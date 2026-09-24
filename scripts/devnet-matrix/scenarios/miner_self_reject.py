@@ -20,7 +20,8 @@ spec §7a moving together —
                                a guard failure falls through to a case that
                                matches `AutolykosSolution`, not the wrapped
                                `SolutionFound`, so the sender waits forever)
-  pow_failures                 `Invalid input block` — the race itself
+  pow_failures                 the generator's input-arm PoW-failure WARN —
+                               the race itself (stock or F11 wording)
   input_blocks_applied         input blocks that passed the generator's PoW
                                check and were sent to the node view
   input_blocks_on_winning_chain  of those, the ones that reached the best
@@ -54,24 +55,76 @@ PAYMENT_NANOERG = 1_000_000
 #   CandidateGenerator.scala:280    the PoW check the race fails
 #   CandidateGenerator.scala:286    the generator answered a submission
 #
-# `pow_failures` counts the generator's own WARN, not the exception
-# text. At 62c10315 EACH failure puts that text on the log TWICE — once
-# in the generator's `Processed solution … with the result Error(…)`
-# echo and once in the stack trace under `ErgoMiningThread`'s ERROR — so
-# a substring as loose as "invalid input block" doubles every failure.
-# The text is counted separately as `pow_failure_reply_lines` and
-# checked against that measured 2:1, which is the cross-check: a build
-# that stops logging both sites is a build these phrases no longer
-# describe. Measured on the Task 2 trial at stock 62c10315: 83 WARNs,
-# 166 exception-text lines.
+# The PoW failures are counted from the generator's own WARN, not the
+# exception text, and in either build's wording (below).
 PHRASES = {
     'submissions_input': 'found solution for input block, sending it for validation',
     'submissions_ordering': 'found solution for ordering block, sending it for validation',
     'replies_success': 'solution accepted',
     'replies_error': 'accepting solution or preparing candidate did not succeed',
-    'pow_failures': 'removing candidate due to invalid input block',
-    'pow_failure_reply_lines': 'invalid input block! pow valid',
     'generator_processed': 'processed solution',
+}
+
+# One WARN per rejected solution, in the stock (62c10315) or the F11
+# (`matrix/F11-candidate-retained-work`) wording. Anchored on the level
+# and logger prefix: F11 echoes the same words once more as
+# `akka.pattern.StatusReply$ErrorMessage: …` under `ErgoMiningThread`'s
+# ERROR, and a bare substring would count every F11 failure twice.
+_GENERATOR_WARN = r'WARN org\.ergoplatform\.mining\.CandidateGenerator - '
+POW_FAILURE_WARN = {
+    # the race itself; `pow_failures` is this arm
+    'input': re.compile(
+        _GENERATOR_WARN
+        + r'(Removing candidate due to invalid input block'   # stock
+        r'|No retained candidate matches input solution PoW)'),  # F11
+    'ordering': re.compile(
+        _GENERATOR_WARN
+        + r'(Removing candidates due to invalid block'        # stock
+        r'|No retained candidate matches ordering solution PoW)'),  # F11
+    # F11 only: retained work found against an ordering parent that has
+    # since been replaced
+    'stale_parent': re.compile(_GENERATOR_WARN
+                               + r'Stale input ordering parent'),
+}
+
+# F11's other reply arms. Rejections, each answered with an error reply,
+# but not PoW failures, so they are counted by arm and kept apart.
+OTHER_REJECTIONS = {
+    'already_known': re.compile(
+        r'CandidateGenerator - Input block already known: '),
+    'pending': re.compile(
+        r'CandidateGenerator - Input block pending application: '),
+    'already_solved': re.compile(
+        r'CandidateGenerator - Ordering block already solved: '),
+    'invalid_wrapped': re.compile(
+        _GENERATOR_WARN + r'Invalid mining solution'),
+    'invalid_unwrapped': re.compile(
+        _GENERATOR_WARN + r'Invalid unwrapped mining solution'),
+    'pending_timeout': re.compile(
+        _GENERATOR_WARN + r'Input processing timed out: '),
+    'pending_deferral': re.compile(
+        _GENERATOR_WARN + r'Input processing deferral limit reached: '),
+}
+
+# The reply text each input-arm PoW failure leaves, per wording. Stock
+# puts it on the log TWICE — in the generator's `Processed solution …
+# with the result Error(…)` echo and in the stack trace under
+# `ErgoMiningThread`'s ERROR (Task 2 trial at stock 62c10315: 83 WARNs,
+# 166 text lines). F11 dropped the `Processed solution` line and leaves
+# it ONCE, as the `StatusReply$ErrorMessage` line (F11 runs 1-3: 61, 20
+# and 16 of each). The expected total is checked against the WARNs as a
+# cross-check: a build that stops logging in that proportion is a build
+# these patterns no longer describe.
+POW_FAILURE_REPLY_TEXT = {
+    'stock': (re.compile(r'invalid input block! pow valid', re.IGNORECASE),
+              re.compile(_GENERATOR_WARN
+                         + r'Removing candidate due to invalid input block'),
+              2),
+    'f11': (re.compile(r'StatusReply\$ErrorMessage: '
+                       r'No retained candidate matches input solution PoW'),
+            re.compile(_GENERATOR_WARN
+                       + r'No retained candidate matches input solution PoW'),
+            1),
 }
 
 # An input block the generator passed its PoW check and sent to the node
@@ -102,6 +155,9 @@ def count(lines):
     exists to expose, a submission with no reply.
     """
     out = {key: 0 for key in PHRASES}
+    warns = {arm: 0 for arm in POW_FAILURE_WARN}
+    other = {arm: 0 for arm in OTHER_REJECTIONS}
+    reply_text = {build: [0, 0] for build in POW_FAILURE_REPLY_TEXT}
     applied_ids = []
     site_ids = {site: set() for site in APPLIED_SITES}
     for line in lines:
@@ -109,6 +165,17 @@ def count(lines):
         for key, phrase in PHRASES.items():
             if phrase in low:
                 out[key] += 1
+        for arm, pattern in POW_FAILURE_WARN.items():
+            if pattern.search(line):
+                warns[arm] += 1
+        for arm, pattern in OTHER_REJECTIONS.items():
+            if pattern.search(line):
+                other[arm] += 1
+        for build, (text, warn, _per) in POW_FAILURE_REPLY_TEXT.items():
+            if text.search(line):
+                reply_text[build][0] += 1
+            if warn.search(line):
+                reply_text[build][1] += 1
         for site, pattern in APPLIED_SITES.items():
             match = pattern.search(low)
             if match:
@@ -124,21 +191,34 @@ def count(lines):
         and any(ids != logging_sites[0] for ids in logging_sites[1:]))
     out['submissions'] = out['submissions_input'] + out['submissions_ordering']
     out['replies'] = out['replies_success'] + out['replies_error']
-    # Both PoW-failure sites have to keep logging: one WARN and two
-    # lines of exception text per failure, as measured at 62c10315. A
-    # different proportion means the phrases no longer mean what this
-    # counting assumes — it is NOT a second, independent count of the
-    # failures, and was never reported as one.
+    out['pow_failures'] = warns['input']
+    out['pow_failures_ordering'] = warns['ordering']
+    out['stale_parent_rejections'] = warns['stale_parent']
+    out['other_rejections'] = other
+    out['pow_failure_reply_lines'] = sum(
+        text for text, _warn in reply_text.values())
+    # Both PoW-failure sites have to keep logging, in each wording's
+    # measured proportion. A different proportion means the patterns no
+    # longer mean what this counting assumes — it is NOT a second,
+    # independent count of the failures, and was never reported as one.
     out['pow_failure_lines_per_failure'] = (
         round(out['pow_failure_reply_lines'] / out['pow_failures'], 2)
         if out['pow_failures'] else None)
     # Compared UNCONDITIONALLY. Gating this on a nonzero WARN count
     # reported agreement for the case it exists to catch in the other
-    # direction: a build that stops logging the WARN while the exception
+    # direction: a build that stops logging the WARN while the reply
     # text survives reads as 0 failures and says nothing is wrong. Zero
     # against zero already agrees.
-    out['pow_failure_sites_disagree'] = (
-        out['pow_failure_reply_lines'] != 2 * out['pow_failures'])
+    out['pow_failure_sites_disagree'] = any(
+        text != per * warn
+        for (text, warn), (_t, _w, per) in zip(
+            reply_text.values(), POW_FAILURE_REPLY_TEXT.values()))
+    # Every rejection above is answered with an error reply, which
+    # `ErgoMiningThread` logs once in both builds; more rejections than
+    # error replies means the patterns overcount.
+    rejections = (sum(warns.values()) + sum(other.values()))
+    out['rejections_exceed_error_replies'] = (
+        rejections > out['replies_error'])
     # The F11c evidence: a submission the generator never answered. Not
     # derived by subtraction anywhere else, because a negative would
     # mean the phrases no longer say what this counting assumes.

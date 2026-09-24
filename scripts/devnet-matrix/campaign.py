@@ -2647,7 +2647,11 @@ def _self_test():
         'INFO Processed solution x with the result Success(())',
         'INFO Solution accepted',
         'INFO Found solution for input block, sending it for validation',
-        'WARN Removing candidate due to invalid input block',
+        # The WARN as the pinned build logs it: level, logger, ` - `.
+        # The PoW-failure count is anchored on that prefix, so a fixture
+        # without it would not be the line a real run holds.
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Removing candidate due to invalid input block',
         'INFO Processed solution y with the result Error(java.lang.Exception: '
         'Invalid input block! PoW valid: false)',
         'ERROR Accepting solution or preparing candidate did not succeed',
@@ -2697,6 +2701,68 @@ def _self_test():
     assert _warn_gone['pow_failure_sites_disagree'] is True, _warn_gone
     assert _counts['distinct_applied_input_blocks'] == 1, _counts
     assert _counts['applied_input_block_ids'] == ['ab' * 32], _counts
+    # ----- F11's own wording for the same rejection -----
+    #
+    # F11 replaced the stock WARN with `No retained candidate matches
+    # input solution PoW` and logs its reply text ONCE, as the
+    # `StatusReply$ErrorMessage` line under `ErgoMiningThread`'s ERROR —
+    # not twice, as stock does. A counter that knew only the stock
+    # phrase read 0 on every F11 run, and the 2:1 cross-check passed
+    # because 0 = 2 x 0 (batch review, 2026-09-24). Taken from the saved
+    # F11 run 2 log, lines 62-66.
+    _f11_reject = [
+        'INFO org.ergoplatform.mining.ErgoMiningThread - Found solution for '
+        'input block, sending it for validation',
+        'WARN org.ergoplatform.mining.CandidateGenerator - No retained '
+        'candidate matches input solution PoW',
+        'ERROR org.ergoplatform.mining.ErgoMiningThread - Accepting solution '
+        'or preparing candidate did not succeed',
+        'akka.pattern.StatusReply$ErrorMessage: No retained candidate '
+        'matches input solution PoW',
+    ]
+    _f11c = _msr.count(_f11_reject)
+    assert _f11c['pow_failures'] == 1, _f11c
+    # The echo line carries the same words and must not count twice.
+    assert _f11c['pow_failure_reply_lines'] == 1, _f11c
+    assert _f11c['pow_failure_sites_disagree'] is False, _f11c
+    assert _f11c['replies_error'] == 1, _f11c
+    assert _f11c['rejections_exceed_error_replies'] is False, _f11c
+    # The echo alone is not a failure the generator logged.
+    _echo_only = _msr.count(_f11_reject[-1:])
+    assert _echo_only['pow_failures'] == 0, _echo_only
+    assert _echo_only['pow_failure_sites_disagree'] is True, _echo_only
+    # The ordering arm, in either wording, counts apart from the input
+    # arm; stock's plural WARN has no `input` in it.
+    _ordering = _msr.count([
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Removing candidates due to invalid block',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'No retained candidate matches ordering solution PoW',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Stale input ordering parent abc',
+    ])
+    assert _ordering['pow_failures'] == 0, _ordering
+    assert _ordering['pow_failures_ordering'] == 2, _ordering
+    assert _ordering['stale_parent_rejections'] == 1, _ordering
+    # F11's other reply arms are rejections too, counted by arm and never
+    # as PoW failures.
+    _other = _msr.count([
+        'INFO org.ergoplatform.mining.CandidateGenerator - '
+        'Input block already known: ab',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Input processing timed out: ab',
+        'ERROR org.ergoplatform.mining.ErgoMiningThread - Accepting solution '
+        'or preparing candidate did not succeed',
+    ])
+    assert _other['pow_failures'] == 0, _other
+    assert _other['other_rejections'] == {
+        'already_known': 1, 'pending': 0, 'already_solved': 0,
+        'invalid_wrapped': 0, 'invalid_unwrapped': 0, 'pending_timeout': 1,
+        'pending_deferral': 0}, _other
+    # Two rejections, one error reply: the phrases no longer describe the
+    # build, and the evidence says so.
+    assert _other['rejections_exceed_error_replies'] is True, _other
+    assert _counts['rejections_exceed_error_replies'] is False, _counts
     # ----- the patched miner's log line -----
     #
     # F11 (`matrix/F11-candidate-retained-work`) rewrote the
