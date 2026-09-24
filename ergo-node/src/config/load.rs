@@ -1209,9 +1209,7 @@ mod tests {
             std::fs::write(file.path(), format!("network = \"{net}\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [7, 7, 7, 7]\n")).unwrap();
             let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
                 .unwrap();
-            let err = NodeConfig::load(cli)
-                .err()
-                .expect("public network must reject devnet_magic");
+            let err = NodeConfig::load(cli).expect_err("public network must reject devnet_magic");
             // the named rejection, not the unknown-key error a build without the key would raise
             assert!(
                 err.to_string().contains("devnet_magic requires devnet"),
@@ -1227,9 +1225,7 @@ mod tests {
             std::fs::write(file.path(), format!("network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = {magic}\n")).unwrap();
             let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
                 .unwrap();
-            let err = NodeConfig::load(cli)
-                .err()
-                .expect("a public network's magic must be rejected");
+            let err = NodeConfig::load(cli).expect_err("a public network's magic must be rejected");
             assert!(err.to_string().contains("public network"), "{err}");
         }
     }
