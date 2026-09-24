@@ -61,6 +61,283 @@ async fn cold_tip_context_rejects_with_tip_unready() {
 /// dial it. Regression guard for the `ergo_api::serve` return-tuple
 /// change that backed this seam.
 #[tokio::test]
+async fn production_native_routes_are_served_over_http() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = make_test_config(tmp.path().to_path_buf());
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.expect("api should be bound");
+    let client = reqwest::Client::new();
+
+    let node = client
+        .get(format!("http://{addr}/api/v1/node"))
+        .send()
+        .await
+        .expect("native node request");
+    assert_eq!(node.status(), 200);
+    let node_body: serde_json::Value = node.json().await.expect("native node json");
+    assert!(node_body["revision"].is_number());
+
+    let headers = client
+        .get(format!("http://{addr}/api/v1/chain/headers?limit=1"))
+        .send()
+        .await
+        .expect("native chain headers request");
+    assert_eq!(headers.status(), 200);
+    let headers_body: serde_json::Value = headers.json().await.expect("native headers json");
+    assert!(headers_body["items"].is_array());
+
+    for path in [
+        "/api/v1/network/peers",
+        "/api/v1/network/connected",
+        "/api/v1/network/blacklisted",
+        "/api/v1/network/sync-info",
+    ] {
+        let response = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .expect("native network peer request");
+        assert_eq!(response.status(), 200, "{path}");
+        let body: serde_json::Value = response.json().await.expect("native network json");
+        assert!(body["items"].is_array(), "{path}");
+        assert!(body["page"]["limit"].is_number(), "{path}");
+    }
+    let track_info = client
+        .get(format!("http://{addr}/api/v1/network/track-info"))
+        .send()
+        .await
+        .expect("native network track request");
+    assert_eq!(track_info.status(), 200);
+    let track_info_body: serde_json::Value =
+        track_info.json().await.expect("native network track json");
+    assert!(track_info_body["num_requested"].is_number());
+    assert!(track_info_body["num_received"].is_number());
+    assert!(track_info_body["num_failed"].is_number());
+    let legacy_peers = client
+        .get(format!("http://{addr}/api/v1/peers"))
+        .send()
+        .await
+        .expect("legacy flat peers probe");
+    assert_eq!(legacy_peers.status(), 404);
+
+    let recent = client
+        .get(format!("http://{addr}/api/v1/chain/blocks/recent?n=999"))
+        .send()
+        .await
+        .expect("native recent blocks request");
+    assert_eq!(recent.status(), 200);
+    let recent_body: serde_json::Value = recent.json().await.expect("native recent blocks json");
+    assert!(recent_body.is_array());
+
+    let legacy_recent = client
+        .get(format!("http://{addr}/api/v1/blocks/recent"))
+        .send()
+        .await
+        .expect("legacy recent blocks probe");
+    assert_eq!(legacy_recent.status(), 404);
+
+    let events = client
+        .get(format!("http://{addr}/api/v1/node/events"))
+        .send()
+        .await
+        .expect("native event feed request");
+    assert_eq!(events.status(), 200);
+    let events_body: serde_json::Value = events.json().await.expect("native event feed json");
+    assert!(events_body["latestSeq"].is_number());
+    assert!(events_body["events"].is_array());
+
+    let legacy_events = client
+        .get(format!("http://{addr}/api/v1/events"))
+        .send()
+        .await
+        .expect("legacy event feed probe");
+    assert_eq!(legacy_events.status(), 404);
+
+    let host = client
+        .get(format!("http://{addr}/api/v1/node/host"))
+        .send()
+        .await
+        .expect("native host request");
+    assert_eq!(host.status(), 200);
+    let host_body: serde_json::Value = host.json().await.expect("native host json");
+    for field in [
+        "rss_bytes",
+        "state_db_bytes",
+        "index_db_bytes",
+        "disk_free_bytes",
+        "disk_total_bytes",
+        "cpu_pct",
+        "net_in_bps",
+        "net_out_bps",
+        "load_1m",
+    ] {
+        assert!(host_body.get(field).is_some(), "missing host field {field}");
+    }
+
+    let legacy_host = client
+        .get(format!("http://{addr}/api/v1/host"))
+        .send()
+        .await
+        .expect("legacy flat host probe");
+    assert_eq!(legacy_host.status(), 404);
+
+    let difficulty = client
+        .get(format!("http://{addr}/api/v1/difficulty/history?blocks=2"))
+        .send()
+        .await
+        .expect("native difficulty request");
+    assert_eq!(difficulty.status(), 200);
+    let difficulty_body: serde_json::Value =
+        difficulty.json().await.expect("native difficulty json");
+    assert!(difficulty_body["points"].is_array());
+
+    let miner_stats = client
+        .get(format!("http://{addr}/api/v1/mining/minerStats?window=2"))
+        .send()
+        .await
+        .expect("native miner stats request");
+    assert_eq!(miner_stats.status(), 200);
+    let miner_stats_body: serde_json::Value =
+        miner_stats.json().await.expect("native miner stats json");
+    assert!(miner_stats_body["miners"].is_array());
+
+    let history = client
+        .get(format!("http://{addr}/api/v1/voting/history"))
+        .send()
+        .await
+        .expect("native protocol history request");
+    assert_eq!(history.status(), 200);
+    let history_body: serde_json::Value =
+        history.json().await.expect("native protocol history json");
+    assert_eq!(history_body["epoch_length"], 1024);
+    assert!(history_body["current_height"].is_number());
+    assert!(history_body["changes"].is_array());
+
+    let legacy_flat = client
+        .get(format!("http://{addr}/api/v1/votes/history"))
+        .send()
+        .await
+        .expect("legacy flat history probe");
+    assert_eq!(legacy_flat.status(), 404);
+    let openapi = client
+        .get(format!(
+            "http://{addr}/api-docs/openapi-native-redesign.json"
+        ))
+        .send()
+        .await
+        .expect("native redesign OpenAPI request");
+    assert_eq!(openapi.status(), 200);
+    let openapi_body: serde_json::Value =
+        openapi.json().await.expect("native redesign OpenAPI json");
+    assert!(openapi_body["paths"]["/api/v1/node"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/node/host"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/node/events"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/difficulty/history"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/voting/history"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/mining/minerStats"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/chain/blocks/recent"].is_object());
+    for path in [
+        "/api/v1/network/peers",
+        "/api/v1/network/connected",
+        "/api/v1/network/blacklisted",
+        "/api/v1/network/sync-info",
+        "/api/v1/network/track-info",
+    ] {
+        assert!(openapi_body["paths"][path].is_object(), "missing {path}");
+    }
+    assert!(openapi_body["components"]["schemas"]["NetworkPeerView"].is_object());
+    assert!(openapi_body["components"]["schemas"]["NetworkTrackInfoView"].is_object());
+    assert!(openapi_body["components"]["schemas"]["RecentBlockView"].is_object());
+    assert!(openapi_body["components"]["schemas"]["HostStatusView"].is_object());
+    assert!(openapi_body["components"]["schemas"]["EventView"].is_object());
+    assert!(openapi_body["components"]["schemas"]["EventFeedView"].is_object());
+    assert!(openapi_body["paths"]["/api/v1/transactions/{tx_id}/status"].is_object());
+
+    let api_client = client
+        .get(format!("http://{addr}/js/api-client.js"))
+        .send()
+        .await
+        .expect("dashboard api client request");
+    assert_eq!(api_client.status(), 200);
+    let api_client_body = api_client.text().await.expect("dashboard api client body");
+    assert!(api_client_body.contains("/api/v1/network/peers"));
+    assert!(api_client_body.contains("next_cursor"));
+
+    let transaction = client
+        .post(format!("http://{addr}/api/v1/transactions"))
+        .json(&serde_json::json!({"bytes": "zz"}))
+        .send()
+        .await
+        .expect("native transaction request");
+    assert_eq!(transaction.status(), 400);
+    let transaction_body: serde_json::Value = transaction
+        .json()
+        .await
+        .expect("native transaction error json");
+    assert_eq!(transaction_body["error"]["code"], "invalid_transaction_hex");
+
+    let transaction_read = client
+        .get(format!(
+            "http://{addr}/api/v1/transactions/{}",
+            "00".repeat(32)
+        ))
+        .send()
+        .await
+        .expect("native transaction read request");
+    assert_eq!(transaction_read.status(), 404);
+
+    let transaction_status = client
+        .get(format!(
+            "http://{addr}/api/v1/transactions/{}/status",
+            "00".repeat(32)
+        ))
+        .send()
+        .await
+        .expect("native transaction status request");
+    assert_eq!(transaction_status.status(), 200);
+    let transaction_status_body: serde_json::Value = transaction_status
+        .json()
+        .await
+        .expect("native transaction status json");
+    assert_eq!(transaction_status_body["state"], "unknown");
+
+    handle.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn digest_mode_serves_native_chain_reads_and_correct_scala_state_type() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = make_test_config(tmp.path().to_path_buf());
+    config.state_type = ergo_node::config::StateType::Digest;
+    config.verify_transactions = false;
+    config.blocks_to_keep = 0;
+    config.mempool_config.enabled = false;
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.expect("api should be bound");
+    let client = reqwest::Client::new();
+
+    let info = client
+        .get(format!("http://{addr}/info"))
+        .send()
+        .await
+        .expect("Scala info request");
+    assert_eq!(info.status(), 200);
+    let info_body: serde_json::Value = info.json().await.expect("Scala info json");
+    assert_eq!(info_body["stateType"], "digest");
+
+    let headers = client
+        .get(format!("http://{addr}/api/v1/chain/headers?limit=1"))
+        .send()
+        .await
+        .expect("native chain request");
+    assert_eq!(headers.status(), 200);
+    let headers_body: serde_json::Value = headers.json().await.expect("native chain json");
+    assert!(headers_body["items"].is_array());
+
+    handle.shutdown().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn api_addr_resolves_ephemeral_port() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = make_test_config(tmp.path().to_path_buf());

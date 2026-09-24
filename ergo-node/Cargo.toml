@@ -29,6 +29,7 @@ ergo-mempool    = { workspace = true }
 ergo-mining     = { workspace = true }
 ergo-indexer    = { workspace = true }
 ergo-api        = { workspace = true }
+ergo-api-core   = { workspace = true }
 ergo-rest-json  = { workspace = true }
 redb            = { workspace = true, features = ["logging"] }
 bincode         = { workspace = true }

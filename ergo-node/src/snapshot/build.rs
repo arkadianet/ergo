@@ -26,6 +26,7 @@ pub(super) fn build_snapshot(
     p: SnapshotParts<'_>,
     info: ApiInfo,
     last_progress_age_ms: u64,
+    revision: u64,
 ) -> NodeSnapshot {
     let gap = p
         .best_header_height
@@ -160,6 +161,7 @@ pub(super) fn build_snapshot(
 
     let _ = p.now_unix_ms;
     NodeSnapshot {
+        revision,
         gauges: p.sync_gauges,
         info,
         status,

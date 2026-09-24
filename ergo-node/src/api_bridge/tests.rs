@@ -4,6 +4,45 @@ use ergo_rest_json::decode::{decode_output, decode_registers};
 use ergo_ser::transaction::{transaction_id, write_transaction};
 use std::collections::BTreeMap;
 
+#[test]
+fn core_submit_error_mapping_covers_submit_bridge_outcomes() {
+    assert!(matches!(
+        map_core_submit_error(SubmitError {
+            reason: "overloaded".into(),
+            detail: None,
+        }),
+        TransactionError::Overloaded
+    ));
+    assert!(matches!(
+        map_core_submit_error(SubmitError {
+            reason: "shutting_down".into(),
+            detail: None,
+        }),
+        TransactionError::ShuttingDown
+    ));
+    assert!(matches!(
+        map_core_submit_error(SubmitError {
+            reason: "timeout".into(),
+            detail: None,
+        }),
+        TransactionError::TimedOut
+    ));
+    assert!(matches!(
+        map_core_submit_error(SubmitError {
+            reason: "budget_exhausted".into(),
+            detail: Some("per-peer cost budget exhausted".into()),
+        }),
+        TransactionError::Rejected(TransactionRejection::PeerBudget)
+    ));
+    assert!(matches!(
+        map_core_submit_error(SubmitError {
+            reason: "script_failed".into(),
+            detail: None,
+        }),
+        TransactionError::Rejected(TransactionRejection::ScriptValidation)
+    ));
+}
+
 /// Pin Scala parity: any key in `additionalRegisters` outside
 /// R4..R9 must reject. Silently dropping unknowns produces a
 /// different `tx_id` than Scala for the same JSON input — a
@@ -1117,6 +1156,36 @@ fn read_state_with_slot_and_apply(
         apply_phase,
         std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
     )
+}
+
+#[test]
+fn core_host_adapter_preserves_the_live_probe_shape() {
+    use ergo_api::NodeReadState;
+    use ergo_api_core::observability::HostStatusSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    let read = read_state_for_host(HostPaths {
+        state_db: dir.path().join("state.redb"),
+        index_db: dir.path().join("index.redb"),
+        data_dir: dir.path().to_path_buf(),
+    });
+    let legacy = read.host();
+    let core = read.host_status();
+    assert_eq!(core.state_db_bytes, legacy.state_db_bytes);
+    assert_eq!(core.index_db_bytes, legacy.index_db_bytes);
+    assert_eq!(
+        core.disk_free_bytes.is_some(),
+        legacy.disk_free_bytes.is_some()
+    );
+    assert_eq!(
+        core.disk_total_bytes.is_some(),
+        legacy.disk_total_bytes.is_some()
+    );
+    assert_eq!(core.rss_bytes.is_some(), legacy.rss_bytes.is_some());
+    assert!(core.cpu_pct.is_none());
+    assert!(core.net_in_bps.is_none());
+    assert!(core.net_out_bps.is_none());
+    assert!(core.load_1m.is_none());
 }
 
 /// Live apply-phase atomics must overlay snapshot-stale ApiStatus fields.

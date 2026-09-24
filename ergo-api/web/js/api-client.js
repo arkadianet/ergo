@@ -22,6 +22,21 @@ async function getJson(path) {
   }
 }
 
+async function getAllPeerPages() {
+  const items = [];
+  let cursor = null;
+  do {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const page = await getJson(`/api/v1/network/peers${query}`);
+    if (!page || !Array.isArray(page.items) || !page.page) return null;
+    items.push(...page.items);
+    if (!page.page.has_more) return items;
+    const next = page.page.next_cursor;
+    if (!next || next === cursor) return items;
+    cursor = next;
+  } while (true);
+}
+
 // POST a JSON body with the operator's api_key (auth-gated writes). Resolves to
 // `{ ok, status, detail }` so callers can surface the precise rejection (403
 // missing/invalid key, 409 mining disabled, 400 bad target) in the UI.
@@ -80,20 +95,67 @@ function walletPost(path, body) {
   });
 }
 
+async function nativeNode() {
+  return getJson('/api/v1/node');
+}
+
+function normalizeNativeStatus(node) {
+  if (!node?.status) return null;
+  const status = { ...node.status };
+  const header = node.tip?.best_header;
+  const block = node.tip?.best_block;
+  status.best_header_height = header?.height ?? null;
+  status.best_full_block_height = block?.height ?? null;
+  status.bootstrap = status.bootstrap_active ? {} : null;
+  status.shadow = status.shadow_diverged ? { diverged: {} } : null;
+  return status;
+}
+
+function normalizeNativeSync(node) {
+  if (!node?.sync) return null;
+  const sync = { ...node.sync };
+  sync.best_header_height = sync.header_height;
+  sync.best_full_block_height = sync.full_block_height;
+  return sync;
+}
+
+function normalizeNativeIdentity(identity) {
+  if (!identity) return null;
+  return {
+    ...identity,
+    mode: identity.mode ?? `${identity.history_mode} · ${identity.state_backend}`,
+    state_type: identity.state_type ?? identity.state_backend,
+    mining: identity.mining ?? identity.mining_enabled,
+    extra_index_enabled: identity.extra_index_enabled ?? identity.indexer_enabled,
+    declared_addr: identity.declared_addr ?? identity.declared_address,
+    bind_addr: identity.bind_addr ?? identity.bind_address,
+  };
+}
+
+function normalizeNativeTip(node) {
+  if (!node?.tip) return null;
+  const tip = { ...node.tip };
+  tip.best_full_block = tip.best_block;
+  tip.headers_ahead_of_full_blocks =
+    (tip.best_header?.height ?? 0) - (tip.best_block?.height ?? 0);
+  return tip;
+}
+
 export const api = {
-  status: () => getJson('/api/v1/status'),
-  info: () => getJson('/api/v1/info'),
-  sync: () => getJson('/api/v1/sync'),
-  tip: () => getJson('/api/v1/tip'),
-  identity: () => getJson('/api/v1/identity'),
-  host: () => getJson('/api/v1/host'),
+  node: nativeNode,
+  status: async () => normalizeNativeStatus(await nativeNode()),
+  info: () => getJson('/api/v1/node/info'),
+  sync: async () => normalizeNativeSync(await nativeNode()),
+  tip: async () => normalizeNativeTip(await nativeNode()),
+  identity: async () => normalizeNativeIdentity(await getJson('/api/v1/node/identity')),
+  host: () => getJson('/api/v1/node/host'),
   indexedHeight: () => getJson('/blockchain/indexedHeight'),
   // Operator health superset of indexedHeight (self-repair markers + totals).
   // 404s on indexer-less wiring — the UI reads null as "extra-index disabled".
   indexerStatus: () => getJson('/api/v1/indexer/status'),
-  recentBlocks: (n = 10) => getJson(`/api/v1/blocks/recent?n=${n}`),
+  recentBlocks: (n = 10) => getJson(`/api/v1/chain/blocks/recent?n=${n}`),
   // Operator event feed (bounded ring tail). `since` = last-seen seq.
-  events: (since = 0) => getJson(`/api/v1/events${since ? `?since=${since}` : ''}`),
+  events: (since = 0) => getJson(`/api/v1/node/events${since ? `?since=${since}` : ''}`),
   // Mining surface — routes mount only when mining is wired (404 = off).
   // candidate is cheap on repeat calls (same-tip template cache node-side).
   miningCandidate: () => getJson('/mining/candidate'),
@@ -108,12 +170,12 @@ export const api = {
   // Mempool wait-time histogram: bins+1 buckets of {nTxns, totalFee}.
   poolHistogram: (bins = 10, maxtimeMs = 3_600_000) =>
     getJson(`/transactions/poolHistogram?bins=${bins}&maxtime=${maxtimeMs}`),
-  peers: () => getJson('/api/v1/peers'),
+  peers: getAllPeerPages,
   mempoolSummary: () => getJson('/api/v1/mempool/summary'),
   mempoolTransactions: () => getJson('/api/v1/mempool/transactions'),
   txDetail: (id) => getJson(`/api/v1/transactions/${id}/detail`),
   votes: () => getJson('/api/v1/votes'),
-  votesHistory: () => getJson('/api/v1/votes/history'),
+  votesHistory: () => getJson('/api/v1/voting/history'),
   // Auth-gated write: `votes` is the full desired set (replaces current).
   setVotes: (votes) => postJson('/api/v1/votes', { votes }),
   // Wallet section: api_key-gated; each returns { ok, status, data, reason }.

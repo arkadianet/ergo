@@ -324,7 +324,32 @@ pub(crate) async fn batch_handler(State(state): State<BatchState>, req: Request<
 /// from — batch is one more class of spender on the one bucket, not a
 /// second rate limiter.
 pub fn batch_router(state: V1State, governor: Arc<Governor>) -> Router {
+    batch_router_with_filter(state, governor, |_| false)
+}
+
+pub fn batch_router_without_native_chain(state: V1State, governor: Arc<Governor>) -> Router {
+    batch_router_with_filter(state, governor, |template| {
+        matches!(
+            template,
+            "/api/v1/chain/headers"
+                | "/api/v1/chain/headers/:header_id"
+                | "/api/v1/chain/blocks/:header_id"
+                | "/api/v1/transactions/:tx_id"
+                | "/api/v1/transactions/:tx_id/status"
+        )
+    })
+}
+
+fn batch_router_with_filter(
+    state: V1State,
+    governor: Arc<Governor>,
+    filter: impl Fn(&str) -> bool,
+) -> Router {
     let (inner, table) = allowed_routes();
+    let table = table
+        .into_iter()
+        .filter(|route| !filter(route.template))
+        .collect::<Vec<_>>();
     let dispatch: Router = inner.with_state(state);
     let batch_state = BatchState {
         dispatch,

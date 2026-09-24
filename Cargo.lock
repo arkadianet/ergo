@@ -694,6 +694,7 @@ dependencies = [
  "base64",
  "blake2",
  "bs58",
+ "ergo-api-core",
  "ergo-compiler",
  "ergo-indexer",
  "ergo-indexer-types",
@@ -725,6 +726,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "utoipa",
+]
+
+[[package]]
+name = "ergo-api-core"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "ergo-primitives",
+ "ergo-ser",
+ "hex",
+ "num-bigint",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -868,6 +881,7 @@ dependencies = [
  "bincode",
  "clap",
  "ergo-api",
+ "ergo-api-core",
  "ergo-chain-spec",
  "ergo-crypto",
  "ergo-indexer",

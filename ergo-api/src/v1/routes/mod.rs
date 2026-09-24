@@ -28,7 +28,7 @@ pub(crate) mod tokens;
 pub(crate) mod transactions;
 pub(crate) mod tx_intel;
 
-pub use batch::batch_router;
+pub use batch::{batch_router, batch_router_without_native_chain};
 
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -349,6 +349,18 @@ pub(super) fn offset_page_at<T>(
 /// so all classes draw on the same per-IP budget. No tier gate: T0 is bounded
 /// by the governor, not by auth.
 pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
+    v1_router_with_options(state, governor, true)
+}
+
+pub fn v1_router_without_native_chain(state: V1State, governor: Arc<Governor>) -> Router {
+    v1_router_with_options(state, governor, false)
+}
+
+fn v1_router_with_options(
+    state: V1State,
+    governor: Arc<Governor>,
+    include_legacy_chain: bool,
+) -> Router {
     // Cheap point reads — a single by-id lookup.
     let cheap: Router<V1State> = Router::new()
         .route("/api/v1/boxes/:box_id", get(boxes::box_by_id))
@@ -394,27 +406,30 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         ));
 
     // Heavy reads — full-block payloads, paginated / scan / range surfaces.
-    let heavy: Router<V1State> = Router::new()
-        // ----- chain/blocks -----
+    let mut heavy: Router<V1State> = Router::new()
         .route("/api/v1/chain/blocks", get(chain::list_blocks))
         .route("/api/v1/chain/blocks/by-ids", post(chain::blocks_by_ids))
         .route(
             "/api/v1/chain/blocks/at-height/:height",
             get(chain::blocks_at_height),
         )
-        .route("/api/v1/chain/blocks/:header_id", get(chain::block_by_id))
         .route(
             "/api/v1/chain/blocks/:header_id/transactions",
             get(chain::block_transactions),
         )
-        // ----- chain/headers -----
-        .route("/api/v1/chain/headers", get(chain::list_headers))
         .route(
             "/api/v1/chain/headers/at-height/:height",
             get(chain::headers_at_height),
-        )
-        .route("/api/v1/chain/headers/:header_id", get(chain::header_by_id))
-        // ----- chain/modifiers + proofs -----
+        );
+    if include_legacy_chain {
+        heavy = heavy
+            .route("/api/v1/chain/blocks/:header_id", get(chain::block_by_id))
+            .route("/api/v1/chain/headers", get(chain::list_headers))
+            .route("/api/v1/chain/headers/:header_id", get(chain::header_by_id))
+            .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
+            .route("/api/v1/transactions/:tx_id/status", get(tx_intel::status));
+    }
+    let heavy: Router<V1State> = heavy
         .route(
             "/api/v1/chain/modifiers/:modifier_id",
             get(chain::modifier_by_id),
@@ -427,16 +442,13 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
             "/api/v1/chain/proofs/:header_id/transactions/:tx_id",
             get(chain::proof_for_tx),
         )
-        // ----- transactions reads + submit -----
-        .route("/api/v1/transactions/:tx_id", get(transactions::tx_by_id))
-        .route("/api/v1/transactions/submit", post(transactions::submit))
-        .route("/api/v1/transactions/check", post(transactions::check))
         // ----- transactions/* intelligence reads -----
         .route(
             "/api/v1/transactions/fee-estimate",
             get(tx_intel::fee_estimate),
         )
-        .route("/api/v1/transactions/:tx_id/status", get(tx_intel::status))
+        .route("/api/v1/transactions/submit", post(transactions::submit))
+        .route("/api/v1/transactions/check", post(transactions::check))
         // ----- mempool/* lists + submit/check aliases -----
         .route("/api/v1/mempool/transactions", get(mempool::transactions))
         .route(

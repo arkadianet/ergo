@@ -14,6 +14,7 @@ use super::openapi::{
     native_openapi_yaml, rust_openapi_json, rust_openapi_yaml, scala_openapi_yaml,
 };
 use super::NativeOpenApi;
+use crate::native::openapi::NativeApiOpenApi;
 use crate::web::{
     index_html, rust_swagger_html, scala_swagger_html, COMPONENTS_CSS, DASHBOARD_CSS,
     INTER_VARIABLE_WOFF2, JETBRAINS_MONO_WOFF2, OPENAPI_YAML, TOKENS_CSS,
@@ -75,6 +76,21 @@ pub(super) async fn openapi_native_yaml() -> Response {
 /// Rust-native `/api/v1/*` OpenAPI spec as JSON.
 pub(super) async fn openapi_native_json() -> Response {
     (StatusCode::OK, Json(NativeOpenApi::openapi())).into_response()
+}
+
+pub(super) async fn openapi_native_redesign_yaml() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/yaml")],
+        NativeApiOpenApi::openapi()
+            .to_yaml()
+            .expect("native redesign OpenAPI yaml serialize"),
+    )
+        .into_response()
+}
+
+pub(super) async fn openapi_native_redesign_json() -> Response {
+    (StatusCode::OK, Json(NativeApiOpenApi::openapi())).into_response()
 }
 
 /// The v1 product-API OpenAPI spec as YAML, generated from

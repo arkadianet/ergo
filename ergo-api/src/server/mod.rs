@@ -76,9 +76,9 @@ pub(crate) use shared::{map_submit_error, submit_via_node};
 
 use assets::{
     components_css, dashboard_css, index, inter_variable_woff2, jetbrains_mono_woff2, js,
-    openapi_native_json, openapi_native_yaml, openapi_rust_json, openapi_rust_yaml,
-    openapi_scala_yaml, openapi_v1_json, openapi_v1_yaml_handler, openapi_yaml, swagger,
-    swagger_native, swagger_v1, tokens_css,
+    openapi_native_json, openapi_native_redesign_json, openapi_native_redesign_yaml,
+    openapi_native_yaml, openapi_rust_json, openapi_rust_yaml, openapi_scala_yaml, openapi_v1_json,
+    openapi_v1_yaml_handler, openapi_yaml, swagger, swagger_native, swagger_v1, tokens_css,
 };
 use handlers::metrics_handler;
 
@@ -285,6 +285,52 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     security: Option<Arc<crate::auth::ApiSecurity>>,
     allowed_hosts: &[String],
 ) -> JoinHandle<()> {
+    serve_on_with_mempool_and_wallet_and_security_and_hosts_inner(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        allowed_hosts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts_and_native(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    native: crate::native::NativeState,
+) -> JoinHandle<()> {
+    serve_on_with_mempool_and_wallet_and_security_and_hosts_inner(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        allowed_hosts,
+        Some(native),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_on_with_mempool_and_wallet_and_security_and_hosts_inner(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    native: Option<crate::native::NativeState>,
+) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
@@ -292,7 +338,16 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     if let Some(addr) = bind_addr {
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
-    let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
+    let app = match native {
+        Some(native) => router_with_mempool_and_wallet_and_security_and_native(
+            ctx,
+            admin,
+            wallet_admin,
+            security,
+            native,
+        ),
+        None => router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security),
+    };
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -673,6 +728,55 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> (Router, ApiRouteInventory) {
+    router_with_mempool_and_wallet_and_security_and_native_inventory_inner(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        None,
+    )
+}
+
+pub fn router_with_mempool_and_wallet_and_security_and_native(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    native: crate::native::NativeState,
+) -> Router {
+    router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        native,
+    )
+    .0
+}
+
+pub fn router_with_mempool_and_wallet_and_security_and_native_inventory(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    native: crate::native::NativeState,
+) -> (Router, ApiRouteInventory) {
+    router_with_mempool_and_wallet_and_security_and_native_inventory_inner(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        Some(native),
+    )
+}
+
+fn router_with_mempool_and_wallet_and_security_and_native_inventory_inner(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    native: Option<crate::native::NativeState>,
+) -> (Router, ApiRouteInventory) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
         read,
@@ -750,6 +854,14 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/api-docs/openapi-rust.json", get(openapi_rust_json))
         .route("/api-docs/openapi-native.yaml", get(openapi_native_yaml))
         .route("/api-docs/openapi-native.json", get(openapi_native_json))
+        .route(
+            "/api-docs/openapi-native-redesign.yaml",
+            get(openapi_native_redesign_yaml),
+        )
+        .route(
+            "/api-docs/openapi-native-redesign.json",
+            get(openapi_native_redesign_json),
+        )
         .route("/api-docs/openapi-v1.yaml", get(openapi_v1_yaml_handler))
         .route("/api-docs/openapi-v1.json", get(openapi_v1_json))
         .route("/metrics", get(metrics_handler))
@@ -757,7 +869,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let operator = route_registry::merge_family_router(
         operator,
         &mut inventory,
-        rust_api::legacy_router(read.clone()),
+        rust_api::legacy_router(read.clone(), native.is_some()),
     );
 
     let operator = route_registry::merge_family_router(
@@ -788,7 +900,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         route_registry::merge_family_router(
             operator,
             &mut inventory,
-            rust_api::indexer_router(state),
+            rust_api::indexer_router(state, native.is_some()),
         )
     } else {
         operator
@@ -821,7 +933,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,
-        rust_api::conditional_chain_router(v1_chain.clone(), network),
+        rust_api::conditional_chain_router(v1_chain.clone(), network, native.is_some()),
     );
 
     let assembled = route_registry::merge_family_router(
@@ -998,10 +1110,114 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             operator: v1_operator_state,
             accounts: v1_accounts_state,
             webhooks: v1_webhooks_state,
-            governor: v1_governor,
+            governor: v1_governor.clone(),
             auth: v1_auth,
+            native_node: native.is_some(),
         }),
     );
+
+    let assembled = if let Some(native) = native {
+        inventory.rust.extend([
+            RouteOperation::new("/api/v1/node", "get"),
+            RouteOperation::new("/api/v1/node/info", "get"),
+            RouteOperation::new("/api/v1/node/status", "get"),
+            RouteOperation::new("/api/v1/node/sync", "get"),
+            RouteOperation::new("/api/v1/node/identity", "get"),
+            RouteOperation::new("/api/v1/node/health", "get"),
+            RouteOperation::new("/api/v1/node/tip", "get"),
+            RouteOperation::new("/api/v1/node/capabilities", "get"),
+            RouteOperation::new("/api/v1/chain/tip", "get"),
+            RouteOperation::new("/api/v1/chain/headers", "get"),
+            RouteOperation::new("/api/v1/chain/headers/:header_id", "get"),
+            RouteOperation::new("/api/v1/chain/blocks/:header_id", "get"),
+            RouteOperation::new("/api/v1/voting/history", "get"),
+            RouteOperation::new("/api/v1/difficulty/history", "get"),
+            RouteOperation::new("/api/v1/mining/minerStats", "get"),
+            RouteOperation::new("/api/v1/transactions", "post"),
+            RouteOperation::new("/api/v1/transactions/:tx_id", "get"),
+            RouteOperation::new("/api/v1/transactions/:tx_id/status", "get"),
+        ]);
+        if native.recent_blocks.is_some() {
+            inventory
+                .rust
+                .insert(RouteOperation::new("/api/v1/chain/blocks/recent", "get"));
+        }
+        if native.events.is_some() {
+            inventory
+                .rust
+                .insert(RouteOperation::new("/api/v1/node/events", "get"));
+        }
+        if native.indexer.is_some() {
+            inventory
+                .rust
+                .insert(RouteOperation::new("/api/v1/indexer/status", "get"));
+        }
+        if native.host.is_some() {
+            inventory
+                .rust
+                .insert(RouteOperation::new("/api/v1/node/host", "get"));
+        }
+        if native.peers.is_some() {
+            inventory.rust.extend([
+                RouteOperation::new("/api/v1/network/peers", "get"),
+                RouteOperation::new("/api/v1/network/connected", "get"),
+                RouteOperation::new("/api/v1/network/blacklisted", "get"),
+                RouteOperation::new("/api/v1/network/sync-info", "get"),
+                RouteOperation::new("/api/v1/network/track-info", "get"),
+            ]);
+        }
+        let node = crate::native::node_router(native.clone()).route_layer(
+            axum::middleware::from_fn_with_state(
+                v1_governor.state(crate::v1::governor::RouteClass::CheapRead),
+                crate::v1::governor::governor_mw,
+            ),
+        );
+        let chain = crate::native::chain_router(native.clone()).route_layer(
+            axum::middleware::from_fn_with_state(
+                v1_governor.state(crate::v1::governor::RouteClass::HeavyRead),
+                crate::v1::governor::governor_mw,
+            ),
+        );
+        let tip = crate::native::tip_router(native.clone()).route_layer(
+            axum::middleware::from_fn_with_state(
+                v1_governor.state(crate::v1::governor::RouteClass::CheapRead),
+                crate::v1::governor::governor_mw,
+            ),
+        );
+        let transactions = crate::native::transaction_router(native.clone()).route_layer(
+            axum::middleware::from_fn_with_state(
+                v1_governor.state(crate::v1::governor::RouteClass::Compute),
+                crate::v1::governor::governor_mw,
+            ),
+        );
+        let network = if native.peers.is_some() {
+            crate::native::network_router(native.clone()).route_layer(
+                axum::middleware::from_fn_with_state(
+                    v1_governor.state(crate::v1::governor::RouteClass::CheapRead),
+                    crate::v1::governor::governor_mw,
+                ),
+            )
+        } else {
+            Router::new()
+        };
+        let indexer = if native.indexer.is_some() {
+            crate::native::indexer_router(native).route_layer(axum::middleware::from_fn_with_state(
+                v1_governor.state(crate::v1::governor::RouteClass::HeavyRead),
+                crate::v1::governor::governor_mw,
+            ))
+        } else {
+            Router::new()
+        };
+        assembled
+            .merge(node)
+            .merge(chain)
+            .merge(tip)
+            .merge(transactions)
+            .merge(network)
+            .merge(indexer)
+    } else {
+        assembled
+    };
 
     // INFO spans retain request correlation on failure events without
     // adding per-request INFO lines. Matched route templates are code-defined

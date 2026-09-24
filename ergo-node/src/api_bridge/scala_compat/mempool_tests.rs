@@ -92,6 +92,7 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
             name: "test".into(),
             app_version: "test".into(),
             network: "mainnet".into(),
+            state_type: "digest".into(),
             launch_time_unix_ms: 0,
             rest_api_url: None,
             min_relay_fee_nano_erg: 2_500_000,
@@ -99,6 +100,8 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
         store.reader_handle(),
         ergo_chain_spec::DifficultyParams::mainnet(),
     );
+    assert_eq!(bridge.info().state_type, "digest");
+
     let responses = [
         bridge.pool_txs_paged(0, 10).remove(0),
         bridge.pool_tx_by_id(&id_hex).unwrap(),

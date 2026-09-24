@@ -10,14 +10,15 @@
 
 use std::sync::Arc;
 
+use ergo_api_core::capability::{CapabilityDescriptor, CapabilityId};
 use ergo_state::HeaderSectionStore;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::api_bridge::{
-    HostPaths, ScalaCompatBridge, ScalaCompatStatic, SnapshotMempoolView, SnapshotReadState,
-    SubmitBridge, SubmitRequest,
+    CoreTransactionReader, HostPaths, IndexerStatusAdapter, ScalaCompatBridge, ScalaCompatStatic,
+    SnapshotMempoolView, SnapshotReadState, SubmitBridge, SubmitRequest,
 };
 use crate::config::NodeConfig;
 use crate::snapshot::SnapshotPublisher;
@@ -32,7 +33,44 @@ pub(super) struct Scaffold {
     pub snapshot_publisher: SnapshotPublisher,
     pub voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     pub read_state: Arc<dyn ergo_api::NodeReadState>,
+    pub native_snapshot: Arc<dyn ergo_api_core::node::NodeSnapshotSource>,
+    pub native_recent: Arc<dyn ergo_api_core::observability::RecentBlockSource>,
+    pub native_peers: Arc<dyn ergo_api_core::network::PeerSnapshotSource>,
+    pub native_events: Arc<dyn ergo_api_core::observability::EventSource>,
+    pub native_host: Arc<dyn ergo_api_core::observability::HostStatusSource>,
     pub submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+    pub native_transactions: Arc<dyn ergo_api_core::transaction::TransactionSubmitter>,
+}
+
+fn core_capabilities(config: &NodeConfig) -> Vec<CapabilityDescriptor> {
+    let mut capabilities = vec![
+        CapabilityDescriptor::available(CapabilityId::Node),
+        CapabilityDescriptor::available(CapabilityId::Chain),
+        CapabilityDescriptor::available(CapabilityId::Scripts),
+        CapabilityDescriptor::available(CapabilityId::Wallet),
+        CapabilityDescriptor::available(CapabilityId::Administration),
+    ];
+    capabilities.push(if config.mempool_config.enabled {
+        CapabilityDescriptor::available(CapabilityId::Transactions)
+    } else {
+        CapabilityDescriptor::disabled(CapabilityId::Transactions)
+    });
+    capabilities.push(if config.mempool_config.enabled {
+        CapabilityDescriptor::available(CapabilityId::Mempool)
+    } else {
+        CapabilityDescriptor::disabled(CapabilityId::Mempool)
+    });
+    capabilities.push(if config.indexer_config.enabled {
+        CapabilityDescriptor::available(CapabilityId::Indexer)
+    } else {
+        CapabilityDescriptor::disabled(CapabilityId::Indexer)
+    });
+    capabilities.push(if config.mining_config.enabled {
+        CapabilityDescriptor::available(CapabilityId::Mining)
+    } else {
+        CapabilityDescriptor::disabled(CapabilityId::Mining)
+    });
+    capabilities
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -97,19 +135,35 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         std::time::Duration::from_secs(5),
     );
-    let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
-        snapshot_publisher.handle(),
-        identity_slot.clone(),
-        host_paths,
-        voting_targets_slot.clone(),
-        executor.apply_phase_metrics(),
-        live_telemetry,
-    )
-    .into_dyn();
-    let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
+    let concrete_read_state = Arc::new(
+        SnapshotReadState::new(
+            snapshot_publisher.handle(),
+            identity_slot.clone(),
+            host_paths,
+            voting_targets_slot.clone(),
+            executor.apply_phase_metrics(),
+            live_telemetry,
+        )
+        .with_core_capabilities(core_capabilities(config)),
+    );
+    let native_snapshot: Arc<dyn ergo_api_core::node::NodeSnapshotSource> =
+        concrete_read_state.clone();
+    let native_recent: Arc<dyn ergo_api_core::observability::RecentBlockSource> =
+        concrete_read_state.clone();
+    let native_peers: Arc<dyn ergo_api_core::network::PeerSnapshotSource> =
+        concrete_read_state.clone();
+    let native_events: Arc<dyn ergo_api_core::observability::EventSource> =
+        concrete_read_state.clone();
+    let native_host: Arc<dyn ergo_api_core::observability::HostStatusSource> =
+        concrete_read_state.clone();
+    let read_state: Arc<dyn ergo_api::NodeReadState> = concrete_read_state;
+    let submit_bridge_impl = Arc::new(
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
-            .with_direct_block_submit(config.network, config.allow_direct_block_submit)
-            .into_dyn();
+            .with_direct_block_submit(config.network, config.allow_direct_block_submit),
+    );
+    let submit_bridge: Arc<dyn ergo_api::NodeSubmit> = submit_bridge_impl.clone();
+    let native_transactions: Arc<dyn ergo_api_core::transaction::TransactionSubmitter> =
+        submit_bridge_impl;
 
     Ok(Scaffold {
         api_info,
@@ -117,7 +171,13 @@ pub(super) fn build_scaffold(
         snapshot_publisher,
         voting_targets_slot,
         read_state,
+        native_snapshot,
+        native_recent,
+        native_peers,
+        native_events,
+        native_host,
         submit_bridge,
+        native_transactions,
     })
 }
 
@@ -147,7 +207,13 @@ pub(super) async fn bind(
     api_info: &ergo_api::types::ApiInfo,
     snapshot_publisher: &SnapshotPublisher,
     read_state: Arc<dyn ergo_api::NodeReadState>,
+    native_snapshot: Arc<dyn ergo_api_core::node::NodeSnapshotSource>,
+    native_recent: Arc<dyn ergo_api_core::observability::RecentBlockSource>,
+    native_peers: Arc<dyn ergo_api_core::network::PeerSnapshotSource>,
+    native_events: Arc<dyn ergo_api_core::observability::EventSource>,
+    native_host: Arc<dyn ergo_api_core::observability::HostStatusSource>,
     submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+    native_transactions: Arc<dyn ergo_api_core::transaction::TransactionSubmitter>,
     indexer_handle: Option<ergo_indexer::IndexerHandle>,
     mempool: &mut ergo_mempool::Mempool,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
@@ -304,15 +370,17 @@ pub(super) async fn bind(
         name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
+        state_type: format!("{:?}", config.state_type).to_lowercase(),
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
     };
-    let scala_compat_bridge_arc = Arc::new(ScalaCompatBridge::new(
+    let scala_compat_bridge_arc = Arc::new(ScalaCompatBridge::new_with_voting_epoch_length(
         snapshot_publisher.handle(),
         scala_static,
         store.reader_handle(),
         config.chain_spec.difficulty.clone(),
+        config.chain_spec.voting.voting_length,
     ));
     let scala_compat: Arc<dyn ergo_api::NodeChainQuery> = scala_compat_bridge_arc.clone();
     // Submission HTTP routes are always mounted, matching
@@ -323,8 +391,16 @@ pub(super) async fn bind(
     info!("api submission enabled; POST /api/v1/mempool/{{submit,check}} and POST /transactions[/bytes][/check[Bytes]], POST /blocks are live");
     let mounted_submit = Some(submit_bridge.clone());
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
-        .clone()
-        .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
+        .as_ref()
+        .map(|handle| Arc::new(handle.clone()) as Arc<dyn ergo_indexer::IndexerQuery>);
+    let native_indexer = indexer_for_api.as_ref().map(|indexer| {
+        Arc::new(IndexerStatusAdapter::new(indexer.clone()))
+            as Arc<dyn ergo_api_core::indexer::IndexerStatusSource>
+    });
+    let native_transaction_reader = Arc::new(CoreTransactionReader::new(
+        snapshot_publisher.handle(),
+        indexer_for_api.clone(),
+    ));
     // Realtime WS bridge (A2): the same process-wide bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
@@ -395,7 +471,27 @@ pub(super) async fn bind(
     let security_inner = ergo_api::auth::ApiSecurity::new(hash)
         .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?;
     let security = Arc::new(security_inner);
-    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
+    let native_chain: Arc<dyn ergo_api_core::chain::ChainArchive> = scala_compat_bridge_arc.clone();
+    let mut native_state = ergo_api::native::NativeState::new(native_snapshot)
+        .with_network(network_prefix)
+        .with_chain(native_chain)
+        .with_recent_blocks(native_recent)
+        .with_peers(native_peers)
+        .with_events(native_events)
+        .with_host(native_host)
+        .with_transactions(native_transactions)
+        .with_transaction_reader(native_transaction_reader);
+    if let Some(indexer) = native_indexer {
+        native_state = native_state.with_indexer(indexer);
+    }
+    let native_state = ergo_api::native::NativeRuntime::build(
+        native_state,
+        ergo_api::native::RuntimeConfig::default(),
+    )
+    .map_err(|error| -> NodeError { format!("invalid native API runtime config: {error}").into() })?
+    .into_parts()
+    .0;
+    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts_and_native(
         api_ctx,
         listener,
         api_shutdown_rx,
@@ -403,6 +499,7 @@ pub(super) async fn bind(
         wallet_admin,
         Some(security),
         &config.api_allowed_hosts,
+        native_state,
     );
 
     Ok(ApiBind {

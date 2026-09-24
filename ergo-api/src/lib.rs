@@ -22,6 +22,7 @@ pub mod compat;
 pub mod emission;
 pub mod host_guard;
 pub mod mining;
+pub mod native;
 pub mod script;
 pub mod server;
 pub mod traits;
@@ -37,9 +38,11 @@ mod web;
 pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
-    bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,
+    bind, realtime_handle, router_with_mempool_and_wallet_and_security_and_native_inventory,
+    router_with_wallet, serve, serve_on, serve_on_with_mempool,
     serve_on_with_mempool_and_wallet_and_security,
-    serve_on_with_mempool_and_wallet_and_security_and_hosts, ServerCtx,
+    serve_on_with_mempool_and_wallet_and_security_and_hosts,
+    serve_on_with_mempool_and_wallet_and_security_and_hosts_and_native, ServerCtx,
 };
 pub use traits::{
     ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,

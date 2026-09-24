@@ -22,6 +22,7 @@ async-trait        = { workspace = true }
 tracing            = { workspace = true }
 utoipa             = { workspace = true }
 ergo-indexer-types = { workspace = true }
+ergo-api-core     = { workspace = true }
 ergo-ser           = { workspace = true }
 ergo-primitives    = { workspace = true }
 ergo-rest-json     = { workspace = true }

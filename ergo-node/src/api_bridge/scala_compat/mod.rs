@@ -23,6 +23,7 @@ pub struct ScalaCompatStatic {
     pub name: String,
     pub app_version: String,
     pub network: String,
+    pub state_type: String,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
     /// The same configured admission floor used by the mempool.
@@ -37,10 +38,8 @@ pub struct ScalaCompatBridge {
     handle: SnapshotHandle,
     static_cfg: Arc<ScalaCompatStatic>,
     store_reader: ChainStoreReader,
-    /// Network difficulty schedule for the NiPoPoW on-demand prover
-    /// (`/nipopow/proof/*`). Wired from `chain_spec.difficulty` at
-    /// boot, mirroring `StateStore::set_difficulty_params`.
     difficulty_params: ergo_chain_spec::DifficultyParams,
+    voting_epoch_length: u32,
 }
 
 impl ScalaCompatBridge {
@@ -50,11 +49,33 @@ impl ScalaCompatBridge {
         store_reader: ChainStoreReader,
         difficulty_params: ergo_chain_spec::DifficultyParams,
     ) -> Self {
+        let voting_epoch_length = match static_cfg.network.as_str() {
+            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
+            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
+            _ => 0,
+        };
+        Self::new_with_voting_epoch_length(
+            handle,
+            static_cfg,
+            store_reader,
+            difficulty_params,
+            voting_epoch_length,
+        )
+    }
+
+    pub fn new_with_voting_epoch_length(
+        handle: SnapshotHandle,
+        static_cfg: ScalaCompatStatic,
+        store_reader: ChainStoreReader,
+        difficulty_params: ergo_chain_spec::DifficultyParams,
+        voting_epoch_length: u32,
+    ) -> Self {
         Self {
             handle,
             static_cfg: Arc::new(static_cfg),
             store_reader,
             difficulty_params,
+            voting_epoch_length,
         }
     }
 
@@ -66,6 +87,22 @@ impl ScalaCompatBridge {
     /// instance — the `Arc` holds it once.
     pub fn into_chain_params(self: Arc<Self>) -> Arc<dyn ergo_api::ChainParamsView> {
         self
+    }
+
+    pub(super) fn chain_store_reader(&self) -> &ChainStoreReader {
+        &self.store_reader
+    }
+
+    pub(super) fn state_type(&self) -> &str {
+        &self.static_cfg.state_type
+    }
+
+    pub(super) fn voting_epoch_length(&self) -> u32 {
+        self.voting_epoch_length
+    }
+
+    pub(super) fn current_full_block_height(&self) -> u32 {
+        self.handle.load().tip.best_full_block.height
     }
 }
 
@@ -135,7 +172,7 @@ impl NodeChainQuery for ScalaCompatBridge {
             current_time: unix_now_ms(),
             network: cfg.network.clone(),
             name: cfg.name.clone(),
-            state_type: "utxo".to_string(),
+            state_type: cfg.state_type.clone(),
             // Decoded from the best-header tip's nBits. `u64` is a
             // Scala-surface cap only — native truth is the full-precision
             // String on `ApiTip`; this saturates if difficulty ever
@@ -173,21 +210,13 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn votes_history(&self) -> ergo_api::types::ApiVotesHistory {
-        let snap = self.handle.load();
-        let current_height = snap.tip.best_full_block.height;
-        // Epoch length is network-fixed; surfaced so the UI can explain that
-        // changes only land on `voting_length`-block boundaries.
-        let epoch_length = match self.static_cfg.network.as_str() {
-            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
-            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
-            _ => 0,
-        };
+        let current_height = self.current_full_block_height();
         match self.store_reader.voted_params_history() {
-            Ok(rows) => build_votes_history(&rows, epoch_length, current_height),
+            Ok(rows) => build_votes_history(&rows, self.voting_epoch_length(), current_height),
             Err(e) => {
                 warn!(handler = "votes_history", error = %e, "scala-compat handler failed");
                 ergo_api::types::ApiVotesHistory {
-                    epoch_length,
+                    epoch_length: self.voting_epoch_length(),
                     current_height,
                     changes: Vec::new(),
                 }
@@ -1008,11 +1037,73 @@ fn parse_header_id(s: &str) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// Diff a `voted_params` history (ascending by epoch-start height) into the
-/// parameter-change timeline. Pure — the bridge supplies the rows from the
-/// store, keeping the diff independently testable. `rows[0]` is the genesis
-/// row, which has no predecessor and is never diffed. Only boundaries where at
-/// least one parameter actually changed produce an event.
+pub(super) fn build_protocol_history(
+    rows: &[ergo_validation::ActiveProtocolParameters],
+    epoch_length: u32,
+    current_height: u32,
+) -> ergo_api_core::chain::ProtocolHistory {
+    use ergo_validation::voting::votable_param_descriptors;
+
+    let mut ordered = rows.to_vec();
+    ordered.sort_by_key(|row| row.epoch_start_height);
+    let mut changes = Vec::new();
+    let mut previous: Option<ergo_validation::ActiveProtocolParameters> = None;
+    for row in ordered {
+        if row.epoch_start_height != 0 {
+            let previous_values = previous
+                .as_ref()
+                .map(|params| {
+                    votable_param_descriptors(params)
+                        .into_iter()
+                        .map(|descriptor| (descriptor.id, descriptor.current))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let mut params = Vec::new();
+            for descriptor in votable_param_descriptors(&row) {
+                let from = previous_values.get(&descriptor.id).copied();
+                if from != Some(descriptor.current) {
+                    params.push(ergo_api_core::chain::ProtocolParamChange {
+                        id: descriptor.id,
+                        name: descriptor.name.to_string(),
+                        description: descriptor.description.to_string(),
+                        from: from.map(i64::from),
+                        to: i64::from(descriptor.current),
+                    });
+                }
+            }
+            let block_version_from = previous
+                .as_ref()
+                .map(|params| i64::from(params.block_version));
+            let block_version_to = i64::from(row.block_version);
+            if block_version_from != Some(block_version_to) {
+                params.push(ergo_api_core::chain::ProtocolParamChange {
+                    id: 123,
+                    name: "blockVersion".to_string(),
+                    description: "Block format version — advanced by soft-fork activation, not a numeric parameter vote."
+                        .to_string(),
+                    from: block_version_from,
+                    to: block_version_to,
+                });
+            }
+            if !params.is_empty() {
+                params.sort_by_key(|change| change.id);
+                changes.push(ergo_api_core::chain::ProtocolChangeEvent {
+                    height: row.epoch_start_height,
+                    params,
+                });
+            }
+        }
+        previous = Some(row);
+    }
+
+    ergo_api_core::chain::ProtocolHistory {
+        epoch_length,
+        current_height,
+        changes,
+    }
+}
+
 pub(super) fn build_votes_history(
     rows: &[ergo_validation::ActiveProtocolParameters],
     epoch_length: u32,
@@ -1021,49 +1112,45 @@ pub(super) fn build_votes_history(
     use ergo_validation::voting::votable_param_descriptors;
 
     let mut changes = Vec::new();
-    let mut prev: Option<&ergo_validation::ActiveProtocolParameters> = None;
+    let mut previous: Option<&ergo_validation::ActiveProtocolParameters> = None;
     for row in rows {
-        if let Some(p) = prev {
-            let prev_vals: std::collections::BTreeMap<u8, i32> = votable_param_descriptors(p)
+        if let Some(previous_row) = previous {
+            let previous_values = votable_param_descriptors(previous_row)
                 .into_iter()
-                .map(|d| (d.id, d.current))
-                .collect();
+                .map(|descriptor| (descriptor.id, descriptor.current))
+                .collect::<std::collections::BTreeMap<_, _>>();
             let mut params = Vec::new();
-            for d in votable_param_descriptors(row) {
-                let from = prev_vals.get(&d.id).copied();
-                if from != Some(d.current) {
+            for descriptor in votable_param_descriptors(row) {
+                let from = previous_values.get(&descriptor.id).copied();
+                if from != Some(descriptor.current) {
                     params.push(ergo_api::types::ApiParamChange {
-                        id: d.id,
-                        name: d.name.to_string(),
-                        description: d.description.to_string(),
-                        from: from.map(|v| v as i64),
-                        to: d.current as i64,
+                        id: descriptor.id,
+                        name: descriptor.name.to_string(),
+                        description: descriptor.description.to_string(),
+                        from: from.map(i64::from),
+                        to: i64::from(descriptor.current),
                     });
                 }
             }
-            // blockVersion (123): advanced by soft-fork activation, not a
-            // numeric parameter vote, but it IS a governance event worth
-            // showing (e.g. the v3 → v4 transition).
-            if p.block_version != row.block_version {
+            if previous_row.block_version != row.block_version {
                 params.push(ergo_api::types::ApiParamChange {
                     id: 123,
                     name: "blockVersion".to_string(),
-                    description: "Block format version — advanced by soft-fork \
-                                  activation, not a numeric parameter vote."
+                    description: "Block format version — advanced by soft-fork activation, not a numeric parameter vote."
                         .to_string(),
-                    from: Some(p.block_version as i64),
+                    from: Some(previous_row.block_version as i64),
                     to: row.block_version as i64,
                 });
             }
             if !params.is_empty() {
-                params.sort_by_key(|c| c.id);
+                params.sort_by_key(|change| change.id);
                 changes.push(ergo_api::types::ApiVoteChangeEvent {
                     height: row.epoch_start_height,
                     params,
                 });
             }
         }
-        prev = Some(row);
+        previous = Some(row);
     }
 
     ergo_api::types::ApiVotesHistory {
@@ -1130,8 +1217,15 @@ fn with_pool_cost(
 
 #[cfg(test)]
 mod votes_history_tests {
-    use super::build_votes_history;
+    use super::{
+        build_protocol_history, build_votes_history, ScalaCompatBridge, ScalaCompatStatic,
+    };
+    use ergo_api::types::{ApiInfo, ApiWeightFunction};
+    use ergo_api_core::chain::ChainArchive;
+    use ergo_state::reader::ChainStoreReader;
     use ergo_validation::scala_launch;
+    use std::sync::Arc;
+    use std::time::Instant;
 
     /// Only boundaries where a parameter actually changed appear, each decoded
     /// (id/name/description) with the correct from→to, ascending by height.
@@ -1184,5 +1278,81 @@ mod votes_history_tests {
     fn build_votes_history_empty_when_only_genesis() {
         let h = build_votes_history(&[scala_launch()], 1024, 0);
         assert!(h.changes.is_empty());
+    }
+
+    #[test]
+    fn protocol_history_maps_voted_params_store_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        const VOTED: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("voted_params");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(VOTED).unwrap();
+            table.insert(0, &[0xff][..]).unwrap();
+        }
+        txn.commit().unwrap();
+        let publisher = crate::snapshot::SnapshotPublisher::new(
+            ApiInfo {
+                agent_name: "test".into(),
+                node_name: "test".into(),
+                network: "mainnet".into(),
+                version: "test".into(),
+                started_at_unix_ms: 0,
+                uptime_seconds: 0,
+                target_block_interval_ms: 120_000,
+            },
+            Instant::now(),
+            ApiWeightFunction::Cost,
+        );
+        let bridge = ScalaCompatBridge::new_with_voting_epoch_length(
+            publisher.handle(),
+            ScalaCompatStatic {
+                name: "test".into(),
+                app_version: "test".into(),
+                network: "mainnet".into(),
+                state_type: "utxo".into(),
+                launch_time_unix_ms: 0,
+                rest_api_url: None,
+                min_relay_fee_nano_erg: 0,
+            },
+            ChainStoreReader::new_from_db(db),
+            ergo_chain_spec::DifficultyParams::mainnet(),
+            17,
+        );
+        let error = bridge.protocol_history().unwrap_err();
+        assert_eq!(error.code(), "protocol_history_unavailable");
+        assert!(error.failure().is_some());
+    }
+
+    #[test]
+    fn build_protocol_history_orders_activations_and_omits_genesis() {
+        let genesis = scala_launch();
+        let mut activation = scala_launch();
+        activation.epoch_start_height = 128;
+        activation.storage_fee_factor = genesis.storage_fee_factor + 25_000;
+        activation.subblocks_per_block = Some(4);
+        let mut next = activation.clone();
+        next.epoch_start_height = 256;
+        next.storage_fee_factor = activation.storage_fee_factor + 25_000;
+
+        let history = build_protocol_history(&[next, genesis.clone(), activation], 7, 256);
+        assert_eq!(history.epoch_length, 7);
+        assert_eq!(history.current_height, 256);
+        assert_eq!(history.changes.len(), 2);
+        assert_eq!(history.changes[0].height, 128);
+        assert_eq!(
+            history.changes[0]
+                .params
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![1, 9]
+        );
+        assert_eq!(
+            history.changes[0].params[0].from,
+            Some(genesis.storage_fee_factor as i64)
+        );
+        assert_eq!(history.changes[0].params[1].from, None);
+        assert_eq!(history.changes[1].height, 256);
     }
 }

@@ -29,6 +29,7 @@ pub struct SnapshotPublisher {
     last_block_progress_at: Instant,
     last_header_height: u32,
     last_full_block_height: u32,
+    revision: u64,
 }
 
 impl SnapshotPublisher {
@@ -45,6 +46,7 @@ impl SnapshotPublisher {
             last_block_progress_at: started_at,
             last_header_height: 0,
             last_full_block_height: 0,
+            revision: 0,
         }
     }
 
@@ -131,8 +133,9 @@ impl SnapshotPublisher {
 
         let mut info = self.info.clone();
         info.uptime_seconds = now.duration_since(self.started_at).as_secs();
+        self.revision = self.revision.saturating_add(1);
 
-        let snap = build_snapshot(parts, info, effective_progress_age_ms);
+        let snap = build_snapshot(parts, info, effective_progress_age_ms, self.revision);
         self.handle.store(std::sync::Arc::new(snap));
     }
 }

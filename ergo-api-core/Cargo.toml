@@ -1,0 +1,16 @@
+[package]
+name = "ergo-api-core"
+description = "Transport-independent domain records and capability contracts for the native Rust node API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+ergo-primitives = { workspace = true }
+ergo-ser = { workspace = true }
+hex = { workspace = true }
+num-bigint = { workspace = true }
+thiserror = { workspace = true }

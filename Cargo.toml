@@ -17,6 +17,7 @@ members = [
     "ergo-mining",
     "ergo-indexer-types",
     "ergo-indexer",
+    "ergo-api-core",
     "ergo-api",
     "ergo-rest-json",
     "ergo-difftest",
@@ -45,6 +46,7 @@ ergo-mempool       = { path = "ergo-mempool" }
 ergo-mining        = { path = "ergo-mining" }
 ergo-indexer-types = { path = "ergo-indexer-types" }
 ergo-indexer       = { path = "ergo-indexer" }
+ergo-api-core      = { path = "ergo-api-core" }
 ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
 

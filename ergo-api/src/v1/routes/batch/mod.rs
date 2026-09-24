@@ -53,7 +53,7 @@ use crate::v1::error::{Reason, V1Error};
 mod allowlist;
 pub(crate) mod dispatch;
 
-pub use dispatch::batch_router;
+pub use dispatch::{batch_router, batch_router_without_native_chain};
 
 /// Hard cap on sub-requests per batch call.
 /// ASSUMED policy constant — not yet an operator-config knob, same as every

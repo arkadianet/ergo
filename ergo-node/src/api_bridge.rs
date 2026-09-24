@@ -22,6 +22,13 @@ use ergo_api::types::{
 };
 use ergo_api::types::{SubmitError, SubmitMode};
 use ergo_api::{MempoolView, NodeAdmin, NodeChainQuery, NodeReadState, NodeSubmit, PoolTxDetail};
+use ergo_api_core::control::{PeerDialer, ShutdownControl, VotingControl, VotingError};
+use ergo_api_core::error::{ServiceError, ServiceResult};
+use ergo_api_core::id::TxId;
+use ergo_api_core::transaction::{
+    AdmissionDisposition, SubmissionMode, TransactionAdmission, TransactionError,
+    TransactionRejection, TransactionSubmission, TransactionSubmitter,
+};
 use ergo_crypto::pow::verify_pow_solution;
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::VlqReader;
@@ -39,6 +46,14 @@ use crate::snapshot::{unix_now_ms, SnapshotHandle};
 
 mod block_reassembly;
 mod compat;
+mod core_chain;
+mod core_events;
+mod core_host;
+mod core_indexer;
+mod core_peers;
+mod core_recent;
+mod core_snapshot;
+mod core_transactions;
 mod emission;
 mod error;
 mod nipopow;
@@ -48,6 +63,9 @@ use block_reassembly::{
     load_and_encode_header, load_and_encode_modifier_by_id, load_headers_in_range,
 };
 use compat::*;
+pub use core_indexer::IndexerStatusAdapter;
+pub use core_peers::{SnapshotNetworkSource, SnapshotPeerSource};
+pub use core_transactions::CoreTransactionReader;
 pub use emission::{render_emission_scripts, EmissionScheduleBridge};
 use error::BridgeError;
 
@@ -81,6 +99,7 @@ pub struct SnapshotReadState {
     /// and wall-clock apply age/wedge, written by a plain thread nothing
     /// on the runtime can starve. Overlaid onto `/metrics` per request.
     telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
+    core_capabilities: Arc<Vec<ergo_api_core::capability::CapabilityDescriptor>>,
 }
 
 /// Filesystem paths the `/api/v1/host` handler needs to compute per-call
@@ -257,6 +276,58 @@ impl NodeAdmin for ShutdownAdmin {
     }
 }
 
+impl ShutdownControl for ShutdownAdmin {
+    fn request_shutdown(&self) {
+        <Self as NodeAdmin>::request_shutdown(self);
+    }
+}
+
+impl PeerDialer for ShutdownAdmin {
+    fn request_dial(&self, address: std::net::SocketAddr) -> ServiceResult<()> {
+        let Some(tx) = &self.peer_connect_tx else {
+            return Err(ServiceError::unavailable(
+                "peer_dial_unavailable",
+                "peer dialing is not wired on this node",
+            ));
+        };
+        tx.try_send(address).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                ServiceError::overloaded("peer_dial_overloaded", "the peer dial queue is full")
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                ServiceError::unavailable("peer_dial_unavailable", "the peer dial queue is closed")
+            }
+        })
+    }
+}
+
+impl VotingControl for ShutdownAdmin {
+    fn replace_targets(
+        &self,
+        targets: std::collections::BTreeMap<u8, i64>,
+    ) -> Result<(), VotingError> {
+        <Self as NodeAdmin>::set_voting_targets(self, targets.into_iter().collect()).map_err(
+            |error| match error {
+                ergo_api::VotingControlError::MiningDisabled => VotingError::MiningDisabled,
+                ergo_api::VotingControlError::NotVotable { parameter_id } => {
+                    VotingError::NotVotable { parameter_id }
+                }
+                ergo_api::VotingControlError::OutOfRange {
+                    parameter_id,
+                    target,
+                    min,
+                    max,
+                } => VotingError::OutOfRange {
+                    parameter_id,
+                    target,
+                    min,
+                    max,
+                },
+            },
+        )
+    }
+}
+
 impl SnapshotReadState {
     pub fn new(
         handle: SnapshotHandle,
@@ -273,6 +344,11 @@ impl SnapshotReadState {
             voting_targets,
             apply_phase,
             telemetry,
+            core_capabilities: Arc::new(vec![
+                ergo_api_core::capability::CapabilityDescriptor::available(
+                    ergo_api_core::capability::CapabilityId::Node,
+                ),
+            ]),
         }
     }
 
@@ -331,22 +407,61 @@ impl SnapshotReadState {
     }
 }
 
+impl SnapshotReadState {
+    fn info_from_snapshot(&self, snap: &crate::snapshot::NodeSnapshot) -> ApiInfo {
+        let mut info = snap.info.clone();
+        if self.telemetry.has_sampled() {
+            info.uptime_seconds = self.telemetry.uptime_secs();
+        }
+        info
+    }
+
+    fn status_from_snapshot(&self, snap: &crate::snapshot::NodeSnapshot) -> ApiStatus {
+        let mut status = snap.status.clone();
+        status.snapshot_age_ms = self.age_ms(snap.produced_at);
+        status.apply_in_progress = self.apply_phase.in_progress();
+        status.last_apply_duration_ms = self.apply_phase.last_duration_ms();
+        status.last_applied_height = self.apply_phase.last_applied_height();
+        status.last_apply_age_ms = self.apply_phase.last_apply_age_ms();
+        if self.telemetry.has_sampled() {
+            status.rss_kb_live = Some(self.telemetry.rss_kb());
+            status.uptime_seconds_live = Some(self.telemetry.uptime_secs());
+            status.apply_age_ms = self.telemetry.apply_age_ms();
+            status.apply_wedged = self.telemetry.apply_wedged();
+        }
+        (status.state_db_bytes, status.index_db_bytes) = self.db_sizes();
+        (status.disk_free_bytes, status.disk_total_bytes) = self.disk_space();
+        let (state_total, indexer_total) =
+            ergo_state::storage_observability::storage_error_totals();
+        status.storage_errors_state_total = state_total;
+        status.storage_errors_indexer_total = indexer_total;
+        if let Some((timestamp, message)) = ergo_state::storage_observability::last_storage_error()
+        {
+            let snapshot_produced_unix_ms =
+                unix_now_ms().saturating_sub(self.age_ms(snap.produced_at));
+            if status.last_storage_error.is_none() || timestamp >= snapshot_produced_unix_ms {
+                status.last_storage_error = Some(message);
+            }
+        }
+        status
+    }
+
+    fn health_from_snapshot(&self, snap: &crate::snapshot::NodeSnapshot) -> ApiHealth {
+        let mut health = snap.health.clone();
+        health.last_progress_age_ms = health
+            .last_progress_age_ms
+            .saturating_add(self.age_ms(snap.produced_at));
+        health
+    }
+}
+
 impl NodeReadState for SnapshotReadState {
     fn sync_gauges(&self) -> ergo_api::ApiSyncGauges {
         self.handle.load().gauges
     }
 
     fn info(&self) -> ApiInfo {
-        let mut info = self.handle.load().info.clone();
-        // Issue #266 review: `/api/v1/info` must not report starved
-        // uptime — overlay the live sample when one has landed, same
-        // guard as `status()`. The compat Scala-parity `/info`
-        // (`NodeChainQuery`) path is intentionally left on its own
-        // source.
-        if self.telemetry.has_sampled() {
-            info.uptime_seconds = self.telemetry.uptime_secs();
-        }
-        info
+        self.info_from_snapshot(&self.handle.load())
     }
 
     fn votes(&self) -> ergo_api::ApiVotes {
@@ -425,62 +540,7 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn status(&self) -> ApiStatus {
-        let snap = self.handle.load();
-        let mut s = snap.status.clone();
-        s.snapshot_age_ms = self.age_ms(snap.produced_at);
-        // Live apply-phase probes — must not wait for the next snapshot tick.
-        s.apply_in_progress = self.apply_phase.in_progress();
-        s.last_apply_duration_ms = self.apply_phase.last_duration_ms();
-        s.last_applied_height = self.apply_phase.last_applied_height();
-        s.last_apply_age_ms = self.apply_phase.last_apply_age_ms();
-        // Starvation-free telemetry (issue #266): RSS / uptime / running-
-        // apply age sampled by a plain thread, so these stay truthful even
-        // while a long apply has starved the snapshot publisher. Gated on
-        // the first sample landing — before that the snapshot fallbacks
-        // win instead of serving pre-sample zeros (review of #267).
-        if self.telemetry.has_sampled() {
-            s.rss_kb_live = Some(self.telemetry.rss_kb());
-            s.uptime_seconds_live = Some(self.telemetry.uptime_secs());
-            s.apply_age_ms = self.telemetry.apply_age_ms();
-            s.apply_wedged = self.telemetry.apply_wedged();
-        }
-        // Storage gauges (measure-first, #257): on-disk size of the two
-        // redb stores plus disk headroom around the data dir. Same
-        // per-call probes the `/host` card uses — two stat calls and a
-        // mount-table scan, cheap at dashboard / scrape cadence. Surfaced
-        // so data-dir growth (bytes per synced height) is measured, not
-        // guessed.
-        (s.state_db_bytes, s.index_db_bytes) = self.db_sizes();
-        (s.disk_free_bytes, s.disk_total_bytes) = self.disk_space();
-        // Storage-error counters (issue #281, P0 review fix): the state
-        // and indexer buckets are process-global atomics in
-        // `ergo_state::storage_observability` — read live here exactly
-        // like the telemetry block above, NOT sourced from the published
-        // snapshot. This matters precisely in the incident scenario the
-        // issue is about: a poisoned redb handle wedges the action loop
-        // (`publish_snapshot` never runs again), so a snapshot-sourced
-        // counter would freeze at its pre-wedge value forever while the
-        // atomics keep climbing. The peers bucket CANNOT do this the same
-        // way — `PeerManager` uses `Cell`/`RefCell` (not `Sync`) because
-        // it's owned single-threaded by the action loop, so it stays
-        // snapshot-fed and can lag during a wedge; see docs/operating.md.
-        let (live_state_total, live_indexer_total) =
-            ergo_state::storage_observability::storage_error_totals();
-        s.storage_errors_state_total = live_state_total;
-        s.storage_errors_indexer_total = live_indexer_total;
-        if let Some((ts, message)) = ergo_state::storage_observability::last_storage_error() {
-            // Only override the snapshot's (peers-inclusive) merge when
-            // this live error is at least as new as the snapshot itself —
-            // otherwise the snapshot already reflects it (or a fresher
-            // peers-sourced one) and clobbering would lose that.
-            let now_unix_ms = unix_now_ms();
-            let snapshot_produced_unix_ms =
-                now_unix_ms.saturating_sub(self.age_ms(snap.produced_at));
-            if s.last_storage_error.is_none() || ts >= snapshot_produced_unix_ms {
-                s.last_storage_error = Some(message);
-            }
-        }
-        s
+        self.status_from_snapshot(&self.handle.load())
     }
 
     fn tip(&self) -> ApiTip {
@@ -540,15 +600,7 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn health(&self) -> ApiHealth {
-        let snap = self.handle.load();
-        let mut h = snap.health.clone();
-        // The age stored in the snapshot is correct as of `produced_at`;
-        // bump it forward so a stale snapshot doesn't report a fresher
-        // last-progress than reality.
-        h.last_progress_age_ms = h
-            .last_progress_age_ms
-            .saturating_add(self.age_ms(snap.produced_at));
-        h
+        self.health_from_snapshot(&self.handle.load())
     }
 }
 
@@ -683,6 +735,94 @@ impl SubmitBridge {
     pub fn into_dyn(self) -> Arc<dyn NodeSubmit> {
         Arc::new(self)
     }
+}
+
+#[async_trait::async_trait]
+impl TransactionSubmitter for SubmitBridge {
+    async fn submit(
+        &self,
+        request: TransactionSubmission,
+    ) -> Result<TransactionAdmission, TransactionError> {
+        let mode = match request.mode {
+            SubmissionMode::Broadcast => SubmitMode::Broadcast,
+            SubmissionMode::Validate => SubmitMode::CheckOnly,
+        };
+        let tx_id = self
+            .submit_transaction(request.bytes.to_vec(), mode)
+            .await
+            .map_err(map_core_submit_error)?;
+        let tx_id = tx_id.parse::<TxId>().map_err(|error| {
+            TransactionError::Internal(ergo_api_core::error::BackendFailure::new(
+                "submit",
+                format!("node returned an invalid transaction id: {error}"),
+            ))
+        })?;
+        Ok(TransactionAdmission {
+            tx_id,
+            disposition: match request.mode {
+                SubmissionMode::Broadcast => AdmissionDisposition::Admitted,
+                SubmissionMode::Validate => AdmissionDisposition::WouldAdmit,
+            },
+        })
+    }
+}
+
+fn map_core_submit_error(error: SubmitError) -> TransactionError {
+    let reason = error.reason.clone();
+    let detail = error.detail.clone();
+    let rejection = match reason.as_str() {
+        "disabled" => return TransactionError::Disabled,
+        "overloaded" => return TransactionError::Overloaded,
+        "shutting_down" => return TransactionError::ShuttingDown,
+        "timeout" => return TransactionError::TimedOut,
+        "budget_exhausted" => {
+            if detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("per-peer"))
+            {
+                TransactionRejection::PeerBudget
+            } else {
+                TransactionRejection::GlobalBudget
+            }
+        }
+        "global_budget_exhausted" => TransactionRejection::GlobalBudget,
+        "peer_budget_exhausted" => TransactionRejection::PeerBudget,
+        "ibd_gated" => TransactionRejection::IbdGated,
+        "tip_unready" => TransactionRejection::TipUnready,
+        "size_limit" | "too_big" => TransactionRejection::SizeLimit,
+        "recently_unresolved" | "unresolved_input" | "no_inputs_found" => {
+            TransactionRejection::UnresolvedInput
+        }
+        "unresolved_data_input" => TransactionRejection::UnresolvedDataInput,
+        "deserialize" => TransactionRejection::InvalidEncoding,
+        "non_canonical" => TransactionRejection::NonCanonical,
+        "known_invalid" => TransactionRejection::KnownInvalid,
+        "duplicate" | "already_known" => TransactionRejection::Duplicate,
+        "structural" => TransactionRejection::Structural,
+        "below_min_fee" | "insufficient_fee" | "fee_too_low" => TransactionRejection::FeeTooLow,
+        "script_failed" | "script_error" => TransactionRejection::ScriptValidation,
+        "monetary_failed" | "invalid" => TransactionRejection::MonetaryInvariant,
+        "cost_exceeded" | "cost_limit" | "too_much_cost" => TransactionRejection::CostLimit,
+        "reemission_policy" => TransactionRejection::ReemissionPolicy,
+        "validation_failed" => TransactionRejection::ValidationFailed,
+        "double_spend" => TransactionRejection::DoubleSpend,
+        "double_spend_loser" => TransactionRejection::DoubleSpendReplacement,
+        "stale" => TransactionRejection::Stale,
+        "pool_full" => TransactionRejection::PoolFull,
+        "insert_collision" => {
+            return TransactionError::Internal(ergo_api_core::error::BackendFailure::new(
+                "submit",
+                "transaction insertion collision",
+            ));
+        }
+        _ => {
+            return TransactionError::Internal(ergo_api_core::error::BackendFailure::new(
+                "submit",
+                detail.unwrap_or(reason),
+            ));
+        }
+    };
+    TransactionError::Rejected(rejection)
 }
 
 #[async_trait::async_trait]

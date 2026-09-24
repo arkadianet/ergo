@@ -181,34 +181,67 @@ pub fn operator_router(
     governor: Arc<Governor>,
     auth: Arc<V1AuthConfig>,
 ) -> Router {
+    operator_router_with_options(state, governor, auth, true, true, true)
+}
+
+pub fn operator_router_without_node(
+    state: OperatorState,
+    governor: Arc<Governor>,
+    auth: Arc<V1AuthConfig>,
+) -> Router {
+    operator_router_with_options(state, governor, auth, false, false, true)
+}
+
+pub fn operator_router_without_native_reads(
+    state: OperatorState,
+    governor: Arc<Governor>,
+    auth: Arc<V1AuthConfig>,
+) -> Router {
+    operator_router_with_options(state, governor, auth, false, false, false)
+}
+
+fn operator_router_with_options(
+    state: OperatorState,
+    governor: Arc<Governor>,
+    auth: Arc<V1AuthConfig>,
+    include_node: bool,
+    include_history: bool,
+    include_network_reads: bool,
+) -> Router {
     // ----- T0: public, governor-bounded reads -----
-    let t0: Router<OperatorState> = Router::new()
-        // node/*
-        .route("/api/v1/node/info", get(node::info))
-        .route("/api/v1/node/status", get(node::status))
-        .route("/api/v1/node/sync", get(node::sync))
-        .route("/api/v1/node/tip", get(node::tip))
-        .route("/api/v1/node/identity", get(node::identity))
-        .route("/api/v1/node/health", get(node::health))
-        .route("/api/v1/node/version", get(node::version))
-        .route("/api/v1/node/host", get(node::host))
-        // network/*
-        .route("/api/v1/network/peers", get(network::peers))
-        .route("/api/v1/network/connected", get(network::connected))
-        .route("/api/v1/network/blacklisted", get(network::blacklisted))
-        .route("/api/v1/network/sync-info", get(network::sync_info))
-        .route("/api/v1/network/track-info", get(network::track_info))
-        // mining/*
+    let mut t0: Router<OperatorState> = Router::new();
+    if include_network_reads {
+        t0 = t0
+            .route("/api/v1/network/peers", get(network::peers))
+            .route("/api/v1/network/connected", get(network::connected))
+            .route("/api/v1/network/blacklisted", get(network::blacklisted))
+            .route("/api/v1/network/sync-info", get(network::sync_info))
+            .route("/api/v1/network/track-info", get(network::track_info));
+    }
+    let mut t0 = t0
         .route("/api/v1/mining/miner-stats", get(mining::miner_stats))
         .route("/api/v1/mining/status", get(mining::status))
-        // voting/*
-        .route("/api/v1/voting/votes", get(voting::votes))
-        .route("/api/v1/voting/history", get(voting::history))
-        .route("/api/v1/voting/candidate", get(voting::candidate))
-        .route_layer(axum::middleware::from_fn_with_state(
-            governor.state(RouteClass::CheapRead),
-            governor_mw,
-        ));
+        .route("/api/v1/voting/votes", get(voting::votes));
+    if include_history {
+        t0 = t0.route("/api/v1/voting/history", get(voting::history));
+    }
+    let t0 = t0.route("/api/v1/voting/candidate", get(voting::candidate));
+    let t0 = if include_node {
+        t0.route("/api/v1/node/info", get(node::info))
+            .route("/api/v1/node/status", get(node::status))
+            .route("/api/v1/node/sync", get(node::sync))
+            .route("/api/v1/node/tip", get(node::tip))
+            .route("/api/v1/node/identity", get(node::identity))
+            .route("/api/v1/node/health", get(node::health))
+            .route("/api/v1/node/version", get(node::version))
+            .route("/api/v1/node/host", get(node::host))
+    } else {
+        t0.route("/api/v1/node/version", get(node::version))
+    };
+    let t0 = t0.route_layer(axum::middleware::from_fn_with_state(
+        governor.state(RouteClass::CheapRead),
+        governor_mw,
+    ));
 
     // ----- T1: operator (api_key) controls -----
     let t1: Router<OperatorState> = Router::new()

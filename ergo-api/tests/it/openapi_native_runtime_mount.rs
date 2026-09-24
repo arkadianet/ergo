@@ -23,10 +23,13 @@ use ergo_api::compat::types::{Parameters, ScalaFullBlock, ScalaInfo, ScalaTransa
 use ergo_api::compat::NodeChainQuery;
 use ergo_api::emission::{EmissionInfoJson, EmissionSchedule, EmissionScriptsJson};
 use ergo_api::mining::{MiningApiError, NodeMining};
+use ergo_api::native::{NativeRuntime, NativeState, RuntimeConfig};
 use ergo_api::server::{
     established_openapi_operations, legacy_rust_openapi, openapi_operations, router,
     router_with_mempool, router_with_mempool_and_wallet_and_security,
-    router_with_mempool_and_wallet_and_security_and_inventory, rust_openapi,
+    router_with_mempool_and_wallet_and_security_and_inventory,
+    router_with_mempool_and_wallet_and_security_and_native,
+    router_with_mempool_and_wallet_and_security_and_native_inventory, rust_openapi,
     scala_openapi_operations, v1_openapi_fragment, RouteOperation, ServerCtx,
 };
 use ergo_api::traits::{
@@ -38,6 +41,25 @@ use ergo_api::types::{
     ApiWeightFunction, HealthStatus, SubmitError, SubmitMode, SyncStateLabel,
 };
 use ergo_api::wallet::NoopWalletAdmin;
+use ergo_api_core::capability::CapabilityDescriptor;
+use ergo_api_core::id::HeaderId;
+use ergo_api_core::indexer::{
+    IndexerRepair as CoreIndexerRepair, IndexerStatus as CoreIndexerStatus, IndexerStatusSnapshot,
+    IndexerStatusSource, IndexerTotals as CoreIndexerTotals,
+};
+use ergo_api_core::network::{
+    BlacklistedPeerRecord, NetworkSnapshot, PeerChainStatus, PeerDirection, PeerRecord,
+    PeerSnapshotSource, PeerState, PeerSyncRecord, TrackInfoRecord,
+};
+use ergo_api_core::node::{
+    BlockTip, ChainTip, HeaderTip, Health, HealthStatus as CoreHealthStatus, HistoryMode,
+    NodeIdentity, NodeInfo, NodeNetwork, NodeSnapshot, NodeSnapshotSource, NodeStatus,
+    StateBackend, SyncState, SyncStatus,
+};
+use ergo_api_core::observability::{
+    EventFeed, EventRecord, EventSource, HostStatus, HostStatusSource, RecentBlockRecord,
+    RecentBlockSource,
+};
 use ergo_indexer_types::{
     BalanceDto, BoxId, IndexedBoxDto, IndexedTokenDto, IndexedTxDto, IndexerQuery, IndexerStatus,
     Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
@@ -152,7 +174,258 @@ impl NodeReadState for StubReadState {
     }
 }
 
-/// Always-accept submit stub — the mount matrix only cares whether the
+struct StubCoreSnapshot(Arc<NodeSnapshot>);
+
+impl NodeSnapshotSource for StubCoreSnapshot {
+    fn snapshot(&self) -> Arc<NodeSnapshot> {
+        self.0.clone()
+    }
+}
+
+struct StubPeerSource(NetworkSnapshot);
+
+impl PeerSnapshotSource for StubPeerSource {
+    fn snapshot(&self) -> NetworkSnapshot {
+        self.0.clone()
+    }
+}
+
+fn peer_record(addr: &str, state: PeerState) -> PeerRecord {
+    PeerRecord {
+        addr: addr.to_string(),
+        direction: PeerDirection::Outbound,
+        state,
+        score: 7,
+        agent: Some("ergo-test".to_string()),
+        node_name: Some("peer".to_string()),
+        version: Some("5.0.13".to_string()),
+        sync_version: "V2".to_string(),
+        connected_seconds: 12,
+        last_seen_seconds: 3,
+        bytes_in: Some(100),
+        bytes_out: Some(200),
+        peer_height: Some(42),
+        rest_api_url: Some("http://peer:9053".to_string()),
+        declared_address: Some("203.0.113.9:9030".to_string()),
+    }
+}
+
+fn native_state_with_peers() -> NativeState {
+    native_state().with_peers(Arc::new(StubPeerSource(NetworkSnapshot {
+        revision: ergo_api_core::page::SnapshotRevision(9),
+        peers: vec![
+            peer_record("1.2.3.4:9030", PeerState::Active),
+            peer_record("5.6.7.8:9030", PeerState::Degraded),
+            peer_record("9.10.11.12:9030", PeerState::Disconnected),
+        ],
+        blacklisted: vec![
+            BlacklistedPeerRecord {
+                addr: "/192.0.2.1".to_string(),
+            },
+            BlacklistedPeerRecord {
+                addr: "192.0.2.2".to_string(),
+            },
+        ],
+        sync_info: vec![
+            PeerSyncRecord {
+                addr: "1.2.3.4:9030".to_string(),
+                peer_height: Some(42),
+                status: PeerChainStatus::Younger,
+            },
+            PeerSyncRecord {
+                addr: "5.6.7.8:9030".to_string(),
+                peer_height: None,
+                status: PeerChainStatus::Unknown,
+            },
+        ],
+        track_info: TrackInfoRecord {
+            requested: 5,
+            received: 3,
+            failed: 1,
+        },
+    })))
+}
+
+fn native_state() -> NativeState {
+    let id = HeaderId::from_bytes([1; 32]);
+    let tip = ChainTip {
+        best_header: HeaderTip {
+            height: 0,
+            id: Some(id),
+            parent_id: None,
+            timestamp_unix_ms: 0,
+            compact_bits: 0,
+            difficulty: num_bigint::BigUint::from(0u32),
+        },
+        best_block: BlockTip {
+            header: HeaderTip {
+                height: 0,
+                id: Some(id),
+                parent_id: None,
+                timestamp_unix_ms: 0,
+                compact_bits: 0,
+                difficulty: num_bigint::BigUint::from(0u32),
+            },
+            state_root: None,
+        },
+    };
+    NativeState::new(Arc::new(StubCoreSnapshot(Arc::new(NodeSnapshot {
+        revision: ergo_api_core::page::SnapshotRevision(1),
+        produced_at_unix_ms: 0,
+        info: NodeInfo {
+            agent_name: "stub".into(),
+            node_name: "stub".into(),
+            network: NodeNetwork::Devnet,
+            version: "0.0.0".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 1,
+        },
+        identity: NodeIdentity {
+            state_backend: StateBackend::Utxo,
+            verify_transactions: false,
+            history_mode: HistoryMode::HeadersOnly,
+            utxo_bootstrap: false,
+            nipopow_bootstrap: false,
+            mining_enabled: false,
+            indexer_enabled: false,
+            declared_address: None,
+            bind_address: None,
+        },
+        status: NodeStatus {
+            sync: SyncState::AtTip,
+            peer_count: 0,
+            mempool_size: 0,
+            headers_ahead_of_full_blocks: 0,
+            snapshot_age_ms: 0,
+            block_apply_errors_total: 0,
+            storage_errors_total: 0,
+            reorgs_total: 0,
+            sync_wedged: false,
+            apply_wedged: false,
+            apply_in_progress: false,
+            shadow_diverged: false,
+            bootstrap_active: false,
+        },
+        tip,
+        sync: SyncStatus {
+            state: SyncState::AtTip,
+            headers_chain_synced: true,
+            header_height: 0,
+            full_block_height: 0,
+            gap: 0,
+            download_window: 0,
+            pending_blocks: 0,
+            recovery_complete: true,
+            best_known_height: 0,
+        },
+        health: Health {
+            status: CoreHealthStatus::Healthy,
+            behind: 0,
+            last_progress_age_ms: 0,
+            peer_count: 0,
+        },
+        capabilities: vec![CapabilityDescriptor::available(
+            ergo_api_core::capability::CapabilityId::Node,
+        )],
+    }))))
+}
+
+fn native_state_with_recent_blocks() -> NativeState {
+    native_state().with_recent_blocks(Arc::new(StubRecentBlocks(vec![
+        RecentBlockRecord {
+            height: 9,
+            header_id: HeaderId::from_bytes([9; 32]),
+            timestamp_unix_ms: 1_700_000_000_009,
+            transaction_count: 4,
+            size_bytes: 4_096,
+            delivered_by: Some("203.0.113.7:9030".parse().unwrap()),
+            miner_public_key: Some([2; 33]),
+            miner_address: Some("miner-address".to_string()),
+        },
+        RecentBlockRecord {
+            height: 8,
+            header_id: HeaderId::from_bytes([8; 32]),
+            timestamp_unix_ms: 1_700_000_000_008,
+            transaction_count: 3,
+            size_bytes: 3_072,
+            delivered_by: None,
+            miner_public_key: None,
+            miner_address: None,
+        },
+    ])))
+}
+
+fn native_state_with_events() -> NativeState {
+    native_state().with_events(Arc::new(StubEvents(EventFeed::new(
+        3,
+        vec![
+            EventRecord {
+                seq: 1,
+                unix_ms: 1_700_000_000_001,
+                kind: "blockApplied".to_string(),
+                height: Some(9),
+                header_id: Some(hex::encode([9; 32])),
+                depth: None,
+                dropped_header_ids: None,
+                returned_tx_ids: None,
+                returned_txs_total: None,
+                delivered_by: None,
+                txs: Some(4),
+                size_bytes: Some(4_096),
+                addr: None,
+                detail: None,
+            },
+            EventRecord {
+                seq: 2,
+                unix_ms: 1_700_000_000_002,
+                kind: "reorg".to_string(),
+                height: Some(8),
+                header_id: Some(hex::encode([8; 32])),
+                depth: Some(1),
+                dropped_header_ids: Some(vec![hex::encode([7; 32])]),
+                returned_tx_ids: Some(Vec::new()),
+                returned_txs_total: Some(0),
+                delivered_by: None,
+                txs: None,
+                size_bytes: None,
+                addr: None,
+                detail: None,
+            },
+            EventRecord {
+                seq: 3,
+                unix_ms: 1_700_000_000_003,
+                kind: "peerConnected".to_string(),
+                height: None,
+                header_id: None,
+                depth: None,
+                dropped_header_ids: None,
+                returned_tx_ids: None,
+                returned_txs_total: None,
+                delivered_by: None,
+                txs: None,
+                size_bytes: None,
+                addr: Some("127.0.0.1:9030".to_string()),
+                detail: None,
+            },
+        ],
+    ))))
+}
+
+fn native_state_with_host() -> NativeState {
+    native_state().with_host(Arc::new(StubHost(HostStatus {
+        rss_bytes: Some(42),
+        state_db_bytes: Some(0),
+        index_db_bytes: None,
+        disk_free_bytes: Some(1024),
+        disk_total_bytes: Some(2048),
+        cpu_pct: Some(1.5),
+        net_in_bps: Some(3),
+        net_out_bps: None,
+        load_1m: Some(0.25),
+    })))
+}
+
 /// route exists, not what admission decides.
 struct StubSubmit;
 
@@ -345,6 +618,38 @@ impl IndexerQuery for StubIndexer {
 
     fn token_total_boxes(&self, _token_id: &TokenId) -> u64 {
         0
+    }
+}
+
+struct StubIndexerStatusSource(IndexerStatusSnapshot);
+
+impl IndexerStatusSource for StubIndexerStatusSource {
+    fn snapshot(&self) -> IndexerStatusSnapshot {
+        self.0.clone()
+    }
+}
+
+struct StubRecentBlocks(Vec<RecentBlockRecord>);
+
+impl RecentBlockSource for StubRecentBlocks {
+    fn recent_blocks(&self, count: u32) -> Vec<RecentBlockRecord> {
+        self.0.iter().take(count as usize).cloned().collect()
+    }
+}
+
+struct StubEvents(EventFeed);
+
+impl EventSource for StubEvents {
+    fn events(&self) -> EventFeed {
+        self.0.clone()
+    }
+}
+
+struct StubHost(HostStatus);
+
+impl HostStatusSource for StubHost {
+    fn host_status(&self) -> HostStatus {
+        self.0.clone()
     }
 }
 
@@ -561,6 +866,781 @@ async fn post(app: &axum::Router, path: &str, api_key: Option<&str>) -> (StatusC
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn native_router_replaces_node_and_chain_paths_without_collisions() {
+    let app = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state(),
+    );
+    for path in [
+        "/api/v1/info",
+        "/api/v1/identity",
+        "/api/v1/status",
+        "/api/v1/tip",
+        "/api/v1/sync",
+        "/api/v1/health",
+    ] {
+        assert_eq!(get(&app, path).await, StatusCode::NOT_FOUND, "{path}");
+    }
+    for path in [
+        "/api/v1/node",
+        "/api/v1/node/info",
+        "/api/v1/node/status",
+        "/api/v1/node/sync",
+        "/api/v1/node/identity",
+        "/api/v1/node/health",
+        "/api/v1/node/tip",
+        "/api/v1/node/capabilities",
+        "/api/v1/chain/tip",
+    ] {
+        assert_eq!(get(&app, path).await, StatusCode::OK, "{path}");
+    }
+    assert_eq!(
+        get(&app, "/api/v1/chain/headers").await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        get(&app, "/api/v1/chain/headers?limit=0").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get(&app, "/api/v1/transactions").await,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/transactions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"bytes":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let batch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"requests":[{"method":"GET","path":"/api/v1/chain/headers"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.status(), StatusCode::OK);
+    let batch_body = to_bytes(batch.into_body(), 1 << 20).await.unwrap();
+    let batch_json: serde_json::Value = serde_json::from_slice(&batch_body).unwrap();
+    assert_eq!(batch_json["items"][0]["status"], "error");
+}
+
+#[tokio::test]
+async fn native_peer_routes_preserve_shapes_pagination_and_controls() {
+    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_peers(),
+    );
+    assert_eq!(get(&app, "/api/v1/peers").await, StatusCode::NOT_FOUND);
+    assert_eq!(get(&app, "/api/v1/network/peers").await, StatusCode::OK);
+    assert_eq!(get(&app, "/api/v1/network/connected").await, StatusCode::OK);
+    assert_eq!(
+        get(&app, "/api/v1/network/blacklisted").await,
+        StatusCode::OK
+    );
+    assert_eq!(get(&app, "/api/v1/network/sync-info").await, StatusCode::OK);
+    assert_eq!(
+        get(&app, "/api/v1/network/track-info").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(&app, "/api/v1/network/connect", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for path in [
+        "/api/v1/network/peers",
+        "/api/v1/network/connected",
+        "/api/v1/network/blacklisted",
+        "/api/v1/network/sync-info",
+        "/api/v1/network/track-info",
+    ] {
+        assert_eq!(
+            inventory
+                .rust
+                .iter()
+                .filter(|operation| operation.path == path && operation.method == "get")
+                .count(),
+            1,
+            "{path}"
+        );
+    }
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network/peers?limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first["items"][0]["direction"], "outbound");
+    assert_eq!(first["items"][0]["state"], "active");
+    assert_eq!(first["items"][0]["node_name"], "peer");
+    assert_eq!(first["page"]["limit"], 1);
+    assert_eq!(first["page"]["has_more"], true);
+    let cursor = first["page"]["next_cursor"].as_str().unwrap().to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/network/peers?limit=1&cursor={cursor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(second["items"][0]["state"], "degraded");
+    assert_eq!(second["page"]["has_more"], true);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network/connected")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let connected: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(connected["items"].as_array().unwrap().len(), 1);
+    assert_eq!(connected["items"][0]["state"], "active");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network/blacklisted")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let blacklisted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(blacklisted["items"][0]["addr"], "192.0.2.1");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network/sync-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let sync_info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(sync_info["items"].as_array().unwrap().len(), 1);
+    assert_eq!(sync_info["items"][0]["peer_height"], 42);
+    assert_eq!(sync_info["items"][0]["status"], "younger");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/network/track-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let track: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(track["num_requested"], 5);
+    assert_eq!(track["num_received"], 3);
+    assert_eq!(track["num_failed"], 1);
+}
+
+#[tokio::test]
+async fn native_peer_routes_are_optional_without_changing_legacy_builder() {
+    let (native, inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state(),
+    );
+    for path in [
+        "/api/v1/network/peers",
+        "/api/v1/network/connected",
+        "/api/v1/network/blacklisted",
+        "/api/v1/network/sync-info",
+        "/api/v1/network/track-info",
+    ] {
+        assert_eq!(get(&native, path).await, StatusCode::NOT_FOUND, "{path}");
+        assert!(!inventory.rust.contains(&RouteOperation::new(path, "get")));
+    }
+    assert_eq!(get(&native, "/api/v1/peers").await, StatusCode::NOT_FOUND);
+    let legacy = router(read(), None, None, None, NetworkPrefix::Mainnet);
+    assert_eq!(get(&legacy, "/api/v1/peers").await, StatusCode::OK);
+    assert_eq!(get(&legacy, "/api/v1/network/peers").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_peer_routes_reject_invalid_cursor_and_obey_response_limit() {
+    let response = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_peers(),
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/api/v1/network/peers?cursor=bad")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let state = NativeRuntime::build(
+        native_state_with_peers(),
+        RuntimeConfig {
+            max_response_bytes: 8,
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    let response = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        state,
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/api/v1/network/track-info")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn native_host_replaces_flat_and_operator_routes_only_when_wired() {
+    let (unwired, unwired_inventory) =
+        router_with_mempool_and_wallet_and_security_and_native_inventory(
+            ctx(None),
+            Some(admin()),
+            Arc::new(NoopWalletAdmin),
+            None,
+            native_state(),
+        );
+    assert_eq!(
+        get(&unwired, "/api/v1/node/host").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get(&unwired, "/api/v1/host").await, StatusCode::NOT_FOUND);
+    assert!(!unwired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/node/host", "get")));
+    assert!(!unwired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/host", "get")));
+
+    let (wired, wired_inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_host(),
+    );
+    let operation = RouteOperation::new("/api/v1/node/host", "get");
+    assert_eq!(
+        wired_inventory
+            .rust
+            .iter()
+            .filter(|candidate| *candidate == &operation)
+            .count(),
+        1
+    );
+    assert!(!wired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/host", "get")));
+
+    let response = wired
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/node/host")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["rss_bytes"], 42);
+    assert_eq!(value["state_db_bytes"], 0);
+    assert!(value["index_db_bytes"].is_null());
+    assert_eq!(value["disk_free_bytes"], 1024);
+    assert_eq!(value["disk_total_bytes"], 2048);
+    assert_eq!(value["cpu_pct"], 1.5);
+    assert_eq!(value["net_in_bps"], 3);
+    assert!(value["net_out_bps"].is_null());
+    assert_eq!(value["load_1m"], 0.25);
+
+    assert_eq!(get(&wired, "/api/v1/host").await, StatusCode::NOT_FOUND);
+    let legacy = router(read(), None, None, None, NetworkPrefix::Mainnet);
+    assert_eq!(get(&legacy, "/api/v1/host").await, StatusCode::OK);
+    assert_eq!(get(&legacy, "/api/v1/node/host").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_host_rejects_oversized_response() {
+    let state = NativeRuntime::build(
+        native_state_with_host(),
+        RuntimeConfig {
+            max_response_bytes: 8,
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    let response = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        state,
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/api/v1/node/host")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn native_recent_blocks_mounts_only_with_source_and_suppresses_flat_route() {
+    let (unwired, unwired_inventory) =
+        router_with_mempool_and_wallet_and_security_and_native_inventory(
+            ctx(None),
+            Some(admin()),
+            Arc::new(NoopWalletAdmin),
+            None,
+            native_state(),
+        );
+    assert_eq!(
+        get(&unwired, "/api/v1/chain/blocks/recent").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&unwired, "/api/v1/blocks/recent").await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(!unwired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/chain/blocks/recent", "get")));
+
+    let (wired, wired_inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_recent_blocks(),
+    );
+    let operation = RouteOperation::new("/api/v1/chain/blocks/recent", "get");
+    assert_eq!(
+        wired_inventory
+            .rust
+            .iter()
+            .filter(|candidate| *candidate == &operation)
+            .count(),
+        1
+    );
+    assert!(!wired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/blocks/recent", "get")));
+
+    let wired = wired.layer(axum::middleware::from_fn(mark_matched_route));
+    let response = wired
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/chain/blocks/recent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-ergo-route-matched")
+            .and_then(|value| value.to_str().ok()),
+        Some("/api/v1/chain/blocks/recent")
+    );
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let blocks = value.as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["height"], 9);
+    assert_eq!(blocks[0]["header_id"], hex::encode([9; 32]));
+    assert_eq!(blocks[0]["ts_unix_ms"], 1_700_000_000_009u64);
+    assert_eq!(blocks[0]["txs"], 4);
+    assert_eq!(blocks[0]["size_bytes"], 4_096);
+    assert_eq!(blocks[0]["delivered_by"], "203.0.113.7:9030");
+    assert_eq!(blocks[0]["miner_pk"], hex::encode([2; 33]));
+    assert_eq!(blocks[0]["miner_address"], "miner-address");
+    assert_eq!(blocks[1]["height"], 8);
+    assert!(blocks[1].get("delivered_by").is_none());
+    assert!(blocks[1].get("miner_pk").is_none());
+    assert!(blocks[1].get("miner_address").is_none());
+
+    assert_eq!(
+        get(&wired, "/api/v1/blocks/recent").await,
+        StatusCode::NOT_FOUND
+    );
+    let legacy = router(read(), None, None, None, NetworkPrefix::Mainnet);
+    assert_eq!(get(&legacy, "/api/v1/blocks/recent").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_events_mount_only_with_source_and_preserve_wire_shape() {
+    let (unwired, unwired_inventory) =
+        router_with_mempool_and_wallet_and_security_and_native_inventory(
+            ctx(None),
+            Some(admin()),
+            Arc::new(NoopWalletAdmin),
+            None,
+            native_state(),
+        );
+    assert_eq!(
+        get(&unwired, "/api/v1/node/events").await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(!unwired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/node/events", "get")));
+
+    let (wired, wired_inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_events(),
+    );
+    let operation = RouteOperation::new("/api/v1/node/events", "get");
+    assert_eq!(
+        wired_inventory
+            .rust
+            .iter()
+            .filter(|candidate| *candidate == &operation)
+            .count(),
+        1
+    );
+    let response = wired
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/node/events?since=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["latestSeq"], 3);
+    assert_eq!(value["events"].as_array().unwrap().len(), 2);
+    assert_eq!(value["events"][0]["kind"], "reorg");
+    assert_eq!(value["events"][0]["headerId"], hex::encode([8; 32]));
+    assert_eq!(
+        value["events"][0]["droppedHeaderIds"][0],
+        hex::encode([7; 32])
+    );
+    assert_eq!(value["events"][0]["returnedTxIds"], serde_json::json!([]));
+    assert_eq!(value["events"][0]["returnedTxsTotal"], 0);
+    assert!(value["events"][0].get("txs").is_none());
+    assert!(value["events"][0].get("sizeBytes").is_none());
+    assert_eq!(value["events"][1]["kind"], "peerConnected");
+    assert_eq!(value["events"][1]["addr"], "127.0.0.1:9030");
+    assert!(value["events"][1].get("depth").is_none());
+
+    assert_eq!(get(&wired, "/api/v1/events").await, StatusCode::NOT_FOUND);
+    let legacy = router(read(), None, None, None, NetworkPrefix::Mainnet);
+    assert_eq!(get(&legacy, "/api/v1/events").await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_events_response_obeys_bound_and_non_numeric_since_defaults_full_tail() {
+    let (wired, _) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state_with_events(),
+    );
+    let response = wired
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/node/events?since=not-a-number")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["events"].as_array().unwrap().len(), 3);
+
+    let state = NativeRuntime::build(
+        native_state_with_events(),
+        RuntimeConfig {
+            max_response_bytes: 8,
+            ..RuntimeConfig::default()
+        },
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    let response = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        state,
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/api/v1/node/events")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn native_indexer_status_replaces_legacy_mount_without_losing_tx_detail() {
+    let (unwired, unwired_inventory) =
+        router_with_mempool_and_wallet_and_security_and_native_inventory(
+            fully_wired_ctx(),
+            Some(admin()),
+            Arc::new(NoopWalletAdmin),
+            None,
+            native_state(),
+        );
+    assert_eq!(
+        get(&unwired, "/api/v1/indexer/status").await,
+        StatusCode::NOT_FOUND
+    );
+    assert!(!unwired_inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/indexer/status", "get")));
+    assert!(unwired_inventory.rust.contains(&RouteOperation::new(
+        "/api/v1/transactions/{txId}/detail",
+        "get"
+    )));
+
+    let mut native =
+        native_state().with_indexer(Arc::new(StubIndexerStatusSource(IndexerStatusSnapshot {
+            status: CoreIndexerStatus::CaughtUp,
+            halt_reason: None,
+            indexed_height: 17,
+            repair: CoreIndexerRepair {
+                pending: true,
+                next_gi: Some(4),
+                skipped: 2,
+                drift_skips: 1,
+            },
+            totals: CoreIndexerTotals { boxes: 8, txs: 9 },
+        })));
+    let mut snapshot = (*native.snapshot.snapshot()).clone();
+    snapshot.sync.full_block_height = 321;
+    native.snapshot = Arc::new(StubCoreSnapshot(Arc::new(snapshot)));
+    let (app, inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        fully_wired_ctx(),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native,
+    );
+    let operation = RouteOperation::new("/api/v1/indexer/status", "get");
+    assert_eq!(
+        inventory
+            .rust
+            .iter()
+            .filter(|candidate| *candidate == &operation)
+            .count(),
+        1
+    );
+    assert!(inventory.rust.contains(&RouteOperation::new(
+        "/api/v1/transactions/{txId}/detail",
+        "get"
+    )));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/indexer/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["status"], "caughtUp");
+    assert_eq!(value["indexedHeight"], 17);
+    assert_eq!(value["fullHeight"], 321);
+    assert_eq!(value["repair"]["nextGi"], 4);
+    assert_eq!(value["totals"]["txs"], 9);
+}
+
+#[tokio::test]
+async fn native_indexer_status_syncing_and_halted_are_200() {
+    for (status, halt_reason, expected_status, expected_reason) in [
+        (CoreIndexerStatus::Syncing, None, "syncing", None),
+        (
+            CoreIndexerStatus::Halted,
+            Some("db-corruption".to_string()),
+            "halted",
+            Some("db-corruption"),
+        ),
+    ] {
+        let native =
+            native_state().with_indexer(Arc::new(StubIndexerStatusSource(IndexerStatusSnapshot {
+                status,
+                halt_reason,
+                indexed_height: 0,
+                repair: CoreIndexerRepair {
+                    pending: false,
+                    next_gi: None,
+                    skipped: 0,
+                    drift_skips: 0,
+                },
+                totals: CoreIndexerTotals { boxes: 0, txs: 0 },
+            })));
+        let response = router_with_mempool_and_wallet_and_security_and_native(
+            fully_wired_ctx(),
+            Some(admin()),
+            Arc::new(NoopWalletAdmin),
+            None,
+            native,
+        )
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/indexer/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["status"], expected_status);
+        if let Some(expected_reason) = expected_reason {
+            assert_eq!(value["haltReason"], expected_reason);
+        } else {
+            assert!(value.get("haltReason").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_protocol_history_replaces_legacy_history_mounts() {
+    let app = router_with_mempool_and_wallet_and_security_and_native(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state(),
+    );
+    let (_, inventory) = router_with_mempool_and_wallet_and_security_and_native_inventory(
+        ctx(None),
+        Some(admin()),
+        Arc::new(NoopWalletAdmin),
+        None,
+        native_state(),
+    );
+    let history_operation = RouteOperation::new("/api/v1/voting/history", "get");
+    assert_eq!(
+        inventory
+            .rust
+            .iter()
+            .filter(|operation| *operation == &history_operation)
+            .count(),
+        1
+    );
+    assert!(!inventory
+        .rust
+        .contains(&RouteOperation::new("/api/v1/votes/history", "get")));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/voting/history")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "chain_unavailable");
+    assert_eq!(
+        get(&app, "/api/v1/votes/history").await,
+        StatusCode::NOT_FOUND
+    );
 }
 
 async fn assert_all_gets_mounted(app: &axum::Router) {

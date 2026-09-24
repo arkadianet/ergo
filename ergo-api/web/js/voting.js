@@ -476,10 +476,10 @@ async function loadHistoryInner(host) {
     return;
   }
   historyLoaded = true;
-  epochLength = h.epochLength || null;
+  epochLength = h.epoch_length || null;
   refreshSummary();
   const meta = root.querySelector('[data-hist-meta]');
-  if (meta) meta.textContent = h.epochLength ? `epoch ${num(h.epochLength)} blocks` : '';
+  if (meta) meta.textContent = h.epoch_length ? `epoch ${num(h.epoch_length)} blocks` : '';
   const changes = h.changes || [];
   if (changes.length === 0) {
     host.replaceChildren(
