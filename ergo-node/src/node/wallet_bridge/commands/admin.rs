@@ -104,10 +104,15 @@ pub(crate) async fn status(
         } else {
             String::new()
         };
-        let invalidated = ctx
+        let read = ctx
             .store
             .begin_read()
-            .and_then(|read| read.scan_invalidated())
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let invalidated = read
+            .scan_invalidated()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let rescan_state = read
+            .rescan_state()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         Ok(WalletStatus {
             is_initialized: !matches!(
@@ -120,10 +125,15 @@ pub(crate) async fn status(
                 .chain
                 .wallet_scan_height()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
-            error: if invalidated {
-                "scan_invalidated".to_string()
-            } else {
-                String::new()
+            error: match rescan_state {
+                ergo_state::wallet::RescanState::Failed { reason, .. } => {
+                    format!("rescan_failed: {reason}")
+                }
+                ergo_state::wallet::RescanState::Running { .. } => "rescan_running".to_string(),
+                ergo_state::wallet::RescanState::Idle if invalidated => {
+                    "scan_invalidated".to_string()
+                }
+                ergo_state::wallet::RescanState::Idle => String::new(),
             },
         })
     })();
@@ -257,7 +267,17 @@ pub(crate) async fn rescan(
     }
     crate::wallet_boot::RESCAN_FROM_HEIGHT.store(start_h, Ordering::SeqCst);
     crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(start_h == 0, Ordering::SeqCst);
-    let _flags = RescanFlagsGuard;
+    if let Err(error) = persist_rescan_state(
+        ctx.store.as_ref(),
+        &ergo_state::wallet::RescanState::Running {
+            from_height: start_h,
+        },
+    ) {
+        crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
+        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        let _ = reply.send(Err(WalletAdminError::Internal(error.to_string())));
+        return;
+    }
 
     let (trees, pks) = {
         let state = ctx.state.read();
@@ -266,30 +286,69 @@ pub(crate) async fn rescan(
             state.cached_pubkeys().clone(),
         )
     };
+    let db = ctx.db.clone();
+    let chain = ctx.chain.clone();
+    let store = ctx.store.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _flags = RescanFlagsGuard;
+        let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
+            &db,
+            trees,
+            pks,
+            start_h,
+            tip_h,
+            |height| chain.read_block_at(height),
+            || {
+                chain
+                    .tip_height()
+                    .map_err(|e| ergo_state::wallet::scan::RescanReadError::Storage {
+                        height: 0,
+                        source: e,
+                    })
+            },
+            || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst),
+            scan_matcher
+                .as_ref()
+                .map(|matcher| matcher as &dyn ergo_state::wallet::scan::ScanRescanMatcher),
+        );
+        let state = match result {
+            Ok(_) => ergo_state::wallet::RescanState::Idle,
+            Err(error) => rescan_failure_state(start_h, &error),
+        };
+        if let Err(error) = persist_rescan_state(store.as_ref(), &state) {
+            tracing::error!(%error, "failed to persist wallet rescan outcome");
+        }
+    });
+    drop(task);
+    let _ = reply.send(Ok(()));
+}
 
-    let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
-        ctx.db,
-        trees,
-        pks,
-        start_h,
-        tip_h,
-        |height| ctx.chain.read_block_at(height),
-        || {
-            ctx.chain
-                .tip_height()
-                .map_err(|e| ergo_state::wallet::scan::RescanReadError::Storage {
-                    height: 0,
-                    source: e,
-                })
-        },
-        || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst),
-        scan_matcher
-            .as_ref()
-            .map(|matcher| matcher as &dyn ergo_state::wallet::scan::ScanRescanMatcher),
-    );
+fn persist_rescan_state(
+    store: &dyn ergo_state::wallet::WalletStore,
+    state: &ergo_state::wallet::RescanState,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    let mut write = store.begin_write()?;
+    write.set_rescan_state(state)?;
+    write.commit()
+}
 
-    let result = result.map(|_| ()).map_err(map_rescan_error);
-    let _ = reply.send(result);
+fn rescan_failure_state(
+    from_height: u32,
+    error: &ergo_state::wallet::scan::RescanError,
+) -> ergo_state::wallet::RescanState {
+    use ergo_state::wallet::scan::{RescanError, RescanReadError};
+    let height = match error {
+        RescanError::Read(RescanReadError::Missing { height })
+        | RescanError::Read(RescanReadError::Corrupt { height, .. })
+        | RescanError::Read(RescanReadError::Storage { height, .. })
+        | RescanError::Cancelled { height }
+        | RescanError::Matcher { height, .. } => *height,
+        RescanError::Storage(_) => from_height,
+    };
+    ergo_state::wallet::RescanState::Failed {
+        height,
+        reason: error.to_string(),
+    }
 }
 
 struct RescanFlagsGuard;
@@ -305,16 +364,6 @@ fn map_rescan_read_error(error: ergo_state::wallet::scan::RescanReadError) -> Wa
     match error {
         ergo_state::wallet::scan::RescanReadError::Missing { height } => {
             WalletAdminError::RescanUnavailable(format!("block missing at height {height}"))
-        }
-        other => WalletAdminError::Internal(other.to_string()),
-    }
-}
-
-fn map_rescan_error(error: ergo_state::wallet::scan::RescanError) -> WalletAdminError {
-    match error {
-        ergo_state::wallet::scan::RescanError::Read(error) => map_rescan_read_error(error),
-        ergo_state::wallet::scan::RescanError::Cancelled { height } => {
-            WalletAdminError::RescanUnavailable(format!("rescan cancelled at height {height}"))
         }
         other => WalletAdminError::Internal(other.to_string()),
     }
@@ -1042,18 +1091,24 @@ pub(crate) async fn native_status(
                 ergo_ser::address::NetworkPrefix::Mainnet => NetworkDto::Mainnet,
                 ergo_ser::address::NetworkPrefix::Testnet => NetworkDto::Testnet,
             };
-            // Rescan: `running` while a rebuild is in flight (set by the rescan
-            // command); `unavailable` on a non-replay (pruned) backend; else idle.
-            let rescan = if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
-                RescanStateDto::Running {
-                    from_height: crate::wallet_boot::RESCAN_FROM_HEIGHT.load(Ordering::SeqCst),
+            let rescan_state = ctx
+                .store
+                .begin_read()
+                .and_then(|read| read.rescan_state())
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let rescan = match rescan_state {
+                ergo_state::wallet::RescanState::Running { from_height } => {
+                    RescanStateDto::Running { from_height }
                 }
-            } else if ctx.chain.is_pruned() {
-                RescanStateDto::Unavailable {
-                    detail: "node is pruned; block replay unavailable".to_string(),
+                ergo_state::wallet::RescanState::Failed { height, reason } => {
+                    RescanStateDto::Failed { height, reason }
                 }
-            } else {
-                RescanStateDto::Idle
+                ergo_state::wallet::RescanState::Idle if ctx.chain.is_pruned() => {
+                    RescanStateDto::Unavailable {
+                        detail: "node is pruned; block replay unavailable".to_string(),
+                    }
+                }
+                ergo_state::wallet::RescanState::Idle => RescanStateDto::Idle,
             };
             Ok(WalletStatusDto {
                 initialized,

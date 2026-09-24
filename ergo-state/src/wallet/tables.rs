@@ -174,6 +174,9 @@ pub const WALLET_SCHEMA_VERSION_TABLE: TableDefinition<(), u32> =
 pub const WALLET_SCAN_INVALIDATED: TableDefinition<(), bool> =
     TableDefinition::new("wallet_scan_invalidated");
 
+pub const WALLET_RESCAN_STATE: TableDefinition<(), Vec<u8>> =
+    TableDefinition::new("wallet_rescan_state");
+
 /// Pack a `(derivation_path_index, pubkey)` pair into a 41-byte
 /// `WALLET_TRACKED_PUBKEYS` key. Big-endian u64 prefix sorts
 /// the table in derivation-order.

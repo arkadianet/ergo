@@ -100,6 +100,52 @@ impl ChainStateAccessor for StubChainReemission {
     }
 }
 
+struct BlockingRescanChain {
+    entered: std::sync::mpsc::Sender<()>,
+    release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl ChainStateAccessor for BlockingRescanChain {
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
+    }
+
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(3)
+    }
+
+    fn is_pruned(&self) -> bool {
+        false
+    }
+
+    fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
+        Ok(true)
+    }
+
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        if height == 1 {
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
+            return Err(ergo_state::wallet::scan::RescanReadError::Storage {
+                height,
+                source: ergo_state::store::StateError::Serialization(
+                    "synthetic rescan read failure".to_string(),
+                ),
+            });
+        }
+        Ok(Some(ergo_state::wallet::scan::RescanBlock {
+            block_id: [height as u8; 32],
+            txs: vec![],
+        }))
+    }
+}
+
 struct StubTxSubmitter;
 
 #[async_trait]
@@ -175,6 +221,13 @@ fn minimal_signed_tx() -> (Vec<u8>, [u8; 32]) {
 fn spawn_writer(
     submitter: Arc<dyn TxSubmitter>,
 ) -> (NodeWalletAdmin, Arc<redb::Database>, tempfile::TempDir) {
+    spawn_writer_with_chain(Arc::new(StubChainAccessorTip(200)), submitter)
+}
+
+fn spawn_writer_with_chain(
+    chain: Arc<dyn ChainStateAccessor>,
+    submitter: Arc<dyn TxSubmitter>,
+) -> (NodeWalletAdmin, Arc<redb::Database>, tempfile::TempDir) {
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
@@ -185,7 +238,6 @@ fn spawn_writer(
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessorTip(200));
     let cfg = WriterConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
@@ -199,6 +251,66 @@ fn spawn_writer(
         rx, storage, state, db, chain, cfg, submitter, mempool,
     ));
     (NodeWalletAdmin::new(tx), db_seed, dir)
+}
+
+#[tokio::test]
+async fn rescan_runs_in_background_and_reports_durable_failure() {
+    use ergo_api::wallet::native::dto::RescanStateDto;
+    use std::time::{Duration, Instant};
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let chain = Arc::new(BlockingRescanChain {
+        entered: entered_tx,
+        release: Arc::new(std::sync::Mutex::new(release_rx)),
+    });
+    let (admin, db, _dir) = spawn_writer_with_chain(chain, Arc::new(StubTxSubmitter));
+
+    tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
+        .await
+        .expect("rescan RPC must not wait for the rebuild")
+        .expect("rescan must be accepted");
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("background rebuild must start");
+
+    let running = tokio::time::timeout(Duration::from_secs(1), admin.native_status())
+        .await
+        .expect("status must not wait for the rebuild")
+        .expect("status must succeed");
+    assert!(matches!(
+        running.rescan,
+        RescanStateDto::Running { from_height: 0 }
+    ));
+
+    release_tx.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let failed = loop {
+        let status = tokio::time::timeout(Duration::from_millis(100), admin.native_status())
+            .await
+            .expect("status timeout")
+            .expect("status must succeed");
+        if let RescanStateDto::Failed { height, .. } = status.rescan.clone() {
+            break (height, status);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rescan failure was not persisted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(failed.0, 1);
+    assert!(matches!(failed.1.rescan, RescanStateDto::Failed { .. }));
+
+    let read = db.begin_read().unwrap();
+    let invalidated = read
+        .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+        .unwrap()
+        .get(())
+        .unwrap()
+        .map(|row| row.value())
+        .unwrap_or(false);
+    assert!(invalidated);
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed

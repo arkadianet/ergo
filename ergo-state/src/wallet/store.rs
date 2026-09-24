@@ -70,11 +70,19 @@ pub struct ScanRegistrySnapshot {
     pub last_used_id: Option<u16>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RescanState {
+    Idle,
+    Running { from_height: u32 },
+    Failed { height: u32, reason: String },
+}
+
 pub type TrackedPubkeyPath = (u64, [u8; 33], Vec<u32>);
 
 pub trait WalletRead {
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError>;
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError>;
+    fn rescan_state(&self) -> Result<RescanState, WalletStoreError>;
     fn all_boxes(&self) -> Result<Vec<WalletBox>, WalletStoreError>;
     fn box_by_id(&self, box_id: &[u8; 32]) -> Result<Option<WalletBox>, WalletStoreError>;
     fn all_transactions(&self) -> Result<Vec<WalletTransaction>, WalletStoreError>;
@@ -98,6 +106,7 @@ pub trait WalletRead {
 
 pub trait WalletWrite {
     fn set_scan_invalidated(&mut self, invalidated: bool) -> Result<(), WalletStoreError>;
+    fn set_rescan_state(&mut self, state: &RescanState) -> Result<(), WalletStoreError>;
     fn set_scan_cursor(
         &mut self,
         height: u32,
@@ -188,6 +197,22 @@ impl WalletRead for RedbWalletRead {
             Err(error) => return Err(error.into()),
         };
         Ok(table.get(())?.map(|row| row.value()).unwrap_or(false))
+    }
+
+    fn rescan_state(&self) -> Result<RescanState, WalletStoreError> {
+        let table = match self
+            .txn
+            .open_table(crate::wallet::tables::WALLET_RESCAN_STATE)
+        {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(RescanState::Idle),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(row) = table.get(())? else {
+            return Ok(RescanState::Idle);
+        };
+        bincode::deserialize(row.value().as_slice())
+            .map_err(|error| WalletStoreError::Decode(format!("rescan state decode: {error}")))
     }
 
     fn all_boxes(&self) -> Result<Vec<WalletBox>, WalletStoreError> {
@@ -328,6 +353,15 @@ impl WalletWrite for RedbWalletWrite<'_> {
         self.txn()
             .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)?
             .insert((), invalidated)?;
+        Ok(())
+    }
+
+    fn set_rescan_state(&mut self, state: &RescanState) -> Result<(), WalletStoreError> {
+        let bytes = bincode::serialize(state)
+            .map_err(|error| WalletStoreError::Decode(format!("rescan state encode: {error}")))?;
+        self.txn()
+            .open_table(crate::wallet::tables::WALLET_RESCAN_STATE)?
+            .insert((), bytes)?;
         Ok(())
     }
 

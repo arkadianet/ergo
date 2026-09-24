@@ -130,8 +130,8 @@ pub use apply::RescanGuard;
 pub use hydration::{HydrationSource, WalletApplyHook};
 pub use reader::{RewardKeyResolution, WalletReader};
 pub use store::{
-    RedbWalletStore, ScanRegistrySnapshot, StoredScan, WalletRead, WalletStore, WalletStoreError,
-    WalletWrite,
+    RedbWalletStore, RescanState, ScanRegistrySnapshot, StoredScan, WalletRead, WalletStore,
+    WalletStoreError, WalletWrite,
 };
 pub use types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
 
