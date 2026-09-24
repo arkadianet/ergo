@@ -1,20 +1,30 @@
 # The provisioned Scala Matrix builds a devnet role may run (spec §4, §7a).
 #
-# One work directory per build, all under `root`. They live in a SIBLING
-# worktree rather than in this one because provisioning costs a sigma
-# `publishLocal` plus a full ergo compile, and every worktree of this
-# repo wants the same stock pin. `root` is resolved against this
-# worktree's repo root; `MATRIX_BUILDS_ROOT` overrides it.
+# One work directory per build, all under `root`, which is the shared
+# archive `matrix-evidence/scala-builds` beside this repository's
+# checkouts. `root` is resolved against the repo root of whichever
+# worktree reads this file, so every sibling worktree
+# (`../ergo-wt-*`, the main checkout) finds the same builds;
+# `MATRIX_BUILDS_ROOT` overrides it. Provisioning costs a sigma
+# `publishLocal` plus a full ergo compile, which is why the builds are
+# shared rather than rebuilt per worktree.
 #
-# `stock` is provisioned and IMMUTABLE. The patch builds are created by
+# The M4 entries (`stock` and the patch builds F16 .. `all`) were moved
+# here from a worktree that has since been deleted. Their work
+# directories are archived as they were, and each one's `classpath` file
+# still names class directories inside that deleted worktree, so
+# `Build.verify()` refuses them ("classpath names ..., which does not
+# exist"). Re-provision one before a role runs it again:
 #
 #   python3 scripts/jvm_weak_blocks_oracle/provision.py \
 #     --ergo-source ~/coding/development/arkadianet/ergo-scala \
-#     --ergo-ref matrix/<branch> --work-dir <root>/.work-<name> --sigma-reuse
+#     --ergo-ref <the entry's ergo_ref> --work-dir <root>/<its work_dir> \
+#     --sigma-reuse
 #
-# as each patch branch lands (plan 3 tasks 3-9). A build that is not
-# provisioned yet is declared here anyway: `--build F14` then fails with
-# the command that would create it, rather than with a missing name.
+# (with TMPDIR and JDK_JAVA_OPTIONS=-Djava.io.tmpdir= off /tmp on this
+# host). A build that is not provisioned yet is declared here anyway:
+# `--build F14` then fails with the command that would create it, rather
+# than with a missing name.
 #
 # `ergo_ref` is a FULL commit id, never a branch name (`builds.py`
 # refuses one), and `Build.verify()` refuses a build whose manifest
@@ -26,8 +36,11 @@
 # ed6e91489 over the retry-budget fix a3dde7466, all f31f09064), so their
 # provisioned work directories (8036a71d9, 817b66b5c, f0562361d) are
 # refused until re-provisioned.
+#
+# A new entry needs its name in `builds.BUILD_NAMES` as well: the list
+# is fixed in code so that a typo here is an error, not a new build.
 
-root = "../input-blocks/scripts/jvm_weak_blocks_oracle"
+root = "../matrix-evidence/scala-builds"
 
 [builds.stock]
 work_dir = ".work-62c10315"
@@ -76,3 +89,44 @@ work_dir = ".work-all"
 ergo_ref = "f31f09064e8c16f9bd9397bc3e582447c2eb176e"
 branch = "matrix-fixes-all"
 description = "the integration build: base + every patch branch merged, measured ONCE at the end and never used for a per-patch claim"
+
+# ----- the ergoplatform/ergo#2563 re-measure (REVIEW-2563 §3.2) -----
+#
+# Every build below is on sigma 6.0.5-22-368a860b-SNAPSHOT, which
+# a1bd938ef declares. `campaign.py --base-build` puts the miner(s) and
+# the stock follower on one of them; `--build` puts the patched
+# follower on another.
+
+[builds.base]
+work_dir = ".work-a1bd938e"
+ergo_ref = "a1bd938effb7f5acabfe5230a5ef20fe0d50ae62"
+branch = "weak-blocks"
+description = "upstream ergoplatform/ergo weak-blocks @ a1bd938ef (90a129733 + #2560): the re-measure base, miner and stock follower of arm A"
+
+# Declared once their commits are final. A branch name is refused as an
+# `ergo_ref`, so each waits here, commented, until it has a full commit
+# id; uncomment it and add its name to `builds.BUILD_NAMES` together.
+#
+# [builds."base+2506"]
+# work_dir = ".work-base+2506-<commit>"
+# ergo_ref = "<full commit of the merge a1bd938ef + #2506 c11df116ea372234d8b0b6fdd931401d4a02a091>"
+# branch = "<local merge branch>"
+# description = "a1bd938ef + #2506 (processed-tip replay, sender side): miner and stock follower of arm B"
+#
+# [builds.2563f]
+# work_dir = ".work-2563f-<commit>"
+# ergo_ref = "<full commit of the fixed #2563, rebased on a1bd938ef>"
+# branch = "upstream/pending-root-announcement-store"
+# description = "#2563 with the review fixes, on a1bd938ef: the patched follower of arm A and the flood target"
+#
+# [builds."2563f+2506"]
+# work_dir = ".work-2563f+2506-<commit>"
+# ergo_ref = "<full commit of the merge 2563f + c11df116e>"
+# branch = "<local merge branch>"
+# description = "2563f + #2506: the patched follower of arm B"
+#
+# [builds.soak]
+# work_dir = ".work-soak-<commit>"
+# ergo_ref = "<full commit of the final soak integration head>"
+# branch = "soak/matrix-2026-09-25"
+# description = "90a12973 + retained-mining-work + waitlist-sibling-order + #2562 + #2563 + the route fix: the integration soak build"

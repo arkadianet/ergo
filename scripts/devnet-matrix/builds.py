@@ -32,10 +32,14 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 BUILDS_TOML = HERE / 'builds.toml'
 
-# The names later tasks use on `campaign.py --build`. Fixed here rather
-# than taken from the file so a typo in `builds.toml` is an error rather
-# than a new build nobody provisions.
-BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all')
+# The names `campaign.py --build` / `--base-build` accept. Fixed here
+# rather than taken from the file so a typo in `builds.toml` is an error
+# rather than a new build nobody provisions. `base` is the #2563
+# re-measure's base (weak-blocks @ a1bd938ef); the other re-measure
+# builds join this list when their commits are final (see the commented
+# entries at the end of `builds.toml`).
+BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all',
+               'base')
 
 # A registry entry's `ergo_ref`: a full commit id, never a branch name,
 # so a later branch move cannot change what a rerun provisions.
@@ -238,7 +242,18 @@ class Build:
                 f'{provisioned}, but builds.toml pins {pinned}. Re-provision '
                 'it at the pinned commit before a role runs it.')
         expected = self.class_hash()
-        actual = class_dir_sha256(self.classpath_file.read_text())
+        try:
+            actual = class_dir_sha256(self.classpath_file.read_text())
+        except BuildError as error:
+            # The usual cause is a work directory moved here from a
+            # worktree that no longer exists: its `classpath` file still
+            # names the old class directories.
+            raise BuildError(
+                f'build {self.name!r} at {self.work_dir} cannot be hashed: '
+                f'{error}. Its classpath file names class directories that '
+                'are gone (a work directory moved from a deleted worktree '
+                'keeps the old paths); re-provision it before a role runs '
+                'it.') from error
         if actual != expected:
             raise BuildError(
                 f'build {self.name!r} at {self.work_dir} does not match its '
@@ -509,10 +524,36 @@ def _self_test():
         else:
             raise AssertionError('a branch name in the registry must be refused')
     assert list(known) == list(BUILD_NAMES), list(known)
-    assert known['stock'].work_dir.name == '.work-62c10315', known['stock']
+    # The work directory each name resolves to. The pinned baselines are
+    # named by their commit; the M4 patch builds by their own name.
+    by_commit = {'stock': '.work-62c10315', 'base': '.work-a1bd938e'}
     for name in BUILD_NAMES:
-        if name != 'stock':
-            assert known[name].work_dir.name == f'.work-{name}', known[name]
+        assert known[name].work_dir.name == by_commit.get(
+            name, f'.work-{name}'), known[name]
+    assert known['base'].declared['ergo_ref'] == \
+        'a1bd938effb7f5acabfe5230a5ef20fe0d50ae62', known['base'].declared
+    # `root` is the shared archive, resolved against this worktree's repo
+    # root, so every sibling checkout finds the same directories.
+    assert known['base'].work_dir.parent == \
+        (ROOT / '../matrix-evidence/scala-builds').resolve(), \
+        known['base'].work_dir
+    # A build moved here from a deleted worktree keeps a classpath that
+    # names the old directories. It is refused with the reason, never
+    # hashed as an empty build.
+    with tempfile.TemporaryDirectory() as tmp:
+        moved = Path(tmp) / '.work-moved'
+        moved.mkdir()
+        (moved / 'classpath').write_text(
+            f'{tmp}/gone/source/target/scala-2.12/classes\n')
+        (moved / 'manifest.json').write_text(json.dumps({
+            'ergo_commit': 'ab' * 20, 'class_dir_sha256': '00' * 32}) + '\n')
+        try:
+            Build('moved', moved, declared={'ergo_ref': 'ab' * 20}).verify()
+        except BuildError as error:
+            assert 're-provision it' in str(error), error
+            assert 'which does not exist' in str(error), error
+        else:
+            raise AssertionError('a classpath into a deleted tree must be refused')
     try:
         load('nope')
     except BuildError as error:
