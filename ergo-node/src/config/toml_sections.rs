@@ -271,12 +271,12 @@ pub(super) struct TomlChain {
     /// Defaults to the network's hardcoded value if only the height is
     /// overridden.
     pub(super) script_validation_checkpoint_block_id: Option<String>,
-    /// Hex-encoded genesis header id (32 bytes). Required for NiPoPoW
-    /// proof verification: the verifier rejects any proof whose first
-    /// header's id does not match this value. If omitted, the network's baked-in default
-    /// is used (mainnet / testnet hardcoded ids). Pass an empty
-    /// string to disable genesis-id checking entirely — accepted
-    /// **only** in development; production runs MUST keep the default.
+    /// Hex-encoded genesis header id (32 bytes). Ordinary header validation
+    /// and NiPoPoW proof verification reject a first header whose id differs.
+    /// If omitted, the network's baked-in default is used (mainnet / testnet
+    /// hardcoded ids). Pass an empty string to disable genesis-id checking
+    /// entirely — accepted **only** in development; production runs MUST keep
+    /// the default.
     pub(super) genesis_id: Option<String>,
     /// Header-level checkpoint (Scala `ergo.node.checkpoint`): the header at
     /// exactly `height` MUST have id `block_id`, enforced during HEADER

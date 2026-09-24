@@ -675,17 +675,18 @@ pub(super) fn handle_mining_request(
             //    re-verifies — same consensus path as inbound
             //    blocks.
             //
-            //    Uses `process_header_cfg` with the MiningHandle's
+            //    Uses `process_header_cfg_with_genesis` with the MiningHandle's
             //    chain_config so testnet mining is validated under
-            //    testnet's difficulty schedule, not mainnet's. The
-            //    convenience wrapper `process_header` hardcodes
-            //    `DifficultyParams::mainnet()` and would misvalidate testnet.
+            //    testnet's difficulty schedule, not mainnet's, and the node's
+            //    configured genesis id is enforced. The convenience wrapper
+            //    `process_header` hardcodes `DifficultyParams::mainnet()` and
+            //    would misvalidate testnet.
             //
             //    The header-level checkpoint travels with it: Scala runs
             //    `hdrCheckpoint` in `HeadersProcessor` regardless of where the
             //    header came from, so a locally mined header that lands on the
             //    checkpoint height with the wrong id is refused here too.
-            if let Err(e) = ergo_sync::header_proc::process_header_cfg(
+            if let Err(e) = ergo_sync::header_proc::process_header_cfg_with_genesis(
                 state
                     .store
                     .as_utxo_mut()
@@ -693,6 +694,7 @@ pub(super) fn handle_mining_request(
                 &header_bytes,
                 handle.chain_config(),
                 state.executor.header_checkpoint(),
+                state.executor.genesis_id(),
             ) {
                 warn!(error = %e, "mining: header proc failed");
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(

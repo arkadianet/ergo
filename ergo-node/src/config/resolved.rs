@@ -161,12 +161,11 @@ pub struct NodeConfig {
     /// Sourced from `[chain] checkpoint`; there is deliberately no network
     /// default, so an anchored node is always an operator decision.
     pub header_checkpoint: Option<ergo_sync::header_proc::HeaderCheckpoint>,
-    /// Genesis header id (32 bytes) used for NiPoPoW R5 enforcement.
-    /// `Some(id)` → verifier rejects proofs whose first header id
-    /// does not match. `None` → open verification (development only).
-    /// Resolved from `[chain] genesis_id` config override or the
-    /// network's baked-in default; an explicit empty string in TOML
-    /// disables the check.
+    /// Genesis header id (32 bytes) used for ordinary header validation and
+    /// NiPoPoW R5 enforcement. `Some(id)` → a height-1 header whose id does
+    /// not match is rejected. `None` → open verification (development only).
+    /// Resolved from `[chain] genesis_id` config override or the network's
+    /// baked-in default; an explicit empty string in TOML disables the check.
     pub genesis_id: Option<[u8; 32]>,
     /// Operator HTTP API bind address. `None` disables the API server.
     /// Default: `127.0.0.1:9099`.

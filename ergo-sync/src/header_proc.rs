@@ -67,6 +67,12 @@ pub enum HeaderProcessError {
         expected: [u8; 32],
         got: [u8; 32],
     },
+    #[error(
+        "genesis id mismatch: expected {}, got {}",
+        hex::encode(expected),
+        hex::encode(got)
+    )]
+    GenesisIdMismatch { expected: [u8; 32], got: [u8; 32] },
     #[error("validation failed: {0}")]
     Validation(#[from] HeaderValidationError),
     #[error("storage error: {0}")]
@@ -280,14 +286,27 @@ pub fn pre_validate_header(header_bytes: &[u8]) -> Result<PreValidatedHeader, He
 ///
 /// `checkpoint` is the operator-supplied header-level trust anchor
 /// ([`HeaderCheckpoint`]); `None` disables it (Scala's default).
+/// `genesis_id` is the operator-supplied first mined header id; `None`
+/// disables that check.
 pub fn finalize_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     store: &mut S,
     pre: PreValidatedHeader,
     header_bytes: &[u8],
     config: &DifficultyParams,
     checkpoint: Option<HeaderCheckpoint>,
+    genesis_id: Option<[u8; 32]>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
     let header_id = *pre.pow_checked.header_id();
+    if pre.height == 1 && pre.parent_id == [0u8; 32] {
+        if let Some(expected) = genesis_id {
+            if header_id != expected {
+                return Err(HeaderProcessError::GenesisIdMismatch {
+                    expected,
+                    got: header_id,
+                });
+            }
+        }
+    }
     // Already known?
     if store.get_header(&header_id)?.is_some() {
         return Err(HeaderProcessError::AlreadyKnown { header_id });
@@ -336,8 +355,20 @@ pub fn process_header_cfg<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     config: &DifficultyParams,
     checkpoint: Option<HeaderCheckpoint>,
 ) -> Result<ProcessedHeader, HeaderProcessError> {
+    process_header_cfg_with_genesis(store, header_bytes, config, checkpoint, None)
+}
+
+/// Process a raw header with network-specific chain configuration and an
+/// optional configured genesis id.
+pub fn process_header_cfg_with_genesis<S: HeaderSectionStore + ChainStateRead + ?Sized>(
+    store: &mut S,
+    header_bytes: &[u8],
+    config: &DifficultyParams,
+    checkpoint: Option<HeaderCheckpoint>,
+    genesis_id: Option<[u8; 32]>,
+) -> Result<ProcessedHeader, HeaderProcessError> {
     let pre = pre_validate_header(header_bytes)?;
-    finalize_header(store, pre, header_bytes, config, checkpoint)
+    finalize_header(store, pre, header_bytes, config, checkpoint, genesis_id)
 }
 
 /// Chain linkage + difficulty + persist. Shared by process_header_cfg and finalize_header.
