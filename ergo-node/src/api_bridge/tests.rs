@@ -1819,10 +1819,18 @@ fn encode_pow_solutions_v1_d_matches_scala_served_number() {
 // ----- helpers -----
 
 fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
+    let id = [0xab; 32];
+    let (dir, bridge) = bridge_over_store(|store| store.store_header(&id, &[0xff]).unwrap());
+    (dir, bridge, hex::encode(id))
+}
+
+/// A compat bridge over a fresh temp store that `setup` has written into.
+fn bridge_over_store(
+    setup: impl FnOnce(&ergo_state::store::StateStore),
+) -> (tempfile::TempDir, ScalaCompatBridge) {
     let dir = tempfile::tempdir().unwrap();
     let store = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
-    let id = [0xab; 32];
-    store.store_header(&id, &[0xff]).unwrap();
+    setup(&store);
     let publisher = crate::snapshot::SnapshotPublisher::new(
         ApiInfo {
             agent_name: "test".into(),
@@ -1849,7 +1857,7 @@ fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
         store.reader_handle(),
         ergo_chain_spec::DifficultyParams::mainnet(),
     );
-    (dir, bridge, hex::encode(id))
+    (dir, bridge)
 }
 
 /// `{header, blockTransactions}` slice of Scala's `GET /blocks/{id}`.
@@ -2055,4 +2063,37 @@ fn bridge_try_header_by_id_corrupt_stored_bytes_is_corrupt() {
 fn bridge_header_by_id_corrupt_stored_bytes_stays_none() {
     let (_dir, bridge, id) = corrupt_header_bridge();
     assert!(bridge.header_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_short_section_is_corrupt_compat_stays_none() {
+    let id = [0xa1; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(
+                &id,
+                &[0x01; 8],
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.modifier_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_unknown_type_tag_is_corrupt_compat_stays_none() {
+    let id = [0xa2; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(&id, &[0x01; 40], 7)
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("unknown type byte 7"));
+    assert!(bridge.modifier_by_id(&id).is_none());
 }
