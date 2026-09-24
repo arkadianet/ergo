@@ -504,9 +504,20 @@ fn make_and_store_block_transactions_section(
     use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 
     let section_id = compute_section_id(TYPE_BLOCK_TRANSACTIONS, header_id, transactions_root);
+    // A synthetic transaction with no UTXO effects keeps these unchecked
+    // state fixtures non-empty, as required by BlockTransactions.scala:42.
+    let transactions = if transactions.is_empty() {
+        vec![ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        }]
+    } else {
+        transactions.to_vec()
+    };
     let bt = BlockTransactions {
         header_id: ModifierId::from_bytes(*header_id),
-        transactions: transactions.to_vec(),
+        transactions,
     };
     let mut w = VlqWriter::new();
     write_block_transactions(&mut w, &bt).expect("write_block_transactions");
@@ -557,7 +568,7 @@ fn advanced_base_dry_run_matches_rehydrated_oracle() {
         .store_header(&hdr_n_id_bytes, &hdr_n_bytes)
         .expect("store hdr_n");
     let expected_n = store.root_digest();
-    // Store empty BlockTransactions for block N.
+    // Store a BlockTransactions section with no UTXO effects for block N.
     make_and_store_block_transactions_section(
         &store,
         &hdr_n_id_bytes,

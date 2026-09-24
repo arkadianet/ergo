@@ -140,7 +140,8 @@ pub struct Candidate {
 
 /// Build a candidate for the next block. Returns `None` if the chain
 /// has not reached a state from which mining is possible (tip below
-/// height 10, or a tip-flip caught by the post-dry-run guard).
+/// height 10, no transactions available, or a tip-flip caught by the
+/// post-dry-run guard).
 ///
 /// **Applied-tip contract:** the caller is expected to have gated on the
 /// mining-started latch (`BestTip::synced`) already, and every consensus input
@@ -682,6 +683,11 @@ pub fn generate_candidate<V: CandidateStateView>(
     if let Some(cf) = checked_fee {
         checked.push(cf);
     }
+    // BlockTransactions.scala:42 requires a non-empty section, including after
+    // emission ends. Wait for a rent claim or user transaction before mining.
+    if checked.is_empty() {
+        return Ok(None);
+    }
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
@@ -1206,13 +1212,13 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn candidate_exhausted_emission_builds_without_emission_transaction() {
+    fn candidate_exhausted_emission_without_transactions_returns_none() {
         let mut header = crate::genesis::parent_header();
         header.height = 14;
         header.n_bits = 16_842_752;
         let view = ExhaustedView { header };
         for mode in [BuildMode::Minimal, BuildMode::Full] {
-            let (candidate, _, _) = generate_candidate(
+            let candidate = generate_candidate(
                 &view,
                 ergo_chain_spec::Network::Mainnet,
                 mode,
@@ -1228,9 +1234,8 @@ mod tests {
                 &[],
                 &mut vec![],
             )
-            .unwrap()
             .unwrap();
-            assert!(candidate.transactions.is_empty());
+            assert!(candidate.is_none());
         }
     }
 
