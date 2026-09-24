@@ -304,6 +304,7 @@ pub fn check_proof_against_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::header::read_header;
     use ergo_ser::popow_header::PoPowHeader;
@@ -325,11 +326,16 @@ mod tests {
     }
 
     fn popow_hdr(h: Header) -> PoPowHeader {
-        PoPowHeader {
-            header: h,
-            interlinks: vec![],
-            interlinks_proof: vec![],
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
         }
+        let links = vec![ModifierId::from_bytes([0x11; 32])];
+        let fields = ergo_validation::popow::algos::pack_interlinks(&links);
+        ergo_validation::popow::algos::build_popow_header(h, links, &fields).unwrap()
     }
 
     fn valid_proof() -> NipopowProof {
