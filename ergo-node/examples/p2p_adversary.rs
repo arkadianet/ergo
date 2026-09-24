@@ -2014,7 +2014,15 @@ mod tests {
         let _ = task.await;
     }
 
+    // The premise is that a peer which never reads eventually fills the
+    // kernel's socket buffers and blocks the writer. Windows loopback
+    // accepts the whole 32 MiB write at once, so the timeout path is not
+    // reachable there; the devnet harness runs this tool on Linux only.
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows loopback buffers the whole write, so a non-reading peer cannot block it"
+    )]
     async fn held_nonreading_peer_write_times_out_other_socket_progresses() {
         let (blocked, _peer) = socket_pair().await;
         let (other, mut reader) = socket_pair().await;
