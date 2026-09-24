@@ -7,13 +7,19 @@
 
 use ergo_primitives::digest::{ADDigest, ModifierId};
 use ergo_primitives::reader::VlqReader;
+use ergo_primitives::writer::VlqWriter;
+use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
 use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox, ErgoBoxCandidate};
 use ergo_ser::ergo_tree::read_ergo_tree;
+use ergo_ser::header::read_header;
+use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::register::{AdditionalRegisters, RegisterValue};
 use ergo_ser::sigma_value::read_constant;
 use ergo_ser::transaction::{read_transaction, Transaction};
 use ergo_state::chain::{ChainStateMeta, HeaderMeta};
 use ergo_state::store::StateStore;
+use ergo_state::wallet::{RescanGuard, WalletApplyHook, WalletReader};
+use redb::WriteTransaction;
 
 /// Re-install the `hci_version=1` sentinel on the underlying redb after a
 /// `test_force_set_best_header_unsafe` call. Without this, the next
@@ -185,6 +191,112 @@ fn get_header_id(data: &TestData, height: u32) -> [u8; 32] {
         .unwrap()
         .try_into()
         .unwrap()
+}
+
+struct TestWalletHook {
+    tree: Vec<u8>,
+}
+
+impl WalletApplyHook for TestWalletHook {
+    fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
+        std::collections::BTreeSet::from([self.tree.clone()])
+    }
+
+    fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
+        std::collections::BTreeMap::new()
+    }
+}
+
+struct NoopRescanGuard;
+
+impl RescanGuard for NoopRescanGuard {
+    fn abort_in_progress(&self, _txn: &WriteTransaction) -> Result<(), redb::Error> {
+        Ok(())
+    }
+
+    fn force_invalidate(&self, _txn: &WriteTransaction) -> Result<(), redb::Error> {
+        Ok(())
+    }
+}
+
+fn apply_blocks_with_wallet(
+    store: &mut StateStore,
+    data: &TestData,
+    hook: &TestWalletHook,
+    from: u32,
+    to: u32,
+) {
+    for height in from..=to {
+        let expected = data.digests.iter().find(|d| d.height == height).unwrap();
+        let expected_digest = ADDigest::from_bytes(
+            hex::decode(&expected.state_root)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        let tx_entry = data
+            .all_txs
+            .iter()
+            .find(|t| t["height"].as_u64().unwrap() == height as u64)
+            .unwrap();
+        let tx = parse_block_tx(tx_entry["bytes"].as_str().unwrap());
+        let header = data
+            .headers
+            .iter()
+            .find(|h| h["height"].as_u64().unwrap() == height as u64)
+            .unwrap();
+        let header_id: [u8; 32] = hex::decode(header["id"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let header_bytes = hex::decode(header["bytes"].as_str().unwrap()).unwrap();
+        let parsed_header = {
+            let mut reader = VlqReader::new(&header_bytes);
+            read_header(&mut reader).unwrap()
+        };
+        store.store_header(&header_id, &header_bytes).unwrap();
+        let block_transactions = BlockTransactions {
+            header_id: ModifierId::from_bytes(header_id),
+            transactions: vec![tx.clone()],
+        };
+        let mut section_writer = VlqWriter::new();
+        write_block_transactions(&mut section_writer, &block_transactions).unwrap();
+        let section_id = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &header_id,
+            parsed_header.transactions_root.as_bytes(),
+        );
+        store
+            .store_block_section(&section_id, &section_writer.result())
+            .unwrap();
+        store
+            .apply_block_unchecked_for_test_with_wallet(
+                height,
+                &header_id,
+                &expected_digest,
+                &[tx],
+                Some(hook),
+            )
+            .unwrap_or_else(|e| panic!("wallet apply failed at height {height}: {e}"));
+    }
+}
+
+fn read_wallet_cursor(store: &StateStore) -> Option<ergo_state::wallet::WalletScanCursor> {
+    let read = store.db_arc().begin_read().unwrap();
+    WalletReader::new(&read).scan_cursor().unwrap()
+}
+
+fn wallet_invalidated(store: &StateStore) -> bool {
+    let read = store.db_arc().begin_read().unwrap();
+    match read.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED) {
+        Ok(table) => table
+            .get(())
+            .unwrap()
+            .map(|row| row.value())
+            .unwrap_or(false),
+        Err(redb::TableError::TableDoesNotExist(_)) => false,
+        Err(error) => panic!("wallet invalidation read failed: {error}"),
+    }
 }
 
 // ---- Serialization roundtrip tests ----
@@ -429,6 +541,32 @@ fn chain_state_updated_after_rollback_survives_restart() {
         assert_eq!(store.chain_state().best_full_block_height, 3);
         assert_eq!(store.chain_state().best_full_block_id, header_id_3);
     }
+}
+
+#[test]
+fn wallet_rollback_to_nonzero_and_genesis_restores_cursor_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.redb");
+    let data = load_test_data();
+    let hook = TestWalletHook {
+        tree: vec![0x01, 0x02, 0x03],
+    };
+    let guard = NoopRescanGuard;
+    let mut store = StateStore::open(&db_path).unwrap();
+    init_genesis(&mut store);
+    apply_blocks_with_wallet(&mut store, &data, &hook, 1, 5);
+
+    store.rollback_to(3, Some(&hook), Some(&guard)).unwrap();
+    let cursor = read_wallet_cursor(&store).unwrap();
+    assert_eq!(cursor.height, 3);
+    assert_eq!(cursor.header_id, Some(get_header_id(&data, 3)));
+    assert!(!wallet_invalidated(&store));
+
+    store.rollback_to(0, Some(&hook), Some(&guard)).unwrap();
+    let cursor = read_wallet_cursor(&store).unwrap();
+    assert_eq!(cursor.height, 0);
+    assert_eq!(cursor.header_id, None);
+    assert!(!wallet_invalidated(&store));
 }
 
 #[test]

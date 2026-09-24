@@ -171,6 +171,11 @@ pub(crate) fn set_scan_cursor(
     Ok(())
 }
 
+/// Rewind the cursor after per-block rollback has lowered its height.
+///
+/// Per-block rollback owns lowering the height and removes the header row;
+/// this final call owns restoring the surviving tip identity. A missing header
+/// at an equal height is therefore a repairable intermediate state.
 pub(crate) fn rewind_scan_cursor(
     txn: &WriteTransaction,
     target_height: u32,
@@ -190,15 +195,20 @@ pub(crate) fn rewind_scan_cursor(
     if current > target_height {
         return set_scan_cursor(txn, target_height, target_header_id);
     }
-    let header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
-    let stored = header_table.get(())?.map(|row| row.value());
-    if stored != target_header_id.copied() {
-        return Err(redb::Error::Io(std::io::Error::new(
+    let stored = {
+        let header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+        let stored = header_table.get(())?.map(|row| row.value());
+        stored
+    };
+    match (stored, target_header_id) {
+        (None, Some(header_id)) => set_scan_cursor(txn, target_height, Some(header_id)),
+        (None, None) => Ok(()),
+        (Some(stored), Some(expected)) if stored == *expected => Ok(()),
+        _ => Err(redb::Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "wallet scan cursor header mismatch",
-        )));
+        ))),
     }
-    Ok(())
 }
 
 fn apply_inputs(
