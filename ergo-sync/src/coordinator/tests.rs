@@ -3,6 +3,7 @@ use ergo_p2p::delivery::ModifierStatus;
 use ergo_p2p::message::{self, SyncInfo};
 use ergo_p2p::peer::SyncVersion;
 use ergo_p2p::types::{InvData, ModifierTypeId};
+use ergo_primitives::digest::blake2b256;
 use ergo_ser::modifier_id::ExpectedSections;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -15,6 +16,10 @@ fn peer(port: u16) -> PeerId {
 
 fn mk(v: u8) -> [u8; 32] {
     [v; 32]
+}
+
+fn header_id(bytes: &[u8]) -> [u8; 32] {
+    *blake2b256(bytes).as_bytes()
 }
 
 /// Mock chain view for testing.
@@ -196,9 +201,11 @@ fn on_modifier_received_accepts_requested() {
     let p = peer(9030);
 
     // First request via Inv
+    let header_bytes = vec![10, 20, 30];
+    let header_id = header_id(&header_bytes);
     let inv = InvData {
         type_id: ModifierTypeId::Header.as_byte(),
-        ids: vec![mk(1)],
+        ids: vec![header_id],
     };
     coord.on_inv(p, &inv, &chain, now);
 
@@ -206,14 +213,52 @@ fn on_modifier_received_accepts_requested() {
     let actions = coord.on_modifier_received(
         p,
         ModifierTypeId::Header.as_byte(),
-        mk(1),
-        vec![10, 20, 30],
+        header_id,
+        header_bytes,
         now,
     );
     assert!(actions
         .iter()
         .any(|a| matches!(a, Action::ValidateHeader { .. })));
     assert!(!actions.iter().any(|a| matches!(a, Action::Penalize { .. })));
+}
+
+#[test]
+fn on_modifier_received_rejects_header_id_mismatch_without_ack() {
+    let mut coord = SyncCoordinator::new(0);
+    let chain = MockChain::new(0, 0);
+    let now = Instant::now();
+    let p = peer(9030);
+    let claimed_id = mk(1);
+    let bytes = vec![10, 20, 30];
+    assert_ne!(claimed_id, header_id(&bytes));
+
+    coord.on_inv(
+        p,
+        &InvData {
+            type_id: ModifierTypeId::Header.as_byte(),
+            ids: vec![claimed_id],
+        },
+        &chain,
+        now,
+    );
+    let actions =
+        coord.on_modifier_received(p, ModifierTypeId::Header.as_byte(), claimed_id, bytes, now);
+
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::Penalize {
+            penalty: Penalty::Misbehavior,
+            ..
+        }
+    )));
+    assert!(!actions
+        .iter()
+        .any(|a| matches!(a, Action::ValidateHeader { .. })));
+    assert_eq!(
+        coord.delivery().status(&claimed_id),
+        ModifierStatus::Requested
+    );
 }
 
 #[test]
@@ -327,16 +372,18 @@ fn header_accept_does_not_record_delivery_outcome() {
     let now = Instant::now();
     let p = peer(9030);
 
+    let header_bytes = vec![10, 20, 30];
+    let header_id = header_id(&header_bytes);
     let inv = InvData {
         type_id: ModifierTypeId::Header.as_byte(),
-        ids: vec![mk(1)],
+        ids: vec![header_id],
     };
     coord.on_inv(p, &inv, &chain, now);
     let actions = coord.on_modifier_received(
         p,
         ModifierTypeId::Header.as_byte(),
-        mk(1),
-        vec![10, 20, 30],
+        header_id,
+        header_bytes,
         now,
     );
     assert!(
@@ -3315,7 +3362,8 @@ fn timeout_no_penalty_when_modifier_received_meanwhile() {
 
     // Connectivity clock advances past the request time via a real accept.
     let chain = MockChain::new(101, 100);
-    let other = mk(99);
+    let other_bytes = vec![1];
+    let other = header_id(&other_bytes);
     let inv = InvData {
         type_id: ModifierTypeId::Header.as_byte(),
         ids: vec![other],
@@ -3325,7 +3373,7 @@ fn timeout_no_penalty_when_modifier_received_meanwhile() {
         p,
         ModifierTypeId::Header.as_byte(),
         other,
-        vec![1],
+        other_bytes,
         now + Duration::from_secs(1),
     );
 

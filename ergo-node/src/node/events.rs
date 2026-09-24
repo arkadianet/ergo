@@ -8,7 +8,7 @@ use std::time::Instant;
 use ergo_api::SubmitError;
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{Direction, PeerId, SyncVersion};
+use ergo_p2p::peer::{Direction, PeerId, Penalty, SyncVersion};
 use ergo_p2p::peer_manager::ConnectError;
 use ergo_p2p::types::ModifierTypeId;
 use ergo_primitives::reader::VlqReader;
@@ -23,8 +23,8 @@ use crate::anchor_map::parse_rest_url;
 use crate::peer_loop::{self, PeerEvent};
 
 use super::{
-    cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer, send_to_peer,
-    try_send_anchor_sync_info, NodeState, PeerRuntime,
+    admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
+    send_to_peer, try_send_anchor_sync_info, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -48,26 +48,44 @@ pub(super) fn handle_event_batch(state: &mut NodeState, events: Vec<PeerEvent>) 
     let mut other: Vec<PeerEvent> = Vec::new();
 
     for ev in events {
-        if let PeerEvent::Message {
-            peer,
-            code,
-            payload,
-        } = &ev
-        {
-            if *code == message::CODE_MODIFIER {
-                // Pre-deserialize so we can route header-Modifiers
-                // to the coalesced path without re-parsing. Tx-typed
-                // Modifiers and parse failures fall through to
-                // individual handle_event dispatch (unchanged
-                // semantics — Tx admission is per-message, parse
-                // failures emit Penalize per-message).
-                if let Ok(mods) = message::deserialize_modifiers(payload) {
-                    if mods.type_id != ModifierTypeId::Transaction.as_byte() {
-                        header_mods.push((*peer, mods));
-                        continue;
-                    }
-                }
+        let is_header_modifier = matches!(
+            &ev,
+            PeerEvent::Message { code, payload, .. }
+                if *code == message::CODE_MODIFIER
+                    && payload.first().copied() == Some(ModifierTypeId::Header.as_byte())
+        );
+        if is_header_modifier {
+            let PeerEvent::Message {
+                peer,
+                code,
+                payload,
+            } = ev
+            else {
+                continue;
+            };
+            if state.peer_manager.get(&peer).is_none() {
+                warn!(peer = %peer, "dropping message from untracked peer");
+                cleanup_disconnected_peer(state, &peer);
+                continue;
             }
+            state.peer_manager.touch(&peer, now);
+            match admit_frame(state, peer, code, &payload, now) {
+                Ok(()) => match message::deserialize_modifiers(&payload) {
+                    Ok(mods) => header_mods.push((peer, mods)),
+                    Err(e) => {
+                        warn!(peer = %peer, error = %e, "bad Modifier");
+                        flush_actions(
+                            state,
+                            vec![Action::Penalize {
+                                peer,
+                                penalty: Penalty::Misbehavior,
+                            }],
+                        );
+                    }
+                },
+                Err(actions) => flush_actions(state, actions),
+            }
+            continue;
         }
         other.push(ev);
     }
@@ -743,6 +761,7 @@ fn inject_local_full_block(
             | HeaderProcessError::EpochContextIncomplete { .. }
             | HeaderProcessError::EpochHeaderMissing { .. }
             | HeaderProcessError::CheckpointMismatch { .. }
+            | HeaderProcessError::GenesisIdMismatch { .. }
             | HeaderProcessError::Validation(_)),
         ) => {
             return Err(SubmitError {

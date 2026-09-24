@@ -25,14 +25,9 @@ const INTERNAL_NODE_PREFIX: u8 = 0x01;
 /// exactly the supplied `expected_root`.
 ///
 /// Scala parity: `scrypto BatchMerkleProof.valid`.
-///
-/// Empty proof (no indices, no proof entries) verifies against any
-/// root — used by the genesis case in `PoPowHeader.checkInterlinksProof`
-/// (`PoPowHeader.scala:57-60`). Returns `true` in that case to
-/// match Scala behavior.
 pub fn verify_batch_merkle_proof(proof: &BatchMerkleProof, expected_root: &[u8; 32]) -> bool {
     if proof.indices.is_empty() && proof.proofs.is_empty() {
-        return true;
+        return false;
     }
 
     let mut e: Vec<(u32, [u8; 32])> = proof.indices.clone();
@@ -168,13 +163,13 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn empty_proof_verifies_against_any_root() {
+    fn empty_proof_rejects_every_root() {
         let bmp = BatchMerkleProof {
             indices: vec![],
             proofs: vec![],
         };
-        assert!(verify_batch_merkle_proof(&bmp, &[0xAA; 32]));
-        assert!(verify_batch_merkle_proof(&bmp, &[0xBB; 32]));
+        assert!(!verify_batch_merkle_proof(&bmp, &[0xAA; 32]));
+        assert!(!verify_batch_merkle_proof(&bmp, &[0xBB; 32]));
     }
 
     #[test]

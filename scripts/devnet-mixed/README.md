@@ -41,7 +41,7 @@ ergo-core 6.0.5, sigma-state 6.0.6 and circe-parser 0.14.15.
 
 | Setting | Shared value |
 | --- | --- |
-| P2P magic | `[7, 7, 7, 7]` |
+| P2P magic | `[7, 7, 7, 7]` (Rust: overridable with `[chain] devnet_magic`; `genesis.conf` `magicBytes` must match) |
 | Address prefix | `16` |
 | Genesis state root | `cb63aa99a3060f341781d8662b58bf18b9ad258db4fe88d09f8f71cb668cad4502` |
 | Genesis boxes | `test-vectors/testnet/genesis_boxes.json` (three JVM boxes) |
