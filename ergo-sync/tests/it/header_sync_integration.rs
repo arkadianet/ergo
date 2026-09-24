@@ -341,6 +341,7 @@ fn configured_genesis_mismatch_penalizes_header_sender() {
     let actions = executor.execute(
         Action::ValidateHeader {
             peer,
+            modifier_id: genesis_id,
             header_bytes: genesis_bytes,
         },
         &mut store,
