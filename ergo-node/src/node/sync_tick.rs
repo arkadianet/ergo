@@ -395,14 +395,10 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
 ///
 /// Returns early when:
 /// * the node wasn't booted with `utxo_bootstrap = true`, or
-/// * we already have applied UTXO state (`best_full_block > 0`), or
-/// * quorum has been reached (`BootstrapState::Selected`).
+/// * we already have applied UTXO state (`best_full_block > 0`).
 ///
-/// Until part 2j lifts the activation gate this is effectively
-/// dead code in production — `utxo_bootstrap_enabled` is always
-/// false because `validate_runtime_mode_support` refuses the
-/// config that would set it true. The plumbing flips on
-/// automatically when the gate lifts.
+/// The reducer suppresses discovery after selection unless an authenticated
+/// manifest retry has exhausted its voters and needs fresh suppliers.
 fn request_snapshots_info_fan_out(state: &mut NodeState) {
     if !state.utxo_bootstrap_enabled {
         return;
@@ -410,13 +406,6 @@ fn request_snapshots_info_fan_out(state: &mut NodeState) {
     if state.store.chain_state_meta().best_full_block_height > 0 {
         return;
     }
-    if matches!(
-        state.snapshot_bootstrap.state(),
-        BootstrapState::Selected { .. }
-    ) {
-        return;
-    }
-
     // Collect eligible peers up front so the registry borrow ends
     // before the mutating `mark_queried` calls.
     let eligible: Vec<PeerId> = state
@@ -769,7 +758,7 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         let voter_set: std::collections::HashSet<PeerId> = voters.iter().copied().collect();
         let mut pool: Vec<PeerId> = voters;
         for p in state.peer_manager.block_section_capable_peers(now) {
-            if !voter_set.contains(&p) {
+            if !voter_set.contains(&p) && !state.snapshot_bootstrap.supplier_excluded(&p) {
                 pool.push(p);
             }
         }
@@ -928,7 +917,8 @@ fn defer_reconstructed_tree(
     state.reconstructed_tree = Some(reconstructed);
 }
 
-/// Discard a failed epoch and penalize only an attributable supplier.
+/// Discard an unusable epoch, such as an unreachable or reorged anchor.
+/// Supplier-only failures must preserve the authenticated epoch instead.
 pub(super) fn recover_snapshot_bootstrap(
     state: &mut NodeState,
     culprit: Option<PeerId>,
@@ -954,6 +944,11 @@ pub(super) fn halt_snapshot_bootstrap(state: &mut NodeState, reason: &dyn std::f
     state.snapshot_bootstrap.halt();
 }
 
+/// Retry authenticated manifests with invalid metadata from another supplier;
+/// reject the epoch only after three distinct servers fail. Local errors halt.
+/// Chunks have already been consumed, so a replacement manifest starts a new assembly.
+/// Scala `avldb/.../ProxyInternalProverNode.scala:21-22` hashes balance and child
+/// labels, excluding separator keys; root authentication cannot verify separators.
 fn handle_snapshot_reconstruction_error(
     state: &mut NodeState,
     error: ergo_state::store::StateError,
@@ -962,10 +957,31 @@ fn handle_snapshot_reconstruction_error(
         error,
         ergo_state::store::StateError::InvalidSnapshotManifest(_)
     ) {
-        warn!(error = %error, "Mode 2: invalid manifest metadata; rejecting snapshot epoch");
-        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
-        let actions = recover_snapshot_bootstrap(state, culprit);
-        flush_actions(state, actions);
+        let target = state.snapshot_bootstrap.state();
+        let Some((peer, failures)) = state.snapshot_bootstrap.retry_verified_manifest() else {
+            halt_snapshot_bootstrap(
+                state,
+                &"manifest reconstruction failed without a verified supplier",
+            );
+            return;
+        };
+        state.chunk_assembly = None;
+        state.pending_manifest_bytes = None;
+        state.reconstructed_tree = None;
+        if failures >= 3 {
+            warn!(error = %error, %peer, ?target, failures,
+                "Mode 2: three distinct manifest suppliers failed; rejecting snapshot epoch");
+        } else {
+            warn!(error = %error, %peer, ?target, failures,
+                "Mode 2: invalid manifest metadata; evicting supplier and retrying the same epoch");
+        }
+        flush_actions(
+            state,
+            vec![ergo_sync::coordinator::Action::Penalize {
+                peer,
+                penalty: ergo_p2p::peer::Penalty::Misbehavior,
+            }],
+        );
     } else {
         // Manifest parsing and chunk authentication already succeeded at ingress.
         // Repeating those operations or splicing arenas cannot implicate a new peer.
@@ -2117,19 +2133,212 @@ mod tests {
     }
 
     #[test]
-    fn reconstruction_manifest_metadata_error_rejects_epoch() {
+    fn drive_chunk_download_excluded_supplier_skips_archive_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.utxo_bootstrap_enabled = true;
         state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        let bad_server = synthetic_voter(1);
+        let now = std::time::Instant::now();
+        state
+            .peer_manager
+            .register_outbound(bad_server, now)
+            .unwrap();
+        state.peer_manager.mark_tcp_connected(&bad_server);
+        let mut spec = state.our_handshake.peer_spec.clone();
+        spec.features.push(ergo_p2p::handshake::PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        state
+            .peer_manager
+            .complete_handshake(&bad_server, spec, None, now)
+            .unwrap();
+        assert_eq!(
+            state.peer_manager.block_section_capable_peers(now),
+            vec![bad_server]
+        );
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            bad_server,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        // With no remaining voters, the archive fallback is the only candidate.
+        state.snapshot_bootstrap.evict_snapshot_supplier(bad_server);
+        state
+            .snapshot_bootstrap
+            .on_peer_disconnect(&synthetic_voter(2));
+        state
+            .snapshot_bootstrap
+            .on_peer_disconnect(&synthetic_voter(3));
+        let chunk = ergo_primitives::digest::Digest32::from_bytes([0xBB; 32]);
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            chunk,
+        ]));
+        state.pending_manifest_bytes = Some(vec![]);
+        super::drive_chunk_download(&mut state, now);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            state.chunk_assembly.as_ref().unwrap().next_to_request(),
+            vec![chunk]
+        );
+    }
+
+    #[test]
+    fn manifest_retry_exhausted_voters_queries_fresh_supplier() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        state.snapshot_bootstrap.retry_verified_manifest().unwrap();
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .on_peer_disconnect(&synthetic_voter(port));
+        }
+        let peer = synthetic_voter(4);
+        let now = std::time::Instant::now();
+        state.peer_manager.register_outbound(peer, now).unwrap();
+        state.peer_manager.mark_tcp_connected(&peer);
+        let mut spec = state.our_handshake.peer_spec.clone();
+        spec.features.push(ergo_p2p::handshake::PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        state
+            .peer_manager
+            .complete_handshake(&peer, spec, None, now)
+            .unwrap();
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            peer,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        super::request_snapshots_info_fan_out(&mut state);
+        assert_eq!(
+            rx.try_recv().unwrap().code,
+            ergo_p2p::message::CODE_GET_SNAPSHOTS_INFO
+        );
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: 100,
+                manifest_id: [0xAA; 32],
+            }
+        );
+        super::request_snapshots_info_fan_out(&mut state);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reconstruction_manifest_metadata_error_retries_same_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(popow_sparse_store(&dir));
+        let height = DENSE_TIP_HEIGHT as i32;
+        let id = [0xAA; 32];
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(height, id, 1);
+        let server = state.snapshot_bootstrap.verified_manifest_peer().unwrap();
+        state
+            .peer_manager
+            .register_outbound(server, std::time::Instant::now())
+            .unwrap();
+        state.snapshot_bootstrap.take_verified_manifest_bytes();
+        state.pending_manifest_bytes = Some(vec![1]);
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![]));
         super::handle_snapshot_reconstruction_error(
             &mut state,
             ergo_state::store::StateError::InvalidSnapshotManifest("separator mismatch".into()),
         );
-        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        assert_eq!(
+            state.peer_manager.get(&server).unwrap().score.raw_score(),
+            10
+        );
+        assert!(state.snapshot_bootstrap.supplier_excluded(&server));
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state
+            .snapshot_bootstrap
+            .take_verified_manifest_bytes()
+            .is_none());
+        let (replacement, retry_height, retry_id) =
+            state.snapshot_bootstrap.should_request_manifest().unwrap();
+        assert_ne!(replacement, server);
+        assert_eq!((retry_height, retry_id), (height, id));
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            replacement,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        super::drive_manifest_request(&mut state, std::time::Instant::now());
+        assert_eq!(
+            rx.try_recv().unwrap().code,
+            ergo_p2p::message::CODE_GET_MANIFEST
+        );
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::ManifestRequested {
+                peer: replacement,
+                height,
+                manifest_id: id,
+            }
+        );
+    }
+
+    #[test]
+    fn reconstruction_manifest_third_distinct_server_rejects_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let id = [0xAA; 32];
+        state.snapshot_bootstrap = verified_bootstrap(100, id, 1);
+        let mut failed = std::collections::HashSet::new();
+        for count in 1..=3 {
+            let server = state.snapshot_bootstrap.verified_manifest_peer().unwrap();
+            assert!(failed.insert(server));
+            state
+                .peer_manager
+                .register_outbound(server, std::time::Instant::now())
+                .unwrap();
+            super::handle_snapshot_reconstruction_error(
+                &mut state,
+                ergo_state::store::StateError::InvalidSnapshotManifest("separator mismatch".into()),
+            );
+            assert_eq!(
+                state.peer_manager.get(&server).unwrap().score.raw_score(),
+                10
+            );
+            state.peer_manager.disconnect(&server);
+            if count < 3 {
+                let (replacement, height, retry_id) =
+                    state.snapshot_bootstrap.should_request_manifest().unwrap();
+                assert!(!failed.contains(&replacement));
+                assert_eq!((height, retry_id), (100, id));
+                state.snapshot_bootstrap.mark_manifest_requested(
+                    replacement,
+                    height,
+                    retry_id,
+                    std::time::Instant::now(),
+                );
+                state.snapshot_bootstrap.accept_verified_manifest(vec![]);
+            }
+        }
         for port in 1..=3 {
             state
                 .snapshot_bootstrap
-                .on_snapshots_info(synthetic_voter(port), &[(100, [0xAA; 32])]);
+                .on_snapshots_info(synthetic_voter(port + 10), &[(100, id)]);
         }
         assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
     }

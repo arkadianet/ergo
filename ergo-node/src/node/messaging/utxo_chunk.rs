@@ -20,6 +20,8 @@ use ergo_sync::coordinator::Action;
 /// peer than the one we asked tries to fulfill the slot. That
 /// case is logged (debug) and silently dropped — no penalty, since
 /// races between requests and responses are normal.
+/// Malformed replies from request owners re-queue only their slots and exclude
+/// that supplier for this epoch; the verified manifest and received chunks survive.
 pub(super) fn handle_inbound_utxo_chunk(
     state: &mut NodeState,
     peer: PeerId,
@@ -44,7 +46,12 @@ pub(super) fn handle_inbound_utxo_chunk(
                 "Mode 2: chunk parse failed during root-label recompute",
             );
             if assembly.has_requests_from(&peer) {
-                return crate::node::sync_tick::recover_snapshot_bootstrap(state, Some(peer));
+                assembly.drop_peer(&peer);
+                state.snapshot_bootstrap.evict_snapshot_supplier(peer);
+                return vec![Action::Penalize {
+                    peer,
+                    penalty: ergo_p2p::peer::Penalty::Misbehavior,
+                }];
             }
             return Vec::new();
         }
@@ -101,20 +108,45 @@ mod tests {
             .mark_manifest_requested(manifest_server, 100, id, Instant::now());
         state.snapshot_bootstrap.accept_verified_manifest(vec![]);
         let chunk_id = Digest32::from_bytes([0xBB; 32]);
-        let mut assembly = ChunkAssembly::new(vec![chunk_id]);
+        let received_id = Digest32::from_bytes([0xCC; 32]);
+        let other_id = Digest32::from_bytes([0xDD; 32]);
+        let mut assembly = ChunkAssembly::new(vec![chunk_id, received_id, other_id]);
+        assembly.mark_requested(received_id, manifest_server, Instant::now());
+        assembly.on_chunk_received(manifest_server, received_id, vec![1]);
+        assembly.mark_requested(other_id, manifest_server, Instant::now());
         assembly.mark_requested(chunk_id, chunk_server, Instant::now());
         state.chunk_assembly = Some(assembly);
         let actions = handle_inbound_utxo_chunk(&mut state, chunk_server, vec![]);
         assert!(
-            matches!(actions.as_slice(), [Action::Penalize { peer, .. }] if *peer == chunk_server)
+            matches!(actions.as_slice(), [Action::Penalize { peer, penalty: ergo_p2p::peer::Penalty::Misbehavior }] if *peer == chunk_server)
         );
-        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
-        assert!(state.chunk_assembly.is_none());
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::ManifestVerified {
+                height: 100,
+                manifest_id: id,
+            }
+        );
+        let assembly = state.chunk_assembly.as_ref().unwrap();
+        assert_eq!(assembly.received_count(), 1);
+        assert_eq!(assembly.next_to_request(), vec![chunk_id]);
+        assert!(assembly.has_requests_from(&manifest_server));
+        assert!(!assembly.has_requests_from(&chunk_server));
+        assert!(state.snapshot_bootstrap.supplier_excluded(&chunk_server));
+        // Rediscovery must still be able to select this epoch, excluding its bad supplier.
+        state.snapshot_bootstrap.drop_verified_manifest();
         for port in 1..=4 {
             state
                 .snapshot_bootstrap
                 .on_snapshots_info(([10, 0, 0, 1], port).into(), &[(100, id)]);
         }
-        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+        let (peer, height, manifest_id) =
+            state.snapshot_bootstrap.should_request_manifest().unwrap();
+        assert_ne!(peer, chunk_server);
+        assert_eq!((height, manifest_id), (100, id));
+        assert!(!state
+            .snapshot_bootstrap
+            .voters_for_selected_manifest()
+            .contains(&chunk_server));
     }
 }

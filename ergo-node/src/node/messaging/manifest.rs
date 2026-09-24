@@ -16,6 +16,8 @@ use ergo_sync::coordinator::Action;
 /// requested ID, then binds its root and height to the canonical header.
 /// Bad supplied bytes evict and penalize the sender. Local store/parse errors
 /// stop bootstrap without blaming peers; reachable header gaps defer verification.
+/// An authenticated epoch that becomes unreachable or reorged during a supplier
+/// retry is rejected without penalizing its replacement server.
 pub(super) fn handle_inbound_manifest(
     state: &mut NodeState,
     peer: PeerId,
@@ -88,6 +90,14 @@ pub(super) fn handle_inbound_manifest(
             return Vec::new();
         }
         Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
+            if state.snapshot_bootstrap.retrying_verified_manifest() {
+                warn!(
+                    height,
+                    dense_from_height,
+                    "authenticated snapshot retry became unreachable; rejecting epoch"
+                );
+                return crate::node::sync_tick::recover_snapshot_bootstrap(state, None);
+            }
             // The advertised snapshot sits in the NiPoPoW sparse
             // prefix. Forward catch-up never indexes below
             // `dense_from_height`, so re-polling this voter would
@@ -149,6 +159,16 @@ pub(super) fn handle_inbound_manifest(
             return Vec::new();
         }
     };
+
+    if state.snapshot_bootstrap.retrying_verified_manifest()
+        && header.state_root.as_bytes()[..32] != manifest_id
+    {
+        warn!(
+            height,
+            "authenticated snapshot retry was reorged away; rejecting epoch"
+        );
+        return crate::node::sync_tick::recover_snapshot_bootstrap(state, None);
+    }
 
     match verify_manifest_against_state_root(&manifest_id, manifest_height, &header.state_root) {
         Ok(()) => {
@@ -253,6 +273,39 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn inbound_manifest_retry_reorg_rejects_epoch_without_penalty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, peer, id, bytes) = fixture_state(&dir.path().join("state.redb"));
+        assert!(handle_inbound_manifest(&mut state, peer, bytes.clone()).is_empty());
+        state.snapshot_bootstrap.retry_verified_manifest().unwrap();
+        let (replacement, height, retry_id) =
+            state.snapshot_bootstrap.should_request_manifest().unwrap();
+        state.snapshot_bootstrap.mark_manifest_requested(
+            replacement,
+            height,
+            retry_id,
+            Instant::now(),
+        );
+        let (header_id, header_bytes) = crate::node::tests::synthetic_header_with_state_root(
+            height as u32,
+            ADDigest::from_bytes([0; 33]),
+        );
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .test_force_put_header_chain_index(height as u32, &header_id)
+            .unwrap();
+        assert!(handle_inbound_manifest(&mut state, replacement, bytes).is_empty());
+        for port in 10..=12 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(([10, 0, 0, 1], port).into(), &[(height, id)]);
+        }
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+        assert!(!state.snapshot_bootstrap.retrying_verified_manifest());
+    }
 
     #[test]
     fn inbound_manifest_forged_boundary_label_penalizes_server_without_latching() {
