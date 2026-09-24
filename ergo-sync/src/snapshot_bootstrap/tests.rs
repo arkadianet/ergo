@@ -14,6 +14,51 @@ fn mid(b: u8) -> [u8; 32] {
     [b; 32]
 }
 
+fn scala_manifest_fixture() -> ([u8; 32], ADDigest, Vec<u8>) {
+    #[derive(serde::Deserialize)]
+    struct HeaderFixture {
+        id: String,
+        height: u32,
+        #[serde(rename = "stateRoot")]
+        state_root: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ManifestFixture {
+        height: u32,
+        manifest_id: String,
+        header_id: String,
+        state_root: String,
+        header: HeaderFixture,
+        manifest_file: String,
+        manifest_length: usize,
+    }
+
+    let directory =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-vectors/testnet");
+    let raw = std::fs::read_to_string(directory.join("utxo_snapshot_manifest_522239.json"))
+        .expect("Scala snapshot metadata fixture");
+    let fixture: ManifestFixture = serde_json::from_str(&raw).unwrap();
+    assert_eq!(fixture.height, 522_239);
+    assert_eq!(fixture.header.height, fixture.height);
+    assert_eq!(fixture.header.id, fixture.header_id);
+    assert_eq!(fixture.header.state_root, fixture.state_root);
+    let manifest = std::fs::read(directory.join(&fixture.manifest_file))
+        .expect("capture raw Scala manifest bytes with scripts/capture-utxo-manifest.sh");
+    assert_eq!(manifest.len(), fixture.manifest_length);
+    let manifest_id = hex::decode(&fixture.manifest_id)
+        .expect("manifest_id hex")
+        .try_into()
+        .expect("manifest_id must be 32 bytes");
+    let state_root = ADDigest::from_bytes(
+        hex::decode(&fixture.header.state_root)
+            .expect("header stateRoot hex")
+            .try_into()
+            .expect("stateRoot must be 33 bytes"),
+    );
+    (manifest_id, state_root, manifest)
+}
+
 // ----- happy path -----
 
 #[test]
@@ -1065,46 +1110,36 @@ fn anchor_check_snapshot_above_mismatching_checkpoint_refuses() {
 
 // ----- oracle parity -----
 
-/// Scala-produced snapshot manifest vs the header `state_root` at the same
-/// height — the capture that retires the "provisional" note on
-/// [`verify_manifest_against_state_root`].
-///
-/// Fixture captured 2026-09-05 from a Scala 6.0.3 testnet node with
-/// `scripts/capture-utxo-manifest.sh http://127.0.0.1:9062 522239` against a
-/// Scala testnet node running `ergo.node.utxo.storingUtxoSnapshots > 0`
-/// (its `/utxo/getSnapshotsInfo` advertised exactly that height).
+/// Raw P2P bytes and REST header captured from Scala 6.0.3, testnet height
+/// 522239. The fixture records the source, checksum and reproduction command.
+/// Scala avldb/src/main/scala/org/ergoplatform/serialization/ManifestSerializer.scala:
+/// 17-19,35-41 writes/reads rootHeight as byte 0, separately from manifestDepth.
 #[test]
-fn manifest_prefix32_rule_matches_scala_manifest() {
-    #[derive(serde::Deserialize)]
-    struct ManifestFixture {
-        /// Snapshot height the Scala node advertised in
-        /// `/utxo/getSnapshotsInfo`.
-        height: u32,
-        /// `manifestId` from `/utxo/getSnapshotsInfo`, hex (32 bytes).
-        manifest_id: String,
-        /// `stateRoot` of the header at `height`, hex (33 bytes).
-        state_root: String,
-    }
+fn manifest_scala_bytes_root_and_height_match_header() {
+    use ergo_state::avl::snapshot_codec::{enumerate_expected_chunk_ids, manifest_tree_height};
 
-    let path = "../test-vectors/testnet/utxo_snapshot_manifest_522239.json";
-    let raw = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("capture the fixture first ({path}): {e}"));
-    let fixture: ManifestFixture = serde_json::from_str(&raw).unwrap();
+    let (manifest_id, state_root, manifest) = scala_manifest_fixture();
+    // Walk the complete captured manifest, including its chunk references.
+    assert!(!enumerate_expected_chunk_ids(&manifest).unwrap().is_empty());
+    let height = manifest_tree_height(&manifest).unwrap();
+    assert_eq!(height, manifest[0]);
+    assert_eq!(manifest[0], state_root.as_bytes()[32]);
+    verify_manifest_against_state_root(&manifest_id, height, &state_root)
+        .expect("Scala manifest root and independently captured height must match the header");
+}
 
-    let manifest_id: [u8; 32] = hex::decode(&fixture.manifest_id)
-        .expect("manifest_id hex")
-        .try_into()
-        .expect("manifest_id must be 32 bytes");
-    let state_root_bytes: [u8; 33] = hex::decode(&fixture.state_root)
-        .expect("state_root hex")
-        .try_into()
-        .expect("state_root must be 33 bytes");
-    let state_root = ADDigest::from_bytes(state_root_bytes);
+#[test]
+fn manifest_scala_bytes_changed_height_rejected() {
+    use ergo_state::avl::snapshot_codec::manifest_tree_height;
 
+    let (manifest_id, state_root, mut manifest) = scala_manifest_fixture();
+    manifest[0] = manifest[0].wrapping_add(1);
+    let height = manifest_tree_height(&manifest).unwrap();
     assert_eq!(
-        fixture.height, 522_239,
-        "fixture height must match its name"
+        verify_manifest_against_state_root(&manifest_id, height, &state_root),
+        Err(ManifestVerifyError::HeightMismatch {
+            manifest_height: height,
+            state_root_height: state_root.tree_height_byte(),
+        }),
     );
-    verify_manifest_against_state_root(&manifest_id, state_root.tree_height_byte(), &state_root)
-        .expect("Scala manifest_id and height must equal state_root at the snapshot height");
 }
