@@ -2417,8 +2417,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            Free bytes on the filesystem holding the data dir, probed per
-            status read. `None` when the mount could not be determined. The
+            Free bytes on the filesystem holding the data dir, from the
+            background storage sampler. `None` before the first sample or when
+            the mount could not be determined. The
             `ergo_disk_free_bytes` Prometheus gauge source.
           minimum: 0
         disk_total_bytes:
@@ -2427,8 +2428,8 @@ components:
           - 'null'
           format: int64
           description: |-
-            Total bytes on the filesystem holding the data dir, probed per
-            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+            Total bytes on the filesystem holding the data dir, from the
+            background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
           minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
@@ -2440,9 +2441,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of the indexer redb in bytes, probed per status
-            read. `None` when `[indexer] enabled = false` or the file is
-            absent. The `ergo_index_db_bytes` Prometheus gauge source.
+            On-disk size of the indexer redb in bytes, from the background
+            storage sampler. `None` before the first sample, when
+            `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -2579,8 +2580,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of `state.redb` in bytes, probed per status read.
-            `None` when the file is absent (never synced / failed to open).
+            On-disk size of `state.redb` in bytes, from the background storage
+            sampler (refreshed every 10 s). `None` before the first sample or
+            when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         storage_errors_indexer_total:

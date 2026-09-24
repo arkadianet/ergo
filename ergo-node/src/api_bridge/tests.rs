@@ -1054,9 +1054,9 @@ async fn submit_full_block_oneshot_dropped_returns_shutting_down() {
     action_loop.await.unwrap();
 }
 
-// ----- host() byte fields: Option<u64> semantics -----
+// ----- helpers -----
 
-/// Build a `SnapshotReadState` pinned to `host_paths` for host() tests.
+/// Build a `SnapshotReadState` with one storage sample from `host_paths`.
 /// The snapshot itself is a default empty publisher — host() ignores it.
 fn read_state_for_host(host_paths: HostPaths) -> SnapshotReadState {
     read_state_with_targets(host_paths, std::collections::BTreeMap::new())
@@ -1109,15 +1109,19 @@ fn read_state_with_slot_and_apply(
     );
     let identity_slot: crate::api_bridge::IdentitySlot =
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(ApiIdentity::default()));
+    let storage = Arc::new(LiveStorage::default());
+    storage.store_sample(crate::node::storage_probe::sample(&host_paths));
     SnapshotReadState::new(
         publisher.handle(),
         identity_slot,
-        host_paths,
+        storage,
         voting_targets,
         apply_phase,
         std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
     )
 }
+
+// ----- happy path -----
 
 /// Live apply-phase atomics must overlay snapshot-stale ApiStatus fields.
 #[test]
@@ -1162,7 +1166,6 @@ fn status_overlays_live_apply_phase_metrics() {
 fn status_overlays_live_telemetry_values() {
     use ergo_api::NodeReadState;
 
-    let dir = tempfile::tempdir().unwrap();
     let telemetry = std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default());
     let api_info = ergo_api::types::ApiInfo {
         agent_name: "test".into(),
@@ -1184,11 +1187,7 @@ fn status_overlays_live_telemetry_values() {
     let read = SnapshotReadState::new(
         publisher.handle(),
         identity_slot,
-        HostPaths {
-            state_db: dir.path().join("s.redb"),
-            index_db: dir.path().join("i.redb"),
-            data_dir: dir.path().to_path_buf(),
-        },
+        Arc::new(LiveStorage::default()),
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
         telemetry.clone(),
@@ -1271,40 +1270,81 @@ fn status_reflects_live_storage_error_with_no_new_snapshot_published() {
     assert!(last.contains("simulated redb write failure"));
 }
 
-/// Measure-first (#257): `status()` probes the two redb stores and the
-/// data-dir filesystem on every call, so data-dir growth (bytes per
-/// synced height) is observable on /metrics rather than guessed. Absent
-/// files must read as `None`, present files as their exact byte length.
+/// Storage reads stay at the last sample even when the files grow.
 #[test]
-fn status_probes_storage_sizes_per_call() {
-    use ergo_api::NodeReadState;
-
+fn status_serves_cached_storage_sample_without_probing() {
     let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
+    let paths = HostPaths {
         state_db: dir.path().join("s.redb"),
         index_db: dir.path().join("i.redb"),
         data_dir: dir.path().to_path_buf(),
-    });
+    };
+    std::fs::write(&paths.state_db, [0u8; 1234]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 567]).unwrap();
+    let read = read_state_for_host(paths.clone());
+    let before = read.status();
+    assert_eq!(before.state_db_bytes, Some(1234));
+    assert_eq!(before.index_db_bytes, Some(567));
+    assert!(before.disk_free_bytes.is_some());
+    assert!(before.disk_total_bytes.is_some());
 
-    // Nothing on disk yet: both stores are absent, but the filesystem
-    // probe still resolves for a real temp dir.
-    let pre = read.status();
-    assert_eq!(pre.state_db_bytes, None);
-    assert_eq!(pre.index_db_bytes, None);
-    let (free, total) = (pre.disk_free_bytes, pre.disk_total_bytes);
-    assert!(
-        free.is_some() && total.is_some(),
-        "disk probe failed on a real temp dir"
-    );
-    assert!(free.unwrap() <= total.unwrap());
+    std::fs::write(&paths.state_db, [0u8; 2468]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 1134]).unwrap();
+    let after = read.status();
+    assert_eq!(after.state_db_bytes, before.state_db_bytes);
+    assert_eq!(after.index_db_bytes, before.index_db_bytes);
+    assert_eq!(after.disk_free_bytes, before.disk_free_bytes);
+    assert_eq!(after.disk_total_bytes, before.disk_total_bytes);
+}
 
-    // Files appear (node synced / indexer enabled): exact byte lengths,
-    // re-probed per call — a stale snapshot value would be the bug.
-    std::fs::write(dir.path().join("s.redb"), [0u8; 1234]).unwrap();
-    std::fs::write(dir.path().join("i.redb"), [0u8; 567]).unwrap();
-    let post = read.status();
-    assert_eq!(post.state_db_bytes, Some(1234));
-    assert_eq!(post.index_db_bytes, Some(567));
+#[test]
+fn status_storage_fields_none_before_first_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    };
+    std::fs::write(&paths.state_db, b"state").unwrap();
+    std::fs::write(&paths.index_db, b"index").unwrap();
+    let mut read = read_state_for_host(paths);
+    read.storage = Arc::new(LiveStorage::default());
+    let status = read.status();
+    assert_eq!(status.state_db_bytes, None);
+    assert_eq!(status.index_db_bytes, None);
+    assert_eq!(status.disk_free_bytes, None);
+    assert_eq!(status.disk_total_bytes, None);
+    let host = read.host();
+    assert_eq!(host.state_db_bytes, None);
+    assert_eq!(host.index_db_bytes, None);
+    assert_eq!(host.disk_free_bytes, None);
+    assert_eq!(host.disk_total_bytes, None);
+}
+
+#[test]
+fn host_serves_cached_storage_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    };
+    std::fs::write(&paths.state_db, [0u8; 1234]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 567]).unwrap();
+    let read = read_state_for_host(paths.clone());
+    let before = read.host();
+    assert_eq!(before.state_db_bytes, Some(1234));
+    assert_eq!(before.index_db_bytes, Some(567));
+    assert!(before.disk_free_bytes.is_some());
+    assert!(before.disk_total_bytes.is_some());
+
+    std::fs::write(&paths.state_db, [0u8; 2468]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 1134]).unwrap();
+    let after = read.host();
+    assert_eq!(after.state_db_bytes, before.state_db_bytes);
+    assert_eq!(after.index_db_bytes, before.index_db_bytes);
+    assert_eq!(after.disk_free_bytes, before.disk_free_bytes);
+    assert_eq!(after.disk_total_bytes, before.disk_total_bytes);
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter
@@ -1527,72 +1567,6 @@ fn set_voting_targets_rejects_target_outside_allowable_range() {
     );
 }
 
-/// State DB file present and non-empty → `Some(len)` with the actual
-/// file length.
-#[test]
-fn host_state_db_existing_file_returns_some_len() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::write(&state_db, b"redb-payload").unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: state_db.clone(),
-        index_db: dir.path().join("missing-index.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(
-        host.state_db_bytes,
-        Some(12),
-        "wrote 12 bytes, expected Some(12)"
-    );
-}
-
-/// Empty file → `Some(0)`, not `None`. The wire shape must
-/// distinguish "file exists but is empty" from "file missing."
-#[test]
-fn host_state_db_empty_file_returns_some_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::File::create(&state_db).unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: state_db.clone(),
-        index_db: dir.path().join("missing-index.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.state_db_bytes, Some(0));
-}
-
-/// State DB path doesn't exist → `None`, not `0` — monitoring scrapers
-/// would misread a wired `0` as "database empty."
-#[test]
-fn host_state_db_missing_file_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: dir.path().join("does-not-exist.redb"),
-        index_db: dir.path().join("also-missing.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.state_db_bytes, None);
-}
-
-/// Indexer disabled (file absent) → `None`. Operators with
-/// `[indexer] enabled = false` should see `null`, not `0`.
-#[test]
-fn host_index_db_disabled_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::write(&state_db, b"x").unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db,
-        index_db: dir.path().join("indexer.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.index_db_bytes, None);
-}
-
 /// Current process is always sampleable via sysinfo → RSS is
 /// `Some(_)`. Pins that the sysinfo path constructs `Some`, not
 /// `unwrap_or(0)` falling through to a bogus zero.
@@ -1609,36 +1583,6 @@ fn host_rss_for_current_process_is_some() {
         .rss_bytes
         .expect("RSS must be measurable for the test process");
     assert!(rss > 0, "test process RSS must be > 0, got {rss}");
-}
-
-/// `tempfile::tempdir()` lives on a mounted volume on every
-/// supported platform, so the disk-match path produces
-/// `Some(_)` for both fields. Pins the success branch — the
-/// `None` branch fires when no sysinfo disk's mount-point is a
-/// prefix of `data_dir`, which is environment-specific and
-/// flaky to provoke in a test. Coverage of the `None` branch
-/// for byte fields lives in the state-db / index-db tests
-/// above.
-#[test]
-fn host_disk_for_tempdir_returns_some_pair() {
-    let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: dir.path().join("state.redb"),
-        index_db: dir.path().join("indexer.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    let free = host
-        .disk_free_bytes
-        .expect("tempdir is on a mounted volume → Some(free)");
-    let total = host
-        .disk_total_bytes
-        .expect("tempdir is on a mounted volume → Some(total)");
-    assert!(
-        total >= free,
-        "disk_total_bytes ({total}) must be >= disk_free_bytes ({free})",
-    );
-    assert!(total > 0, "disk_total_bytes on a real volume must be > 0");
 }
 
 /// End-to-end JSON-encoder parity on REAL mainnet data, no node needed:
