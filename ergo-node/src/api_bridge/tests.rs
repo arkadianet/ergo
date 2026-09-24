@@ -1818,6 +1818,48 @@ fn encode_pow_solutions_v1_d_matches_scala_served_number() {
 
 // ----- helpers -----
 
+fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
+    let id = [0xab; 32];
+    let (dir, bridge) = bridge_over_store(|store| store.store_header(&id, &[0xff]).unwrap());
+    (dir, bridge, hex::encode(id))
+}
+
+/// A compat bridge over a fresh temp store that `setup` has written into.
+fn bridge_over_store(
+    setup: impl FnOnce(&ergo_state::store::StateStore),
+) -> (tempfile::TempDir, ScalaCompatBridge) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+    setup(&store);
+    let publisher = crate::snapshot::SnapshotPublisher::new(
+        ApiInfo {
+            agent_name: "test".into(),
+            node_name: "test".into(),
+            network: "mainnet".into(),
+            version: "test".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 120_000,
+        },
+        std::time::Instant::now(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    let bridge = ScalaCompatBridge::new(
+        publisher.handle(),
+        ScalaCompatStatic {
+            name: "test".into(),
+            app_version: "test".into(),
+            network: "mainnet".into(),
+            launch_time_unix_ms: 0,
+            rest_api_url: None,
+            min_relay_fee_nano_erg: 1_000_000,
+        },
+        store.reader_handle(),
+        ergo_chain_spec::DifficultyParams::mainnet(),
+    );
+    (dir, bridge)
+}
+
 /// `{header, blockTransactions}` slice of Scala's `GET /blocks/{id}`.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1880,6 +1922,61 @@ fn mainnet_block_545684_section_bytes(v: &BlockSectionsVector) -> Vec<u8> {
         "section bytes must hash to the transactionsRoot Scala signed into the header",
     );
     bytes
+}
+
+// ----- error paths -----
+
+#[test]
+fn bridge_try_header_ids_at_height_malformed_row_is_corrupt() {
+    let height = 7;
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .write_malformed_headers_by_height_row_for_test(height)
+            .unwrap();
+    });
+    let err = bridge.try_header_ids_at_height(height).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.header_ids_at_height(height).is_empty());
+    assert!(bridge
+        .try_header_ids_at_height(height + 1)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bridge_try_proof_for_tx_root_mismatch_is_corrupt_compat_stays_none() {
+    let v = mainnet_block_545684_sections();
+    let section_bytes = mainnet_block_545684_section_bytes(&v);
+    let header_id: [u8; 32] = hex::decode(&v.header.id).unwrap().try_into().unwrap();
+    let mut header = ergo_rest_json::decode_scala_header_struct(&v.header).unwrap();
+    let mut root = *header.transactions_root.as_bytes();
+    root[0] ^= 1;
+    header.transactions_root = Digest32::from(root);
+    let mut writer = VlqWriter::new();
+    ergo_ser::header::write_header(&mut writer, &header).unwrap();
+    let header_bytes = writer.result();
+    let expected = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &header_id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    let (_dir, bridge) = bridge_over_store(|store| {
+        // Keep the original header id so the real section still names its header.
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .store_block_section_typed(
+                &expected.transactions_id,
+                &section_bytes,
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap();
+    });
+    let tx_id = &v.block_transactions.transactions[0].id;
+    let err = bridge.try_proof_for_tx(&v.header.id, tx_id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("proof does not verify"));
+    assert!(bridge.proof_for_tx(&v.header.id, tx_id).is_none());
 }
 
 // ----- oracle parity -----
@@ -2003,4 +2100,55 @@ fn block_545684_transaction_is_rejected_under_todays_activated_version() {
     }
     let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes).with_activated_script_version(1);
     ergo_ser::transaction::read_transaction(&mut r).expect("activated 1: the require is inert");
+}
+
+#[test]
+fn bridge_try_header_by_id_corrupt_stored_bytes_is_corrupt() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    let err = bridge.try_header_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().starts_with("parse header:"));
+    assert!(bridge
+        .try_header_by_id(&hex::encode([0xcd; 32]))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn bridge_header_by_id_corrupt_stored_bytes_stays_none() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    assert!(bridge.header_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_short_section_is_corrupt_compat_stays_none() {
+    let id = [0xa1; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(
+                &id,
+                &[0x01; 8],
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.modifier_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_unknown_type_tag_is_corrupt_compat_stays_none() {
+    let id = [0xa2; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(&id, &[0x01; 40], 7)
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("unknown type byte 7"));
+    assert!(bridge.modifier_by_id(&id).is_none());
 }

@@ -455,6 +455,7 @@ pub struct MembershipQuery {
         (status = 200, description = "Merkle membership proof (same core as chain/proofs/{header_id}/transactions/{tx_id})", body = V1MerkleProof),
         (status = 400, description = "Missing/malformed header_id or tx_id", body = V1Error),
         (status = 404, description = "No block, or tx not in that block", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
