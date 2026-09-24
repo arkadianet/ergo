@@ -2682,9 +2682,15 @@ fn code_106_acknowledges_the_tracked_ordering_request() {
         &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
     );
 
-    assert_eq!(
+    // The reply acknowledges the expectation: the id leaves `inflight`.
+    // It does not stay `Received`: the fixture header carries no valid
+    // PoW, so the reconstruction handoff's header validation fails and
+    // rolls the id's delivery state back to `Unknown`, as every failed
+    // header delivery does — a header that was not stored must stay
+    // requestable. Only a missing acknowledgement leaves it `Requested`.
+    assert_ne!(
         state.coordinator.delivery().status(&oa_id),
-        ModifierStatus::Received,
+        ModifierStatus::Requested,
         "the reply clears the expectation it answered"
     );
     assert!(
@@ -3170,9 +3176,12 @@ fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
         ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
         &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
     );
-    assert_eq!(
+    // Acknowledged means out of `inflight`; the invalid fixture header
+    // then rolls `Received` back to `Unknown` (see
+    // `code_106_acknowledges_the_tracked_ordering_request`).
+    assert_ne!(
         state.coordinator.delivery().status(&x),
-        ModifierStatus::Received,
+        ModifierStatus::Requested,
         "A's 106 acknowledges A's own outstanding request"
     );
     assert!(
