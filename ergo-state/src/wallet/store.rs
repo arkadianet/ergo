@@ -433,6 +433,7 @@ impl WalletWrite for RedbWalletWrite<'_> {
         unpromote_matured_boxes(self.txn(), height.saturating_sub(1))?;
         rollback_scans_from_block(self.txn(), &block_txs, height)?;
         if invalidate {
+            self.set_scan_invalidated(true)?;
             clear_scan_tracking(self.txn())?;
         }
         Ok(())
@@ -505,6 +506,22 @@ mod tests {
         assert_eq!(read.scan_cursor().unwrap().unwrap().height, 0);
         assert!(read.all_boxes().unwrap().is_empty());
         assert!(read.all_transactions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rollback_block_with_invalidate_sets_scan_invalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let (payload, txs) = payload();
+        let mut write = store.begin_write().unwrap();
+        write.apply_block(1, &[4; 32], &payload).unwrap();
+        write.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.rollback_block(1, &txs, true).unwrap();
+        write.commit().unwrap();
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
     }
 
     #[test]
