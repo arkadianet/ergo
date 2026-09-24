@@ -527,6 +527,18 @@ impl StateStore {
                 }
             }
         }
+        if wallet_hook.is_some() {
+            crate::wallet::apply::rewind_scan_cursor(
+                &write_txn,
+                target_height,
+                (target_height > 0).then_some(&new_tip_id),
+            )
+            .map_err(|e| StateError::WalletApply {
+                what: "cursor rewind",
+                height: target_height,
+                source: Box::new(e),
+            })?;
+        }
 
         write_txn.commit()?;
         // Mutation after successful commit.

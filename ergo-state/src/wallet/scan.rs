@@ -20,8 +20,8 @@ use thiserror::Error;
 
 use crate::store::StateError;
 use crate::wallet::apply::{
-    apply_block_to_scans_rescan, apply_block_to_wallet_rescan, clear_scan_tracking, BlockOutput,
-    BlockTx,
+    apply_block_to_scans_rescan, apply_block_to_wallet_rescan, clear_scan_tracking,
+    set_scan_cursor, BlockOutput, BlockTx,
 };
 use crate::wallet::maturity::promote_matured_boxes_rescan;
 use crate::wallet::tables::{
@@ -247,10 +247,7 @@ impl WalletScanService {
                     txs_tbl.remove(k)?;
                 }
             }
-            {
-                let mut sh = txn.open_table(WALLET_SCAN_HEIGHT)?;
-                sh.insert((), 0u32)?;
-            }
+            set_scan_cursor(&txn, 0, None)?;
             txn.commit()?;
         } else {
             // Range-scoped rebuild: delete rows >= start_height, rewind
@@ -371,10 +368,7 @@ impl WalletScanService {
             }
 
             // STEP 1e: rewind scan height.
-            {
-                let mut sh = txn.open_table(WALLET_SCAN_HEIGHT)?;
-                sh.insert((), start_height.saturating_sub(1))?;
-            }
+            set_rescan_boundary(&txn, start_height.saturating_sub(1))?;
             txn.commit()?;
         }
 
@@ -549,6 +543,31 @@ fn mark_scan_invalidated(db: &Arc<Database>) -> Result<(), redb::Error> {
     txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
     txn.commit()?;
     Ok(())
+}
+
+fn set_rescan_boundary(txn: &redb::WriteTransaction, height: u32) -> Result<(), redb::Error> {
+    let header_id = if height == 0 {
+        None
+    } else {
+        let table = txn.open_table(crate::store::CHAIN_INDEX)?;
+        let bytes = table.get(height as u64)?.ok_or_else(|| {
+            redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("rescan boundary {height} missing from chain_index"),
+            ))
+        })?;
+        let bytes = bytes.value();
+        if bytes.len() != 32 {
+            return Err(redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("chain_index row at {height} is not 32 bytes"),
+            )));
+        }
+        let mut header_id = [0u8; 32];
+        header_id.copy_from_slice(bytes);
+        Some(header_id)
+    };
+    set_scan_cursor(txn, height, header_id.as_ref())
 }
 
 // --- internal helpers ---

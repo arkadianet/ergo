@@ -5,6 +5,7 @@
 
 use crate::wallet::tables::*;
 use crate::wallet::types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
+use crate::wallet::WalletScanCursor;
 use redb::{ReadTransaction, ReadableTable, ReadableTableMetadata};
 
 /// A wallet box surfaced through a reserved scan id (9 mining / 10 payments),
@@ -73,12 +74,65 @@ impl<'tx> WalletReader<'tx> {
     /// wallet has never been initialized (table is empty).
     #[allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
     pub fn scan_height(&self) -> Result<Option<u32>, redb::Error> {
-        let tbl = match self.txn.open_table(WALLET_SCAN_HEIGHT) {
-            Ok(t) => t,
+        Ok(self.scan_cursor()?.map(|cursor| cursor.height))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, redb::Error> {
+        let height = match self.txn.open_table(WALLET_SCAN_HEIGHT) {
+            Ok(table) => table.get(())?.map(|row| row.value()),
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(error) => return Err(error.into()),
         };
-        Ok(tbl.get(())?.map(|g| g.value()))
+        let Some(height) = height else {
+            return Ok(None);
+        };
+        let stored_id = match self.txn.open_table(WALLET_SCAN_HEADER_ID) {
+            Ok(table) => table.get(())?.map(|row| row.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if height == 0 {
+            return Ok(Some(WalletScanCursor {
+                height,
+                header_id: None,
+            }));
+        }
+        if let Some(header_id) = stored_id {
+            return Ok(Some(WalletScanCursor {
+                height,
+                header_id: Some(header_id),
+            }));
+        }
+        let table = match self.txn.open_table(crate::store::CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Err(redb::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "wallet cursor has no header id and chain_index is absent",
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let bytes = table.get(height as u64)?.ok_or_else(|| {
+            redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "wallet cursor has no chain_index row",
+            ))
+        })?;
+        let bytes = bytes.value();
+        if bytes.len() != 32 {
+            return Err(redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "wallet cursor chain_index row is not 32 bytes",
+            )));
+        }
+        let mut header_id = [0u8; 32];
+        header_id.copy_from_slice(bytes);
+        Ok(Some(WalletScanCursor {
+            height,
+            header_id: Some(header_id),
+        }))
     }
 
     /// All wallet boxes (any status). Returns an owned `Vec<WalletBox>`

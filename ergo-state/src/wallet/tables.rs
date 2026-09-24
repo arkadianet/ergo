@@ -18,6 +18,10 @@ use redb::TableDefinition;
 /// historical blocks.
 pub const WALLET_SCAN_HEIGHT: TableDefinition<(), u32> = TableDefinition::new("wallet_scan_height");
 
+/// Header id of the last block committed to `WALLET_SCAN_HEIGHT`.
+pub const WALLET_SCAN_HEADER_ID: TableDefinition<(), [u8; 32]> =
+    TableDefinition::new("wallet_scan_header_id");
+
 /// Unspent / spent / immature wallet boxes, keyed by box id.
 /// Iterating this table gives all currently-known wallet boxes;
 /// the value's `status` field discriminates lifecycle stage.

@@ -372,6 +372,69 @@ fn rollback_never_raises_scan_height() {
     assert_eq!(read_scan_height(&db), Some(50), "rollback never raises");
 }
 
+fn read_scan_header(db: &redb::Database) -> Option<[u8; 32]> {
+    let r = db.begin_read().unwrap();
+    match r.open_table(WALLET_SCAN_HEADER_ID) {
+        Ok(t) => t.get(()).unwrap().map(|g| g.value()),
+        Err(_) => None,
+    }
+}
+
+#[test]
+fn apply_records_scan_header_id_with_height() {
+    let (_d, db) = temp_db();
+    let block_id = [0xA7; 32];
+    let txs: Vec<BlockTx<'_>> = vec![];
+    {
+        let w = db.begin_write().unwrap();
+        apply_block_to_wallet_rescan(&w, &BTreeSet::new(), &BTreeMap::new(), 10, &block_id, &txs)
+            .unwrap();
+        w.commit().unwrap();
+    }
+    assert_eq!(read_scan_height(&db), Some(10));
+    assert_eq!(read_scan_header(&db), Some(block_id));
+}
+
+#[test]
+fn rollback_rewinds_scan_header_to_common_ancestor() {
+    let (_d, db) = temp_db();
+    let ancestor = [0xA1; 32];
+    let old_tip = [0xA3; 32];
+    let new_tip = [0xB3; 32];
+    {
+        let w = db.begin_write().unwrap();
+        set_scan_cursor(&w, 3, Some(&old_tip)).unwrap();
+        w.commit().unwrap();
+    }
+    {
+        let w = db.begin_write().unwrap();
+        let txs: Vec<BlockTx<'_>> = vec![];
+        rollback_block_from_wallet(&w, 3, &txs, &NoopGuard).unwrap();
+        rewind_scan_cursor(&w, 1, Some(&ancestor)).unwrap();
+        w.commit().unwrap();
+    }
+    assert_eq!(read_scan_height(&db), Some(1));
+    assert_eq!(read_scan_header(&db), Some(ancestor));
+    {
+        let txs: Vec<BlockTx<'_>> = vec![];
+        for (height, header_id) in [(2, [0xB2; 32]), (3, new_tip)] {
+            let w = db.begin_write().unwrap();
+            apply_block_to_wallet_rescan(
+                &w,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                height,
+                &header_id,
+                &txs,
+            )
+            .unwrap();
+            w.commit().unwrap();
+        }
+    }
+    assert_eq!(read_scan_height(&db), Some(3));
+    assert_eq!(read_scan_header(&db), Some(new_tip));
+}
+
 // ----- WALLET_SCAN_TXS (per-tx scan tagging, Scala WalletScanLogic) -----
 
 #[test]

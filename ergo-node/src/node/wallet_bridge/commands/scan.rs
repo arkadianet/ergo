@@ -2128,7 +2128,9 @@ mod tests {
         // the contract `rescan_full_rebuild` relies on.
         let hit = serialize_box_json(&box_json_with_asset(0x11));
         let miss = serialize_box_json(&box_json(5, 100, 0x77, 0));
-        let out = matcher.match_boxes(&[hit.as_slice(), miss.as_slice()]).unwrap();
+        let out = matcher
+            .match_boxes(&[hit.as_slice(), miss.as_slice()])
+            .unwrap();
         assert_eq!(out, vec![vec![11u16], vec![]]);
     }
 

@@ -141,9 +141,7 @@ pub fn apply_block_to_wallet_rescan(
             tx,
         )?;
     }
-    // Advance scan height.
-    let mut scan_height_tbl = txn.open_table(WALLET_SCAN_HEIGHT)?;
-    scan_height_tbl.insert((), block_height)?;
+    set_scan_cursor(txn, block_height, (block_height > 0).then_some(block_id))?;
     Ok(())
 }
 
@@ -155,6 +153,52 @@ pub fn is_scan_invalidated(txn: &WriteTransaction) -> Result<bool, redb::Error> 
         Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+pub(crate) fn set_scan_cursor(
+    txn: &WriteTransaction,
+    height: u32,
+    header_id: Option<&[u8; 32]>,
+) -> Result<(), redb::Error> {
+    let mut height_table = txn.open_table(WALLET_SCAN_HEIGHT)?;
+    let mut header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+    height_table.insert((), height)?;
+    if let Some(header_id) = header_id {
+        header_table.insert((), *header_id)?;
+    } else {
+        header_table.remove(())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn rewind_scan_cursor(
+    txn: &WriteTransaction,
+    target_height: u32,
+    target_header_id: Option<&[u8; 32]>,
+) -> Result<(), redb::Error> {
+    let current = {
+        let height_table = txn.open_table(WALLET_SCAN_HEIGHT)?;
+        let current = height_table.get(())?.map(|row| row.value());
+        current
+    };
+    let Some(current) = current else {
+        return Ok(());
+    };
+    if current < target_height {
+        return Ok(());
+    }
+    if current > target_height {
+        return set_scan_cursor(txn, target_height, target_header_id);
+    }
+    let header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+    let stored = header_table.get(())?.map(|row| row.value());
+    if stored != target_header_id.copied() {
+        return Err(redb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "wallet scan cursor header mismatch",
+        )));
+    }
+    Ok(())
 }
 
 fn apply_inputs(
@@ -423,6 +467,8 @@ pub fn rollback_block_from_wallet(
     let current = scan_height_tbl.get(())?.map(|g| g.value());
     if let Some(current) = current {
         if current > target {
+            let mut header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+            header_table.remove(())?;
             scan_height_tbl.insert((), target)?;
         }
     }
