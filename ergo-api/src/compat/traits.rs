@@ -13,6 +13,17 @@ use crate::compat::types::{
 };
 use ergo_rest_json::types::{ScalaNipopowProof, ScalaPopowHeader};
 
+/// Failure to read or materialise a stored chain record.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChainReadError {
+    /// Store could not be read: v1 responds with 503 chain_reader_unavailable.
+    #[error("{0}")]
+    Unavailable(String),
+    /// Stored record could not be decoded or encoded: v1 responds with 500.
+    #[error("{0}")]
+    Corrupt(String),
+}
+
 pub trait NodeChainQuery: Send + Sync {
     /// `/info` — node identity, tip pointers, peer/mempool counts,
     /// protocol parameters. Volatile fields may differ slightly from the
@@ -44,6 +55,11 @@ pub trait NodeChainQuery: Send + Sync {
     /// vec if the height is past the tip or no chain has been written.
     fn header_ids_at_height(&self, height: u32) -> Vec<String>;
 
+    /// Fallible [`Self::header_ids_at_height`] for callers that must distinguish read failures from misses.
+    fn try_header_ids_at_height(&self, height: u32) -> Result<Vec<String>, ChainReadError> {
+        Ok(self.header_ids_at_height(height))
+    }
+
     /// `(height, hex manifest id)` of the locally-served UTXO snapshot
     /// set — Scala `UtxoSetSnapshotPersistence.getSnapshotInfo()`, which
     /// backs BOTH the REST `/utxo/getSnapshotsInfo` route and the P2P
@@ -66,16 +82,16 @@ pub trait NodeChainQuery: Send + Sync {
     /// `adProofs: null`.
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock>;
 
-    /// Same lookup as [`Self::full_block_by_id`], but able to tell "the node
-    /// does not have this block" apart from "the node has it and could not
-    /// serialise it". The former is a 404; the latter is a 500 carrying the
-    /// failure — answering 404 for a block the node is storing tells the client
-    /// the chain has a hole it does not have, and a REST walker that trusts it
-    /// stalls there forever.
-    ///
-    /// The default delegates, so a bridge that cannot distinguish the two keeps
-    /// today's behaviour; the store-backed bridge overrides it.
-    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+    /// Fallible [`Self::full_block_by_id`]: missing blocks return `Ok(None)`,
+    /// unreadable storage returns [`ChainReadError::Unavailable`], and stored
+    /// records that cannot be decoded or encoded return [`ChainReadError::Corrupt`].
+    /// v1 maps those failures to 503 and 500 respectively; compat maps both
+    /// to its existing 500 envelope using the error's unchanged display text.
+    /// The default delegates; store-backed bridges override it.
+    fn try_full_block_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaFullBlock>, ChainReadError> {
         Ok(self.full_block_by_id(header_id_hex))
     }
 
@@ -104,6 +120,11 @@ pub trait NodeChainQuery: Send + Sync {
     /// subset of the surface need not opt in; production bridges override.
     fn header_by_id(&self, _header_id_hex: &str) -> Option<ScalaHeader> {
         None
+    }
+
+    /// Fallible [`Self::header_by_id`] for callers that must distinguish read failures from misses.
+    fn try_header_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaHeader>, ChainReadError> {
+        Ok(self.header_by_id(header_id_hex))
     }
 
     /// `GET /nipopow/popowHeaderById/{headerId}` — header + interlinks +
@@ -149,12 +170,12 @@ pub trait NodeChainQuery: Send + Sync {
         None
     }
 
-    /// [`Self::block_transactions_by_id`] with the absent / unserialisable
-    /// distinction of [`Self::try_full_block_by_id`]. Default delegates.
+    /// Fallible [`Self::block_transactions_by_id`] with the failure
+    /// distinctions of [`Self::try_full_block_by_id`]. Default delegates.
     fn try_block_transactions_by_id(
         &self,
         header_id_hex: &str,
-    ) -> Result<Option<ScalaBlockTransactions>, String> {
+    ) -> Result<Option<ScalaBlockTransactions>, ChainReadError> {
         Ok(self.block_transactions_by_id(header_id_hex))
     }
 
@@ -172,6 +193,15 @@ pub trait NodeChainQuery: Send + Sync {
         None
     }
 
+    /// Fallible [`Self::proof_for_tx`] for callers that must distinguish read failures from misses.
+    fn try_proof_for_tx(
+        &self,
+        header_id_hex: &str,
+        tx_id_hex: &str,
+    ) -> Result<Option<ScalaMerkleProof>, ChainReadError> {
+        Ok(self.proof_for_tx(header_id_hex, tx_id_hex))
+    }
+
     /// `/blocks/modifier/{modifierId}` — generic-by-id lookup spanning
     /// headers and the three non-header block sections. Mirrors Scala's
     /// `getModifierById` (`BlocksApiRoute.scala:75-76`,
@@ -184,6 +214,14 @@ pub trait NodeChainQuery: Send + Sync {
     /// `ApiResponse.scala:30-31`).
     fn modifier_by_id(&self, _modifier_id_hex: &str) -> Option<ScalaBlockSection> {
         None
+    }
+
+    /// Fallible [`Self::modifier_by_id`] for callers that must distinguish read failures from misses.
+    fn try_modifier_by_id(
+        &self,
+        modifier_id_hex: &str,
+    ) -> Result<Option<ScalaBlockSection>, ChainReadError> {
+        Ok(self.modifier_by_id(modifier_id_hex))
     }
 
     /// `/blocks/lastHeaders/{count}` — last `count` headers from the

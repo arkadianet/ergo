@@ -49,10 +49,51 @@ pub(super) enum BridgeError {
         remaining: usize,
     },
     /// Underlying storage read failed (chain-store / block-section
-    /// fetch). The reassembly layer doesn't act on this beyond
-    /// logging it — the trait wrapper translates it to `Ok(None)` —
-    /// but preserving the source keeps the typed `StateError` variant
-    /// available for future log-aggregator grouping.
+    /// fetch). Fallible chain reads preserve this as `Unavailable` for
+    /// v1's 503 response; decoding and encoding failures become `Corrupt`
+    /// for its 500 response. Compat Option/Vec wrappers remain best-effort.
     #[error("storage read failed: {0}")]
     Storage(#[from] StateError),
+}
+
+impl From<BridgeError> for ergo_api::compat::ChainReadError {
+    fn from(error: BridgeError) -> Self {
+        match error {
+            BridgeError::Storage(_) => Self::Unavailable(error.to_string()),
+            BridgeError::Parse { .. }
+            | BridgeError::Encode { .. }
+            | BridgeError::LeftoverBytes { .. } => Self::Corrupt(error.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_api::compat::ChainReadError;
+
+    // ----- error paths -----
+
+    #[test]
+    fn chain_read_error_from_storage_error_is_unavailable() {
+        let error = BridgeError::Storage(StateError::StorageError(Box::new(
+            redb::StorageError::Io(std::io::Error::other("read failed")),
+        )));
+        let detail = error.to_string();
+        let actual = ChainReadError::from(error);
+        assert_eq!(actual.to_string(), detail);
+        assert_eq!(actual, ChainReadError::Unavailable(detail));
+    }
+
+    #[test]
+    fn chain_read_error_from_parse_error_is_corrupt() {
+        let error = BridgeError::Parse {
+            what: "header",
+            source: ReadError::UnexpectedEnd { pos: 1, needed: 1 },
+        };
+        let detail = error.to_string();
+        let actual = ChainReadError::from(error);
+        assert_eq!(actual.to_string(), detail);
+        assert_eq!(actual, ChainReadError::Corrupt(detail));
+    }
 }

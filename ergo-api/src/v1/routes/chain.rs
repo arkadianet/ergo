@@ -19,6 +19,7 @@ use super::{
     candidate_heights, invalid_hex, parse_height, parse_order, valid_modifier_id, HeightCursor,
     ListQuery, V1State,
 };
+use crate::compat::ChainReadError;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::V1Error;
 use crate::v1::error::{v1_error, Reason};
@@ -32,6 +33,17 @@ fn block_unserialisable(detail: String) -> Response {
         "the block is stored but could not be serialised",
         detail,
     )
+}
+
+fn chain_read_failed(error: ChainReadError) -> Response {
+    match error {
+        ChainReadError::Unavailable(_) => v1_error(
+            Reason::ChainReaderUnavailable,
+            "the chain store could not be read",
+            "retry the request shortly",
+        ),
+        ChainReadError::Corrupt(detail) => block_unserialisable(detail),
+    }
 }
 
 fn block_not_found() -> Response {
@@ -57,16 +69,18 @@ fn header_not_found() -> Response {
 /// (limit+1)-th height is probed with `has_header`: headers are dense on a
 /// synced chain, so header presence there is exactly "another candidate row
 /// exists". Returns the window length (how many leading heights to render)
-/// plus the finished `Page`.
+/// plus the finished `Page`. A failed probe fails the whole page.
 fn height_window_page(
     heights: &[u32],
     limit: u32,
-    has_header: impl Fn(u32) -> bool,
-) -> (usize, Page) {
+    has_header: impl Fn(u32) -> Result<bool, ChainReadError>,
+) -> Result<(usize, Page), ChainReadError> {
     let window_len = heights.len().min(limit as usize);
-    let next_cursor = heights[window_len..]
-        .iter()
-        .any(|&h| has_header(h))
+    let mut has_next = false;
+    for &height in &heights[window_len..] {
+        has_next |= has_header(height)?;
+    }
+    let next_cursor = has_next
         .then(|| {
             heights[..window_len]
                 .last()
@@ -74,14 +88,14 @@ fn height_window_page(
         })
         .flatten();
     let has_more = next_cursor.is_some();
-    (
+    Ok((
         window_len,
         Page {
             limit,
             next_cursor,
             has_more,
         },
-    )
+    ))
 }
 
 // ----- chain/blocks -------------------------------------------------------
@@ -98,6 +112,7 @@ fn height_window_page(
     responses(
         (status = 200, description = "Block summaries", body = Collection<V1BlockSummary>),
         (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -118,14 +133,23 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
     let tip = state.read.status().best_full_block_height;
 
     let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
-    let (window_len, page) = height_window_page(&heights, limit, |h| {
-        !chain.header_ids_at_height(h).is_empty()
-    });
+    let (window_len, page) = match height_window_page(&heights, limit, |h| {
+        chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
+    }) {
+        Ok(page) => page,
+        Err(error) => return chain_read_failed(error),
+    };
     let mut items = Vec::new();
     for &h in &heights[..window_len] {
-        if let Some(id) = chain.header_ids_at_height(h).into_iter().next() {
-            if let Some(fb) = chain.full_block_by_id(&id) {
-                items.push(block_summary_from_scala(state.network, &fb));
+        let ids = match chain.try_header_ids_at_height(h) {
+            Ok(ids) => ids,
+            Err(error) => return chain_read_failed(error),
+        };
+        if let Some(id) = ids.first() {
+            match chain.try_full_block_by_id(id) {
+                Ok(Some(fb)) => items.push(block_summary_from_scala(state.network, &fb)),
+                Ok(None) => {}
+                Err(error) => return chain_read_failed(error),
             }
         }
     }
@@ -156,7 +180,7 @@ pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -
     match chain.try_full_block_by_id(&id) {
         Ok(Some(fb)) => Json(block_from_scala(state.network, &fb, tip)).into_response(),
         Ok(None) => block_not_found(),
-        Err(detail) => block_unserialisable(detail),
+        Err(error) => chain_read_failed(error),
     }
 }
 
@@ -184,7 +208,10 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
     match chain.try_block_transactions_by_id(&id) {
         Ok(Some(bt)) => {
             let tip = state.read.status().best_full_block_height;
-            let height = chain.header_by_id(&id).map(|h| h.height);
+            let height = match chain.try_header_by_id(&id) {
+                Ok(header) => header.map(|h| h.height),
+                Err(error) => return chain_read_failed(error),
+            };
             let items = bt
                 .transactions
                 .iter()
@@ -193,7 +220,7 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
             Json(Collection::single_page(items)).into_response()
         }
         Ok(None) => block_not_found(),
-        Err(detail) => block_unserialisable(detail),
+        Err(error) => chain_read_failed(error),
     }
 }
 
@@ -205,6 +232,7 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
     responses(
         (status = 200, description = "Header ids at height (single page)", body = Collection<String>),
         (status = 400, description = "Height is not a non-negative integer", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -220,7 +248,10 @@ pub async fn blocks_at_height(
         Ok(h) => h,
         Err(e) => return *e,
     };
-    let ids = chain.header_ids_at_height(height);
+    let ids = match chain.try_header_ids_at_height(height) {
+        Ok(ids) => ids,
+        Err(error) => return chain_read_failed(error),
+    };
     Json(Collection::single_page(ids)).into_response()
 }
 
@@ -232,6 +263,7 @@ pub async fn blocks_at_height(
     responses(
         (status = 200, description = "Full blocks found (single page, misses dropped)", body = Collection<V1Block>),
         (status = 400, description = "Malformed id or more than 200 ids", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -254,11 +286,14 @@ pub async fn blocks_by_ids(
         return invalid_hex();
     }
     let tip = state.read.status().best_full_block_height;
-    let items = chain
-        .full_blocks_by_header_ids(&ids)
-        .iter()
-        .map(|fb| block_from_scala(state.network, fb, tip))
-        .collect();
+    let mut items = Vec::new();
+    for id in &ids {
+        match chain.try_full_block_by_id(id) {
+            Ok(Some(fb)) => items.push(block_from_scala(state.network, &fb, tip)),
+            Ok(None) => {}
+            Err(error) => return chain_read_failed(error),
+        }
+    }
     Json(Collection::single_page(items)).into_response()
 }
 
@@ -276,6 +311,7 @@ pub async fn blocks_by_ids(
     responses(
         (status = 200, description = "Header objects", body = Collection<V1Header>),
         (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -299,14 +335,23 @@ pub async fn list_headers(
     let tip = state.read.status().best_header_height;
 
     let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
-    let (window_len, page) = height_window_page(&heights, limit, |h| {
-        !chain.header_ids_at_height(h).is_empty()
-    });
+    let (window_len, page) = match height_window_page(&heights, limit, |h| {
+        chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
+    }) {
+        Ok(page) => page,
+        Err(error) => return chain_read_failed(error),
+    };
     let mut items = Vec::new();
     for &h in &heights[..window_len] {
-        if let Some(id) = chain.header_ids_at_height(h).into_iter().next() {
-            if let Some(hdr) = chain.header_by_id(&id) {
-                items.push(header_from_scala(state.network, &hdr));
+        let ids = match chain.try_header_ids_at_height(h) {
+            Ok(ids) => ids,
+            Err(error) => return chain_read_failed(error),
+        };
+        if let Some(id) = ids.first() {
+            match chain.try_header_by_id(id) {
+                Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
+                Ok(None) => {}
+                Err(error) => return chain_read_failed(error),
             }
         }
     }
@@ -321,6 +366,7 @@ pub async fn list_headers(
         (status = 200, description = "Header object", body = V1Header),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No header with that id", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -332,9 +378,10 @@ pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) 
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.header_by_id(&id) {
-        Some(h) => Json(header_from_scala(state.network, &h)).into_response(),
-        None => header_not_found(),
+    match chain.try_header_by_id(&id) {
+        Ok(Some(h)) => Json(header_from_scala(state.network, &h)).into_response(),
+        Ok(None) => header_not_found(),
+        Err(error) => chain_read_failed(error),
     }
 }
 
@@ -346,6 +393,7 @@ pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) 
     responses(
         (status = 200, description = "Header objects at height (single page)", body = Collection<V1Header>),
         (status = 400, description = "Height is not a non-negative integer", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -361,12 +409,18 @@ pub async fn headers_at_height(
         Ok(h) => h,
         Err(e) => return *e,
     };
-    let items = chain
-        .header_ids_at_height(height)
-        .into_iter()
-        .filter_map(|id| chain.header_by_id(&id))
-        .map(|h| header_from_scala(state.network, &h))
-        .collect();
+    let ids = match chain.try_header_ids_at_height(height) {
+        Ok(ids) => ids,
+        Err(error) => return chain_read_failed(error),
+    };
+    let mut items = Vec::new();
+    for id in &ids {
+        match chain.try_header_by_id(id) {
+            Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
+            Ok(None) => {}
+            Err(error) => return chain_read_failed(error),
+        }
+    }
     Json(Collection::single_page(items)).into_response()
 }
 
@@ -382,6 +436,7 @@ pub async fn headers_at_height(
         (status = 200, description = "The modifier, tagged by kind", body = V1Modifier),
         (status = 400, description = "Malformed modifier id", body = V1Error),
         (status = 404, description = "No modifier with that id (block_not_found)", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -394,11 +449,14 @@ pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>
         return invalid_hex();
     }
     let tip = state.read.status().best_full_block_height;
-    match chain.modifier_by_id(&id) {
-        Some(section) => Json(modifier_from_scala(state.network, &section, tip)).into_response(),
+    match chain.try_modifier_by_id(&id) {
+        Ok(Some(section)) => {
+            Json(modifier_from_scala(state.network, &section, tip)).into_response()
+        }
         // No `modifier_not_found` in the canonical enum; a missing block-graph
         // object answers `block_not_found`.
-        None => block_not_found(),
+        Ok(None) => block_not_found(),
+        Err(error) => chain_read_failed(error),
     }
 }
 
@@ -440,7 +498,7 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
             ),
         },
         Ok(None) => block_not_found(),
-        Err(detail) => block_unserialisable(detail),
+        Err(error) => chain_read_failed(error),
     }
 }
 
@@ -456,6 +514,7 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
         (status = 200, description = "Merkle membership proof", body = V1MerkleProof),
         (status = 400, description = "Malformed header or tx id", body = V1Error),
         (status = 404, description = "No block, or tx not in that block", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
         (status = 503, description = "Chain reader unavailable", body = V1Error),
     ),
 )]
@@ -474,7 +533,7 @@ pub async fn proof_for_tx(
 /// behind both `chain/proofs/{header_id}/transactions/{tx_id}` (path params,
 /// [`proof_for_tx`]) and `light/membership-proof` (query params,
 /// [`super::light::membership_proof`]). Identical proof semantics — wraps
-/// [`NodeChainQuery::proof_for_tx`](crate::compat::NodeChainQuery::proof_for_tx),
+/// [`NodeChainQuery::try_proof_for_tx`](crate::compat::NodeChainQuery::try_proof_for_tx),
 /// validating both ids and mapping the `None` return (header unknown OR tx not
 /// in that block) to the honest `tx_not_in_block` 404.
 pub(super) fn merkle_membership_proof(
@@ -492,8 +551,8 @@ pub(super) fn merkle_membership_proof(
             "supply an unprefixed lowercase hex transaction id",
         );
     }
-    match chain.proof_for_tx(header_id, tx_id) {
-        Some(mp) => {
+    match chain.try_proof_for_tx(header_id, tx_id) {
+        Ok(Some(mp)) => {
             let levels = mp
                 .levels
                 .into_iter()
@@ -512,8 +571,9 @@ pub(super) fn merkle_membership_proof(
             })
             .into_response()
         }
+        Err(error) => chain_read_failed(error),
         // Header unknown OR tx not in that block — a real 404.
-        None => v1_error(
+        Ok(None) => v1_error(
             Reason::TxNotInBlock,
             "no membership proof: unknown block or tx not in it",
             "verify the header id and that the tx is included in that block",
@@ -531,7 +591,7 @@ mod tests {
     #[test]
     fn height_window_page_full_window_pages_from_height_math() {
         let heights = [10, 9, 8, 7];
-        let (window_len, page) = height_window_page(&heights, 3, |_| true);
+        let (window_len, page) = height_window_page(&heights, 3, |_| Ok(true)).unwrap();
         assert_eq!(window_len, 3);
         assert!(page.has_more);
         let cur: HeightCursor = decode_cursor(page.next_cursor.as_deref().unwrap()).unwrap();
@@ -542,7 +602,7 @@ mod tests {
     fn height_window_page_short_supply_ends_listing() {
         // Fewer candidate heights than the limit — nothing beyond the window.
         let heights = [3, 2, 1];
-        let (window_len, page) = height_window_page(&heights, 25, |_| true);
+        let (window_len, page) = height_window_page(&heights, 25, |_| Ok(true)).unwrap();
         assert_eq!(window_len, 3);
         assert!(!page.has_more);
         assert!(page.next_cursor.is_none());
@@ -555,7 +615,7 @@ mod tests {
         // A pruned body inside the window must not end the listing: the page
         // math never looks at the collected row count, only the height domain.
         let heights = [10, 9, 8, 7];
-        let (window_len, page) = height_window_page(&heights, 3, |h| h != 9);
+        let (window_len, page) = height_window_page(&heights, 3, |h| Ok(h != 9)).unwrap();
         assert_eq!(window_len, 3);
         assert!(page.has_more, "a header exists beyond the window");
         let cur: HeightCursor = decode_cursor(page.next_cursor.as_deref().unwrap()).unwrap();
@@ -567,14 +627,14 @@ mod tests {
         // The overfetched height has no header (nothing was ever there) —
         // the listing honestly ends.
         let heights = [10, 9, 8, 7];
-        let (_, page) = height_window_page(&heights, 3, |h| h != 7);
+        let (_, page) = height_window_page(&heights, 3, |h| Ok(h != 7)).unwrap();
         assert!(!page.has_more);
         assert!(page.next_cursor.is_none());
     }
 
     #[test]
     fn height_window_page_empty_heights_is_empty_last_page() {
-        let (window_len, page) = height_window_page(&[], 25, |_| true);
+        let (window_len, page) = height_window_page(&[], 25, |_| Ok(true)).unwrap();
         assert_eq!(window_len, 0);
         assert!(!page.has_more);
         assert!(page.next_cursor.is_none());

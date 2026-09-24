@@ -1159,6 +1159,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable
           content:
@@ -1195,6 +1201,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable
           content:
@@ -1227,6 +1239,12 @@ paths:
                 $ref: '#/components/schemas/Collection_V1Block'
         '400':
           description: Malformed id or more than 200 ids
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
           content:
             application/json:
               schema:
@@ -1369,6 +1387,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable
           content:
@@ -1401,6 +1425,12 @@ paths:
                 $ref: '#/components/schemas/Collection_V1Header'
         '400':
           description: Height is not a non-negative integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
           content:
             application/json:
               schema:
@@ -1443,6 +1473,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
           description: Chain reader unavailable
           content:
@@ -1480,6 +1516,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '404':
           description: No modifier with that id (block_not_found)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
           content:
             application/json:
               schema:
@@ -1573,6 +1615,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '404':
           description: No block, or tx not in that block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
           content:
             application/json:
               schema:
@@ -1828,6 +1876,12 @@ paths:
                 $ref: '#/components/schemas/V1Error'
         '404':
           description: No block, or tx not in that block
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised
           content:
             application/json:
               schema:

@@ -1818,6 +1818,40 @@ fn encode_pow_solutions_v1_d_matches_scala_served_number() {
 
 // ----- helpers -----
 
+fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+    let id = [0xab; 32];
+    store.store_header(&id, &[0xff]).unwrap();
+    let publisher = crate::snapshot::SnapshotPublisher::new(
+        ApiInfo {
+            agent_name: "test".into(),
+            node_name: "test".into(),
+            network: "mainnet".into(),
+            version: "test".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 120_000,
+        },
+        std::time::Instant::now(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    let bridge = ScalaCompatBridge::new(
+        publisher.handle(),
+        ScalaCompatStatic {
+            name: "test".into(),
+            app_version: "test".into(),
+            network: "mainnet".into(),
+            launch_time_unix_ms: 0,
+            rest_api_url: None,
+            min_relay_fee_nano_erg: 1_000_000,
+        },
+        store.reader_handle(),
+        ergo_chain_spec::DifficultyParams::mainnet(),
+    );
+    (dir, bridge, hex::encode(id))
+}
+
 /// `{header, blockTransactions}` slice of Scala's `GET /blocks/{id}`.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2003,4 +2037,22 @@ fn block_545684_transaction_is_rejected_under_todays_activated_version() {
     }
     let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes).with_activated_script_version(1);
     ergo_ser::transaction::read_transaction(&mut r).expect("activated 1: the require is inert");
+}
+
+#[test]
+fn bridge_try_header_by_id_corrupt_stored_bytes_is_corrupt() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    let err = bridge.try_header_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().starts_with("parse header:"));
+    assert!(bridge
+        .try_header_by_id(&hex::encode([0xcd; 32]))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn bridge_header_by_id_corrupt_stored_bytes_stays_none() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    assert!(bridge.header_by_id(&id).is_none());
 }
