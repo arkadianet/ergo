@@ -14,6 +14,17 @@ from smoke import Unavailable, api
 from . import common
 
 NODES = ('scala', 'rust')
+# `--reference-follower` may ADD a Scala follower to the base pair. It is
+# never started cold: it would have to sync the whole chain from the
+# miner inside the window, and its lag would then measure that sync. It
+# is seeded from the miner's data directory instead, exactly as
+# `reconstruct_rate` does, and then peers with the miner directly (its
+# own loopback address plus `allowLocal`, `campaign.CAMPAIGN_P2P_HOST`).
+START_NODES = ('scala', 'rust')
+# The Scala nodes this scenario brings up ITSELF, by seeding them from
+# the miner's data directory. Every node outside `START_NODES` has to be
+# named here, or it never runs and its numbers read as a silent zero.
+SEEDED_NODES = ('scala2', 'scala3')
 ORDERING_BLOCKS = 60
 MEMPOOL_TXS = 20
 # Payments kept in flight per ordering block during the window, so the
@@ -21,21 +32,21 @@ MEMPOOL_TXS = 20
 # an ordering block to drop.
 PAYMENTS_PER_BLOCK = 3
 PAYMENT_NANOERG = 1_000_000
+# The node whose wallet the workload is submitted to.
+MINER = 'scala'
 
 
 def _pump(ctx, address, sent):
-    for _ in range(PAYMENTS_PER_BLOCK):
-        try:
-            status, txid = smoke.request(
-                'scala', '/wallet/payment/send',
-                [{'address': address, 'value': PAYMENT_NANOERG}])
-        except (OSError, ValueError):
-            continue
-        if status == 200 and txid:
-            sent.append(txid)
-            # When, so a payment still relaying at the next reading can
-            # be told apart from a real pool disagreement.
-            ctx.evidence.setdefault('_submitted_at', {})[txid] = time.time()
+    """The shared workload, so a fix to it reaches this window too."""
+    before = len(sent)
+    common.pump_payments(ctx, address, sent, MINER,
+                         PAYMENTS_PER_BLOCK, PAYMENT_NANOERG)
+    # When, so a payment still relaying at the next reading can be told
+    # apart from a real pool disagreement.
+    submitted = ctx.evidence.setdefault('_submitted_at', {})
+    now = time.time()
+    for txid in sent[before:]:
+        submitted[txid] = now
     return sent
 
 
@@ -109,6 +120,19 @@ def _observe_window(ctx, blocks, address):
 
 
 def run(ctx):
+    # A reference follower, if `--reference-follower` asked for one, on
+    # the miner's chain BEFORE the workload starts: its whole purpose is
+    # to produce the stock lag the port's is read against (spec §7a), and
+    # it can only do that from a chain it already holds.
+    import lifecycle
+    if set(SEEDED_NODES) & set(lifecycle.NODES):
+        import campaign
+        common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+
+    # AFTER the seed. The follower is deliberately not in `START_NODES`,
+    # so asserting peering first asks a node that does not exist yet
+    # whether it has peers — an unavoidable false failure, which Task
+    # 2's steady evidence duly recorded as a connection refusal.
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
 
     # The mempool workload first: it needs a matured miner reward, and

@@ -1,0 +1,78 @@
+# The provisioned Scala Matrix builds a devnet role may run (spec §4, §7a).
+#
+# One work directory per build, all under `root`. They live in a SIBLING
+# worktree rather than in this one because provisioning costs a sigma
+# `publishLocal` plus a full ergo compile, and every worktree of this
+# repo wants the same stock pin. `root` is resolved against this
+# worktree's repo root; `MATRIX_BUILDS_ROOT` overrides it.
+#
+# `stock` is provisioned and IMMUTABLE. The patch builds are created by
+#
+#   python3 scripts/jvm_weak_blocks_oracle/provision.py \
+#     --ergo-source ~/coding/development/arkadianet/ergo-scala \
+#     --ergo-ref matrix/<branch> --work-dir <root>/.work-<name> --sigma-reuse
+#
+# as each patch branch lands (plan 3 tasks 3-9). A build that is not
+# provisioned yet is declared here anyway: `--build F14` then fails with
+# the command that would create it, rather than with a missing name.
+#
+# `ergo_ref` is a FULL commit id, never a branch name (`builds.py`
+# refuses one), and `Build.verify()` refuses a build whose manifest
+# records a different `ergo_commit`. `branch` is information only.
+# F12F05 and F14 are pinned at the commits their evidence was measured
+# on; their branches have since moved by test-fixture changes only (no
+# production class differs). F13, F11 and `all` are pinned at the final
+# heads (F13 530a5a1b0 over the delivery-release fix 334df6e89, F11
+# ed6e91489 over the retry-budget fix a3dde7466, all f31f09064), so their
+# provisioned work directories (8036a71d9, 817b66b5c, f0562361d) are
+# refused until re-provisioned.
+
+root = "../input-blocks/scripts/jvm_weak_blocks_oracle"
+
+[builds.stock]
+work_dir = ".work-62c10315"
+ergo_ref = "62c10315e1ebcac4480dba6bacdc2100a38119e5"
+branch = "weak-blocks"
+description = "upstream ergoplatform/ergo weak-blocks @ 62c10315 — the M4 pin, and the baseline every patched number is measured against"
+
+[builds.F16]
+work_dir = ".work-F16"
+ergo_ref = "d77ed7f05fddd335ece19b7b823b3302d047dd39"
+branch = "matrix/F16-input-block-routes"
+description = "F16: explicit end-of-path directive on getFullBlockByHeaderIdR so the input-block transaction routes are reachable"
+
+[builds.F12F05]
+work_dir = ".work-F12F05"
+ergo_ref = "c0428cbd9acd9a89085a5f2003591b7d3051e321"
+branch = "matrix/F12-F05-reconstruction"
+description = "F12+F5: the holder reconstructs under parentId in the order the miner commits"
+
+[builds.F14]
+work_dir = ".work-F14"
+ergo_ref = "55c4f373571803a02d2b2260babec7b17c8f6cc7"
+branch = "matrix/F14-waitlist-graph-walk"
+description = "F14: applyDisconnected becomes a graph walk that consumes attached waitlist entries"
+
+[builds.F13]
+work_dir = ".work-F13"
+ergo_ref = "530a5a1b038aaa1a8cb2c49e584393ce65211e13"
+branch = "matrix/F13-pending-root-announcements"
+description = "F13: a bounded untrusted pending store for the root announcement, replayed through the +1 validation path"
+
+[builds.F04]
+work_dir = ".work-F04"
+ergo_ref = "661563190640311a50f9655aa04669311f24182c"
+branch = "matrix/F04-announcement-binding"
+description = "F4/F4b: every PRESENT announced field bound to its extension leaf, on all three generation paths"
+
+[builds.F11]
+work_dir = ".work-F11"
+ergo_ref = "ed6e914898a53a098ef40baa9596dac633b3e5f0"
+branch = "matrix/F11-candidate-retained-work"
+description = "F11: a bounded ring of recent candidates, retained work separated from active work, and a reply on every submission"
+
+[builds.all]
+work_dir = ".work-all"
+ergo_ref = "f31f09064e8c16f9bd9397bc3e582447c2eb176e"
+branch = "matrix-fixes-all"
+description = "the integration build: base + every patch branch merged, measured ONCE at the end and never used for a per-patch claim"

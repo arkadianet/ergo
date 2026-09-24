@@ -79,6 +79,23 @@
 //!                         flood`) reads those bounds off
 //!                         `/api/v1/status.input_blocks`; this side only
 //!                         has to deliver the traffic and say it did.
+//!   input_block_root_flood <hosts> <per_host> <waves> <interval_ms> <first>
+//!                         the Matrix ROOT-announcement flood (plan 3, F13):
+//!                         `waves` waves, each from `hosts` fresh source
+//!                         addresses `127.<first + n>.0.1`, every host
+//!                         sending `per_host` announcements at the node's
+//!                         height + 2 under a random, unknown ordering
+//!                         parent — the shape a patched Scala follower
+//!                         holds in its bounded pending store, unvalidated,
+//!                         until the parent is applied. Each wave re-reads
+//!                         the height, so the flood stays at + 2 while the
+//!                         honest chain advances. Fresh hosts per wave
+//!                         because the store admits per HOST and a host the
+//!                         node blacklists cannot reconnect. Aimed at a
+//!                         Scala follower by the campaign's `flood
+//!                         --reference-follower patched`, which reads the
+//!                         store's caps off `/info` and the honest root
+//!                         announcements off the follower's log.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -423,10 +440,12 @@ async fn api_get(api: &str, path: &str) -> std::io::Result<(Duration, String)> {
     Ok((start.elapsed(), String::from_utf8_lossy(&body).into_owned()))
 }
 
+/// A top-level numeric field. Tolerates whitespace before the colon, which
+/// the Scala node's pretty-printed JSON puts there (`"fullHeight" : 4`).
 fn json_u64(body: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\":");
+    let needle = format!("\"{key}\"");
     let i = body.find(&needle)? + needle.len();
-    let rest = body[i..].trim_start();
+    let rest = body[i..].trim_start().strip_prefix(':')?.trim_start();
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
@@ -918,6 +937,91 @@ async fn input_block_flood(ctx: &Ctx, announcements: u32, deliveries: u32) -> bo
     let ok = sent > 0 && after.is_some();
     println!(
         "{} input_block_flood: node still answering REST after the flood",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    ok
+}
+
+/// The ROOT-announcement flood: waves of announcements at height + 2, each
+/// wave from `hosts` source addresses nobody has used before.
+///
+/// Like `input_block_flood` the verdict is narrow — the traffic was
+/// delivered — and the store's caps, the honest roots and the honest
+/// peers are judged by the campaign from the follower's own `/info` and
+/// log.
+async fn input_block_root_flood(
+    ctx: &Ctx,
+    hosts: u8,
+    per_host: u32,
+    waves: u8,
+    interval: Duration,
+    first: u8,
+) -> bool {
+    let needed = u32::from(hosts) * u32::from(waves);
+    if u32::from(first) + needed > 255 {
+        println!(
+            "FAIL input_block_root_flood: {hosts} hosts x {waves} waves from 127.{first}.0.1 \
+             runs past 127.255.0.1"
+        );
+        return false;
+    }
+    let seed = 0x4d61_7472_6978_0002; // "Matrix" + the root-flood tag.
+    let mut sent_total = 0u32;
+    let mut refused_hosts = 0u32;
+    for wave in 0..waves {
+        let Some(height) = height(&ctx.api).await else {
+            println!("[root_flood] wave {wave}: node height unreadable, wave skipped");
+            tokio::time::sleep(interval).await;
+            continue;
+        };
+        let flood_height = height as u32 + 2;
+        let started = Instant::now();
+        let mut conns = Vec::new();
+        let mut sent_wave = 0u32;
+        for h in 0..hosts {
+            let k = first + wave * hosts + h;
+            let mut conn =
+                match Conn::open_as(src(k), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        refused_hosts += 1;
+                        println!("[root_flood] wave {wave}: {} refused: {e}", src(k));
+                        continue;
+                    }
+                };
+            for i in 0..per_host {
+                let n = (u32::from(k) << 16) | i;
+                let payload = bogus_announcement(seed, n, flood_height, draw(seed, 9, n));
+                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+                if conn.stream.write_all(&frame).await.is_err() {
+                    break;
+                }
+                sent_wave += 1;
+            }
+            conns.push(conn);
+        }
+        // Held open briefly so the node reads every frame before the
+        // sockets close; the entries it admitted outlive the connection.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(conns);
+        sent_total += sent_wave;
+        println!(
+            "[root_flood] wave {wave}: {sent_wave} announcements at height {flood_height} \
+             from {hosts} hosts in {:?}",
+            started.elapsed()
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        tokio::time::sleep(interval).await;
+    }
+    let after = height(&ctx.api).await;
+    println!(
+        "[root_flood] sent {sent_total} announcements in {waves} waves, {refused_hosts} hosts \
+         refused; node fullHeight after: {after:?}"
+    );
+    let ok = sent_total > 0 && after.is_some();
+    println!(
+        "{} input_block_root_flood: node still answering REST after the flood",
         if ok { "PASS" } else { "FAIL" }
     );
     ok
@@ -1455,6 +1559,22 @@ async fn main() {
             let a: u32 = rest.first().map_or(10_000, |s| s.parse().unwrap());
             let d: u32 = rest.get(1).map_or(1_000, |s| s.parse().unwrap());
             input_block_flood(&ctx, a, d).await
+        }
+        "input_block_root_flood" => {
+            let hosts: u8 = rest.first().map_or(10, |s| s.parse().unwrap());
+            let per_host: u32 = rest.get(1).map_or(40, |s| s.parse().unwrap());
+            let waves: u8 = rest.get(2).map_or(10, |s| s.parse().unwrap());
+            let interval_ms: u64 = rest.get(3).map_or(15_000, |s| s.parse().unwrap());
+            let first: u8 = rest.get(4).map_or(100, |s| s.parse().unwrap());
+            input_block_root_flood(
+                &ctx,
+                hosts,
+                per_host,
+                waves,
+                Duration::from_millis(interval_ms),
+                first,
+            )
+            .await
         }
         other => {
             eprintln!("unknown scenario: {other}");

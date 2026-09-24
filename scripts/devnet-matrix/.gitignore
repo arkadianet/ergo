@@ -1,4 +1,6 @@
 .work/
+# `MATRIX_WORK` gives a concurrent run its own working directory.
+.work-*/
 *.log
 .bsp/
 .scala-build/

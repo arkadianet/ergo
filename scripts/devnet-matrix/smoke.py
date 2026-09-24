@@ -66,6 +66,21 @@ API_KEY = lifecycle.API_KEY
 # human PROMOTES land under `test-vectors/weak-blocks/findings/`.
 FINDINGS = WORK / 'findings'
 
+
+def display_path(path):
+    """`path` relative to the checkout when it lies inside it, else absolute.
+
+    Evidence names its files relative to the repository root. A
+    `MATRIX_WORK` outside the checkout (a tempdir, another disk) is a
+    legitimate place to run from, so it is named in full rather than
+    raising `ValueError` in the middle of a run.
+    """
+    path = Path(path).resolve()
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
 # `/api/v1/peers` reports the peer's handshake protocol version. Input
 # blocks are gated on >= 6.5.0 on the Scala side, so anything lower means
 # the two nodes would never exchange them.
@@ -122,6 +137,21 @@ MEMPOOL_MIN_LOCATED = 1
 # ordering block: an ordering-height window closes on the miner's
 # schedule, and a follower cannot be failed for that.
 MEMPOOL_ROUTE_SECONDS = 420.0
+
+# How long one payment is waited into Scala's pool before the next is
+# asked for. This is NOT a tolerance being widened: it is what makes the
+# wallet's box selection see its own previous payment, and without it
+# the workload double-spends itself (see `conflicting_submissions`). At
+# 62c10315 the miner seals an input block roughly every 0.6 s, so a
+# payment appears in the pool within a sweep or two; 15 s is a ceiling
+# for a node under load, not an expected wait.
+MEMPOOL_SETTLE_SECONDS = 15.0
+
+# ...and the ceiling on the whole submission phase's waiting. A payment
+# can also be sealed into an input block and gone from the pool between
+# two polls, and that must cost one wait rather than twenty: if the
+# pacing is not working, `conflicting_submissions` is what says so.
+MEMPOOL_SETTLE_TOTAL_SECONDS = 90.0
 
 # How many input-block id lookups one sweep will make. The lookups are
 # inside the sweep's tip bracket, so they cost the sampler latency; a
@@ -306,7 +336,7 @@ def write_mismatch_artifact(assertion, message, evidence, at=None, context=None,
     if context:
         body.update(context)
     path.write_text(json.dumps(body, indent=2) + '\n')
-    return str(path.relative_to(ROOT))
+    return display_path(path)
 
 
 def ids_in(value, limit=20):
@@ -791,6 +821,21 @@ class Run:
                                 .get('bestOrdering') or None),
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
+            # A reference FOLLOWER's own tip (M4). Assertions 2 and 3 do
+            # not read it — they are defined against the Rust port — but
+            # without it the stock Scala follower's lag cannot be
+            # computed at all, and spec §7a requires that baseline
+            # before a patched number is quoted. Present as `None` when
+            # the node is not running, which `lag_distribution` counts
+            # as `no_tip` rather than as a lag of zero.
+            'scala2_tip': (reading.get('scala2', {}).get('best', {})
+                           .get('bestInputBlock') or None),
+            'scala3_tip': (reading.get('scala3', {}).get('best', {})
+                           .get('bestInputBlock') or None),
+            'scala3_chain': (reading.get('scala3', {}).get('chain', {})
+                             .get('bestInputBlocks') or []),
+            'scala3_ordering': (reading.get('scala3', {}).get('chain', {})
+                                .get('bestOrdering') or None),
         }
         # EVERY sample is retained and streamed to disk as it is taken:
         # the evaluators run over the whole run at finalization, and a
@@ -1001,6 +1046,101 @@ def percentile(values, pct):
     return ordered[min(rank, len(ordered)) - 1]
 
 
+def follower_qualifying_samples(samples, ordering_key,
+                                miner_key='scala_ordering'):
+    """Samples where THIS follower and the miner name the same ordering block.
+
+    `qualifying_samples`'s `ordering` field is agreement between the
+    miner and RUST, which is the right key for the Rust port and the
+    wrong one for everybody else: a Scala follower's lag read through it
+    accepted every sample where Rust happened to agree with the miner,
+    whatever ordering block the follower itself was on. Two input chains
+    under different ordering blocks are not chains of the same thing, so
+    an index into one is not a lag in the other.
+
+    Each exclusion is counted for its own reason — the follower and the
+    miner disagreed, the follower named none, the miner named none —
+    because "unmeasurable" and "measured as zero" must never look alike.
+
+    A sample that carries neither per-node field is a synthetic or
+    pre-M4 one and falls back to the agreed `ordering` id.
+    """
+    kept = []
+    excluded = {'different_ordering_block': 0,
+                'follower_named_no_ordering_block': 0,
+                'miner_named_no_ordering_block': 0}
+    for i, s in enumerate(samples):
+        if ordering_key not in s and miner_key not in s:
+            if s.get('ordering') is None:
+                excluded['different_ordering_block'] += 1
+            else:
+                kept.append((i, s))
+            continue
+        miner, follower = s.get(miner_key), s.get(ordering_key)
+        if miner is None:
+            excluded['miner_named_no_ordering_block'] += 1
+        elif follower is None:
+            excluded['follower_named_no_ordering_block'] += 1
+        elif follower != miner:
+            excluded['different_ordering_block'] += 1
+        else:
+            kept.append((i, s))
+    return kept, excluded
+
+
+def lag_distribution(samples, tip_key, chain_key='scala_chain',
+                     ordering_key=None):
+    """How far ONE follower's input tip trails the miner's chain.
+
+    The definition is assertion 2's — the index of the follower's
+    `bestInputBlock` in the miner's newest-first best input chain, at a
+    sample where the two agree on the ordering block — computed for an
+    arbitrary `tip_key`, so a stock Scala reference follower's lag can
+    be stated beside the Rust port's. Spec §7a: the stock follower is
+    measured before any patched number is quoted, and "stock lag in the
+    hundreds" is a hypothesis until it is.
+
+    Qualified by THIS follower's own ordering id against the miner's
+    (`follower_qualifying_samples`), not by the miner-vs-Rust `ordering`
+    field: reading a Scala follower through that one accepted every
+    sample where Rust agreed with the miner, whatever ordering block the
+    follower was on.
+
+    Nothing is folded in as a zero. A sample where the follower has no
+    tip counts in `no_tip`, and one whose tip the miner's chain does not
+    carry counts in `not_on_miner_chain`; neither contributes a lag,
+    because a measurement that did not happen is not a lag of zero.
+
+    Pure: `--self-test` drives it directly.
+    """
+    ordering_key = ordering_key or tip_key.replace('_tip', '_ordering')
+    kept, excluded = follower_qualifying_samples(samples, ordering_key)
+    lags, no_tip, off_chain = [], 0, 0
+    for _, s in kept:
+        tip = s.get(tip_key)
+        if not tip:
+            no_tip += 1
+            continue
+        chain = s.get(chain_key) or []
+        if tip not in chain:
+            off_chain += 1
+            continue
+        lags.append(chain.index(tip))
+    return {
+        'tip_key': tip_key,
+        'ordering_key': ordering_key,
+        'qualifying_samples': len(kept),
+        'excluded_samples': excluded,
+        'lag_samples': len(lags),
+        'no_tip': no_tip,
+        'not_on_miner_chain': off_chain,
+        'p50': percentile(lags, 50),
+        'p95': percentile(lags, 95),
+        'max': max(lags) if lags else None,
+        'mean': round(sum(lags) / len(lags), 2) if lags else None,
+    }
+
+
 def qualifying_samples(samples):
     """The samples an assertion may draw a conclusion from, plus why the
     rest were excluded.
@@ -1079,6 +1219,7 @@ def evaluate_tip_consistency(samples):
             # Chains are newest-first, so the index IS the number of
             # input blocks Rust trails by at this instant.
             lags.append(chain.index(rust_tip))
+    p50 = percentile(lags, 50)
     p95, mx = percentile(lags, 95), (max(lags) if lags else None)
     violations = _coverage_violations(kept, lags, 'tip consistency')
     if p95 is not None and p95 > LAG_P95_MAX:
@@ -1097,6 +1238,10 @@ def evaluate_tip_consistency(samples):
         'excluded_samples': excluded,
         'compared_samples': compared,
         'lag_samples': len(lags),
+        # The MEDIAN is reported beside the tail: the bound is on p95 and
+        # max, but a baseline a patch is read against needs the middle of
+        # the distribution too (spec §7a).
+        'lag_p50': p50,
         'lag_p95': p95,
         'lag_max': mx,
         'lag_mean': round(sum(lags) / len(lags), 2) if lags else None,
@@ -1490,6 +1635,88 @@ def _self_test():
     assert any('p95' in v for v in tip['violations']), tip
     assert any('max' in v for v in tip['violations']), tip
 
+    # ----- M4: the same lag, for ANY follower, with a median -----
+    #
+    # Spec §7a: the stock Scala FOLLOWER's lag is measured before a
+    # patched number is quoted, so the distribution has to be computable
+    # for a node that is not Rust — and the plan asks for p50, which the
+    # assertion-2 evaluator never reported.
+    assert tip['lag_p50'] is not None, tip
+    assert evaluate_tip_consistency(lockstep)['lag_p50'] == 0
+    # Rust, by the same definition assertion 2 uses.
+    d = lag_distribution(trailing, 'rust_tip')
+    assert (d['p50'], d['p95'], d['max']) == (2, 2, 2), d
+    assert d['lag_samples'] == MIN_QUALIFYING_SAMPLES, d
+    # A Scala reference follower, from its own tip field.
+    ref = [dict(s, scala2_tip=s['rust_tip']) for s in trailing]
+    assert lag_distribution(ref, 'scala2_tip')['p50'] == 2
+    # A follower with NO tip field contributes no lag and is not read as
+    # zero: a missing measurement must never look like a perfect one.
+    empty = lag_distribution(trailing, 'scala3_tip')
+    assert empty['lag_samples'] == 0 and empty['p50'] is None, empty
+    assert empty['no_tip'] == MIN_QUALIFYING_SAMPLES, empty
+    # A tip the miner's chain does not carry is counted apart, never
+    # folded in as a zero lag.
+    off = [dict(s, scala2_tip='zz') for s in trailing]
+    off_d = lag_distribution(off, 'scala2_tip')
+    assert off_d['lag_samples'] == 0, off_d
+    assert off_d['not_on_miner_chain'] == MIN_QUALIFYING_SAMPLES, off_d
+    # ----- fix round 1 (codex review-2): each follower is qualified
+    # against the miner by ITS OWN ordering block -----
+    #
+    # `qualifying_samples`'s `ordering` field is agreement between the
+    # miner and RUST. Reading a Scala follower's lag through it accepted
+    # every sample where Rust happened to agree with the miner, whatever
+    # ordering block the follower itself was on — 2,123 of 6,559
+    # "qualifying" samples in the archived steady series had a different
+    # Scala-follower ordering block. Two chains under different ordering
+    # blocks are not chains of the same thing, so an index into one is
+    # not a lag in the other.
+    _straddle = [
+        {'ordering': 'O1', 'scala_ordering': 'O1', 'rust_ordering': 'O1',
+         'scala_chain': ['c', 'b', 'a'], 'rust_tip': 'c',
+         'scala2_ordering': 'O0', 'scala2_tip': 'a'},
+    ] * MIN_QUALIFYING_SAMPLES
+    _agree = [
+        {'ordering': 'O1', 'scala_ordering': 'O1', 'rust_ordering': 'O1',
+         'scala_chain': ['c', 'b', 'a'], 'rust_tip': 'c',
+         'scala2_ordering': 'O1', 'scala2_tip': 'b'},
+    ] * MIN_QUALIFYING_SAMPLES
+    _mixed = _straddle + _agree
+    _follower = lag_distribution(_mixed, 'scala2_tip')
+    assert _follower['ordering_key'] == 'scala2_ordering', _follower
+    # Only the samples where the FOLLOWER agreed with the miner count.
+    assert _follower['qualifying_samples'] == MIN_QUALIFYING_SAMPLES, _follower
+    assert _follower['lag_samples'] == MIN_QUALIFYING_SAMPLES, _follower
+    assert (_follower['p50'], _follower['max']) == (1, 1), _follower
+    assert _follower['excluded_samples']['different_ordering_block'] == \
+        MIN_QUALIFYING_SAMPLES, _follower
+    # Rust, over the same series, is unaffected: its own ordering field
+    # is the one it was always qualified by.
+    _rust = lag_distribution(_mixed, 'rust_tip')
+    assert _rust['ordering_key'] == 'rust_ordering', _rust
+    assert _rust['qualifying_samples'] == 2 * MIN_QUALIFYING_SAMPLES, _rust
+    assert _rust['lag_samples'] == 2 * MIN_QUALIFYING_SAMPLES, _rust
+    # A follower that named NO ordering block at all is excluded for
+    # that reason, not counted as a lag and not confused with a
+    # disagreement.
+    _silent = [dict(s, scala2_ordering=None) for s in _agree]
+    _sd = lag_distribution(_silent, 'scala2_tip')
+    assert _sd['lag_samples'] == 0, _sd
+    assert _sd['excluded_samples']['follower_named_no_ordering_block'] == \
+        MIN_QUALIFYING_SAMPLES, _sd
+    # And a miner that named none excludes the sample for the miner's
+    # reason rather than blaming the follower.
+    _blind = [dict(s, scala_ordering=None) for s in _agree]
+    assert lag_distribution(_blind, 'scala2_tip')['excluded_samples'][
+        'miner_named_no_ordering_block'] == MIN_QUALIFYING_SAMPLES
+
+    # A spread reports a real median rather than the mean.
+    spread = ([sample(['c', 'b', 'a'], ['c', 'b', 'a'])] * 8
+              + [sample(['c', 'b', 'a'], ['a'])] * 2)
+    sd = lag_distribution(spread, 'rust_tip')
+    assert (sd['p50'], sd['max']) == (0, 2), sd
+
     # Rust longer than Scala cannot be a prefix.
     assert evaluate_chain_consistency(
         series(['b', 'a'], ['c', 'b', 'a']))['prefix_violation_count'] == \
@@ -1823,6 +2050,33 @@ def _self_test():
     overran, ok = paused_against(sweep_seconds=None, budget=0.2)
     assert not ok, 'a sweep that overruns the budget must NOT report quiescence'
     assert overran.sweep_join_timeouts == 1, overran.sweep_join_timeouts
+
+    # ----- M4: the funded workload has to be SPENDABLE -----
+    #
+    # The 62c10315 smoke reported `unresolved = 19` with every route
+    # working: 20 back-to-back `/wallet/payment/send` calls produced 20
+    # transactions that shared inputs (99 input references over 61
+    # distinct boxes, measured from the run's own `scala.log`), so 19 of
+    # them were double-spends of the one that confirmed and could NEVER
+    # reach either route. `unresolved` is "the observation did not
+    # happen"; a workload that cannot be confirmed has to say so in its
+    # own words instead of borrowing that one.
+    assert conflicting_submissions({}) == []
+    assert conflicting_submissions({'a': ['b1'], 'b': ['b2']}) == []
+    # Two transactions on one box conflict, and both are named.
+    assert conflicting_submissions(
+        {'a': ['b1', 'b2'], 'b': ['b2'], 'c': ['b3']}) == ['a', 'b']
+    # A chain of overlaps is ONE cluster, and every member is named: the
+    # measured run had clusters wider than a pair.
+    assert conflicting_submissions(
+        {'a': ['b1'], 'b': ['b1', 'b2'], 'c': ['b2']}) == ['a', 'b', 'c']
+    # A transaction whose inputs could not be read is not evidence of a
+    # conflict either way — it is simply not named.
+    assert conflicting_submissions({'a': [], 'b': []}) == []
+    # And the reverse guard: a workload that IS disjoint must never be
+    # blamed for an unresolved payment.
+    assert conflicting_submissions(
+        {str(i): [f'box{i}'] for i in range(20)}) == []
 
     # ----- fix round 2: assertion 6's two routes -----
 
@@ -2360,7 +2614,7 @@ def finalize_agreement(run, evidence):
         'evaluated_over': 'every sample taken in the run',
         'total_samples': len(run.series),
         'unavailable_samples': run.unavailable_samples,
-        'series_file': str(run.series_path.relative_to(ROOT)),
+        'series_file': display_path(run.series_path),
         'max_propagation_lag_seconds': max(lags) if lags else None,
         **tip,
     }
@@ -2372,6 +2626,14 @@ def finalize_agreement(run, evidence):
         'artifacts_written_at_mismatch_time': run.live_artifact_paths,
         **chain,
     }
+    # The lag of EVERY follower in the run, by one definition (spec §7a).
+    # The Rust port's is assertion 2's own number; a Scala reference
+    # follower's is the baseline it has to be read against, and a node
+    # that was not running reads as `no_tip`, never as a lag of zero.
+    evidence['follower_lag'] = {
+        role: lag_distribution(run.series, key) for role, key in
+        (('rust_follower', 'rust_tip'), ('scala_follower', 'scala2_tip'),
+         ('scala_follower_patched', 'scala3_tip'))}
     if tip['violations']:
         run.fail('2_best_input_block', '; '.join(tip['violations']),
                  {'lag_p95': tip['lag_p95'], 'lag_max': tip['lag_max'],
@@ -2414,6 +2676,49 @@ def wait_for_height(run, target, what):
             pass
         run.idle(0.5)
     raise Unavailable(f'{what}: Scala did not reach ordering block {target} in budget')
+
+
+def conflicting_submissions(tx_inputs):
+    """Which submitted transactions cannot all confirm.
+
+    `tx_inputs` is `{txid: [boxId, ...]}` for the payments the workload
+    submitted. Two transactions spending one box are mutually exclusive
+    by consensus, so at most one of them can ever reach an input block
+    or an ordering block — and a run that submits such a set is
+    measuring its own workload rather than the follower.
+
+    Returns every txid in a conflict cluster (union-find over the shared
+    boxes), sorted. A transaction whose inputs could not be read
+    contributes nothing: silence is not evidence of a conflict.
+
+    Pure, so `--self-test` drives it directly.
+    """
+    owner = {}
+
+    def find(x):
+        while owner.get(x, x) != x:
+            owner[x] = owner.get(owner[x], owner[x])
+            x = owner[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            owner[ra] = rb
+
+    by_box = {}
+    for txid, boxes in tx_inputs.items():
+        owner.setdefault(txid, txid)
+        for box in boxes or ():
+            if box in by_box:
+                union(txid, by_box[box])
+            else:
+                by_box[box] = txid
+    clusters = {}
+    for txid in tx_inputs:
+        clusters.setdefault(find(txid), []).append(txid)
+    return sorted(t for group in clusters.values() if len(group) > 1
+                  for t in group)
 
 
 class PaymentOutcomeTracker:
@@ -2785,21 +3090,71 @@ def assertion_6_mempool(run, evidence, count):
     result['address'] = address
     result['submitted_at_height'] = start_height
 
+    # One payment at a time, each waited into Scala's pool before the
+    # next is asked for.
+    #
+    # `/wallet/payment/send` returns as soon as the transaction is
+    # broadcast; the wallet only stops offering a box to the NEXT
+    # selection once it has scanned that transaction off the mempool
+    # update. Twenty back-to-back calls therefore re-select boxes that
+    # are already spent in flight: the 62c10315 run submitted 20
+    # payments over 61 distinct boxes with 99 input references, so 19 of
+    # them were double-spends of the one that confirmed. Waiting for the
+    # transaction to land in the pool is what makes the workload
+    # spendable, and `tx_inputs` below is what proves it was.
+    tx_inputs = {}
+    settle_budget = time.monotonic() + MEMPOOL_SETTLE_TOTAL_SECONDS
     for i in range(count):
         try:
             status, txid = request('scala', '/wallet/payment/send',
                                    [{'address': address, 'value': 1_000_000}])
             if status != 200 or not txid:
                 result['submit_failures'].append({'index': i, 'status': status})
-            else:
-                result['submitted'].append(txid)
+                continue
+            result['submitted'].append(txid)
         except (OSError, ValueError) as error:
             result['submit_failures'].append({'index': i, 'error': str(error)})
+            continue
+        settled = min(run.deadline, settle_budget,
+                      time.monotonic() + MEMPOOL_SETTLE_SECONDS)
+        while time.monotonic() < settled:
+            try:
+                pool = api('scala', '/transactions/unconfirmed') or []
+            except Unavailable:
+                pool = []
+            entry = next((t for t in pool if t.get('id') == txid), None)
+            if entry is not None:
+                tx_inputs[txid] = [b.get('boxId') for b in entry.get('inputs')
+                                   or () if b.get('boxId')]
+                break
+            run.idle(0.2)
+        else:
+            # Not seen in the pool inside the budget. Its inputs stay
+            # unknown, which the conflict check reads as "no evidence",
+            # never as "disjoint".
+            tx_inputs.setdefault(txid, [])
     submitted = set(result['submitted'])
     if len(submitted) != count:
         run.fail('6_mempool',
                  f'{len(submitted)} of {count} submissions returned HTTP 200',
                  {'failures': result['submit_failures']})
+
+    # A workload that cannot confirm is not a follower measurement.
+    conflicts = conflicting_submissions(tx_inputs)
+    result['submitted_inputs'] = tx_inputs
+    result['submitted_input_boxes'] = len(
+        {b for boxes in tx_inputs.values() for b in boxes})
+    result['submitted_input_refs'] = sum(len(b) for b in tx_inputs.values())
+    result['conflicting_submissions'] = conflicts
+    result['pool_settle_seconds'] = MEMPOOL_SETTLE_SECONDS
+    if conflicts:
+        run.fail('6_mempool',
+                 f'{len(conflicts)} of {len(submitted)} payments spend a box '
+                 'another submitted payment also spends, so at most one of each '
+                 'cluster can ever confirm — the workload, not the follower',
+                 {'conflicting': conflicts,
+                  'distinct_input_boxes': result['submitted_input_boxes'],
+                  'input_references': result['submitted_input_refs']})
 
     # Route each payment. The window is keyed to INPUT-BLOCK
     # PRODUCTION, not to ordering height: the old loop stopped at the
@@ -3455,7 +3810,7 @@ def main():
               f'{bool(poolm.get("scala_corpus_unavailable"))} '
               f'max_height_gap={run.max_height_gap} '
               f'failures={len(run.failures)} '
-              f'evidence={output.relative_to(ROOT)}', flush=True)
+              f'evidence={display_path(output)}', flush=True)
     raise SystemExit(0 if not run.failures else 1)
 
 

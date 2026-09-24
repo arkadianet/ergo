@@ -414,6 +414,22 @@ object WeakBlocksOracle {
     import scorex.crypto.authds.ADKey
     import scala.collection.JavaConverters._
 
+    // Two sources of nondeterminism in the generated fixture chain, both
+    // pinned here (see `seed`):
+    //
+    // 1. `validFullBlock`'s `timeOpt` — passed explicitly below.
+    // 2. `DefaultFakePowScheme.prove` fills the solution's one-time
+    //    public key with `genPk(scala.util.Random.nextLong())`. That `w`
+    //    goes into the header bytes, so the header id, the scripts that
+    //    name it, the boxes holding those scripts and the state root all
+    //    move on every run. `scala.util.Random` is the global singleton
+    //    the fake scheme uses, so seeding it here fixes it.
+    //
+    // With both pinned, regenerating at the same ergo commit reproduces
+    // these fixtures byte for byte, and a vector diff means upstream
+    // moved rather than that the generator ran again.
+    scala.util.Random.setSeed(seed)
+
     val trueTree = ErgoTree.fromProposition(TrueProp)
     val emptyProof = ProverResult(Array.emptyByteArray, ContextExtension.empty)
 
@@ -467,7 +483,14 @@ object WeakBlocksOracle {
             sensitive.map(t => new ErgoBoxCandidate(share, t, 0)).toIndexedSeq :+
               new ErgoBoxCandidate(f.value - 3 * share, trueTree, 0))
         }
-      val fb = ValidBlocksGenerators.validFullBlock(parentOpt, us, Seq(tx))
+      // `timeOpt` is passed EXPLICITLY. Left to the default, the first
+      // block (which has no parent) takes `System.currentTimeMillis()`
+      // and every later block is `parent.timestamp + 1`, so the whole
+      // fixture chain — header ids, the scripts that name them, the
+      // boxes those scripts sit in, the state root — moves with the
+      // wall clock and no two regenerations agree. See `seed`.
+      val fb = ValidBlocksGenerators.validFullBlock(
+        parentOpt, us, Seq(tx), Some(seed + i))
       us = us.applyModifier(fb, None)(_ => ()).get
       parentOpt = Some(fb)
       blockTxs = blockTxs ++ Seq(tx)
@@ -659,8 +682,38 @@ object WeakBlocksOracle {
       "entries" -> entries.asJson)))
   }
 
+  /** Base timestamp for generated fixture blocks.
+    *
+    * Fixture generation has to be REPRODUCIBLE: regenerating at the
+    * same ergo commit must produce byte-identical vectors, or a vector
+    * diff cannot tell "upstream changed" from "the generator ran
+    * again". The one source of nondeterminism in these fixtures is
+    * `ValidBlocksGenerators.validFullBlock`, whose `timeOpt` defaults to
+    * `System.currentTimeMillis()` for a parentless block and then
+    * `parent.timestamp + 1` for every block after it — so the whole
+    * chain's timestamps, header ids, the scripts that name them, the
+    * boxes those scripts sit in and the state root all move with the
+    * clock. Pinning the base fixes every one of them.
+    *
+    * Set from `--seed` (see `gen.py`), whose default is this value.
+    */
+  private var seed: Long = 1600000000000L
+
   def main(args: Array[String]): Unit = {
-    val out = args(0) match {
+    val seedIdx = args.indexOf("--seed")
+    if (seedIdx >= 0) {
+      require(args.length > seedIdx + 1, "--seed needs a value")
+      seed = args(seedIdx + 1).toLong
+    }
+    val positional = {
+      val b = Array.newBuilder[String]
+      var i = 0
+      while (i < args.length) {
+        if (args(i) == "--seed") i += 2 else { b += args(i); i += 1 }
+      }
+      b.result()
+    }
+    val out = positional(0) match {
       case "announcement" => announcementCases()
       case "ordering_announcement" => orderingCases()
       case "messages" => messageCases()
@@ -670,7 +723,7 @@ object WeakBlocksOracle {
       case "extension_proof" => extensionProofCases()
       case "soft_fields" => softFieldCases()
       case "input_block_validation" => inputBlockValidationCases()
-      case "block_sections" => blockSectionCases(args(1))
+      case "block_sections" => blockSectionCases(positional(1))
       case "launch_params" => launchParamsCases()
       case other => sys.error(s"unknown vector $other")
     }

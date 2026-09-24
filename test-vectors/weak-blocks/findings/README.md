@@ -9,18 +9,35 @@ observation, and the port's response is written down beside it.
 "Matrix" is the protocol's name. `weak-blocks` appears only as the
 upstream branch and pin name.
 
-## The pin
+## The pins
 
-Every artifact is against one reference build, and only that one:
+The artifacts here and the vectors in the parent directory are NOT on
+the same reference build.
 
-* `ergoplatform/ergo`, branch `weak-blocks`,
-  commit `31a8de804f7328704f2753a1cf151dda8f64689f`
-* sigma-state `6.0.5-22-368a860b-SNAPSHOT`
-  (`368a860be033af94aa14895381f42099b3646db6`)
+* The vectors in the parent directory are pinned to `ergoplatform/ergo`
+  branch `weak-blocks`, commit `62c10315e1ebcac4480dba6bacdc2100a38119e5`,
+  with sigma-state `6.0.5-22-368a860b-SNAPSHOT`
+  (`368a860be033af94aa14895381f42099b3646db6`). Each vector's `manifest`
+  records that pin (re-pinned in `c250f3c9`).
+* Every artifact in this directory was written BEFORE that re-pin, during
+  the M2/M3 rounds against the earlier pin, `weak-blocks` commit
+  `31a8de804f7328704f2753a1cf151dda8f64689f` (same sigma-state). None
+  has been regenerated at `62c10315`, and none is evidence about that
+  build on its own.
 
-The same pin is in every vector's `manifest` in the parent directory. A
-rebuild at a different commit is a different reference and invalidates
-these files rather than extending them.
+| artifact | where it records the pin |
+| --- | --- |
+| `2026-09-22-1.json` | `scala_app_version` = `6.0.4-492-31a8de80-SNAPSHOT` |
+| `2026-09-22-2.json` | `component` names `weak-blocks @ 31a8de80…` |
+| `2026-09-22-3.json` | `component` names `weak-blocks @ 31a8de80…` |
+| `2026-09-22-3/captured-block.json` | `scala_app_version` = `6.0.4-492-31a8de80-SNAPSHOT` |
+| `2026-09-22-4.json` | `component` names `weak-blocks @ 31a8de80…` |
+| `2026-09-22-5.json` | records no Scala version (a Rust follower throughput observation); written in the same 31a8de80 rounds, last changed in `fc102970` before the re-pin |
+| `2026-09-22-6/7/8.json` | the Scala node's `/info` `appVersion` = `6.0.4-492-31a8de80-SNAPSHOT` |
+
+A finding that has to be quoted against `62c10315` needs a fresh run at
+that pin; the M4 evidence under `dev-docs/upstream/matrix-findings/`
+names the run each of its numbers comes from.
 
 ## Where they come from
 

@@ -6,6 +6,7 @@ internal CPU miner; the Rust node only follows. Ports are private to this
 recipe (Scala 19560/19580, Rust 19561/19581) and never overlap the
 `devnet-mixed` recipe or any long-running node on this host.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,31 @@ import sys
 import time
 import urllib.request
 
+# The role table (which node does what, and on which build). A SEPARATE
+# module because `campaign.py` has to resolve roles BEFORE it configures
+# the ports this module reads from the environment AT IMPORT: asking
+# `lifecycle` for the role table would drag that import forward, freeze
+# the two-node smoke defaults, and every campaign scenario would
+# silently run on the smoke's ports.
+from roles import ROLES, Role, role_node, roles_for_nodes  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[2]
 HERE = ROOT / 'scripts/devnet-matrix'
-WORK = HERE / '.work'
+# Where this run keeps its pid files, logs, series and evidence.
+# `MATRIX_WORK` moves ALL of it: a separate port band is not isolation,
+# because two runs driving one checkout still share `<name>.pid` and
+# `<name>.config` — the second `start` overwrites them and the first
+# `stop` then kills the second run's nodes — and they append to one
+# `scala.log` and one `agreement-series.jsonl`, which is the evidence
+# each of them is measured from.
+# Resolved ONCE, here: a relative value means the directory it was given
+# in, and every later `relative_to(ROOT)` needs an absolute path.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
+# Pinned back into the environment, absolute, so a later chdir (this
+# module's own `__main__`, the campaign's) or a child process cannot
+# resolve the same relative value against another directory.
+if 'MATRIX_WORK' in os.environ:
+    os.environ['MATRIX_WORK'] = str(WORK)
 
 # Which nodes this process drives, and on which ports. The smoke recipe
 # keeps the two-node defaults it has always had (Scala 19560/19580, Rust
@@ -28,8 +51,14 @@ WORK = HERE / '.work'
 # 19590-19592. Nothing is hardcoded any more, and nothing about the
 # default two-node set changed: an unset environment reproduces the
 # previous dicts exactly.
-DEFAULT_P2P = {'scala': 19560, 'rust': 19561, 'scala2': 19562}
-DEFAULT_REST = {'scala': 19580, 'rust': 19581, 'scala2': 19582}
+#
+# `scala3` (M4) is the patched reference FOLLOWER's slot: the ablation
+# runs the stock and the patched follower side by side against one
+# miner, so the two cannot share a node. It is opt-in like `scala2`.
+DEFAULT_P2P = {'scala': 19560, 'rust': 19561, 'scala2': 19562,
+               'scala3': 19563}
+DEFAULT_REST = {'scala': 19580, 'rust': 19581, 'scala2': 19582,
+                'scala3': 19583}
 
 # P2P LISTEN ADDRESS per node, distinct from the port.
 #
@@ -38,14 +67,17 @@ DEFAULT_REST = {'scala': 19580, 'rust': 19581, 'scala2': 19582}
 # a candidate whose declared address shares this node's own external
 # address as one reachable only through the UPnP gateway, and with no
 # gateway it returns `None` — so no outbound connection is ever
-# attempted. On loopback that is every peer. The M3 campaign therefore
-# gives each node its own 127.x address; the smoke keeps 127.0.0.1
-# everywhere, which is correct for it because only the Rust node dials.
+# attempted. On loopback that is every peer, and scorex's
+# `allowLocal = false` default refuses the rest. The campaign therefore
+# moves its Scala FOLLOWERS to their own 127.x addresses with
+# `allowLocal = true` (`campaign.CAMPAIGN_P2P_HOST`); the smoke keeps
+# 127.0.0.1 everywhere, which is correct for it because it runs one Scala
+# node and only the Rust node dials.
 #
 # REST is NOT moved: the harness talks to 127.0.0.1:<rest port> for every
 # node, and nothing about these bindings changes that.
 DEFAULT_P2P_HOST = {'scala': '127.0.0.1', 'rust': '127.0.0.1',
-                    'scala2': '127.0.0.1'}
+                    'scala2': '127.0.0.1', 'scala3': '127.0.0.1'}
 
 # `scala2` is OPT-IN. Every consumer iterates these dicts — the sampler
 # sweeps `REST`, `start()` binds `P2P` — so listing a node that is not
@@ -69,21 +101,61 @@ P2P_HOST = {name: os.environ.get(f'MATRIX_P2P_HOST_{name.upper()}',
 # Config path per node, so a campaign can point a node at a rendered
 # copy without editing the committed recipe files.
 CONFIG_ENV = {'scala': 'SCALA_CONFIG', 'scala2': 'SCALA2_CONFIG',
-              'rust': 'RUST_CONFIG'}
+              'scala3': 'SCALA3_CONFIG', 'rust': 'RUST_CONFIG'}
+# `scala3` shares the second Scala node's recipe file: it is the same
+# kind of node (a second Scala peer on this host), and what makes it a
+# FOLLOWER rather than a miner is the campaign's overlay, exactly as it
+# is for `scala2` in `reconstruct_rate`.
 DEFAULT_CONFIG = {'scala': 'scala-node.conf', 'scala2': 'scala-miner2.conf',
-                  'rust': 'rust-node.toml'}
+                  'scala3': 'scala-miner2.conf', 'rust': 'rust-node.toml'}
+
+# Build selection per NODE, set by the campaign before `lifecycle` is
+# asked for a classpath. Kept in the environment rather than in a module
+# global because `--scenario all` re-execs one process per scenario.
+BUILD_ENV = 'MATRIX_BUILD_%s'
+
+# Verified builds, by build name. See `_build_for`.
+_VERIFIED_BUILDS = {}
+
+
+def node_build(node):
+    """The build name a node was told to run (`stock` unless set)."""
+    return os.environ.get(BUILD_ENV % node.upper(), 'stock')
+
 
 # The weak-blocks branch builds without a git tag, so `/info.appVersion`
 # is a branch-and-hash SNAPSHOT string. It is pinned EXACTLY: the hash in
 # it is the provisioned ergo commit
-# (31a8de804f7328704f2753a1cf151dda8f64689f, see
+# (62c10315e1ebcac4480dba6bacdc2100a38119e5, the M4 pin — see
 # scripts/jvm_weak_blocks_oracle/README.md), and "some build that also
 # has input blocks" is not a reference — every vector and every ruling in
 # this port is against that one commit. A rebuild at a different commit
 # must fail loudly here rather than silently reinterpret the results.
-# Override only to re-pin deliberately.
+#
+# This is the FALLBACK, for a run driven by `MATRIX_CLASSPATH` rather
+# than the build registry. When a node runs a registered build, its own
+# manifest states the version (`scala_app_version`), which is what lets a
+# patched build run beside the stock one. Override only to re-pin
+# deliberately.
 SCALA_APP_VERSION = os.environ.get(
-    'MATRIX_SCALA_APP_VERSION', '6.0.4-492-31a8de80-SNAPSHOT')
+    'MATRIX_SCALA_APP_VERSION', '6.0.6-493-62c10315-SNAPSHOT')
+
+
+def scala_app_version(node='scala'):
+    """The `/info.appVersion` THIS node's build must report.
+
+    Per node, because M4 runs two Scala builds at once: a patched
+    follower beside a stock miner reports a different version string,
+    and one global constant would either fail the patched node or stop
+    checking the stock one. The build registry is the source; the
+    environment overrides it for a deliberate re-pin.
+    """
+    override = os.environ.get(f'MATRIX_SCALA_APP_VERSION_{node.upper()}')
+    if override:
+        return override
+    build = _build_for(node)
+    return build.app_version() if build is not None else SCALA_APP_VERSION
+
 
 # Height-0 state root both nodes must report. `minerRewardDelay` feeds
 # the emission box's proposition, so the Scala `genesisStateDigestHex`
@@ -108,14 +180,57 @@ DEFAULT_RUST_LOG = (
 )
 
 
-def classpath_file() -> Path:
-    """Classpath of the Scala `weak-blocks` build.
+def _build_for(node):
+    """The registry entry this node was told to run, or `None`.
 
-    Overridable because the provisioned build may live in a sibling
-    worktree; the default is this checkout's own oracle work dir.
+    `None` means ONE thing: an explicit `MATRIX_CLASSPATH` override was
+    set by hand, so there is no registry answer to give. That is how an
+    operator points the harness at a one-off classpath, and
+    `campaign.py` refuses it for a measured run.
+
+    Every other failure — a build that is not provisioned, an unreadable
+    `builds.toml`, and above all a `class_dir_sha256` that no longer
+    matches the manifest — PROPAGATES. It used to be caught here and
+    answered with `None`, and `classpath_file` then selected the legacy
+    `.work/classpath`: the devnet came up on an unidentified build while
+    the evidence recorded the registered one. Verification that falls
+    back on failure is not verification.
     """
-    return Path(os.environ.get(
-        'MATRIX_CLASSPATH', str(ROOT / 'scripts/jvm_weak_blocks_oracle/.work/classpath')))
+    if os.environ.get(f'MATRIX_CLASSPATH_{node.upper()}') or \
+            os.environ.get('MATRIX_CLASSPATH'):
+        return None
+    name = node_build(node)
+    if name in _VERIFIED_BUILDS:
+        return _VERIFIED_BUILDS[name]
+    sys.path.insert(0, str(HERE))
+    import builds
+    build = builds.load(name)
+    # Cached because `builds.load` VERIFIES, which hashes every class
+    # file on the classpath; the answer is asked for once per spawn and
+    # again for every evidence record, and the build is immutable while
+    # the devnet runs (spec §7a).
+    _VERIFIED_BUILDS[name] = build
+    return build
+
+
+def classpath_file(node='scala') -> Path:
+    """Classpath of the Scala build this NODE runs.
+
+    Two sources: an explicit override (a hand-driven run, which
+    `campaign.py` refuses for a measured one), and the build registry —
+    which is also what VERIFIES the build, so a node started through it
+    cannot be running compiled output that has moved since its manifest
+    was written.
+
+    There is no third. The legacy `.work/classpath` fallback used to sit
+    here and was selected whenever verification FAILED, which is exactly
+    when it must not be.
+    """
+    override = (os.environ.get(f'MATRIX_CLASSPATH_{node.upper()}')
+                or os.environ.get('MATRIX_CLASSPATH'))
+    if override:
+        return Path(override)
+    return _build_for(node).classpath_file
 
 
 def owned(pid, configs=None):
@@ -136,7 +251,8 @@ def owned(pid, configs=None):
 def stop(names=None):
     # Rust first, then the miners: a follower that outlives its peers
     # spends its last seconds logging failed dials.
-    names = names or [n for n in ('rust', 'scala2', 'scala') if n in NODES]
+    names = names or [n for n in ('rust', 'scala3', 'scala2', 'scala')
+                      if n in NODES]
     for name in names:
         path = WORK / (name + '.pid')
         if not path.exists():
@@ -155,36 +271,68 @@ def stop(names=None):
         config_path.unlink(missing_ok=True)
 
 
-def _workspace_node_binary() -> str:
-    """Path to the built `ergo-node` in this checkout's cargo target directory."""
-    metadata = subprocess.run(
-        ['cargo', 'metadata', '--no-deps', '--format-version', '1'],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    )
-    target = json.loads(metadata.stdout)['target_directory']
-    # Release first: the input-block processor's throughput is what the
-    # +-2 height window and the reconstruction rate are measured against,
-    # and a debug build is not a measurement of the shipped node.
-    for profile in ('release', 'debug'):
-        candidate = Path(target) / profile / 'ergo-node'
-        if candidate.exists():
-            return str(candidate)
-    raise SystemExit(
-        f'ergo-node not built under {target}; run '
-        '`cargo build --release -p ergo-node` or set RUST_NODE to the binary path'
-    )
+def _worktree_release_binary() -> Path:
+    """This checkout's own release build of `ergo-node`.
+
+    Not `cargo metadata`'s target directory: on a host whose cargo config
+    shares one target directory across checkouts, that resolves to
+    whichever worktree built last, and a run then measures a binary whose
+    source is not the commit its evidence names. Release only: the
+    input-block processor's throughput is what the +-2 height window and
+    the reconstruction rate are measured against, and a debug build is
+    not a measurement of the shipped node.
+    """
+    return ROOT / 'target' / 'release' / 'ergo-node'
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def node_binary() -> str:
-    """The Rust binary this recipe will launch (release preferred)."""
-    return os.environ.get('RUST_NODE') or _workspace_node_binary()
+    """The Rust binary this recipe will launch, or a refusal.
+
+    `RUST_NODE` when set (and it must name an executable), otherwise this
+    checkout's release build. Nothing else is ever started.
+    """
+    explicit = os.environ.get('RUST_NODE')
+    if explicit:
+        if not _executable(Path(explicit)):
+            raise SystemExit(f'RUST_NODE={explicit} is not an executable file')
+        return explicit
+    local = _worktree_release_binary()
+    if _executable(local):
+        return str(local)
+    raise SystemExit(
+        f'no Rust node to start: RUST_NODE is unset and {local} does not exist. '
+        f'Build this checkout (`CARGO_TARGET_DIR={ROOT / "target"} cargo build '
+        '--release -p ergo-node`) or set RUST_NODE to the binary path; a '
+        'binary from another target directory is never picked up silently')
+
+
+def node_binary_provenance() -> dict:
+    """Which binary a run launched, where it came from, and its hash."""
+    path = Path(node_binary())
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return {
+        'path': str(path),
+        'source': 'RUST_NODE' if os.environ.get('RUST_NODE')
+                  else 'worktree release build',
+        'sha256': digest.hexdigest(),
+        'mtime': time.strftime('%Y-%m-%dT%H:%M:%S%z',
+                               time.localtime(path.stat().st_mtime)),
+    }
 
 
 def _command(name):
-    cp = classpath_file()
+    cp = classpath_file(name)
     if not cp.exists():
         raise SystemExit(
-            f'Scala weak-blocks classpath not found at {cp}; set MATRIX_CLASSPATH')
+            f'Scala weak-blocks classpath for {name} not found at {cp}; '
+            f'provision the build or set MATRIX_CLASSPATH_{name.upper()}')
     if name.startswith('scala'):
         return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
                 '-cp', cp.read_text().strip(), 'org.ergoplatform.ErgoApp',
@@ -218,11 +366,14 @@ def spawn(name):
                 raise ValueError('node state is not initialized yet')
             if name.startswith('scala'):
                 version = info.get('appVersion')
-                if version != SCALA_APP_VERSION:
+                expected = scala_app_version(name)
+                if version != expected:
                     raise RuntimeError(
                         f'Scala node at {REST[name]} reports appVersion '
-                        f'{version!r}, not the pinned {SCALA_APP_VERSION!r}; point '
-                        'MATRIX_CLASSPATH at the provisioned weak-blocks build')
+                        f'{version!r}, not the {expected!r} its build '
+                        f'({node_build(name)}) declares; point '
+                        f'MATRIX_CLASSPATH_{name.upper()} at the provisioned '
+                        'build, or re-pin deliberately')
                 if 'bestInputBlock' not in info:
                     raise RuntimeError(
                         f'Scala node at {REST[name]} has no bestInputBlock key in '
@@ -315,7 +466,8 @@ def wait_peered(timeout=180, names=None):
 
 
 def start(names=None):
-    names = names or [n for n in ('scala', 'scala2', 'rust') if n in NODES]
+    names = names or [n for n in ('scala', 'scala2', 'scala3', 'rust')
+                      if n in NODES]
     wanted = {(P2P_HOST[n], P2P[n]) for n in names}
     wanted |= {('127.0.0.1', REST[n]) for n in names}
     for host, port in sorted(wanted):

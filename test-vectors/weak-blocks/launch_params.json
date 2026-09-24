@@ -50,11 +50,11 @@
     }
   ],
   "manifest": {
-    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "ergo_commit": "62c10315e1ebcac4480dba6bacdc2100a38119e5",
     "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
     "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
     "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
-    "generator_sha256": "2afca868bd533a3f3a9340d0dec3390959a6b2e41290e4be500c779c09e48899",
-    "timestamp": "2026-09-21T16:12:40.531002+00:00"
+    "generator_sha256": "989291138ccae803b0f3810192fbd7f0ead03fa0cb1848a691f748c3bf2b1636",
+    "seed": 1600000000000
   }
 }

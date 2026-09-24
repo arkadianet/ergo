@@ -5,6 +5,7 @@ Everything decisive here is PURE and exercised by `campaign.py
 calls could not be shown to fail when it should, and an evaluator that
 cannot fail is not an evaluator.
 """
+import re
 import shutil
 import threading
 import time
@@ -13,8 +14,11 @@ import smoke
 from smoke import Unavailable, api, api_retry
 
 
-def wait_ordering_blocks(ctx, blocks, what):
+def wait_ordering_blocks(ctx, blocks, what, on_block=None):
     """Let the sampler run while Scala mines `blocks` ordering blocks.
+
+    `on_block`, if given, is called once each time the miner's height
+    rises, so a workload keeps pace with the chain inside the wait.
 
     Returns `(start_height, reached_height)`. A miner that stalls — the
     upstream F11 `cachedCandidate` race does exactly that — makes this
@@ -29,7 +33,10 @@ def wait_ordering_blocks(ctx, blocks, what):
     seen = set()
     while time.monotonic() < ctx.run.deadline:
         try:
-            reached = smoke.scala_height(ctx.run)
+            now = smoke.scala_height(ctx.run)
+            if on_block is not None and now > reached:
+                on_block()
+            reached = now
         except Unavailable:
             pass
         # The UTXO watch item is transient: by finalization the box may
@@ -72,14 +79,40 @@ def _wait_for_peer_count(ctx, node, wanted, budget=180.0):
     return count
 
 
-def seed_second_miner(ctx, campaign, lifecycle):
+def drop_copied_peer_db(target):
+    """Remove the peer database a seeded Scala node copied from the miner.
+
+    Scala's PeerManager seeds from `scorex.network.knownPeers` ONLY when
+    its database is empty (`PeerManager.scala:24-33` at 62c10315). The
+    miner's database holds the peers the MINER knows, which never
+    includes the miner itself, so a follower that kept the copy never
+    learned the miner's address and dialled the Rust node alone. Gossip
+    cannot fill that gap, because PeerManager refuses local addresses
+    from peers (`:53`, `:67`). With the database gone, the node's own
+    rendered `knownPeers` (every other node) is what it starts from.
+    """
+    shutil.rmtree(target / 'peers', ignore_errors=True)
+
+
+def seeded_nodes_missing(heights, unavailable):
+    """The seeded nodes that did not come up: the ones that did not ANSWER.
+
+    A node at genesis answers `/info` with `fullHeight: null`, and
+    `steady`/`restart` seed before the first block, so a null height is
+    a node that is up on an empty chain, not a missing one.
+    """
+    return [node for node in heights if node in set(unavailable)]
+
+
+def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     """Give miner 2 the chain by COPYING miner 1's data directory.
 
-    The reference node cannot hand it over. Two Scala nodes on one host
-    never complete a mutual connection here — `getPeerAddress` refuses to
-    resolve a same-address peer without a UPnP gateway, and giving each
-    its own 127.x address gets the dial attempted but not established —
-    so a second miner brought up cold sits at genesis indefinitely and,
+    The reference node cannot hand it over in time. Two Scala MINERS on
+    one host never connect here — `getPeerAddress` refuses to resolve a
+    same-address peer without a UPnP gateway, and `allowLocal = false`
+    refuses a loopback one (only the follower roles set it; see
+    `campaign.CAMPAIGN_P2P_HOST`) — so a second miner brought up cold
+    sits at genesis indefinitely and,
     with `offlineGeneration = false`, never mines at all. Two runs were
     lost to that, each reporting "no fork switch observed", which was a
     true statement about a scenario that had not run.
@@ -93,29 +126,54 @@ def seed_second_miner(ctx, campaign, lifecycle):
     Miner 1 is stopped for the copy. A LevelDB copied out from under a
     live writer is not a database, and a scenario built on one would fail
     for a reason that has nothing to do with input blocks.
+
+    `nodes` (M4) is every Scala node to seed this way, so the same
+    mechanism serves a reference FOLLOWER — the node's role decides
+    whether it mines, not this function — and more than one of them:
+    `--reference-follower both` runs a stock follower beside a patched
+    one, which is the §7a ablation. A name not in the running node set is
+    skipped, so a scenario may ask for `scala3` unconditionally.
     """
+    nodes = tuple(n for n in nodes if n in lifecycle.NODES)
+    if not nodes:
+        return {}
     lifecycle.stop(('scala',))
     source = ctx.data_root / 'scala'
-    target = ctx.data_root / 'scala2'
-    shutil.rmtree(target, ignore_errors=True)
-    shutil.copytree(source, target)
-    shutil.rmtree(target / 'wallet', ignore_errors=True)
-    campaign.ensure_data_dirs(ctx.data_root, ['scala2'])
+    targets = []
+    for node in nodes:
+        target = ctx.data_root / node
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(source, target)
+        shutil.rmtree(target / 'wallet', ignore_errors=True)
+        drop_copied_peer_db(target)
+        targets.append(target)
+    campaign.ensure_data_dirs(ctx.data_root, list(nodes))
     lifecycle.spawn('scala')
     ctx.run.started('scala')
     lifecycle.init_wallet('scala')
-    lifecycle.spawn('scala2')
-    ctx.run.started('scala2')
-    lifecycle.init_wallet('scala2')
-    # The follower has been dialling miner 2 since it started, and miner
-    # 2 was not there — so it is several failures into an exponential
-    # dial backoff that outlasts the scenario. See `restart_follower`.
+    for node in nodes:
+        lifecycle.spawn(node)
+        ctx.run.started(node)
+        lifecycle.init_wallet(node)
+    # The follower has been dialling the seeded nodes since it started,
+    # and they were not there — so it is several failures into an
+    # exponential dial backoff (30 s, 2 min, 10 min, …) that outlasts the
+    # scenario. It is restarted to clear that, AND its address book is
+    # deleted: the backoff windows are persisted there
+    # (`ergo_node::node::util::wall_to_instant` restores them), so a
+    # restart alone brings the same backoff back. Measured on the first
+    # `--reference-follower both` validation run — the follower came back
+    # and immediately logged "peer bootstrap starved: no dial candidates
+    # (all known addresses in dial-backoff)", held the miner and neither
+    # follower, and the run produced 0 follower samples. The purge costs
+    # nothing: every node it needs is in the config's `known` list. See
+    # `restart_follower`, which purges between the stop and the respawn.
     restart_follower(ctx, campaign, lifecycle)
     # Reported, never raised: a seed that came up but did not peer is a
     # scenario that cannot run, and the evidence has to say which of the
     # two it was rather than dying with a stack trace that says neither.
     try:
-        lifecycle.wait_peered(names=['scala', 'scala2', 'rust'], timeout=120)
+        lifecycle.wait_peered(names=['scala', *nodes, 'rust'], timeout=120)
         peered = True
     except RuntimeError as error:
         peered = str(error)
@@ -127,24 +185,29 @@ def seed_second_miner(ctx, campaign, lifecycle):
     # switch between them. The scenario's own evidence — `forks > 1`,
     # or a two-peer sighting at any point in the window — is what
     # decides whether it ran, and the scenario checks that itself.
-    connected = _wait_for_peer_count(ctx, 'rust', 2)
+    connected = _wait_for_peer_count(ctx, 'rust', 1 + len(nodes))
     ctx.note('follower_peers_after_seed', connected)
-    heights = {}
-    for node in ('scala', 'scala2'):
+    heights, unavailable = {}, []
+    for node in ('scala', *nodes):
         try:
             heights[node] = (api(node, '/info') or {}).get('fullHeight')
         except Unavailable:
             heights[node] = None
+            unavailable.append(node)
     ctx.note('second_miner_seeded', {
-        'copied_from': str(source), 'to': str(target),
+        'copied_from': str(source), 'to': [str(t) for t in targets],
         'wallet_copied': False,
         'heights_after_seed': heights,
+        'unavailable_after_seed': unavailable,
         'why': 'the reference node cannot hand the chain to a second Scala '
                'node on this host; see the docstring',
     })
-    if heights.get('scala2') is None:
-        ctx.fail('the second miner did not come up on the copied chain, so the '
-                 'scenario has no second miner', {'heights': heights})
+    missing = seeded_nodes_missing({n: heights.get(n) for n in nodes},
+                                   unavailable)
+    if missing:
+        ctx.fail(f'{", ".join(missing)} did not come up on the copied chain, so '
+                 'the scenario is missing a node it was told to run',
+                 {'heights': heights, 'seeded': list(nodes)})
     return heights
 
 
@@ -188,6 +251,159 @@ def follower_events_since(events, watermark, restarted):
     watermark by construction.
     """
     return list(events) if restarted else events_after(events, watermark)
+
+
+# The workload every measurement window needs. ONE implementation:
+# `reconstruct_rate` and `miner_self_reject` each carried a verbatim
+# copy, so Task 2's fix for a workload whose payments were mutually
+# exclusive landed in one of them and not the other — and the two
+# measurements they feed are read against each other.
+PAYMENT_NANOERG = 1_000_000
+
+
+# The funding wait's budget, derived from the chain rather than fixed.
+# The miner's coinbase is spendable once `minerRewardDelay` blocks have
+# passed (`genesis.conf` `monetary.minerRewardDelay = 10`, mirrored by
+# the Rust `devnet_miner_reward_delay`), and the wallet reports it a
+# block or two later. Ordering-block cadence on this host varies about
+# 5x with load, so a fixed 900 s either wastes a quiet evening or fails
+# a busy one (`.work-r1both2`: height 11, balance 0, 900 s gone).
+MINER_REWARD_DELAY = 10
+FUNDING_TARGET_HEIGHT = MINER_REWARD_DELAY + 3
+# Before the wait has seen two blocks: a conservative per-block prior
+# (the recipe measures ~40 s per ordering block on a quiet host).
+FUNDING_CADENCE_PRIOR_S = 60.0
+FUNDING_SAFETY = 3.0
+FUNDING_SLACK_S = 120.0
+# This far past the target with nothing to spend, the wallet (not the
+# cadence) is the problem, and waiting longer measures nothing.
+FUNDING_OVERRUN_BLOCKS = 10
+
+
+def funding_deadline(observations):
+    """`(deadline, rule)` for the funding wait, from the heights it saw.
+
+    `observations` is `[(monotonic_time, height), ...]`, the first entry
+    taken when the wait began and one more each time the height rose.
+    Rule: cadence = seconds per block over the observed span (the prior
+    until two heights are seen); deadline = time of the LAST height seen
+    + max(1, blocks still to the target) x cadence x SAFETY + SLACK. The
+    budget therefore restarts with every block, so a live chain is never
+    abandoned before maturity, and a stall ends the wait after SAFETY
+    times the cadence it had. Past target + OVERRUN blocks it ends at
+    once. Pure, so the self-test pins it.
+    """
+    first_t, first_h = observations[0]
+    last_t, last_h = observations[-1]
+    cadence = ((last_t - first_t) / (last_h - first_h)
+               if last_h > first_h else FUNDING_CADENCE_PRIOR_S)
+    to_go = max(0, FUNDING_TARGET_HEIGHT - last_h)
+    rule = {'cadence_s': round(cadence, 3), 'height': last_h,
+            'target_height': FUNDING_TARGET_HEIGHT, 'blocks_to_go': to_go,
+            'safety': FUNDING_SAFETY, 'slack_s': FUNDING_SLACK_S,
+            'overrun': last_h >= FUNDING_TARGET_HEIGHT + FUNDING_OVERRUN_BLOCKS,
+            'rule': 'deadline = last block seen + max(1, blocks to target) '
+                    'x measured s/block x safety + slack; ends at once '
+                    'past target + overrun blocks'}
+    if rule['overrun']:
+        return last_t, rule
+    return last_t + max(1, to_go) * cadence * FUNDING_SAFETY + FUNDING_SLACK_S, rule
+
+
+def fund_miner(ctx, node='scala'):
+    """`(balance_nano, address)` for the miner whose blocks carry the load.
+
+    An unfunded chain seals coinbase-only input blocks: the reconstruction
+    succeeds without ever exercising the lookup key, and the candidate is
+    never replaced by an arriving transaction. Either way the window
+    measures the quiet case and says nothing about the finding.
+
+    The wait is budgeted by `funding_deadline` from the cadence it
+    observes, and the rule, cadence and outcome are noted as evidence.
+    Short is RETURNED, never raised: the caller decides what an unfunded
+    window means for its own measurement.
+    """
+    def height():
+        try:
+            return int((api(node, '/info') or {}).get('fullHeight') or 0)
+        except (Unavailable, TypeError, ValueError):
+            return None
+
+    began = time.monotonic()
+    observations = [(began, height() or 0)]
+    deadline, rule = funding_deadline(observations)
+    balance = 0
+    while time.monotonic() < min(ctx.run.deadline, deadline):
+        try:
+            balance = (api(node, '/wallet/balances') or {}).get('balance') or 0
+        except Unavailable:
+            balance = 0
+        if balance:
+            break
+        now_h = height()
+        if now_h is not None and now_h > observations[-1][1]:
+            observations.append((time.monotonic(), now_h))
+            deadline, rule = funding_deadline(observations)
+        ctx.run.idle(1)
+    rule = dict(rule, waited_s=round(time.monotonic() - began, 1),
+                funded=bool(balance), heights_seen=len(observations),
+                start_height=observations[0][1],
+                ended_by=('balance' if balance else
+                          'overrun' if rule['overrun'] else
+                          'run deadline' if time.monotonic() >= ctx.run.deadline
+                          else 'cadence budget'))
+    ctx.note('funding_wait', rule)
+    address = (api_retry(node, '/wallet/addresses', ctx.run.deadline,
+                         what=f'the {node} miner wallet address') or [None])[0]
+    return balance, address
+
+
+def pump_payments(ctx, address, sent, node='scala', count=3,
+                  value=PAYMENT_NANOERG, rejected=None):
+    """Submit `count` self-payments, appending the accepted txids.
+
+    A submission the node refused is recorded rather than dropped: a
+    window whose workload never landed is a window that measured the
+    quiet case, and the evidence has to be able to say so.
+    """
+    for _ in range(count):
+        try:
+            status, txid = smoke.request(
+                node, '/wallet/payment/send', [{'address': address,
+                                                'value': value}])
+        except (OSError, ValueError) as error:
+            if rejected is not None:
+                rejected.append(f'{type(error).__name__}: {error}')
+            continue
+        if status == 200 and txid:
+            sent.append(txid)
+        elif rejected is not None:
+            rejected.append(f'HTTP {status}: {txid!r}')
+    return sent
+
+
+def scala_reference_nodes(role_map, role_table):
+    """`(miner nodes, follower nodes)` for one resolved run.
+
+    Pure, and keyed by ROLE rather than by node name, because the same
+    slot is a second miner in `fork` and a reference follower in
+    `reconstruct_rate` — and because `--reference-follower patched`
+    leaves `scala2` out of the run entirely while `both` adds `scala3`.
+    A scenario that named `scala2` literally read a log that was never
+    written in the first case, and ignored the patched follower's
+    decisions in the second, which is the ablation itself.
+
+    Only a FOLLOWER decides: a miner generates its blocks locally, so
+    `processOrderingBlock` never runs on it and it logs neither side of
+    the reconstruct-or-download choice.
+    """
+    miners, followers = [], []
+    for node, role in sorted((role_map or {}).items()):
+        spec = role_table.get(role)
+        if spec is None or spec.kind != 'scala':
+            continue
+        (miners if spec.mines else followers).append(node)
+    return tuple(miners), tuple(followers)
 
 
 def rust_events(ctx):
@@ -284,9 +500,14 @@ class EventCollector:
             self.highest_seen = max(self.highest_seen, seq)
         return self
 
-    def window(self, after_seq):
-        """Every collected event newer than `after_seq`, in order."""
-        return [self.events[s] for s in sorted(self.events) if s > after_seq]
+    def window(self, after_seq, until_seq=None):
+        """Every collected event in `(after_seq, until_seq]`, in order.
+
+        `until_seq` is the window's CLOSE (`close_measurement_window`);
+        without it the window runs to whatever was collected last.
+        """
+        return [self.events[s] for s in sorted(self.events)
+                if s > after_seq and (until_seq is None or s <= until_seq)]
 
     def lost_in_window(self, after_seq):
         return [g for g in self.gaps if g['next_available_seq'] > after_seq]
@@ -1351,3 +1572,374 @@ def check_bounds(ctx, observed_peaks, caps, what, unavailable_bounds=()):
                      {'peaks': observed_peaks})
     return {'checked': observed,
             'not_exposed_by_the_status_route': sorted(unavailable_bounds)}
+
+
+# ----- reconstruction accounting (M4, spec §7a "honest denominators") -----
+#
+# The same five numbers from every node that makes the
+# reconstruct-or-download decision, so a patched follower can be put
+# beside a stock one and the difference read off. Stated as an explicit
+# vocabulary rather than per-scenario ad-hoc tallies, because the
+# findings drafts quote these names and two scenarios counting
+# "fallbacks" differently would make the batch's numbers incomparable.
+#
+#   eligible_announcements  ordering announcements the node decided about
+#   reconstructed           rebuilt from input-block bodies, root matched
+#   download_missing_tx     fell back: an ingredient was missing
+#   download_root_mismatch  fell back: the rebuild did not reproduce the root
+#   skipped_no_chain        no rebuild attempted: no input chain to rebuild from
+#
+# `eligible_announcements` is the DENOMINATOR and is counted
+# independently (Rust: every outcome event; Scala: its own
+# "Processing ordering block announcement" line), so a node that
+# reported no outcome for an announcement shows up as `unaccounted`
+# rather than vanishing from the ratio.
+ACCOUNTING_FIELDS = ('eligible_announcements', 'reconstructed',
+                     'download_missing_tx', 'download_root_mismatch',
+                     'skipped_no_chain',
+                     # The GATE, which decides before the holder is ever
+                     # asked: `ErgoNodeViewSynchronizer.scala:1856-1866`
+                     # at 62c10315 requests the full block and never
+                     # sends `ProcessOrderingBlock` when the previous
+                     # input block's transactions are not stored. It is
+                     # a download, and until M4 it was invisible.
+                     'download_no_prev_input_block')
+
+# The Rust event feed's own strings (`ergo-node` `reconstruct.rs`
+# `MISSING_*`/`ROOT_MISMATCH`, `ergo-inputblocks` `NO_PREV_INPUT_BLOCK` /
+# `NO_INPUT_CHAIN`). Matched exactly: a renamed reason must read as
+# `other`, never be folded into a bucket it no longer belongs to.
+RUST_MISSING_REASONS = ('missing_broadcasted_tx', 'missing_input_body')
+RUST_ROOT_MISMATCH_REASONS = ('root_mismatch',)
+RUST_SKIP_REASONS = ('no_prev_input_block', 'no_chain')
+
+# The pinned Scala build's log lines for the same five outcomes
+# (`ErgoNodeViewHolder.processOrderingBlock`, 62c10315 lines 431, 470,
+# 476, 480, 490). Lower-cased substrings, so a wording change reads as
+# "not found" rather than as a silent zero.
+SCALA_PHRASES = {
+    # `ErgoNodeViewSynchronizer.processOrderingBlockAnnouncement`
+    # (62c10315): the ENTRY line, logged for every announcement that
+    # survives the height-gap and already-known checks.
+    'entry_announcements': 'processing ordering block announcement for',
+    # `ErgoNodeViewHolder.processOrderingBlock` (62c10315):
+    'reconstructed': 'applying block transactions from input-blocks for',
+    'download_missing_tx': 'as not all the transactions available',
+    'download_root_mismatch': 'as merkle root does not match',
+    'skipped_no_chain': 'parent header not found for ordering block',
+    # The GATE, `ErgoNodeViewSynchronizer.scala:1854/:1865`. Line 1854
+    # precedes the branch; line 1865 requests the full block and the
+    # holder never runs — which is why a stock follower that downloaded
+    # 80 of 81 ordering blocks used to read as "none of the phrases
+    # appears", i.e. UNKNOWN, when it was a measured 0 %.
+    'gate_announcements': 'on processing ordering block',
+    'download_no_prev_input_block': 'as prev input block not found',
+}
+
+
+def _empty_accounting(source, **extra):
+    out = {field: 0 for field in ACCOUNTING_FIELDS}
+    out['source'] = source
+    out.update(extra)
+    return out
+
+
+def rust_accounting(events):
+    """The five numbers from a window of the Rust node's event feed."""
+    out = _empty_accounting('rust event feed')
+    other = {}
+    for event in events:
+        kind = event.get('kind')
+        detail = event.get('detail')
+        if kind == 'ordering_reconstructed':
+            out['reconstructed'] += 1
+        elif kind == 'ordering_reconstruct_fallback':
+            if detail in RUST_MISSING_REASONS:
+                out['download_missing_tx'] += 1
+            elif detail in RUST_ROOT_MISMATCH_REASONS:
+                out['download_root_mismatch'] += 1
+            else:
+                # A storage error is a fallback, and it is NOT one of
+                # the two the comparison is about; counting it as either
+                # would misattribute it.
+                other[f'fallback:{detail}'] = other.get(
+                    f'fallback:{detail}', 0) + 1
+        elif kind == 'ordering_reconstruct_skipped':
+            if detail in RUST_SKIP_REASONS:
+                out['skipped_no_chain'] += 1
+            else:
+                other[f'skipped:{detail}'] = other.get(
+                    f'skipped:{detail}', 0) + 1
+        else:
+            continue
+        # The denominator counts every outcome, INCLUDING the ones that
+        # are none of the five: a storage-error fallback is an
+        # announcement the node decided about, and dropping it would
+        # flatter the ratio.
+        out['eligible_announcements'] += 1
+    out['other_outcomes'] = other
+    return _with_ratio(out)
+
+
+# The stages that announce an ordering block, and the outcomes that
+# decide it. Kept apart so an id is eligible once however many stages
+# (or peers) mention it, and decided once however many times it is
+# decided.
+SCALA_STAGES = ('entry_announcements', 'gate_announcements')
+SCALA_OUTCOMES = ('reconstructed', 'download_missing_tx',
+                  'download_root_mismatch', 'skipped_no_chain',
+                  'download_no_prev_input_block')
+
+# The ordering-block id every phrase above carries: after "for"
+# ("… announcement for <id>", "… fully for <id> as …", "… transactions
+# for <id> as …") or after "block" ("On processing ordering block <id>,",
+# "… for ordering block <id>, …"). The FIRST such token is the ordering
+# block; a later one ("last input block Some(<id>)", "requesting parent
+# <id>") never is.
+_SCALA_ID = re.compile(r'\b(?:for|block)\s+([0-9a-f]{2,64})\b')
+
+
+def scala_decisions(lines):
+    """Every ordering block a Scala node's log mentions, ONCE per id.
+
+    A follower peered with more than one node hears each announcement
+    from every peer, and the holder repeats the synchronizer's entry
+    phrase when the announcement reaches it: `.work-r1peer2`'s scala2
+    log carries 42 entry lines for 18 ordering blocks. Counting lines
+    made the accounting read 41 eligible and 20 unaccounted.
+
+    Returns `(ids, raw, lines_without_id)`: `ids` maps each id, in first
+    appearance order, to the stages it passed and the outcomes it was
+    given in log order; `raw` is the per-phrase LINE count, kept as
+    evidence of the duplication.
+    """
+    ids, raw, without_id = {}, {field: 0 for field in SCALA_PHRASES}, 0
+    for line in lines:
+        low = line.lower()
+        for field, phrase in SCALA_PHRASES.items():
+            if phrase not in low:
+                continue
+            raw[field] += 1
+            match = _SCALA_ID.search(low)
+            if match is None:
+                # A line that names no id cannot be merged with anything,
+                # so it stands for one announcement of its own.
+                without_id += 1
+                key = f'<no id #{without_id}>'
+            else:
+                key = match.group(1)
+            entry = ids.setdefault(key, {'stages': set(), 'outcomes': []})
+            if field in SCALA_OUTCOMES:
+                entry['outcomes'].append(field)
+            else:
+                entry['stages'].add(field)
+    return ids, raw, without_id
+
+
+def scala_accounting(lines):
+    """The six numbers from a window of a Scala node's log, per ID.
+
+    The denominator is the SYNCHRONIZER's, not the holder's. At
+    62c10315 an announcement passes three stages — the synchronizer's
+    entry line, its gate at :1854, and only then
+    `ErgoNodeViewHolder.processOrderingBlock` — and the gate at :1865
+    requests the full block without the holder ever running. Counting
+    the holder's phrases alone made a follower that downloaded 80 of 81
+    ordering blocks look like a node that logged nothing at all.
+
+    Every count is of distinct ordering-block ids (`scala_decisions`).
+    An id's outcome is its FIRST decision; a repeat of the same decision
+    is counted in `repeat_decisions` and a different later decision is
+    named in `conflicting_outcomes`, neither added to a bucket.
+    """
+    out = _empty_accounting(
+        'scala log (ErgoNodeViewSynchronizer gate :1854/:1865 and '
+        'ErgoNodeViewHolder.processOrderingBlock, 62c10315), '
+        'de-duplicated by ordering-block id')
+    for field in SCALA_PHRASES:
+        out.setdefault(field, 0)
+    ids, raw, without_id = scala_decisions(lines)
+    repeats, conflicts = 0, {}
+    for key, entry in ids.items():
+        for stage in entry['stages']:
+            out[stage] += 1
+        outcomes = entry['outcomes']
+        if outcomes:
+            out[outcomes[0]] += 1
+            repeats += len(outcomes) - 1
+            distinct = list(dict.fromkeys(outcomes))
+            if len(distinct) > 1:
+                conflicts[key] = distinct
+    # Every id any stage or outcome names is one eligible announcement:
+    # entry precedes the gate, which precedes the holder, and an id is
+    # never counted twice.
+    out['eligible_announcements'] = len(ids)
+    out['raw_line_counts'] = raw
+    out['repeat_decisions'] = repeats
+    out['conflicting_outcomes'] = conflicts
+    out['lines_without_id'] = without_id
+    out['log_lines'] = len(lines)
+    if not out['eligible_announcements'] and not any(
+            out[f] for f in ACCOUNTING_FIELDS):
+        # A build that logs none of them is UNKNOWN, not a run of
+        # zeroes: the reference half of a ratio has to be measured.
+        out['unmatched'] = (
+            'none of the phrases appears in this node\'s log for the '
+            'window; its reconstruction accounting is UNKNOWN, not zero')
+    return _with_ratio(out)
+
+
+def _with_ratio(out):
+    """Add the derived ratio and the unaccounted remainder."""
+    eligible = out['eligible_announcements']
+    decided = (out['reconstructed'] + out['download_missing_tx']
+               + out['download_root_mismatch'] + out['skipped_no_chain']
+               # The gate's download branch is an OUTCOME, not a gap.
+               + out.get('download_no_prev_input_block', 0))
+    out['decided'] = decided
+    # Announcements the node decided about but reported no outcome for.
+    # Never silently dropped from the denominator.
+    out['unaccounted'] = max(0, eligible - decided)
+    out['reconstructed_ratio'] = (
+        round(out['reconstructed'] / eligible, 4) if eligible else None)
+    return out
+
+
+def _scala_log_lines(node):
+    path = smoke.WORK / f'{node}.log'
+    try:
+        return path.read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+
+
+def open_measurement_window(ctx, collector):
+    """Open ONE measurement boundary for every half of the accounting.
+
+    The Rust half is a watermarked event collector; the Scala half is a
+    log file. They were opened independently, so the Rust numbers covered
+    the scenario's window while the Scala numbers covered the node's
+    whole lifetime — start-up, wallet initialisation and funding
+    included. Announcements decided before the window opened then
+    appeared in one accounting and not the other, and a scenario that
+    sampled the best chain from here on compared it against blocks
+    applied long before.
+
+    Returns the per-node line offsets, which the scenario records as
+    evidence: a window has to be quotable, not merely applied.
+    """
+    collector.poll()
+    ctx.collector = collector
+    ctx.collector_watermark = collector.highest_seen
+    ctx.scala_log_offsets = {
+        node: len(_scala_log_lines(node))
+        for node in (ctx.roles or {}) if node != 'rust'}
+    return ctx.scala_log_offsets
+
+
+def close_measurement_window(ctx):
+    """Close the window for EVERY half at one point, once.
+
+    The opening boundary was shared, the closing one was not: the Rust
+    event collection stopped where the scenario stopped polling, while
+    the Scala logs were read at finalisation, after the peering and
+    agreement checks had run, so a Scala follower's accounting covered
+    decisions the Rust half never had a chance to make (`.work-r1both3`:
+    14 vs 15 Scala decisions from the same start offset). The snapshot
+    is the event sequence seen at the close plus every Scala log's line
+    count; every later read stops there. Idempotent: a second call
+    returns the first snapshot, never a later one.
+    """
+    snapshot = getattr(ctx, 'measurement_close', None)
+    if snapshot is not None:
+        return snapshot
+    collector = getattr(ctx, 'collector', None)
+    if collector is not None:
+        collector.poll()
+    offsets = getattr(ctx, 'scala_log_offsets', None) or {}
+    snapshot = {
+        'rust_event_seq': collector.highest_seen if collector is not None
+                          else None,
+        'scala_log_lines': {node: len(_scala_log_lines(node))
+                            for node in offsets},
+    }
+    ctx.measurement_close = snapshot
+    return snapshot
+
+
+def _scala_window_bounds(ctx, node):
+    offset = (getattr(ctx, 'scala_log_offsets', None) or {}).get(node, 0)
+    close = getattr(ctx, 'measurement_close', None) or {}
+    return offset, (close.get('scala_log_lines') or {}).get(node)
+
+
+def scala_window_lines(ctx, node):
+    """One Scala node's log lines INSIDE the measurement window.
+
+    From the opening offset to the closing snapshot when the window was
+    closed. Without a window the whole log is returned — every caller
+    then says so in its own evidence rather than presenting a node's
+    lifetime as a measured interval.
+    """
+    offset, end = _scala_window_bounds(ctx, node)
+    return _scala_log_lines(node)[offset:end]
+
+
+def reconstruction_accounting(ctx):
+    """The five numbers for every node in a run, keyed by ROLE.
+
+    Called by the driver at finalization, so every scenario's evidence
+    carries them. The node logs are already scenario-scoped (the driver
+    rotates them before the nodes start), so the whole live log IS this
+    scenario's window.
+
+    The Rust half prefers a scenario's own incremental collector, whose
+    completeness is known; without one it reads the feed once and SAYS
+    the window may be incomplete rather than presenting a post-hoc read
+    as a measurement.
+    """
+    out = {'fields': list(ACCOUNTING_FIELDS)}
+    offsets = getattr(ctx, 'scala_log_offsets', None) or {}
+    # A window that was opened is closed HERE if its scenario did not
+    # close it (an early failure), and every half reads up to the same
+    # snapshot either way.
+    close = (close_measurement_window(ctx) if offsets or
+             getattr(ctx, 'collector', None) is not None else None)
+    out['closing_boundary'] = close
+    for node, role in (ctx.roles or {}).items():
+        if node == 'rust':
+            collector, watermark = ctx.collector, ctx.collector_watermark
+            if collector is not None:
+                entry = rust_accounting(collector.window(
+                    watermark, (close or {}).get('rust_event_seq')))
+                entry['collection'] = collector.summary(watermark)
+                entry['complete'] = not collector.lost_in_window(watermark)
+            else:
+                try:
+                    events = rust_events(ctx)
+                except Unavailable as error:
+                    out[role] = {'node': node,
+                                 'unavailable': f'{error}'}
+                    continue
+                entry = rust_accounting(events)
+                entry['collection'] = {
+                    'mode': 'single post-hoc read of a BOUNDED ring',
+                    'caveat': 'entries evicted before this read are not '
+                              'counted; the scenario kept no incremental '
+                              'collector, so completeness is unknown'}
+                entry['complete'] = None
+        else:
+            offset, end = _scala_window_bounds(ctx, node)
+            entry = scala_accounting(scala_window_lines(ctx, node))
+            entry['from_line'] = offset
+            entry['to_line'] = end
+            entry['interval'] = (
+                'the measurement window the scenario opened, the same '
+                'boundary the Rust event watermark was taken at'
+                if node in offsets else
+                'the node\'s WHOLE log: this scenario opened no measurement '
+                'window, so the interval includes start-up and funding and '
+                'is not the one the Rust half covers')
+        entry['node'] = node
+        out[role] = entry
+    return out

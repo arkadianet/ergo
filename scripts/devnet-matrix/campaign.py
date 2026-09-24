@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The M3 Matrix (input blocks) devnet campaign (plan 2 task 9, spec §12).
 
-Seven scenarios drive the Rust follower against the pinned Scala
+Eight scenarios drive the Rust follower against the pinned Scala
 `weak-blocks` miner(s) and record what it did:
 
   steady            60 ordering blocks, one miner: tip equality with lag,
@@ -25,6 +25,10 @@ Seven scenarios drive the Rust follower against the pinned Scala
   flood             the p2p adversary against the follower only: every
                     §7.4 bound holds, memory stays inside the caps, the
                     honest peer is never penalised, the chain advances.
+  miner_self_reject (M4) 40 ordering blocks against ONE miner running
+                    `--build`: what the Scala miner does to its own input
+                    solutions (F11). A MEASUREMENT — no pass criterion;
+                    a stock run is what a patched run is read against.
 
 Every scenario writes `.work/campaign/<scenario>.json`, records
 divergences as artifacts under `.work/findings/`, and NEVER absorbs one:
@@ -32,8 +36,16 @@ an observation that could not be made fails the scenario rather than
 passing quietly. The evaluators are smoke.py's — this module reuses
 them rather than writing weaker per-scenario versions.
 
-Ports are the campaign's own (19570-19572 p2p, 19590-19592 REST) so a
+Ports are the campaign's own (19570-19573 p2p, 19590-19593 REST) so a
 smoke run in another worktree can proceed concurrently.
+
+M4 adds three things on top (spec §4, §7a, §8): a BUILD registry, so a
+role can run a patch branch's build and a measurement is attributable to
+compiled output rather than to a commit; ROLES, so the experiment says
+what each node is doing rather than inferring it from the node's name;
+and the reconstruction accounting every scenario now records per role,
+so a patched follower can be read against a stock one. See
+`builds.toml`, `roles.py` and this directory's README.
 """
 import argparse
 import datetime
@@ -44,6 +56,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -52,31 +65,74 @@ import time
 # `smoke.URLS` is derived from them at ITS import time. Setting them here
 # keeps the campaign a single command rather than a command plus six
 # environment variables a reader has to get right.
-CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572}
-CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592}
+# `scala3` (M4) is the patched reference follower's slot, extending the
+# band to 19573 / 19593. It is opt-in: only `--reference-follower
+# patched|both` starts it.
+#
+# The band is the DEFAULT, not the answer: `MATRIX_P2P_<NODE>` /
+# `MATRIX_REST_<NODE>` — the same variables `lifecycle` reads — move the
+# whole campaign onto another block. Two agents can already hold the
+# smoke's band and this one at the same time, and a third run needs
+# somewhere to bind; Task 2 ran on 19600-19603 / 19620-19623 beside a
+# live Plan-2 campaign. Read HERE rather than only in
+# `configure_environment`, because the config renderers close over these
+# tables: an override that reached only the environment would bind one
+# band and write the other into every node's config file.
+DEFAULT_CAMPAIGN_P2P = {'scala': 19570, 'scala2': 19571, 'rust': 19572,
+                        'scala3': 19573}
+DEFAULT_CAMPAIGN_REST = {'scala': 19590, 'scala2': 19591, 'rust': 19592,
+                         'scala3': 19593}
 
-# Every node listens on 127.0.0.1; only the ports differ.
+
+def _band(kind, defaults):
+    return {name: int(os.environ.get(f'MATRIX_{kind}_{name.upper()}', port))
+            for name, port in defaults.items()}
+
+
+CAMPAIGN_P2P = _band('P2P', DEFAULT_CAMPAIGN_P2P)
+CAMPAIGN_REST = _band('REST', DEFAULT_CAMPAIGN_REST)
+
+# The miner and the Rust follower listen on 127.0.0.1; `scala2` and
+# `scala3` each get their own loopback address. REST stays on 127.0.0.1.
 #
-# A detour worth recording, because the obvious fix is wrong here. Two
-# Scala nodes on ONE address can never dial each other —
-# `NetworkController.getPeerAddress` resolves a candidate whose declared
-# address shares this node's own external address through the UPnP
-# gateway, and with no gateway returns `None`. Giving each node its own
-# 127.x address fixes that, and breaks something worse: the Rust
-# follower then stops dialling the second miner at all, and a follower
-# that holds one of two miners is no use to a two-miner scenario.
+# A Scala follower has to peer DIRECTLY with the Scala miner. Neither
+# implementation relays a remote input block (Scala
+# `ErgoNodeViewSynchronizer.scala:2309-2310` sends only locally mined
+# ones; Rust matches it, `processor.rs:1482`), so a follower whose only
+# peer is the Rust node never holds an input block, and every decision
+# it logs is the "prev input block not found" download. Scorex puts two
+# gates in front of a Scala node dialling a Scala node on one host, and
+# both have to be cleared (follower-peering-investigation.md §3, an
+# experiment on stock 62c10315):
 #
-# It does not matter, because the second miner is SEEDED from the
-# first's data directory (`common.seed_second_miner`) rather than
-# synced over the network, so Scala-to-Scala peering is not needed. The
-# follower's per-IP admission limit is raised in the scenarios that run
-# three nodes, and nowhere else.
-CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.1',
-                     'rust': '127.0.0.1'}
+#   1. `NetworkController.getPeerAddress` resolves a peer on the node's
+#      OWN declared IP through a UPnP gateway that does not exist, and
+#      silently gets `None` — so the follower needs a different address;
+#   2. `connectTo` refuses every loopback peer unless
+#      `scorex.network.allowLocal = true` — which `FOLLOWER_EXTRA` sets.
+#
+# Distinct addresses alone did not peer; with `allowLocal` they peered
+# in ~21 s. The miner stays on 127.0.0.1 and gets no `allowLocal`: the
+# followers dial it (inbound is not filtered for locality), and in
+# `fork`/`rollback`, where `scala2` is the SECOND MINER, the two miners
+# still cannot dial each other, which keeps the topology those
+# scenarios measure. The second node is still SEEDED from the miner's
+# data directory (`common.seed_second_miner`). All 127.x addresses are
+# one /16 to the Rust follower, so its per-IP and per-/16 admission
+# limits are raised to fit the node set (`admission_overrides`).
+CAMPAIGN_P2P_HOST = {'scala': '127.0.0.1', 'scala2': '127.0.0.2',
+                     'rust': '127.0.0.1', 'scala3': '127.0.0.3'}
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-WORK = HERE / '.work'
+# See `lifecycle.WORK`: `MATRIX_WORK` moves the whole run, resolved once.
+WORK = Path(os.environ.get('MATRIX_WORK', HERE / '.work')).resolve()
+# ...and PINNED, absolute, in the environment before anything changes
+# directory: `__main__` chdirs to ROOT and only then imports `lifecycle`
+# (and re-execs per-scenario children with `cwd=ROOT`), each of which
+# would otherwise resolve a relative value against a different base.
+if 'MATRIX_WORK' in os.environ:
+    os.environ['MATRIX_WORK'] = str(WORK)
 CAMPAIGN_WORK = WORK / 'campaign'
 CONF = CAMPAIGN_WORK / 'conf'
 
@@ -92,25 +148,29 @@ CONF = CAMPAIGN_WORK / 'conf'
 # still competes for the follower's sync budget, and would make `steady`
 # a different measurement from the M2 smoke it has to be comparable
 # with.
-SCALA2_ROLE = {
-    'fork': 'miner',
-    'rollback': 'miner',
-    'reconstruct_rate': 'follower',
-}
+# (M4: which scenario gets which extra node is now stated by
+# `SCENARIO_ROLES` below, and whether a Scala node mines is a property of
+# its ROLE rather than of its node name — `scala2` is the second miner in
+# `fork` and the reference follower in `reconstruct_rate`, and the role
+# is what says which.)
 
-# A second Scala node that must NOT mine. Without this it would race the
-# first miner and `reconstruct_rate` would be a two-miner scenario by
-# accident.
-SCALA2_FOLLOWER_EXTRA = (
+# A Scala node whose role does not mine. Without this it would race the
+# miner and `reconstruct_rate` would be a two-miner scenario by accident.
+# Applied from the role, so a new follower role cannot forget it.
+FOLLOWER_EXTRA = (
     'ergo.node.mining = false\n'
     'ergo.node.offlineGeneration = false\n'
+    # Lets the follower dial the miner on loopback; see CAMPAIGN_P2P_HOST.
+    'scorex.network.allowLocal = true\n'
 )
 
 # The order `--scenario all` runs them in: cheapest and most diagnostic
 # first, so a broken build is caught in minutes rather than after the
-# 100-block reconstruction measurement.
+# 100-block reconstruction measurement. `miner_self_reject` is a
+# MEASUREMENT with no pass criterion, so it runs last: it can neither
+# fail the campaign nor tell anyone a build is broken.
 ORDER = ('steady', 'restart', 'evict', 'fork', 'rollback', 'flood',
-         'reconstruct_rate')
+         'reconstruct_rate', 'miner_self_reject')
 
 # The node set per scenario, stated HERE rather than read off the
 # scenario module: `lifecycle.P2P` and `smoke.URLS` are built at import
@@ -127,16 +187,200 @@ SCENARIO_NODES = {
     'restart': ('scala', 'rust'),
     'evict': ('scala', 'rust'),
     'flood': ('scala', 'rust'),
+    'miner_self_reject': ('scala', 'rust'),
 }
 
+# ----- roles and the ablation switch (M4, spec §4 and §8) -----
+#
+# Each scenario's BASE role set: what every node in `SCENARIO_NODES` is
+# doing. `--reference-follower` may add to it, and `--build` decides
+# which build the `*_patched` roles run. Kept beside the node table for
+# the same reason that one is here: the environment has to be settled
+# before `lifecycle` (and through it `smoke.URLS`) is imported.
+SCENARIO_ROLES = {
+    'steady': ('scala_miner', 'rust_follower'),
+    'fork': ('scala_miner', 'scala_miner2', 'rust_follower'),
+    'rollback': ('scala_miner', 'scala_miner2', 'rust_follower'),
+    'reconstruct_rate': ('scala_miner', 'scala_follower', 'rust_follower'),
+    'restart': ('scala_miner', 'rust_follower'),
+    'evict': ('scala_miner', 'rust_follower'),
+    'flood': ('scala_miner', 'rust_follower'),
+    # The F11 measurement is about what the MINER does to its own
+    # solutions, so the miner is the node under test and runs `--build`.
+    # With `--build stock` it is the baseline the patch is compared
+    # against, which is the same command with a different build.
+    'miner_self_reject': ('scala_miner_patched', 'rust_follower'),
+}
 
-def configure_environment(scenario, nodes):
-    """Point `lifecycle` at this campaign's ports, configs and data dirs."""
+# Scenarios with NO pass criterion (spec §7a, `task-0-brief.md:32`).
+# They exist to produce denominators a patched run is read against, so
+# "nothing failed" says nothing about them: the question is whether the
+# measurement was TAKEN, over the window it asked for, with the phrases
+# it counts actually matching the build.
+MEASUREMENT_SCENARIOS = ('miner_self_reject',)
+
+# The verdicts that exit 0: the run did what it was asked. A completed
+# measurement is one of them; an incomplete measurement is not, and
+# neither is a PASS it was never eligible for. NOT MEASURED exits 0 as
+# well — a comparison this host could not make is a limitation of the
+# host, not a broken scenario — and is reported as its own verdict.
+OK_RESULTS = ('PASS', 'MEASURED', 'NOT MEASURED')
+
+
+def verdict_of(scenario, aborted, failures, measurement_complete=None,
+               not_measured=None):
+    """One run's verdict. The driver's rule, in one testable place.
+
+    A measurement-only scenario can be MEASURED or INCOMPLETE, never
+    PASS or FAIL: it has no criterion, so it cannot meet one. It used to
+    be given PASS whenever no assertion happened to fail, which made a
+    run that covered 3 of its 40 ordering blocks indistinguishable from
+    one that covered all 40, and let a campaign summary count a
+    measurement among its passes.
+
+    `measurement_complete` is the scenario's OWN statement that its
+    window opened, ran to the end, and matched the phrases it counts. Not
+    stated is not complete: a scenario that never said so has not shown
+    it.
+
+    `NOT MEASURED` is its own kind: a scenario whose comparison could
+    not be made on this host has not failed — nothing about the node is
+    wrong — and it has not passed either, because the property it exists
+    to establish is unestablished. It never outranks a real failure or
+    an abort.
+    """
+    if aborted:
+        return 'ABORTED'
+    if scenario in MEASUREMENT_SCENARIOS:
+        return 'MEASURED' if measurement_complete and not failures \
+            else 'INCOMPLETE'
+    if failures:
+        return 'FAIL'
+    if not_measured:
+        return 'NOT MEASURED'
+    return 'PASS'
+
+
+# Which scenarios take `--reference-follower` (spec §8). The others
+# refuse it rather than accepting it and measuring nothing with it.
+REFERENCE_FOLLOWER_SCENARIOS = ('steady', 'restart', 'fork',
+                                'reconstruct_rate', 'flood')
+# `flood` aims its adversary at the ONE Scala follower the flag adds (F13's
+# pending store is attack surface on the Scala side); with two there is
+# no single target, so `both` is refused rather than guessed.
+SINGLE_FOLLOWER_SCENARIOS = ('flood',)
+
+
+def resolve_roles(scenario, reference_follower=None):
+    """The role set for one run, after `--reference-follower`.
+
+    `reconstruct_rate` already carries a STOCK reference follower — it
+    cannot measure anything without one — so for it the flag chooses
+    between stock, patched and both. For the others the flag ADDS a
+    reference follower that the base scenario does not have.
+
+    `fork` and `rollback` spend the `scala2` slot on a second MINER, so
+    a stock reference follower has nowhere to run there; that is refused
+    with the reason rather than silently downgraded to `patched`.
+    """
+    roles = list(SCENARIO_ROLES[scenario])
+    if reference_follower is None:
+        return tuple(roles)
+    if scenario not in REFERENCE_FOLLOWER_SCENARIOS:
+        raise SystemExit(
+            f'--reference-follower does not apply to {scenario}; it is '
+            f'accepted by {", ".join(REFERENCE_FOLLOWER_SCENARIOS)}')
+    if reference_follower == 'both' and scenario in SINGLE_FOLLOWER_SCENARIOS:
+        raise SystemExit(
+            f'{scenario} takes one target follower, so --reference-follower '
+            'both is refused; run it once with stock and once with patched')
+    wanted = {'stock': ['scala_follower'],
+              'patched': ['scala_follower_patched'],
+              'both': ['scala_follower', 'scala_follower_patched']}[
+                  reference_follower]
+    roles = [r for r in roles if r not in
+             ('scala_follower', 'scala_follower_patched')]
+    for role in wanted:
+        node = lifecycle_roles()[role].node
+        taken = {lifecycle_roles()[r].node for r in roles}
+        if node in taken:
+            holder = next(r for r in roles if lifecycle_roles()[r].node == node)
+            raise SystemExit(
+                f'{scenario} cannot run the {role} reference follower: its '
+                f'{node} slot is already the {holder}. Use '
+                '--reference-follower patched, which has its own slot.')
+        roles.append(role)
+    return tuple(roles)
+
+
+def lifecycle_roles():
+    """The role table.
+
+    From `roles`, NOT from `lifecycle`: `lifecycle` reads its ports from
+    the environment at import, and roles are resolved before
+    `configure_environment` sets them. Importing `lifecycle` here would
+    freeze the two-node smoke defaults over every campaign scenario.
+    """
+    sys.path.insert(0, str(HERE))
+    import roles
+    return roles.ROLES
+
+
+def nodes_for_roles(role_set):
+    """The node set a role set occupies, in start order."""
+    sys.path.insert(0, str(HERE))
+    import roles
+    return roles.nodes_for_roles(role_set)
+
+
+# Ports this harness must never bind, whatever the environment says:
+# the operator's production and devnet nodes. The band is overridable
+# (see `_band`), so the guard runs against the RESOLVED ports — a typo in
+# `MATRIX_REST_SCALA` must not put a mining node's REST port in a
+# campaign config file.
+FORBIDDEN_PORTS = (9052, 9053, 9063, 9072, 9073, 19099)
+
+
+def check_band(p2p, rest):
+    """Refuse a resolved port band that is not this harness's to bind."""
+    both = list(p2p.items()) + list(rest.items())
+    clash = sorted({port for _, port in both if port in FORBIDDEN_PORTS})
+    if clash:
+        raise SystemExit(
+            f'refusing to bind {clash}: those ports belong to the operator\'s '
+            'nodes, not to this harness')
+    # EVERY duplicate, including one node's own two listeners. The
+    # earlier `seen[port] != node` exemption let a node's REST and p2p
+    # share a port: one of the two binds, the other fails, and what is
+    # left is a REST port speaking the p2p handshake.
+    seen = {}
+    for node, port in both:
+        if port in seen:
+            raise SystemExit(
+                f'port {port} is claimed twice ({seen[port]} and {node}); '
+                'every listener needs its own port')
+        seen[port] = f'{node} p2p' if (node, port) in p2p.items() else \
+            f'{node} REST'
+    return None
+
+
+def configure_environment(scenario, nodes, roles=(), build='stock'):
+    """Point `lifecycle` at this campaign's ports, configs, dirs and builds."""
     os.environ['MATRIX_NODES'] = ','.join(nodes)
     for name in nodes:
         os.environ[f'MATRIX_P2P_{name.upper()}'] = str(CAMPAIGN_P2P[name])
         os.environ[f'MATRIX_REST_{name.upper()}'] = str(CAMPAIGN_REST[name])
         os.environ[f'MATRIX_P2P_HOST_{name.upper()}'] = CAMPAIGN_P2P_HOST[name]
+    # `--build` selects the build for the PATCHED roles only. Every
+    # other Scala role stays on `stock`, which is what makes a run an
+    # ablation (base + one patch vs base) rather than a comparison of
+    # two integration builds (spec §7a).
+    for role in roles:
+        spec = lifecycle_roles()[role]
+        if spec.kind != 'scala':
+            continue
+        os.environ[f'MATRIX_BUILD_{spec.node.upper()}'] = (
+            build if spec.patched else 'stock')
 
 
 # ----- config rendering -----
@@ -228,11 +472,27 @@ def ensure_data_dirs(data_root, nodes):
     return data_root
 
 
-def write_configs(scenario, nodes, rust_overrides=(), scala_extra='',
-                  scala2_extra=''):
+def scala_extra_for(node, roles, scala_extra='', scala2_extra=''):
+    """The HOCON a Scala node gets on top of the recipe file.
+
+    Two sources, and the ROLE's comes first: a node whose role does not
+    mine is told not to mine here, so a follower role added later cannot
+    quietly become a second miner because its scenario forgot the
+    constant. The scenario's own extra is appended, and HOCON's
+    last-wins means a scenario can still override deliberately.
+    """
+    spec = lifecycle_roles()[roles[node]] if node in roles else None
+    role_extra = '' if spec is None or spec.mines else FOLLOWER_EXTRA
+    own = {'scala': scala_extra, 'scala2': scala2_extra}.get(node, '')
+    return role_extra + own
+
+
+def write_configs(scenario, nodes, roles=None, rust_overrides=(),
+                  scala_extra='', scala2_extra=''):
     """Render every node's config for one scenario and point `lifecycle`
     at them. Returns the scenario's data directory."""
     CONF.mkdir(parents=True, exist_ok=True)
+    roles = roles or {}
     data_root = CAMPAIGN_WORK / scenario
     data_root.mkdir(parents=True, exist_ok=True)
     ensure_data_dirs(data_root, nodes)
@@ -247,9 +507,9 @@ def write_configs(scenario, nodes, rust_overrides=(), scala_extra='',
             path = CONF / f'{scenario}-{node}.conf'
             path.write_text(scala_override(
                 scenario, node, nodes, data_root / node,
-                extra=scala_extra if node == 'scala' else scala2_extra))
-            os.environ[{'scala': 'SCALA_CONFIG',
-                        'scala2': 'SCALA2_CONFIG'}[node]] = str(path)
+                extra=scala_extra_for(node, roles, scala_extra, scala2_extra)))
+            os.environ[{'scala': 'SCALA_CONFIG', 'scala2': 'SCALA2_CONFIG',
+                        'scala3': 'SCALA3_CONFIG'}[node]] = str(path)
     return data_root
 
 
@@ -269,15 +529,27 @@ class Context:
     not evidence.
     """
 
-    def __init__(self, scenario, run, evidence, args, nodes, data_root):
+    def __init__(self, scenario, run, evidence, args, nodes, data_root,
+                 roles=None):
         self.scenario = scenario
         self.run = run
         self.evidence = evidence
         self.args = args
         self.nodes = nodes
+        # `{node: role}` for this run. A scenario reads it to find the
+        # node playing a role rather than hardcoding `scala2`, which is
+        # the second miner in one scenario and the reference follower in
+        # another.
+        self.roles = dict(roles or {})
         self.data_root = data_root
         self.divergences = []
         self.not_measured_reasons = []
+        # A scenario that polls the event feed INCREMENTALLY parks its
+        # collector here, so the driver's reconstruction accounting can
+        # use a window that is known to be complete rather than a single
+        # post-hoc read the bounded ring may already have evicted from.
+        self.collector = None
+        self.collector_watermark = 0
         # The watch item the controller added: an input block whose
         # inputs Rust could not find in its own UTXO set. Counted per
         # scenario, with the input block and the node's state captured.
@@ -736,21 +1008,8 @@ def check_attempt_cap(name, force=False):
 
 
 def verdict_for(aborted, failures, not_measured=None):
-    """The one verdict rule, in one place.
-
-    `NOT MEASURED` is its own kind: a scenario whose comparison could
-    not be made on this host has not failed — nothing about the node is
-    wrong — and it has not passed either, because the property it exists
-    to establish is unestablished. It never outranks a real failure or
-    an abort.
-    """
-    if aborted:
-        return 'ABORTED'
-    if failures:
-        return 'FAIL'
-    if not_measured:
-        return 'NOT MEASURED'
-    return 'PASS'
+    """`verdict_of` for a scenario that HAS a pass criterion."""
+    return verdict_of(None, aborted, failures, not_measured=not_measured)
 
 
 def persist_verdict(name, evidence, aborted, failures, save):
@@ -762,7 +1021,9 @@ def persist_verdict(name, evidence, aborted, failures, save):
     attempt was recorded, and codex's r3 probe — the attempt recording
     raising after a clean run — left the persisted verdict at DONE/PASS.
     """
-    verdict = verdict_for(aborted, failures, evidence.get('not_measured'))
+    verdict = verdict_of(name, aborted, failures,
+                         evidence.get('measurement_complete'),
+                         evidence.get('not_measured'))
     finished = datetime.datetime.now(datetime.timezone.utc).isoformat()
     evidence.update({'status': 'FINALIZING', 'result': 'ABORTED',
                      'aborted': aborted or 'the verdict was not persisted',
@@ -786,17 +1047,160 @@ def persist_verdict(name, evidence, aborted, failures, save):
     return verdict
 
 
+def check_build(name):
+    """Refuse an unknown or unprovisioned `--build` before anything starts.
+
+    An unknown name is a typo; a declared-but-unprovisioned one is a
+    patch branch nobody has built yet, and the error says which command
+    would build it. Either way the devnet does not start: a run that
+    silently fell back to `stock` would be a patched claim measured on
+    the base build.
+    """
+    sys.path.insert(0, str(HERE))
+    import builds
+    try:
+        known = builds.registry()
+    except builds.BuildError as error:
+        raise SystemExit(str(error)) from error
+    if name not in known:
+        raise SystemExit(
+            f'unknown build {name!r}; declared builds: {", ".join(known)}')
+    build = known[name]
+    if not build.available:
+        raise SystemExit(
+            f'build {name!r} is declared but not provisioned at '
+            f'{build.work_dir}. Provision it first:\n  '
+            + builds.provision_command(
+                name, '~/coding/development/arkadianet/ergo-scala',
+                build.declared.get('ergo_ref', '<ref>')))
+    try:
+        build.verify()
+    except builds.BuildError as error:
+        raise SystemExit(str(error)) from error
+    return build
+
+
+def common_module():
+    """`scenarios.common`, imported lazily (it pulls `smoke` in with it)."""
+    from scenarios import common
+    return common
+
+
+def check_no_classpath_override(environ):
+    """Refuse a hand-set classpath for a MEASURED campaign.
+
+    `MATRIX_CLASSPATH[_<NODE>]` is how an operator drives the harness
+    against a one-off build; it is also the one path that skips
+    `Build.verify()` entirely. A campaign scenario's numbers are
+    attributed to a build in its evidence file, so the two cannot both
+    be true: either the registry says which build ran and checked it, or
+    the run is not a measurement. `smoke.py` and `lifecycle.py start`
+    keep the override.
+    """
+    named = sorted(k for k in environ
+                   if k == 'MATRIX_CLASSPATH'
+                   or k.startswith('MATRIX_CLASSPATH_'))
+    if named:
+        raise SystemExit(
+            f'{", ".join(named)} is set, which points the devnet at a '
+            'classpath the build registry never verified. A campaign '
+            'attributes every number to a build, so it takes its classpath '
+            'from --build alone. Unset it, or register the build in '
+            'scripts/devnet-matrix/builds.toml.')
+
+
+def check_launch_classpath(role, node, summary, launch_classpath):
+    """The evidence entry for one role, bound to the ACTUAL launch.
+
+    The manifest is read from the registry and the classpath is read
+    from `lifecycle`, which is what the JVM is started with. They were
+    recorded independently, so a per-node override could put the
+    registered build in the evidence and a different one on the
+    classpath. Here they have to be the same file.
+    """
+    entry = dict(summary)
+    entry['node'] = node
+    entry['launch_classpath'] = str(launch_classpath)
+    if entry.get('classpath') != str(launch_classpath):
+        raise SystemExit(
+            f'the {role} evidence would name build {entry.get("build")!r} '
+            f'({entry.get("classpath")}) but the {node} node was launched from '
+            f'{launch_classpath}. Evidence that describes a different '
+            'classpath from the one the JVM ran is not evidence.')
+    return entry
+
+
+def build_manifests(by_node):
+    """`{role: manifest summary}` for every Scala role in a run.
+
+    Read through the registry, which VERIFIES the build first, so the
+    manifest recorded beside a measurement is one that was checked
+    against the compiled output the node actually ran — and bound to the
+    classpath `lifecycle` will hand the JVM, so the two cannot describe
+    different builds.
+
+    A `BuildError` ABORTS. It used to be caught and written into the
+    evidence as `unidentified`, which let a whole campaign run and be
+    reported on a build nobody could name.
+    """
+    import builds
+    import lifecycle
+    out = {}
+    for node, role in by_node.items():
+        if lifecycle.ROLES[role].kind != 'scala':
+            continue
+        name = lifecycle.node_build(node)
+        try:
+            summary = builds.load(name).summary()
+        except builds.BuildError as error:
+            raise SystemExit(
+                f'the {role} role on {node} cannot run build {name!r}: {error}'
+            ) from error
+        out[role] = check_launch_classpath(
+            role, node, summary, lifecycle.classpath_file(node))
+    return out
+
+
+def admission_overrides(nodes, overrides):
+    """Raise the follower's per-IP admission limit to fit the node set.
+
+    Every 127.x address is one /16 to the follower, and a Scala node's
+    outbound socket comes from 127.0.0.1 whatever address it listens on.
+    The limit gates outbound dial SELECTION as well as inbound
+    admission, so a follower left at the
+    default holds exactly ONE of them and a multi-Scala scenario
+    measures nothing. It was a per-scenario constant, which is wrong the
+    moment `--reference-follower` adds a node at RUNTIME: the resolved
+    node set is what the limit has to fit.
+
+    A scenario that states its own limit keeps it — `flood` is about
+    admission, and a scenario that tests a bound may not have it widened
+    underneath it. Nothing is raised for a single Scala node.
+    """
+    stated = {(sec, key) for sec, key, _ in overrides}
+    scala_nodes = sum(1 for n in nodes if n != 'rust')
+    if scala_nodes < 2:
+        return tuple(overrides)
+    extra = [o for o in (('peers', 'per_ip_limit', str(scala_nodes)),
+                         ('peers', 'per_subnet_limit', str(scala_nodes * 2)))
+             if (o[0], o[1]) not in stated]
+    return tuple(overrides) + tuple(extra)
+
+
 def run_scenario(name, args):
     import lifecycle
     import smoke
     from scenarios import SCENARIOS
 
     scenario = SCENARIOS[name]
-    nodes = list(SCENARIO_NODES[name])
+    roles = resolve_roles(name, args.reference_follower)
+    by_node = lifecycle.roles_for_nodes(roles)
+    nodes = list(nodes_for_roles(roles))
     attempt = args.attempt or 1
     data_root = write_configs(
-        name, nodes,
-        rust_overrides=getattr(scenario, 'RUST_OVERRIDES', ()),
+        name, nodes, roles=by_node,
+        rust_overrides=admission_overrides(
+            nodes, getattr(scenario, 'RUST_OVERRIDES', ())),
         scala_extra=getattr(scenario, 'SCALA_EXTRA', ''),
         scala2_extra=getattr(scenario, 'SCALA2_EXTRA', ''))
     if args.fresh:
@@ -810,15 +1214,25 @@ def run_scenario(name, args):
         'status': 'RUNNING',
         'started': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         'nodes': nodes,
+        'roles': {node: role for node, role in by_node.items()},
+        'reference_follower': args.reference_follower,
+        'build': args.build,
+        # The IDENTITY of every Scala build this run used, per role
+        # (spec §7a "build identity"): source commit, sigma jars and the
+        # sha256 of the compiled class output the node was launched
+        # from. A number in this file is attributable to a build or it
+        # is not evidence.
+        'builds': build_manifests(by_node),
         'ports': {'p2p': {n: CAMPAIGN_P2P[n] for n in nodes},
                   'rest': {n: CAMPAIGN_REST[n] for n in nodes}},
         'rust': {
             'git_sha': subprocess.check_output(
                 ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
             'binary': lifecycle.node_binary(),
+            'binary_provenance': lifecycle.node_binary_provenance(),
         },
-        'scala': {'classpath': str(lifecycle.classpath_file()),
-                  'pinned_app_version': lifecycle.SCALA_APP_VERSION},
+        'scala': {'classpath': str(lifecycle.classpath_file('scala')),
+                  'pinned_app_version': lifecycle.scala_app_version('scala')},
         'attempt': args.attempt,
         'attempt_cap': MAX_ATTEMPTS,
         'previous_attempts': [
@@ -834,7 +1248,8 @@ def run_scenario(name, args):
     evidence['logs_set_aside_at_start'] = rotate_logs(name, nodes, tag='-prior')
     save()
     run = smoke.Run(time.monotonic() + args.timeout)
-    ctx = Context(name, run, evidence, args, nodes, data_root)
+    ctx = Context(name, run, evidence, args, nodes, data_root,
+                  roles=by_node)
     # A scenario may bring a node up itself, part-way through. The
     # two-miner scenarios do: the second miner is seeded from the
     # first's data directory once there is a chain to copy, because the
@@ -884,6 +1299,14 @@ def run_scenario(name, args):
                     evidence['utxo_watch_scans'] = ctx.utxo_watch.scans
                 smoke.check_sampler(run, evidence)
                 scan_utxo_validation_failures(ctx)
+                # EVERY scenario carries the reconstruction accounting, per
+                # role (spec §7a "honest denominators"), not just the one
+                # that measures it: the patched-vs-stock comparisons in the
+                # findings drafts quote these five numbers, and a scenario
+                # that happened not to collect them would be a hole in the
+                # ablation rather than a scenario with nothing to say.
+                evidence['reconstruction_accounting'] = \
+                    common_module().reconstruction_accounting(ctx)
                 evidence['divergences'] = ctx.divergences
                 evidence['failures'] = run.failures
                 evidence['artifacts'] = smoke.write_findings(run, evidence)
@@ -957,10 +1380,11 @@ def _self_test():
     rendered = render_rust_config(template, Path('/tmp/x/rust'),
                                   ['scala', 'scala2', 'rust'])
     assert 'data_dir = "/tmp/x/rust"' in rendered, rendered
-    # Each node on its own loopback address, REST on 127.0.0.1 for all.
+    # Rust and the miner on 127.0.0.1, `scala2` on its own loopback
+    # address (CAMPAIGN_P2P_HOST), REST on 127.0.0.1 for all.
     assert 'bind_addr = "127.0.0.1:19572"' in rendered, rendered
     assert 'bind = "127.0.0.1:19592"' in rendered, rendered
-    assert ('known = ["127.0.0.1:19570", "127.0.0.1:19571"]' in rendered), rendered
+    assert ('known = ["127.0.0.1:19570", "127.0.0.2:19571"]' in rendered), rendered
     assert 'target_outbound = 2' in rendered, rendered
     # Untouched keys survive verbatim, and nothing is duplicated.
     assert 'allow_local = true' in rendered, rendered
@@ -988,54 +1412,1420 @@ def _self_test():
     overlay = scala_override('fork', 'scala2', ['scala', 'scala2', 'rust'],
                              Path('/tmp/x/scala2'))
     assert 'include file(' in overlay and 'scala-miner2.conf")' in overlay, overlay
-    assert 'bindAddress = "127.0.0.1:19571"' in overlay, overlay
+    assert 'bindAddress = "127.0.0.2:19571"' in overlay, overlay
     assert 'restApi.bindAddress = "127.0.0.1:19591"' in overlay, overlay
     assert '"127.0.0.1:19570", "127.0.0.1:19572"' in overlay, overlay
     # Every scenario that runs three nodes on one address has to raise
     # the follower's per-IP admission limit, or it holds exactly one of
     # the two Scala nodes and the scenario measures nothing.
     from scenarios import SCENARIOS as _all
-    for _name in SCALA2_ROLE:
+    for _name, _nodes in SCENARIO_NODES.items():
+        if len(_nodes) < 3:
+            continue
         _overrides = dict(
             ((sec, key), value)
             for sec, key, value in getattr(_all[_name], 'RUST_OVERRIDES', ()))
         assert _overrides.get(('peers', 'per_ip_limit')) == '3', _name
+    # ...and a node set that grows at RUNTIME gets the same treatment,
+    # because `--reference-follower` is not in any scenario's constant.
+    assert admission_overrides(('scala', 'rust'), ()) == ()
+    assert dict(((s, k), v) for s, k, v in admission_overrides(
+        ('scala', 'scala2', 'rust'), ()))[('peers', 'per_ip_limit')] == '2'
+    assert dict(((s, k), v) for s, k, v in admission_overrides(
+        ('scala', 'scala2', 'scala3', 'rust'), ()))[
+            ('peers', 'per_ip_limit')] == '3'
+    # A scenario that states the bound keeps it: `flood` tests admission
+    # and may not have it widened underneath it.
+    stated = (('peers', 'per_ip_limit', '1'),)
+    assert admission_overrides(('scala', 'scala2', 'rust'), stated)[0] == \
+        stated[0]
+    assert sum(1 for s, k, _ in admission_overrides(
+        ('scala', 'scala2', 'rust'), stated)
+        if (s, k) == ('peers', 'per_ip_limit')) == 1
     assert '19571' not in overlay.split('knownPeers')[1], \
         'a node must not be listed as its own peer'
+
+    # ----- a Scala follower peers DIRECTLY with the Scala miner -----
+    #
+    # Neither implementation relays a REMOTE input block (Scala
+    # `ErgoNodeViewSynchronizer.scala:2309-2310`, Rust `processor.rs:1482`),
+    # so a Scala follower whose only peer is the Rust node never holds an
+    # input block. Every stock decision was then the synchronizer's
+    # "prev input block not found" download (80 of 81 in Task 2, 15 of
+    # 15 in the `both` validation). Scorex applies two gates to a Scala
+    # node dialling a Scala node on one host
+    # (follower-peering-investigation.md §3, experiment-confirmed): a
+    # peer on the node's OWN declared IP resolves through a UPnP gateway
+    # that does not exist, and `allowLocal = false` refuses every
+    # loopback peer. A follower therefore gets its own loopback address
+    # and `allowLocal`. The miner and Rust stay on 127.0.0.1.
+    assert CAMPAIGN_P2P_HOST['scala'] == '127.0.0.1', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['rust'] == '127.0.0.1', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['scala2'] == '127.0.0.2', CAMPAIGN_P2P_HOST
+    assert CAMPAIGN_P2P_HOST['scala3'] == '127.0.0.3', CAMPAIGN_P2P_HOST
+    import lifecycle as _lc
+    _roles_both = _lc.roles_for_nodes(
+        resolve_roles('reconstruct_rate', 'both'))
+    for _node in ('scala2', 'scala3'):
+        _fo = scala_override(
+            'reconstruct_rate', _node, ['scala', 'scala2', 'scala3', 'rust'],
+            Path(f'/tmp/x/{_node}'),
+            extra=scala_extra_for(_node, _roles_both))
+        _host = CAMPAIGN_P2P_HOST[_node]
+        assert f'bindAddress = "{_host}:' in _fo, _fo
+        assert f'declaredAddress = "{_host}:' in _fo, _fo
+        assert 'scorex.network.allowLocal = true' in _fo, (
+            'a follower that may not dial loopback never reaches the miner',
+            _fo)
+        # The miner is in its known peers, at the miner's own address.
+        assert f'"127.0.0.1:{CAMPAIGN_P2P["scala"]}"' in \
+            _fo.split('knownPeers')[1].splitlines()[0], _fo
+    # A MINER role gets no `allowLocal`: in `fork`/`rollback` `scala2` is
+    # the second miner, and letting the two miners dial each other would
+    # change the topology those scenarios measure.
+    _roles_fork = _lc.roles_for_nodes(SCENARIO_ROLES['fork'])
+    for _node in ('scala', 'scala2'):
+        assert 'allowLocal' not in scala_extra_for(_node, _roles_fork), _node
+    # `localOnly` is read by no Scala source at 62c10315, so a recipe that
+    # carries it states a guard that does not exist.
+    for _conf in ('scala-node.conf', 'scala-miner2.conf'):
+        assert 'localOnly' not in (HERE / _conf).read_text(), _conf
+
+    # ----- M4: a THIRD port block, for a run beside a live campaign -----
+    #
+    # Two agents can hold the two documented bands at once (the smoke's
+    # 19560-19563 / 19580-19583 and the campaign's 19570-19573 /
+    # 19590-19593), and a third run then has nowhere to bind. The
+    # environment names the band — the same `MATRIX_P2P_<NODE>` /
+    # `MATRIX_REST_<NODE>` variables `lifecycle` already reads — and the
+    # campaign's own tables are the DEFAULT rather than the answer.
+    #
+    # It has to hold in a FRESH interpreter: the tables are module-level
+    # and the rendering functions close over them, so an override that
+    # only reached `configure_environment` would render the default band
+    # into every config file while binding the overridden one.
+    probe = (
+        'import os, sys; sys.path.insert(0, %r); import campaign;'
+        'print(campaign.CAMPAIGN_P2P["scala"], campaign.CAMPAIGN_REST["rust"]);'
+        'print(campaign.scala_override("steady", "scala", ["scala", "rust"],'
+        ' __import__("pathlib").Path("/tmp/x/scala")))'
+    ) % str(HERE)
+    env = dict(os.environ, MATRIX_P2P_SCALA='19600', MATRIX_P2P_RUST='19602',
+               MATRIX_REST_SCALA='19620', MATRIX_REST_RUST='19622')
+    out = subprocess.run([sys.executable, '-c', probe], env=env,
+                         capture_output=True, text=True, check=True).stdout
+    assert out.splitlines()[0] == '19600 19622', out
+    assert 'bindAddress = "127.0.0.1:19600"' in out, out
+    assert 'restApi.bindAddress = "127.0.0.1:19620"' in out, out
+    assert '"127.0.0.1:19602"' in out, out
+    # An unset environment still reproduces the documented band exactly.
+    out = subprocess.run([sys.executable, '-c', probe],
+                         env={k: v for k, v in os.environ.items()
+                              if not k.startswith(('MATRIX_P2P', 'MATRIX_REST'))},
+                         capture_output=True, text=True, check=True).stdout
+    assert out.splitlines()[0] == '19570 19592', out
+
+    import tempfile
+
+    # ----- M4: a run's WORKING DIRECTORY, not just its ports -----
+    #
+    # A separate port band is not isolation. Two agents driving this one
+    # worktree share `.work/`, so the second run's `lifecycle.start`
+    # overwrites `scala.pid` / `scala.config` and the first run's `stop`
+    # then reads them and kills the SECOND run's nodes — and both runs
+    # append to one `scala.log` and one `agreement-series.jsonl`, which
+    # is the evidence both of them are measured from. This happened on
+    # 2026-09-23 between Task 2 and a concurrent F16 smoke. `MATRIX_WORK`
+    # moves pid files, logs, series and evidence together; `smoke`
+    # imports `WORK` from `lifecycle`, so one variable settles all three
+    # modules.
+    probe = (
+        'import sys; sys.path.insert(0, %r);'
+        'import lifecycle, campaign, smoke;'
+        'print(lifecycle.WORK, smoke.WORK, campaign.WORK, campaign.CAMPAIGN_WORK)'
+    ) % str(HERE)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = subprocess.run(
+            [sys.executable, '-c', probe],
+            env=dict(os.environ, MATRIX_WORK=tmp),
+            capture_output=True, text=True, check=True).stdout.split()
+        assert out[0] == out[1] == out[2] == tmp, out
+        assert out[3] == str(Path(tmp) / 'campaign'), out
+    out = subprocess.run(
+        [sys.executable, '-c', probe],
+        env={k: v for k, v in os.environ.items() if k != 'MATRIX_WORK'},
+        capture_output=True, text=True, check=True).stdout.split()
+    assert out[0] == str(HERE / '.work'), out
+    # A RELATIVE `MATRIX_WORK` (`cd scripts/devnet-matrix;
+    # MATRIX_WORK=.work-m4-f11 python3 campaign.py …`, the launch shape
+    # proof-F11.md records) is resolved against the directory it was
+    # given in, ONCE, at load. Left relative, the first
+    # `path.relative_to(ROOT)` (a mismatch artifact written during
+    # `fund_miner`) raised ValueError and aborted the run before any
+    # devnet state existed. A work directory OUTSIDE the checkout (a
+    # tempdir) is shown as an absolute path instead of raising.
+    rel_probe = (
+        'import sys; sys.path.insert(0, %r);'
+        'import lifecycle, campaign, smoke;'
+        'print(lifecycle.WORK, smoke.WORK, campaign.WORK,'
+        ' smoke.display_path(smoke.FINDINGS / "x.json"))'
+    ) % str(HERE)
+    rel_env = dict(os.environ, MATRIX_WORK='.work-selftest-relative')
+    out = subprocess.run(
+        [sys.executable, '-c', rel_probe], cwd=str(HERE), env=rel_env,
+        capture_output=True, text=True).stdout.split()
+    assert out and out[0] == str(HERE / '.work-selftest-relative'), (
+        'a relative MATRIX_WORK must be absolute once loaded', out)
+    assert out[0] == out[1] == out[2], out
+    assert out[3] == ('scripts/devnet-matrix/.work-selftest-relative/'
+                      'findings/x.json'), out
+    with tempfile.TemporaryDirectory() as tmp:
+        out = subprocess.run(
+            [sys.executable, '-c', rel_probe],
+            env=dict(os.environ, MATRIX_WORK=tmp),
+            capture_output=True, text=True, check=True).stdout.split()
+        # The gate runs with TMPDIR inside the worktree, where the tempdir
+        # IS inside the checkout and is named relative to it; outside it,
+        # the name is absolute. Either way it never raises.
+        found = Path(tmp).resolve() / 'findings' / 'x.json'
+        try:
+            want = str(found.relative_to(ROOT))
+        except ValueError:
+            want = str(found)
+        assert out[3] == want, (want, out)
+    # ----- step A (5): the SAME work dir after `main`'s chdir -----
+    #
+    # `campaign.py` is loaded (and resolves `MATRIX_WORK`) in the launch
+    # directory, then `__main__` changes to the checkout root and imports
+    # `lifecycle` lazily, which resolved the same relative value against
+    # the ROOT: launched from `scripts/devnet-matrix`, the campaign's
+    # evidence and the nodes' pid files and logs went to two different
+    # directories, and so did every re-exec'd child (`cwd=ROOT`). The
+    # probe replays main's order: load in HERE, chdir, lazy import, and
+    # a child started from ROOT.
+    chdir_probe = (
+        'import os, subprocess, sys; sys.path.insert(0, %r);'
+        'import campaign; os.chdir(campaign.ROOT);'
+        'import lifecycle, smoke;'
+        'child = subprocess.run([sys.executable, "-c", "import os;'
+        ' print(os.environ[\'MATRIX_WORK\'])"], capture_output=True,'
+        ' text=True, cwd=str(campaign.ROOT)).stdout.strip();'
+        'print(campaign.WORK, lifecycle.WORK, smoke.WORK,'
+        ' os.environ["MATRIX_WORK"], child)'
+    ) % str(HERE)
+    out = subprocess.run(
+        [sys.executable, '-c', chdir_probe], cwd=str(HERE),
+        env=dict(os.environ, MATRIX_WORK='.work-selftest-chdir'),
+        capture_output=True, text=True).stdout.split()
+    assert out and len(set(out)) == 1 and \
+        out[0] == str(HERE / '.work-selftest-chdir'), (
+            'one absolute work dir before and after the chdir, in this '
+            'process and its children', out)
 
     # The port bands are the controller's, and must never collide with a
     # production node or with the smoke recipe's own defaults.
     import lifecycle
     forbidden = {9052, 9053, 9063, 9072, 9073, 19099}
-    used = set(CAMPAIGN_P2P.values()) | set(CAMPAIGN_REST.values())
+    used = set(DEFAULT_CAMPAIGN_P2P.values()) | set(DEFAULT_CAMPAIGN_REST.values())
     assert not (used & forbidden), used & forbidden
     assert not (used & set(lifecycle.DEFAULT_P2P.values())), used
     assert not (used & set(lifecycle.DEFAULT_REST.values())), used
+    # ----- M4: the role/port table has no collisions -----
+    #
+    # Every node has its OWN p2p and REST port, in both the smoke and
+    # the campaign band, and the two bands do not overlap. A duplicate
+    # here binds one node's port for another and the run fails at start
+    # — or worse, two nodes share a data directory.
+    for table in (DEFAULT_CAMPAIGN_P2P, DEFAULT_CAMPAIGN_REST,
+                  lifecycle.DEFAULT_P2P, lifecycle.DEFAULT_REST):
+        assert len(set(table.values())) == len(table), table
+    assert set(CAMPAIGN_P2P) == set(CAMPAIGN_REST) == set(
+        lifecycle.DEFAULT_P2P) == set(lifecycle.DEFAULT_REST) == set(
+        lifecycle.DEFAULT_P2P_HOST) == set(CAMPAIGN_P2P_HOST), \
+        'every node needs an entry in every port table'
+    # The M4 slot, at the band the plan states.
+    assert DEFAULT_CAMPAIGN_P2P['scala3'] == 19573, DEFAULT_CAMPAIGN_P2P
+    assert DEFAULT_CAMPAIGN_REST['scala3'] == 19593, DEFAULT_CAMPAIGN_REST
+    assert not (set(CAMPAIGN_P2P.values()) & set(CAMPAIGN_REST.values()))
+    # Whatever band a run is moved onto, the guard that keeps it off a
+    # production node runs against the RESOLVED ports, not the defaults.
+    assert check_band(dict(CAMPAIGN_P2P), dict(CAMPAIGN_REST)) is None
+    try:
+        check_band({'scala': 9053}, {'scala': 19620})
+    except SystemExit as error:
+        assert '9053' in str(error), str(error)
+    else:
+        raise AssertionError('a production port must be refused')
+    try:
+        check_band({'scala': 19600, 'rust': 19600}, {'scala': 19620})
+    except SystemExit as error:
+        assert 'twice' in str(error), str(error)
+    else:
+        raise AssertionError('a duplicated port must be refused')
+    # Including ONE node's own two listeners (codex review-2): the
+    # `seen[port] != node` condition let a node's REST and p2p share a
+    # port, which binds once and then fails as a REST port that speaks
+    # the p2p handshake — an unreadable devnet rather than a refused
+    # configuration.
+    try:
+        check_band({'scala': 19600}, {'scala': 19600})
+    except SystemExit as error:
+        assert 'twice' in str(error) and '19600' in str(error), str(error)
+    else:
+        raise AssertionError(
+            "a node's own p2p and REST port must not be the same port")
+    # Every role names a node that HAS a slot, and the node sets the
+    # roles cover are exactly the ones the port tables know about.
+    for role, spec in lifecycle.ROLES.items():
+        assert spec.node in CAMPAIGN_P2P, (role, spec.node)
+        assert spec.node in lifecycle.DEFAULT_CONFIG, (role, spec.node)
+        assert spec.kind in ('scala', 'rust'), role
+        assert spec.why, f'{role} must say what it is for'
+    # Two roles may SHARE a slot (they are alternatives), and asking for
+    # both at once is an error rather than a silent single node.
+    try:
+        lifecycle.roles_for_nodes(('scala_miner', 'scala_miner_patched'))
+    except ValueError as error:
+        assert 'both want the' in str(error), str(error)
+    else:
+        raise AssertionError('two roles in one slot must be refused')
+    try:
+        lifecycle.roles_for_nodes(('scala_miner', 'nonsense_role'))
+    except KeyError as error:
+        assert 'unknown role' in str(error), str(error)
+    else:
+        raise AssertionError('an unknown role must be refused')
 
     # Every scenario the docstring promises exists, names its nodes, and
     # asks for the second miner only if it is a two-miner scenario.
     from scenarios import SCENARIOS
     expected = {'steady', 'fork', 'rollback', 'reconstruct_rate', 'restart',
-                'evict', 'flood'}
+                'evict', 'flood', 'miner_self_reject'}
     assert set(SCENARIOS) == expected, sorted(SCENARIOS)
     assert set(SCENARIO_NODES) == expected, sorted(SCENARIO_NODES)
+    assert set(SCENARIO_ROLES) == expected, sorted(SCENARIO_ROLES)
+    assert set(ORDER) == expected, sorted(ORDER)
+    import lifecycle
     for name, module in SCENARIOS.items():
         assert callable(module.run), name
         # The table the driver uses and the module's own statement of
         # what it needs have to agree, or a scenario would be started
         # with a node set it was not written for.
         assert tuple(module.NODES) == SCENARIO_NODES[name], name
-        assert set(module.NODES) <= {'scala', 'scala2', 'rust'}, name
+        assert set(module.NODES) <= {'scala', 'scala2', 'scala3', 'rust'}, name
         assert 'rust' in module.NODES, name
-        assert ('scala2' in module.NODES) == (name in SCALA2_ROLE), name
+        # ----- M4: the role table decides the node set -----
+        #
+        # Every role a scenario declares has to have its own slot, and
+        # the slots it occupies have to be exactly the nodes the driver
+        # starts. A role table that drifted from the node table would
+        # bind a port nothing uses, or run two roles as one node.
+        assigned = lifecycle.roles_for_nodes(SCENARIO_ROLES[name])
+        assert tuple(sorted(assigned)) == tuple(sorted(module.NODES)), \
+            (name, assigned, module.NODES)
+        assert nodes_for_roles(SCENARIO_ROLES[name]) == SCENARIO_NODES[name], \
+            name
+        # Exactly one Rust follower, and it never mines.
+        assert sum(1 for r in SCENARIO_ROLES[name]
+                   if lifecycle.ROLES[r].kind == 'rust') == 1, name
         # Whatever a scenario starts itself has to be one of its own
         # nodes, or `lifecycle.start` would bind a port nothing uses.
         assert set(getattr(module, 'START_NODES', module.NODES)) <= set(
             module.NODES), name
-        # A second Scala node that is meant to FOLLOW has to be told not
-        # to mine, or the scenario silently becomes a two-miner one.
-        if SCALA2_ROLE.get(name) == 'follower':
-            assert 'mining = false' in getattr(module, 'SCALA2_EXTRA', ''), name
+        # A Scala node whose ROLE does not mine is told not to mine —
+        # from the role, so a scenario cannot forget it. Without this
+        # `reconstruct_rate` silently becomes a two-miner scenario.
+        for node, role in assigned.items():
+            extra = scala_extra_for(
+                node, assigned,
+                getattr(module, 'SCALA_EXTRA', ''),
+                getattr(module, 'SCALA2_EXTRA', ''))
+            if lifecycle.ROLES[role].kind == 'scala' and \
+                    not lifecycle.ROLES[role].mines:
+                assert 'mining = false' in extra, (name, node, role)
+
+    # ----- M4: `--reference-follower` -----
+    #
+    # It adds a reference follower where there is a slot for one, keeps
+    # the roles one-to-one with the nodes, and REFUSES the combination
+    # that has no slot rather than quietly running something else.
+    assert resolve_roles('steady', None) == SCENARIO_ROLES['steady']
+    for _mode, _want in (('stock', 'scala_follower'),
+                         ('patched', 'scala_follower_patched')):
+        _roles = resolve_roles('steady', _mode)
+        assert _want in _roles, (_mode, _roles)
+        lifecycle.roles_for_nodes(_roles)
+    both = resolve_roles('steady', 'both')
+    assert {'scala_follower', 'scala_follower_patched'} <= set(both), both
+    assert nodes_for_roles(both) == ('scala', 'scala2', 'scala3', 'rust'), both
+    # A follower ADDED AT RUNTIME must be told not to mine and must fit
+    # the admission limit, exactly like one a scenario declares. The
+    # loop above only walks each scenario's BASE role set, so without
+    # this a `--reference-follower` node could quietly race the miner —
+    # which is the one thing that would make every reference number
+    # meaningless.
+    for _name in REFERENCE_FOLLOWER_SCENARIOS:
+        for _mode in ('stock', 'patched', 'both'):
+            try:
+                _roles = resolve_roles(_name, _mode)
+            except SystemExit:
+                continue          # refused, with its reason, above
+            _assigned = lifecycle.roles_for_nodes(_roles)
+            _module = _all[_name]
+            for _node, _role in _assigned.items():
+                if lifecycle.ROLES[_role].kind != 'scala' or \
+                        lifecycle.ROLES[_role].mines:
+                    continue
+                _extra = scala_extra_for(
+                    _node, _assigned, getattr(_module, 'SCALA_EXTRA', ''),
+                    getattr(_module, 'SCALA2_EXTRA', ''))
+                assert 'mining = false' in _extra, (_name, _mode, _node, _role)
+            _scala = [n for n in _assigned if n != 'rust']
+            _ov = dict(((sec, key), value) for sec, key, value in
+                       admission_overrides(
+                           tuple(_assigned),
+                           getattr(_module, 'RUST_OVERRIDES', ())))
+            assert int(_ov[('peers', 'per_ip_limit')]) >= len(_scala), \
+                (_name, _mode, _ov)
+            # And a node that is not started at launch has to be one a
+            # scenario actually brings up itself, or it never runs at
+            # all and its numbers read as a silent zero.
+            _late = set(_assigned) - set(
+                getattr(_module, 'START_NODES', tuple(_assigned)))
+            assert _late <= set(getattr(_module, 'SEEDED_NODES', ())), (
+                _name, _mode, _late,
+                'a node outside START_NODES that the scenario does not seed '
+                'never runs, and its numbers read as a silent zero')
+    # `reconstruct_rate` already HAS a stock follower; `patched` replaces
+    # it rather than adding a second one on the same slot.
+    assert resolve_roles('reconstruct_rate', 'patched') == (
+        'scala_miner', 'rust_follower', 'scala_follower_patched'), \
+        resolve_roles('reconstruct_rate', 'patched')
+    # `fork` spends `scala2` on a second MINER, so a stock reference
+    # follower has nowhere to go; that is an error with the reason.
+    for _mode in ('stock', 'both'):
+        try:
+            resolve_roles('fork', _mode)
+        except SystemExit as error:
+            assert 'slot is already the scala_miner2' in str(error), str(error)
+        else:
+            raise AssertionError(
+                f'fork --reference-follower {_mode} must be refused')
+    assert 'scala_follower_patched' in resolve_roles('fork', 'patched')
+    # And a scenario the flag does not apply to says so.
+    try:
+        resolve_roles('evict', 'stock')
+    except SystemExit as error:
+        assert 'does not apply to evict' in str(error), str(error)
+    else:
+        raise AssertionError('--reference-follower must be scenario-checked')
+    # ----- proofs step B: the F13 flood aims at a Scala FOLLOWER -----
+    #
+    # F13's pending store is new attack surface on the SCALA follower,
+    # and `flood` could only ever aim at the Rust one: `flood --build
+    # F13` ran no patched role at all. The flag adds ONE follower as the
+    # target; `both` has two candidates and is refused with the reason.
+    assert 'scala_follower_patched' in resolve_roles('flood', 'patched')
+    assert 'scala_follower' in resolve_roles('flood', 'stock')
+    try:
+        resolve_roles('flood', 'both')
+    except SystemExit as error:
+        assert 'one target' in str(error), str(error)
+    else:
+        raise AssertionError('flood --reference-follower both must be refused')
+    from scenarios import flood as _flood_eval
+    _adv = '/127.105.0.1:5555'
+    _miner = '/127.0.0.1:19600'
+
+    def _root(block, remote):
+        return ('INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - On '
+                f'processing {block}, downloading its parent and unknown '
+                f'ordering block ff from ConnectedPeer(connection: '
+                f'ConnectionId(remote={remote}, local=/127.0.0.3:19603, '
+                'direction=Incoming) , remote version: Some(6.5.0))')
+    _lines = [
+        _root('a1', _adv), _root('a2', _adv),
+        _root('b1', _miner), _root('b2', _miner),
+        'INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing '
+        'valid sub-block b1 with parent sub-block None and parent block ff',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.105.0.1:5555 '
+        'penalized, penalty: NonDeliveryPenalty',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: NonDeliveryPenalty',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: MisbehaviorPenalty',
+        # STOCK behaviour, seen in every peered run with no flood at all:
+        # a block applied twice is declared permanently invalid and its
+        # sender penalised. Attributed, not charged to the flood.
+        'org.ergoplatform.validation.MalformedModifierError: Double '
+        'application of a modifier is prohibited. cc already applied',
+        'INFO org.ergoplatform.network.peer.PeerManager - /127.0.0.1:19600 '
+        'penalized, penalty: MisbehaviorPenalty',
+    ]
+    # Samples: (log line count at the sample, store size, store bytes).
+    _samples = [{'lines': 0, 'size': 0, 'bytes': 0},
+                {'lines': 3, 'size': 256, 'bytes': 70000},
+                {'lines': 8, 'size': 250, 'bytes': 69000}]
+    _ev = _flood_eval.evaluate_root_flood(
+        _lines, _samples, {'maxEntries': 256, 'maxBytes': 4194304},
+        adversary_octets=range(100, 220))
+    assert _ev['adversary_root_lines'] == 2, _ev
+    assert _ev['honest_roots'] == 2 and _ev['honest_roots_landed'] == 1, _ev
+    assert _ev['honest_roots_while_saturated'] == 1, _ev
+    assert _ev['honest_roots_landed_while_saturated'] == 0, _ev
+    assert _ev['peak_size'] == 256 and _ev['caps_held'], _ev
+    assert _ev['honest_penalties'] == {'NonDeliveryPenalty': 1,
+                                       'MisbehaviorPenalty': 2}, _ev
+    assert _ev['honest_misbehaviour_penalties'] == 1, _ev
+    assert _ev['honest_misbehaviour_after_double_application'] == 1, _ev
+    assert _ev['adversary_penalties'] == 1, _ev
+    _over = _flood_eval.evaluate_root_flood(
+        _lines, _samples + [{'lines': 8, 'size': 257, 'bytes': 1}],
+        {'maxEntries': 256, 'maxBytes': 4194304},
+        adversary_octets=range(100, 220))
+    assert not _over['caps_held'], _over
+    # Honest ROOT announcements (+2) only exist while the follower has not
+    # yet applied the miner's newest ordering block. An unfunded chain
+    # applies coinbase-only blocks at once, and the first F13 flood run
+    # (`.work-m4p-f13-flood`) saw 0 honest roots in 12 flooded blocks:
+    # the scenario funds the miner and keeps payments in flight so the
+    # blocks carry work, as `steady` does.
+    import inspect as _insp_fl
+    _src_fl = _insp_fl.getsource(_flood_eval._run_against_scala_follower)
+    assert 'common.fund_miner(' in _src_fl and 'pump_payments' in \
+        _insp_fl.getsource(_flood_eval), 'the root flood must carry a workload'
+    # `restart` is where F13's replay of held roots is measured, and its
+    # first two runs (`.work-m4p-f13-restart`) were 6 unfunded blocks from
+    # genesis: too short and too quiet to say whether the patched follower's
+    # lag after the kill is the patch or the recipe. It funds the miner,
+    # keeps payments in flight on both sides of the kill, lets
+    # `--ordering-blocks` set the pre-kill length, and reports every
+    # follower's lag over the samples AFTER the kill separately.
+    import scenarios.restart as _restart
+    _src_rs = _insp_fl.getsource(_restart.run)
+    assert 'common.fund_miner(' in _src_rs and 'pump_payments' in \
+        _insp_fl.getsource(_restart), 'restart must carry a workload'
+    assert 'ctx.args.ordering_blocks' in _src_rs, \
+        'restart must let --ordering-blocks set the pre-kill length'
+    _rows = [{'at': 1.0, 'scala_chain': ['a'], 'scala_ordering': 'o',
+              'scala2_ordering': 'o', 'scala2_tip': 'a'},
+             {'at': 5.0, 'scala_chain': ['c', 'b', 'a'], 'scala_ordering': 'o',
+              'scala2_ordering': 'o', 'scala2_tip': 'a'}]
+    _after = _restart.lag_after(_rows, 3.0)
+    assert _after['scala_follower']['lag_samples'] == 1, _after
+    assert _after['scala_follower']['p50'] == 2, _after
+    assert _after['since_epoch_s'] == 3.0 and _after['samples'] == 1, _after
+
+    # Resolving roles must NOT import `lifecycle`. `lifecycle.P2P` /
+    # `REST` are read from the environment at import and `smoke.URLS` is
+    # derived from them at ITS import, so an import here — before
+    # `configure_environment` runs — would freeze the two-node smoke
+    # defaults and every campaign scenario would quietly drive the
+    # smoke's ports. Checked in a fresh interpreter, because this one
+    # has imported `lifecycle` already.
+    _probe = subprocess.run(
+        [sys.executable, '-c',
+         'import sys; sys.path.insert(0, %r); import campaign; '
+         'r = campaign.resolve_roles("fork", "patched"); '
+         'campaign.nodes_for_roles(r); '
+         'assert "lifecycle" not in sys.modules, sorted(sys.modules); '
+         'print("clean")' % str(HERE)],
+        capture_output=True, text=True, cwd=ROOT)
+    assert _probe.returncode == 0 and 'clean' in _probe.stdout, \
+        ('resolving roles must not import lifecycle', _probe.stdout,
+         _probe.stderr)
+
+    # ----- M4: the build registry and the ablation switch -----
+    import builds as _builds
+    # `--build` selects the build for the PATCHED roles only; every
+    # other Scala role stays on stock, which is what makes a run an
+    # ablation rather than two integration builds compared.
+    _saved = {k: v for k, v in os.environ.items()
+              if k.startswith('MATRIX_BUILD_')}
+    try:
+        configure_environment('miner_self_reject',
+                              nodes_for_roles(SCENARIO_ROLES['miner_self_reject']),
+                              SCENARIO_ROLES['miner_self_reject'], 'F11')
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'F11', os.environ
+        _fork_roles = resolve_roles('fork', 'patched')
+        configure_environment('fork', nodes_for_roles(_fork_roles),
+                              _fork_roles, 'F13')
+        # The stock miners stay stock; only the patched follower moves.
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'stock', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA2'] == 'stock', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA3'] == 'F13', os.environ
+    finally:
+        for key in [k for k in os.environ if k.startswith('MATRIX_BUILD_')]:
+            del os.environ[key]
+        os.environ.update(_saved)
+
+    # An unknown `--build` is refused, and the message names the
+    # alternatives rather than falling back to stock.
+    try:
+        check_build('not-a-build')
+    except SystemExit as error:
+        assert 'unknown build' in str(error) and 'stock' in str(error), str(error)
+    else:
+        raise AssertionError('an unknown --build must stop the run')
+    # A DECLARED but unprovisioned build is refused too, with the
+    # command that would provision it.
+    _unprovisioned = [n for n, b in _builds.registry().items()
+                      if not b.available]
+    if _unprovisioned:
+        try:
+            check_build(_unprovisioned[0])
+        except SystemExit as error:
+            assert 'not provisioned' in str(error), str(error)
+            assert 'provision.py' in str(error), str(error)
+        else:
+            raise AssertionError(
+                'an unprovisioned build must stop the run, not fall back')
+    # The stock build is the one every baseline is measured on: it has
+    # to be present and to still match its recorded compiled output.
+    _stock = check_build('stock')
+    assert _stock.summary()['ergo_commit'].startswith('62c10315'), \
+        _stock.summary()
+    assert _stock.app_version() == '6.0.6-493-62c10315-SNAPSHOT', \
+        _stock.app_version()
+    # The manifest a scenario records names the build AND its compiled
+    # output, per role.
+    _manifests = build_manifests({'scala': 'scala_miner', 'rust': 'rust_follower'})
+    assert set(_manifests) == {'scala_miner'}, _manifests
+    assert len(_manifests['scala_miner']['class_dir_sha256']) == 64, _manifests
+    # The evidence names the classpath the node was LAUNCHED from, and
+    # it is the registered build's own — not a file that happened to sit
+    # beside it.
+    assert _manifests['scala_miner']['launch_classpath'] == \
+        _manifests['scala_miner']['classpath'], _manifests
+
+    # ----- fix round 1, item 2: build verification FAILS CLOSED -----
+    #
+    # `lifecycle._build_for` used to catch every `BuildError` — a
+    # missing build, an unreadable registry, and the one that matters, a
+    # class hash that no longer matches the manifest — return `None`,
+    # and let `classpath_file` fall back to the legacy
+    # `.work/classpath`. The devnet then ran, and the evidence recorded
+    # the REGISTERED build while the JVM ran whatever was in `.work`. A
+    # number attributed to the wrong build is worse than no number, so
+    # the error propagates and the run never starts.
+    with tempfile.TemporaryDirectory() as _empty:
+        _probe = subprocess.run(
+            [sys.executable, '-c',
+             'import sys\n'
+             'sys.path.insert(0, %r)\n'
+             'import builds, lifecycle\n'
+             'try:\n'
+             '    path = lifecycle.classpath_file("scala")\n'
+             'except builds.BuildError as error:\n'
+             '    print("REFUSED", error)\n'
+             'else:\n'
+             '    print("FELL BACK TO", path)\n' % str(HERE)],
+            capture_output=True, text=True, cwd=ROOT,
+            env={**os.environ, 'MATRIX_BUILDS_ROOT': _empty})
+        assert 'REFUSED' in _probe.stdout, \
+            ('a build that cannot be verified must abort the run, not fall '
+             'back to the legacy classpath', _probe.stdout, _probe.stderr)
+
+    # An explicit classpath override bypasses verification entirely, so
+    # a measured campaign refuses one rather than measuring a build
+    # nothing checked.
+    for _var in ('MATRIX_CLASSPATH', 'MATRIX_CLASSPATH_SCALA2'):
+        try:
+            check_no_classpath_override({_var: '/tmp/some/classpath'})
+        except SystemExit as error:
+            assert _var in str(error), (str(error), _var)
+        else:
+            raise AssertionError(
+                f'{_var} must be refused for a measured campaign')
+    # An environment without one is fine, and an unrelated MATRIX_ var
+    # is not mistaken for one.
+    check_no_classpath_override({'MATRIX_NODES': 'scala,rust',
+                                 'MATRIX_BUILD_SCALA': 'F11'})
+
+    # And a build whose registered classpath is not the one the node was
+    # launched from is an attribution error, not a footnote.
+    _good = check_launch_classpath(
+        'scala_miner', 'scala', {'build': 'stock', 'classpath': '/a/classpath'},
+        '/a/classpath')
+    assert _good['launch_classpath'] == '/a/classpath', _good
+    assert _good['node'] == 'scala', _good
+    try:
+        check_launch_classpath(
+            'scala_miner', 'scala',
+            {'build': 'stock', 'classpath': '/a/classpath'}, '/b/classpath')
+    except SystemExit as error:
+        assert 'was launched from' in str(error), str(error)
+    else:
+        raise AssertionError(
+            'evidence may not describe a classpath the node did not run')
+
+    # ----- proofs step A (2): never a Rust binary from somewhere else -----
+    #
+    # With `RUST_NODE` unset the node binary came from `cargo metadata`'s
+    # target directory, which on this host is the GLOBAL shared cache: a
+    # build from another worktree and another day, launched silently
+    # while the evidence named this checkout's commit. Only RUST_NODE or
+    # THIS checkout's own release build may be started.
+    import lifecycle as _lc_bin
+    _saved_root_bin = _lc_bin.ROOT
+    _saved_env_bin = os.environ.pop('RUST_NODE', None)
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_bin:
+            _lc_bin.ROOT = Path(_tmp_bin)
+            try:
+                _lc_bin.node_binary()
+            except SystemExit as _refused:
+                assert 'RUST_NODE' in str(_refused), _refused
+            else:
+                raise AssertionError(
+                    'a checkout with no release build must refuse to start '
+                    'a Rust node, not resolve one elsewhere')
+            _local_bin = Path(_tmp_bin) / 'target' / 'release' / 'ergo-node'
+            _local_bin.parent.mkdir(parents=True)
+            _local_bin.write_text('#!/bin/sh\n')
+            _local_bin.chmod(0o755)
+            assert _lc_bin.node_binary() == str(_local_bin), \
+                _lc_bin.node_binary()
+            _prov = _lc_bin.node_binary_provenance()
+            assert _prov['source'] == 'worktree release build', _prov
+            assert _prov['path'] == str(_local_bin), _prov
+            assert len(_prov['sha256']) == 64, _prov
+            # An explicit RUST_NODE wins, and must name a real executable.
+            os.environ['RUST_NODE'] = str(Path(_tmp_bin) / 'nowhere')
+            try:
+                _lc_bin.node_binary()
+            except SystemExit as _refused:
+                assert 'nowhere' in str(_refused), _refused
+            else:
+                raise AssertionError('RUST_NODE naming no file must refuse')
+            os.environ['RUST_NODE'] = str(_local_bin)
+            assert _lc_bin.node_binary_provenance()['source'] == 'RUST_NODE'
+    finally:
+        _lc_bin.ROOT = _saved_root_bin
+        os.environ.pop('RUST_NODE', None)
+        if _saved_env_bin is not None:
+            os.environ['RUST_NODE'] = _saved_env_bin
+
+    # ----- proofs step B: a seeded node AT GENESIS is up, not missing -----
+    #
+    # `steady` and `restart` seed their reference followers before the
+    # first block, where every Scala node answers `/info` with
+    # `fullHeight: null`. The seed check read that null as "did not come
+    # up" and failed `.work-m4p-f14-steady` although both followers ran,
+    # peered and logged 60 blocks. Only a node that did not ANSWER is
+    # missing.
+    from scenarios import common as _cs
+    assert _cs.seeded_nodes_missing(
+        {'scala2': None, 'scala3': 0}, unavailable=()) == [], 'genesis is up'
+    assert _cs.seeded_nodes_missing(
+        {'scala2': None, 'scala3': 7}, unavailable=('scala2',)) == ['scala2']
+
+    # ----- proofs step A (3): the funding wait follows the chain -----
+    #
+    # `fund_miner` waited a FIXED 900 s. The coinbase is spendable only
+    # after `minerRewardDelay` (10) blocks, and ordering-block cadence
+    # varies about 5x with host load: `.work-r1both2` reached height 11
+    # with 0 balance when 900 s ran out. The budget is now derived from
+    # the cadence the wait itself observes.
+    from scenarios import common as _cf
+    # Nothing observed yet: the prior cadence, over every block to go.
+    _d0, _r0 = _cf.funding_deadline([(0.0, 0)])
+    assert _r0['cadence_s'] == _cf.FUNDING_CADENCE_PRIOR_S, _r0
+    assert _r0['blocks_to_go'] == _cf.FUNDING_TARGET_HEIGHT, _r0
+    assert _d0 == (_cf.FUNDING_TARGET_HEIGHT * _cf.FUNDING_CADENCE_PRIOR_S
+                   * _cf.FUNDING_SAFETY + _cf.FUNDING_SLACK_S), (_d0, _r0)
+    # A loaded host (100 s per block, at height 5) gets MORE than the old
+    # fixed 900 s from its last block; a fast one gets less.
+    _slow = [(0.0, 1), (100.0, 2), (200.0, 3), (300.0, 4), (400.0, 5)]
+    _ds, _rs = _cf.funding_deadline(_slow)
+    assert _rs['cadence_s'] == 100.0, _rs
+    assert _ds - 400.0 > 900.0, (_ds, _rs)
+    _fast = [(0.0, 1), (10.0, 2), (20.0, 3), (30.0, 4), (40.0, 5)]
+    _df, _rf = _cf.funding_deadline(_fast)
+    assert _rf['cadence_s'] == 10.0 and _df < _ds, (_df, _rf)
+    # The budget restarts at every new block, so a live chain is never
+    # abandoned mid-maturity, while a stalled one is: the deadline is
+    # measured from the LAST block seen.
+    _dl, _ = _cf.funding_deadline(_slow + [(900.0, 6)])
+    assert _dl > _ds, (_dl, _ds)
+    # Well past maturity with nothing to spend is not a cadence problem:
+    # the wait ends at once instead of burning the run.
+    _past = [(0.0, 1), (10.0, _cf.FUNDING_TARGET_HEIGHT
+                       + _cf.FUNDING_OVERRUN_BLOCKS)]
+    _dp, _rp = _cf.funding_deadline(_past)
+    assert _dp == 10.0 and _rp['overrun'], (_dp, _rp)
+
+    # ----- M4: the reconstruction accounting -----
+    import inspect
+    from scenarios import common as _common
+    _rust = _common.rust_accounting([
+        {'kind': 'ordering_reconstructed'},
+        {'kind': 'ordering_reconstructed'},
+        {'kind': 'ordering_reconstruct_fallback', 'detail': 'root_mismatch'},
+        {'kind': 'ordering_reconstruct_fallback', 'detail': 'missing_input_body'},
+        {'kind': 'ordering_reconstruct_fallback',
+         'detail': 'missing_broadcasted_tx'},
+        {'kind': 'ordering_reconstruct_skipped', 'detail': 'no_chain'},
+        {'kind': 'ordering_reconstruct_skipped', 'detail': 'no_prev_input_block'},
+        # Not one of the five, and never folded into one of them.
+        {'kind': 'ordering_reconstruct_fallback', 'detail': 'storage_error'},
+        {'kind': 'blockApplied'},
+    ])
+    assert _rust['reconstructed'] == 2, _rust
+    assert _rust['download_root_mismatch'] == 1, _rust
+    assert _rust['download_missing_tx'] == 2, _rust
+    assert _rust['skipped_no_chain'] == 2, _rust
+    assert _rust['other_outcomes'] == {'fallback:storage_error': 1}, _rust
+    assert _rust['eligible_announcements'] == 8, _rust
+    assert _rust['unaccounted'] == 1, _rust
+    assert _rust['reconstructed_ratio'] == 0.25, _rust
+    # The reference's log lines map onto the SAME five names, which is
+    # the whole point: a patched follower is read against a stock one.
+    _scala = _common.scala_accounting([
+        'INFO Processing ordering block announcement for aa',
+        'INFO Applying block transactions from input-blocks for aa with transactions: 3',
+        'INFO Processing ordering block announcement for bb',
+        'WARN Downloading block transactions fully for bb as Merkle root does not match',
+        'INFO Processing ordering block announcement for cc',
+        'WARN Downloading block transactions fully for cc as not all the transactions available',
+        'INFO Processing ordering block announcement for dd',
+        'WARN Parent header not found for ordering block dd, caching its header and requesting parent ee',
+    ])
+    assert [_scala[f] for f in _common.ACCOUNTING_FIELDS] == \
+        [4, 1, 1, 1, 1, 0], _scala
+    assert _scala['unaccounted'] == 0, _scala
+    assert _scala['reconstructed_ratio'] == 0.25, _scala
+    # ----- M4: the GATE, which decides before `processOrderingBlock` -----
+    #
+    # `ErgoNodeViewSynchronizer.scala:1856-1866` at 62c10315 checks
+    # whether the previous input block's transactions are stored and, if
+    # they are not, requests the full block WITHOUT ever sending
+    # `ProcessOrderingBlock`. None of the five phrases above is then
+    # logged. Task 2 measured a stock follower that took that branch 80
+    # times in 81 announcements, and the accounting reported the whole
+    # reference half as UNKNOWN — a measured 0 % reconstruction rate
+    # read as "no data".
+    _gated = _common.scala_accounting([
+        'INFO On processing ordering block ff, it is last input block Some(gg)',
+        'INFO Requesting all the block transactions for ff as prev input '
+        'block not found',
+    ])
+    assert _gated['eligible_announcements'] == 1, _gated
+    assert _gated['download_no_prev_input_block'] == 1, _gated
+    assert _gated['decided'] == 1 and _gated['unaccounted'] == 0, _gated
+    assert _gated['reconstructed_ratio'] == 0.0, _gated
+    assert 'unmatched' not in _gated, _gated
+    # The gate's own line is the denominator when the entry line is
+    # absent, and the two are never double-counted.
+    _both = _common.scala_accounting([
+        'INFO On processing ordering block aa, it is last input block Some(bb)',
+        'INFO Processing ordering block announcement for aa',
+        'INFO Applying block transactions from input-blocks for aa with '
+        'transactions: 3',
+    ])
+    assert _both['eligible_announcements'] == 1, _both
+    assert _both['reconstructed'] == 1 and _both['unaccounted'] == 0, _both
+    assert _both['gate_announcements'] == 1, _both
+    assert _both['entry_announcements'] == 1, _both
+    # A build that logs none of the five is UNKNOWN, not a clean zero.
+    _silent = _common.scala_accounting(['INFO something else entirely'])
+    assert 'UNKNOWN, not zero' in _silent['unmatched'], _silent
+
+    # ----- proofs step A (1): one announcement, one decision, per ID -----
+    #
+    # A follower peered with the miner AND the Rust node hears each
+    # announcement from every peer, and the holder logs the entry phrase
+    # again after the synchronizer. `.work-r1peer2`'s scala2 log carries
+    # 42 entry lines for 18 ordering blocks, so the accounting read 41
+    # eligible and 20 unaccounted. Every stage is counted once per
+    # ordering-block id; the first decision is the id's outcome and a
+    # later one is recorded, never added.
+    _sync = 'INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - '
+    _hold = 'INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - '
+    _dup = _common.scala_accounting([
+        # aa: synchronizer entry, gate, holder entry, reconstructed, then
+        # the same announcement from a second peer.
+        _sync + 'Processing ordering block announcement for aa',
+        _sync + 'On processing ordering block aa, it is last input block Some(11)',
+        _hold + 'Processing ordering block announcement for aa',
+        _hold + 'Applying block transactions from input-blocks for aa with '
+                'transactions: 1',
+        _sync + 'Processing ordering block announcement for aa',
+        # bb: gate download from two peers.
+        _sync + 'Processing ordering block announcement for bb',
+        _sync + 'On processing ordering block bb, it is last input block Some(22)',
+        _sync + 'Requesting all the block transactions for bb as prev input '
+                'block not found',
+        _sync + 'Processing ordering block announcement for bb',
+        _sync + 'On processing ordering block bb, it is last input block Some(22)',
+        _sync + 'Requesting all the block transactions for bb as prev input '
+                'block not found',
+        # cc: root mismatch at the holder, repeated entry after it.
+        _sync + 'Processing ordering block announcement for cc',
+        _sync + 'On processing ordering block cc, it is last input block Some(33)',
+        _hold + 'Processing ordering block announcement for cc',
+        'WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block '
+        'transactions fully for cc as Merkle root does not match',
+        _sync + 'Processing ordering block announcement for cc',
+    ])
+    assert _dup['eligible_announcements'] == 3, _dup
+    assert _dup['entry_announcements'] == 3, _dup
+    assert _dup['gate_announcements'] == 3, _dup
+    assert _dup['reconstructed'] == 1, _dup
+    assert _dup['download_no_prev_input_block'] == 1, _dup
+    assert _dup['download_root_mismatch'] == 1, _dup
+    assert _dup['decided'] == 3 and _dup['unaccounted'] == 0, _dup
+    # The duplicates are still visible, as evidence rather than as counts.
+    assert _dup['raw_line_counts']['entry_announcements'] == 8, _dup
+    assert _dup['repeat_decisions'] == 1, _dup
+    assert _dup['conflicting_outcomes'] == {}, _dup
+    # Two DIFFERENT decisions about one id: the first is the outcome, the
+    # second is named, and the id is not counted twice.
+    _flip = _common.scala_accounting([
+        _sync + 'On processing ordering block dd, it is last input block Some(44)',
+        _sync + 'Requesting all the block transactions for dd as prev input '
+                'block not found',
+        _hold + 'Applying block transactions from input-blocks for dd with '
+                'transactions: 2',
+    ])
+    assert _flip['eligible_announcements'] == 1, _flip
+    assert _flip['download_no_prev_input_block'] == 1, _flip
+    assert _flip['reconstructed'] == 0, _flip
+    assert _flip['conflicting_outcomes'] == {
+        'dd': ['download_no_prev_input_block', 'reconstructed']}, _flip
+    # The scenario's own per-follower counter reads the same de-duplicated
+    # decisions, so its F5 table cannot disagree with the accounting.
+    from scenarios import reconstruct_rate as _rr_dedup
+    import smoke as _smoke_dd
+    _saved_work_dd = _smoke_dd.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_dd:
+            _smoke_dd.WORK = Path(_tmp_dd)
+            (_smoke_dd.WORK / 'scala2.log').write_text('\n'.join([
+                _sync + 'On processing ordering block bb, it is last input '
+                        'block Some(22)',
+                _sync + 'Requesting all the block transactions for bb as prev '
+                        'input block not found',
+                _sync + 'Requesting all the block transactions for bb as prev '
+                        'input block not found',
+                _hold + 'Applying block transactions from input-blocks for aa '
+                        'with transactions: 1',
+                _hold + 'Applying block transactions from input-blocks for aa '
+                        'with transactions: 1',
+            ]) + '\n')
+            _counts_dd = _rr_dedup._scala_log_counts(None, 'scala2', 0)
+            assert _counts_dd['decided'] == 2, _counts_dd
+            assert _counts_dd['reconstructed'] == 1, _counts_dd
+            assert _counts_dd['fallback_at_gate'] == 1, _counts_dd
+            assert _counts_dd['reconstructed_ratio'] == 0.5, _counts_dd
+    finally:
+        _smoke_dd.WORK = _saved_work_dd
+
+    # ----- fix round 1, item 3: both halves count the SAME interval -----
+    #
+    # The Rust half was a watermarked collector over the scenario's
+    # window; the Scala half was the node's WHOLE log, which starts at
+    # spawn and covers start-up and funding as well. An input block
+    # applied before the window opened therefore appeared in one
+    # accounting and not the other, and `miner_self_reject` counted the
+    # miner's entire log against a best-chain sample that began after
+    # funding — so applied blocks outside the sampled interval read as
+    # blocks that never reached the winning chain.
+    class _StubCollector:
+        """Only what the accounting asks of a collector."""
+
+        def __init__(self, events):
+            self.events = list(events)
+            self.highest_seen = 41
+
+        def poll(self):
+            return self.events
+
+        def window(self, watermark, until=None):
+            return self.events
+
+        def summary(self, watermark):
+            return {'watermark': watermark}
+
+        def lost_in_window(self, watermark):
+            return False
+
+    class _StubCtx:
+        def __init__(self, role_map):
+            self.roles = dict(role_map)
+            self.collector = None
+            self.collector_watermark = 0
+
+    _startup = (
+        'INFO On processing ordering block aa, it is last input block Some(bb)\n'
+        'INFO Requesting all the block transactions for aa as prev input '
+        'block not found\n')
+    _in_window = (
+        'INFO Processing ordering block announcement for cc\n'
+        'INFO Applying block transactions from input-blocks for cc with '
+        'transactions: 3\n')
+    import smoke as _smoke
+    _saved_work = _smoke.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp:
+            _smoke.WORK = Path(_tmp)
+            (_smoke.WORK / 'scala2.log').write_text(_startup)
+            _ctx = _StubCtx({'scala2': 'scala_follower',
+                             'rust': 'rust_follower'})
+            _collector = _StubCollector([{'kind': 'ordering_reconstructed'}])
+            # ONE boundary for both halves.
+            _offsets = _common.open_measurement_window(_ctx, _collector)
+            assert _offsets == {'scala2': 2}, _offsets
+            assert _ctx.collector_watermark == 41, _ctx.collector_watermark
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(_in_window)
+            _acct = _common.reconstruction_accounting(_ctx)
+            _half = _acct['scala_follower']
+            assert _half['from_line'] == 2, _half
+            assert _half['eligible_announcements'] == 1, _half
+            assert _half['reconstructed'] == 1, _half
+            # The two start-up lines are BEFORE the boundary and belong
+            # to neither half.
+            assert _half['download_no_prev_input_block'] == 0, _half
+            assert _acct['rust_follower']['reconstructed'] == 1, _acct
+            # Only what was written after the boundary is this window.
+            assert _common.scala_window_lines(_ctx, 'scala2') == \
+                _in_window.splitlines(), _common.scala_window_lines(_ctx, 'scala2')
+            # A scenario that never opened a window reads the whole log
+            # and SAYS so, rather than presenting it as a measurement.
+            _bare = _StubCtx({'scala2': 'scala_follower'})
+            _whole = _common.reconstruction_accounting(_bare)['scala_follower']
+            assert _whole['from_line'] == 0, _whole
+            assert 'window' in _whole.get('interval', ''), _whole
+    finally:
+        _smoke.WORK = _saved_work
+    # ----- step A (4): ONE closing boundary for every half -----
+    #
+    # The window had a common OPENING but no common close: Rust event
+    # collection stopped where the scenario stopped polling, while the
+    # Scala logs were read at finalisation, after the peering and
+    # agreement checks — `.work-r1both3` shows 14 vs 15 Scala decisions
+    # from the same start offset. The close is one snapshot (the event
+    # sequence AND every Scala log's line count), and every accounting
+    # reads up to it. Exercised through the REAL collector and the
+    # production accounting, with only the feed and the logs stubbed.
+    _feed_close = {'events': []}
+    _saved_api_close = _common.api
+    _saved_work_close = _smoke.WORK
+    try:
+        with tempfile.TemporaryDirectory() as _tmp_close:
+            _smoke.WORK = Path(_tmp_close)
+            _common.api = lambda node, path, *a, **k: _feed_close
+            (_smoke.WORK / 'scala2.log').write_text('INFO start-up\n')
+            _ctx_close = _StubCtx({'scala2': 'scala_follower',
+                                   'rust': 'rust_follower'})
+            _col = _common.EventCollector(_ctx_close)
+            _common.open_measurement_window(_ctx_close, _col)
+            _feed_close['events'] = [
+                {'seq': 1, 'kind': 'ordering_reconstructed'}]
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(
+                    'INFO On processing ordering block aa, it is last input '
+                    'block Some(11)\n'
+                    'INFO Applying block transactions from input-blocks for aa '
+                    'with transactions: 1\n')
+            _snap = _common.close_measurement_window(_ctx_close)
+            assert _snap == {'rust_event_seq': 1,
+                             'scala_log_lines': {'scala2': 3}}, _snap
+            # After the close: one more decision on EACH side.
+            _feed_close['events'] = [
+                {'seq': 1, 'kind': 'ordering_reconstructed'},
+                {'seq': 2, 'kind': 'ordering_reconstruct_fallback',
+                 'detail': 'root_mismatch'}]
+            _col.poll()
+            with (_smoke.WORK / 'scala2.log').open('a') as _fh:
+                _fh.write(
+                    'INFO On processing ordering block bb, it is last input '
+                    'block Some(22)\n'
+                    'INFO Requesting all the block transactions for bb as prev '
+                    'input block not found\n')
+            # A second close is the same snapshot, never a later one.
+            assert _common.close_measurement_window(_ctx_close) == _snap
+            _acct_close = _common.reconstruction_accounting(_ctx_close)
+            assert _acct_close['closing_boundary'] == _snap, _acct_close
+            _sc = _acct_close['scala_follower']
+            assert _sc['eligible_announcements'] == 1, _sc
+            assert _sc['download_no_prev_input_block'] == 0, _sc
+            _rc = _acct_close['rust_follower']
+            assert _rc['eligible_announcements'] == 1, _rc
+            assert _rc['download_root_mismatch'] == 0, _rc
+            assert _common.scala_window_lines(_ctx_close, 'scala2') == [
+                'INFO On processing ordering block aa, it is last input '
+                'block Some(11)',
+                'INFO Applying block transactions from input-blocks for aa '
+                'with transactions: 1']
+            # And the scenario's own per-follower table reads up to the
+            # same close.
+            from scenarios import reconstruct_rate as _rr_close
+            _counts_close = _rr_close._scala_log_counts(
+                _ctx_close, 'scala2', 1, _snap['scala_log_lines']['scala2'])
+            assert _counts_close['decided'] == 1, _counts_close
+    finally:
+        _common.api = _saved_api_close
+        _smoke.WORK = _saved_work_close
+
+    # And the measurement scenario counts its miner over that same
+    # window rather than over the node's whole lifetime.
+    from scenarios import miner_self_reject as _msr_src
+    assert 'scala_window_lines' in inspect.getsource(_msr_src.run), \
+        ('miner_self_reject must count the window it sampled, not the '
+         'miner\'s entire log')
+
+    # ----- fix round 1, item 1: the F5 counter reads EVERY follower -----
+    #
+    # `reconstruct_rate` counted its reference half from the literal
+    # node name `scala2`. With `--reference-follower patched` the stock
+    # follower is not in the run at all and the counter read a log that
+    # was never written; with `both` the patched follower's decisions —
+    # the entire point of the ablation — were collected by the driver's
+    # accounting but not by the scenario's own F5 counter.
+    _table = lifecycle.ROLES
+    _miners, _followers = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(resolve_roles('reconstruct_rate', 'both')),
+        _table)
+    assert _miners == ('scala',), _miners
+    assert _followers == ('scala2', 'scala3'), _followers
+    # `patched` alone: the stock follower is NOT in the run, so nothing
+    # may read its log.
+    _m, _f = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(resolve_roles('reconstruct_rate', 'patched')),
+        _table)
+    assert _f == ('scala3',), _f
+    # A second MINER is not a reference follower: it decides nothing,
+    # because it generates its blocks locally.
+    _m, _f = _common.scala_reference_nodes(
+        lifecycle.roles_for_nodes(SCENARIO_ROLES['fork']), _table)
+    assert _m == ('scala', 'scala2') and _f == (), (_m, _f)
+    # The Rust node is never a Scala reference.
+    assert 'rust' not in _m and 'rust' not in _f, (_m, _f)
+    # And the scenario no longer names a node literally.
+    from scenarios import reconstruct_rate as _rr
+    _run_source = inspect.getsource(_rr.run)
+    assert "'scala2'" not in _run_source and "'scala'" not in _run_source, \
+        ('reconstruct_rate.run must resolve its reference nodes from the '
+         'roles, not from literal node names', _run_source)
+
+    # ----- fix round 1: the seed's rust restart must CLEAR the backoff -
+    #
+    # Measured on the first `--reference-follower both` validation run:
+    # the follower had been dialling `scala2` and `scala3` for the whole
+    # funding wait, with nothing there, so both addresses were deep in an
+    # exponential dial backoff. `seed_second_miner` restarts the follower
+    # to clear that — but the address book PERSISTS the backoff
+    # timestamps (`ergo_node::node::util::wall_to_instant` restores
+    # them), so it came back and immediately logged "peer bootstrap
+    # starved: no dial candidates (all known addresses in dial-backoff)".
+    # It held the miner and neither follower, and the run produced 0
+    # follower samples.
+    with tempfile.TemporaryDirectory() as _tmp:
+        _root = Path(_tmp)
+        for _node in ('rust', 'scala2'):
+            (_root / _node).mkdir(parents=True)
+        _book = _root / 'rust' / 'peers.redb'
+        _book.write_bytes(b'backoff state')
+        (_root / 'scala2' / 'peers.redb').write_bytes(b'not the follower')
+        _removed = purge_address_book(_root)
+        assert not _book.exists(), 'the follower\'s address book must go'
+        assert [str(_book)] == _removed, _removed
+        assert (_root / 'scala2' / 'peers.redb').exists(), \
+            'only the follower\'s book is purged'
+        # Idempotent: a run with no book is not an error.
+        assert purge_address_book(_root) == []
+    # And the seed does it, between stopping the follower and starting it
+    # again — a purge with the node running would be a no-op it then
+    # rewrites.
+    # The seed restarts the follower through `restart_follower`, which
+    # owns the purge.
+    assert 'restart_follower(ctx, campaign, lifecycle)' in inspect.getsource(
+        _common.seed_second_miner), (
+        'seed_second_miner restarts the follower to clear its dial '
+        'backoff; the backoff is persisted, so the address book has to go '
+        'with it')
+    _seed = inspect.getsource(_common.restart_follower)
+    assert 'purge_address_book' in _seed, (
+        'restart_follower must drop the persisted dial backoff')
+    assert _seed.index('purge_address_book') > _seed.index("stop(('rust',))"), \
+        'the purge belongs between the stop and the respawn'
+    assert _seed.index('purge_address_book') < _seed.index("spawn('rust')"), \
+        'the purge belongs between the stop and the respawn'
+
+    # ----- a seeded Scala node must not inherit the miner's peer DB -----
+    #
+    # Measured on the first run with the followers on their own loopback
+    # addresses: `seed_second_miner` copies the miner's data directory,
+    # `peers/` included, and Scala's PeerManager seeds from
+    # `scorex.network.knownPeers` ONLY when that database is empty
+    # (PeerManager.scala:24-33). The copy held one peer (the Rust node),
+    # so the follower logged "1 peers read from the database", never
+    # learned the miner's address, and dialled Rust alone. Gossip cannot
+    # fill the gap: PeerManager refuses local addresses from peers
+    # (:53, :67).
+    with tempfile.TemporaryDirectory() as _tmp:
+        _seeded = Path(_tmp) / 'scala2'
+        (_seeded / 'peers').mkdir(parents=True)
+        (_seeded / 'peers' / 'x.ldb').write_bytes(b'the miner\'s peers')
+        (_seeded / 'history').mkdir()
+        _common.drop_copied_peer_db(_seeded)
+        assert not (_seeded / 'peers').exists(), 'the copied peer DB must go'
+        assert (_seeded / 'history').exists(), 'the chain must stay'
+        _common.drop_copied_peer_db(_seeded)   # idempotent
+    _seed_src = inspect.getsource(_common.seed_second_miner)
+    assert 'drop_copied_peer_db(target)' in _seed_src, (
+        'every seeded node needs the miner\'s peer DB removed')
+    assert _seed_src.index('drop_copied_peer_db(target)') > \
+        _seed_src.index('copytree'), 'the drop belongs after the copy'
+
+    # ----- fix round 1 (codex review-2): seed, THEN assert peering ---
+    #
+    # `--reference-follower` deliberately leaves its node out of
+    # `START_NODES` and brings it up in the seed. A scenario that
+    # asserted peering first therefore asked a node that did not exist
+    # yet whether it had peers, which is an unavoidable false failure —
+    # Task 2's steady evidence carries the connection refusal.
+    for _name in REFERENCE_FOLLOWER_SCENARIOS:
+        _src = inspect.getsource(_all[_name].run)
+        if 'seed_second_miner' not in _src or 'assertion_1_peering' not in _src:
+            continue
+        assert _src.index('seed_second_miner') < \
+            _src.index('assertion_1_peering'), (
+                _name, 'peering is asserted before the follower is seeded')
+
+    # ----- fix round 1, item 8: ONE workload, not two copies -----
+    #
+    # `reconstruct_rate` and `miner_self_reject` each carried a verbatim
+    # copy of the funding and payment-pump helpers, and the two
+    # measurements they feed are read against each other — so a fix to
+    # one workload would silently not apply to the other.
+    from scenarios import miner_self_reject as _msr_mod
+    for _mod in (_rr, _msr_mod):
+        _src = inspect.getsource(_mod)
+        assert 'def _fund(' not in _src and 'def _pump(' not in _src, _mod
+        assert 'common.fund_miner(' in _src and 'common.pump_payments(' in _src, \
+            _mod
+    # EVERY scenario that pumps payments does it through the shared
+    # helper. `evict` and `steady` kept their own copies too, and
+    # `steady` is where the stock follower's lag is measured.
+    for _name, _module in _all.items():
+        _src = inspect.getsource(_module)
+        if '/wallet/payment/send' not in _src:
+            continue
+        assert 'common.pump_payments(' in _src, (
+            _name, 'a scenario that submits payments must use the shared '
+            'workload, or a fix to it reaches some windows and not others')
+        assert "smoke.request(" not in _src, (
+            _name, 'a private copy of the payment submission')
+    # And the shared pump records what the node REFUSED rather than
+    # dropping it: a window whose workload never landed measured the
+    # quiet case, and the evidence has to be able to say so.
+    _answers = [(200, 'aa'), (400, None), (200, None)]
+    _saved_request = _smoke.request
+    try:
+        _smoke.request = lambda node, route, body: _answers.pop(0)
+        _sent, _refused = [], []
+        _common.pump_payments(None, 'addr', _sent, 'scala', count=3,
+                              rejected=_refused)
+        assert _sent == ['aa'], _sent
+        assert len(_refused) == 2, _refused
+        assert all('HTTP' in r for r in _refused), _refused
+    finally:
+        _smoke.request = _saved_request
+
+    # ----- M4: the miner_self_reject denominators -----
+    from scenarios import miner_self_reject as _msr
+    _log = [
+        'INFO Found solution for input block, sending it for validation',
+        'INFO Input-block ' + 'ab' * 32 + ' mined @ height 7!',
+        # The send to the node view that follows it at 62c10315
+        # (`sendInputToNodeView`, CandidateGenerator.scala:87). Both
+        # lines name ONE block, which must be counted once.
+        'INFO New input block ' + 'ab' * 32 + ' w. nonce 91',
+        'INFO Processed solution x with the result Success(())',
+        'INFO Solution accepted',
+        'INFO Found solution for input block, sending it for validation',
+        # The WARN as the pinned build logs it: level, logger, ` - `.
+        # The PoW-failure count is anchored on that prefix, so a fixture
+        # without it would not be the line a real run holds.
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Removing candidate due to invalid input block',
+        'INFO Processed solution y with the result Error(java.lang.Exception: '
+        'Invalid input block! PoW valid: false)',
+        'ERROR Accepting solution or preparing candidate did not succeed',
+        # The stack trace the ERROR above carries. It is the SECOND line
+        # per failure holding the exception text, and leaving it out of
+        # this fixture is what made `pow_failure_sites_disagree` fire on
+        # every real run: the Task 2 trial at stock 62c10315 counted 83
+        # WARNs against 166 exception-text lines, exactly two per
+        # failure.
+        'java.lang.Exception: Invalid input block! PoW valid: false',
+        # The F11c case: submitted, never answered.
+        'INFO Found solution for ordering block, sending it for validation',
+    ]
+    _counts = _msr.count(_log)
+    assert _counts['submissions'] == 3, _counts
+    assert _counts['submissions_input'] == 2, _counts
+    assert _counts['replies_success'] == 1, _counts
+    assert _counts['replies_error'] == 1, _counts
+    assert _counts['replies_missing'] == 1, _counts
+    assert _counts['pow_failures'] == 1, _counts
+    # ONE failure, TWO lines carrying the exception text, and the flag
+    # stays quiet: it exists to catch a build that stops logging them in
+    # that proportion, not to fire on every stock run.
+    assert _counts['pow_failure_reply_lines'] == 2, _counts
+    assert _counts['pow_failure_sites_disagree'] is False, _counts
+    # A build that logged the text once per failure HAS changed, and
+    # says so.
+    _changed = _msr.count([ln for ln in _log
+                           if not ln.startswith('java.lang.Exception')])
+    assert _changed['pow_failure_sites_disagree'] is True, _changed
+    # With neither site logging there is nothing to disagree about.
+    assert _msr.count(
+        ['INFO Found solution for input block, sending it for validation',
+         'INFO Solution accepted'])['pow_failure_sites_disagree'] is False
+    # But a build whose WARN has DISAPPEARED while the exception text
+    # survives is the same drift in the other direction, and gating the
+    # comparison on a nonzero WARN count reported agreement for it
+    # (codex review-2). Zero against zero already agrees; zero against
+    # two does not.
+    _warn_gone = _msr.count([
+        'INFO Found solution for input block, sending it for validation',
+        'INFO Processed solution y with the result Error(java.lang.Exception: '
+        'Invalid input block! PoW valid: false)',
+        'java.lang.Exception: Invalid input block! PoW valid: false'])
+    assert _warn_gone['pow_failures'] == 0, _warn_gone
+    assert _warn_gone['pow_failure_reply_lines'] == 2, _warn_gone
+    assert _warn_gone['pow_failure_sites_disagree'] is True, _warn_gone
+    assert _counts['distinct_applied_input_blocks'] == 1, _counts
+    assert _counts['applied_input_block_ids'] == ['ab' * 32], _counts
+    # ----- F11's own wording for the same rejection -----
+    #
+    # F11 replaced the stock WARN with `No retained candidate matches
+    # input solution PoW` and logs its reply text ONCE, as the
+    # `StatusReply$ErrorMessage` line under `ErgoMiningThread`'s ERROR —
+    # not twice, as stock does. A counter that knew only the stock
+    # phrase read 0 on every F11 run, and the 2:1 cross-check passed
+    # because 0 = 2 x 0 (batch review, 2026-09-24). Taken from the saved
+    # F11 run 2 log, lines 62-66.
+    _f11_reject = [
+        'INFO org.ergoplatform.mining.ErgoMiningThread - Found solution for '
+        'input block, sending it for validation',
+        'WARN org.ergoplatform.mining.CandidateGenerator - No retained '
+        'candidate matches input solution PoW',
+        'ERROR org.ergoplatform.mining.ErgoMiningThread - Accepting solution '
+        'or preparing candidate did not succeed',
+        'akka.pattern.StatusReply$ErrorMessage: No retained candidate '
+        'matches input solution PoW',
+    ]
+    _f11c = _msr.count(_f11_reject)
+    assert _f11c['pow_failures'] == 1, _f11c
+    # The echo line carries the same words and must not count twice.
+    assert _f11c['pow_failure_reply_lines'] == 1, _f11c
+    assert _f11c['pow_failure_sites_disagree'] is False, _f11c
+    assert _f11c['replies_error'] == 1, _f11c
+    assert _f11c['rejections_exceed_error_replies'] is False, _f11c
+    # The echo alone is not a failure the generator logged.
+    _echo_only = _msr.count(_f11_reject[-1:])
+    assert _echo_only['pow_failures'] == 0, _echo_only
+    assert _echo_only['pow_failure_sites_disagree'] is True, _echo_only
+    # The ordering arm, in either wording, counts apart from the input
+    # arm; stock's plural WARN has no `input` in it.
+    _ordering = _msr.count([
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Removing candidates due to invalid block',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'No retained candidate matches ordering solution PoW',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Stale input ordering parent abc',
+    ])
+    assert _ordering['pow_failures'] == 0, _ordering
+    assert _ordering['pow_failures_ordering'] == 2, _ordering
+    assert _ordering['stale_parent_rejections'] == 1, _ordering
+    # F11's other reply arms are rejections too, counted by arm and never
+    # as PoW failures.
+    _other = _msr.count([
+        'INFO org.ergoplatform.mining.CandidateGenerator - '
+        'Input block already known: ab',
+        'WARN org.ergoplatform.mining.CandidateGenerator - '
+        'Input processing timed out: ab',
+        'ERROR org.ergoplatform.mining.ErgoMiningThread - Accepting solution '
+        'or preparing candidate did not succeed',
+    ])
+    assert _other['pow_failures'] == 0, _other
+    assert _other['other_rejections'] == {
+        'already_known': 1, 'pending': 0, 'already_solved': 0,
+        'invalid_wrapped': 0, 'invalid_unwrapped': 0, 'pending_timeout': 1,
+        'pending_deferral': 0}, _other
+    # Two rejections, one error reply: the phrases no longer describe the
+    # build, and the evidence says so.
+    assert _other['rejections_exceed_error_replies'] is True, _other
+    assert _counts['rejections_exceed_error_replies'] is False, _counts
+    # ----- the patched miner's log line -----
+    #
+    # F11 (`matrix/F11-candidate-retained-work`) rewrote the
+    # `InputSolutionFound` arm and dropped `Input-block <id> mined @
+    # height <h>!`. Only `sendInputToNodeView`'s `New input block <id> w.
+    # nonce <n>` is left, and at 62c10315 that line sits at the same call.
+    # Matching the stock line alone made the F11 proof run report
+    # `input_blocks_applied 0` and `on_winning_chain 0`, although the same
+    # window held about 3 020 applied input blocks.
+    assert _counts['input_blocks_applied'] == 1, (
+        'the stock pair of lines is ONE block', _counts)
+    _f11 = _msr.count([
+        'INFO Found solution for input block, sending it for validation',
+        'INFO New input block ' + 'cd' * 32 + ' w. nonce 22',
+        'INFO Solution accepted'])
+    assert _f11['input_blocks_applied'] == 1, _f11
+    assert _f11['applied_input_block_ids'] == ['cd' * 32], _f11
+    assert _f11['applied_sites_disagree'] is False, (
+        'a build that logs only the send site is not disagreement', _f11)
+    # Both sites logging different blocks means the two lines no longer
+    # mark the same call, and the evidence has to say so.
+    _split = _msr.count([
+        'INFO Input-block ' + 'ab' * 32 + ' mined @ height 7!',
+        'INFO New input block ' + 'cd' * 32 + ' w. nonce 22'])
+    assert _split['applied_sites_disagree'] is True, _split
+    assert _counts['applied_sites_disagree'] is False, _counts
+    # An empty window is UNKNOWN, not a run with no submissions.
+    assert 'UNKNOWN, not zero' in _msr.count([])['unmatched']
+    # The result line renders, names the build, and carries every
+    # denominator §7a asks for.
+    # ----- fix round 1, Minor: the winning-chain count is a FLOOR -----
+    #
+    # The best input chain is sampled periodically and resets at every
+    # ordering block, so a block that was on the winning chain between
+    # two samples is never seen; and a read that was unavailable used to
+    # be skipped silently. The number is an observed lower bound and the
+    # evidence says so, with the sampling that produced it.
+    _chain = _msr.winning_chain_note(
+        applied={'aa', 'bb', 'cc'}, winning={'aa', 'bb', 'zz'},
+        reads=100, failures=7)
+    assert _chain['on_winning_chain'] == 2, _chain
+    assert _chain['on_winning_chain_is_lower_bound'] is True, _chain
+    assert _chain['chain_reads'] == 100, _chain
+    assert _chain['chain_read_failures'] == 7, _chain
+    assert _chain['applied_but_never_sampled_on_the_chain'] == ['cc'], _chain
+    assert 'lower bound' in _chain['source'], _chain
+    # A run in which every read failed has not observed the chain at all.
+    _blind = _msr.winning_chain_note({'aa'}, set(), reads=5, failures=5)
+    assert _blind['chain_never_observed'] is True, _blind
+    assert 'UNKNOWN' in _blind['unmatched'], _blind
+    assert _msr.winning_chain_note({'aa'}, {'aa'}, 5, 0).get(
+        'chain_never_observed') is False
+
+    _line = _msr.result_line({
+        'build': 'F11', 'miner': _counts,
+        'winning_chain': _msr.winning_chain_note({'ab' * 32}, {'ab' * 32},
+                                                 10, 0)})
+    assert _line.startswith('miner_self_reject [F11]:'), _line
+    for _fragment in ('submissions 3', 'replies 1 ok / 1 err / 1 missing',
+                      'pow_failures 1', 'input_blocks_applied 1',
+                      'on_winning_chain 1'):
+        assert _fragment in _line, (_fragment, _line)
+    assert 'NOT MEASURED' in _msr.result_line({'miner': _msr.count([])})
 
     # The REAL recipe file, rendered with the real overrides, has to parse
     # as TOML and carry the values the scenario asked for. A renderer
@@ -1653,6 +3443,70 @@ def _self_test():
             ('RuntimeError: boom', [{'message': 'x'}], 'y', 'ABORTED')):
         got = verdict_for(aborted, failures, not_measured)
         assert got == expected, (aborted, failures, not_measured, got, expected)
+        # `verdict_for` is `verdict_of` for a scenario WITH a criterion.
+        assert verdict_of('steady', aborted, failures, None, not_measured) \
+            == expected, (aborted, failures, not_measured)
+    verdicts = []
+    for aborted, failures, expected in (
+            (None, [], 'PASS'),
+            (None, [{'message': 'x'}], 'FAIL'),
+            ('RuntimeError: rust did not become ready', [], 'ABORTED'),
+            ('RuntimeError: boom', [{'message': 'x'}], 'ABORTED')):
+        got = verdict_of('steady', aborted, failures)
+        verdicts.append(got)
+        assert got == expected, (aborted, failures, got, expected)
+    assert 'ABORTED' in verdicts, verdicts
+
+    # ----- fix round 1, item 4: a MEASUREMENT does not PASS -----
+    #
+    # `miner_self_reject` has no pass criterion by construction — its
+    # own docstring says so, and `task-0-brief.md:32` requires it. The
+    # driver nevertheless wrote PASS whenever nothing failed, so a run
+    # that covered 3 of its 40 ordering blocks and a run that covered
+    # all 40 read identically, and a campaign summary counted the
+    # measurement among its passes.
+    assert 'miner_self_reject' in MEASUREMENT_SCENARIOS, MEASUREMENT_SCENARIOS
+    assert verdict_of('miner_self_reject', None, [], True) == 'MEASURED'
+    # A short window, a phrase set that matched nothing, or any failure
+    # at all leaves the measurement INCOMPLETE — never PASS, and never
+    # FAIL either, because there is no criterion to fail.
+    assert verdict_of('miner_self_reject', None, [], False) == 'INCOMPLETE'
+    assert verdict_of('miner_self_reject', None, [{'message': 'x'}], True) == \
+        'INCOMPLETE'
+    # A scenario that never stated whether its window completed has not
+    # shown that it did.
+    assert verdict_of('miner_self_reject', None, [], None) == 'INCOMPLETE'
+    # An abort still outranks everything.
+    assert verdict_of('miner_self_reject', 'RuntimeError: boom', [], True) == \
+        'ABORTED'
+    # PASS is not silently widened for the scenarios that do have a
+    # criterion.
+    assert verdict_of('steady', None, [], True) == 'PASS'
+    # The exit code and the campaign summary treat a completed
+    # measurement as a run that did what it was asked, and INCOMPLETE as
+    # one that did not. NOT MEASURED exits 0 too (a limitation of the
+    # host, not a broken scenario) — it is its own verdict, never PASS.
+    assert set(OK_RESULTS) == {'PASS', 'MEASURED', 'NOT MEASURED'}, OK_RESULTS
+    for _bad in ('FAIL', 'ABORTED', 'INCOMPLETE'):
+        assert _bad not in OK_RESULTS, _bad
+
+    # And the rule the driver uses is THIS function, not a copy that has
+    # drifted: the driver persists through `persist_verdict`, and that
+    # has to call it. (That every attempt is recorded, pass or fail, is
+    # proven by driving the real `run_scenario` below.)
+    import inspect
+    assert 'persist_verdict(name, evidence' in inspect.getsource(run_scenario), \
+        'the driver must persist through persist_verdict'
+    assert 'verdict_of(name, aborted' in inspect.getsource(persist_verdict), \
+        'the driver must use this rule'
+    assert 'OK_RESULTS' in inspect.getsource(main), \
+        'the exit code has to come from the same table'
+    # And every measurement scenario STATES whether its window
+    # completed; without that the driver can only call it INCOMPLETE.
+    for _name in MEASUREMENT_SCENARIOS:
+        assert "ctx.note('measurement_complete'" in inspect.getsource(
+            _all[_name].run), (
+                _name, 'a measurement scenario has to say whether it measured')
     _self_test_driver()
     _self_test_round_2()
 
@@ -1666,10 +3520,24 @@ def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
 
     import smoke as real_smoke
 
+    import lifecycle as real_lifecycle
+
     lifecycle = types.ModuleType('lifecycle')
+    # Constants and pure role resolution come from the real module; every
+    # function that would touch a process, a build or a port is faked
+    # below, so an attribute this list misses fails loudly rather than
+    # starting something.
+    for _attr in ('ROLES', 'Role', 'role_node', 'roles_for_nodes', 'NODES',
+                  'P2P', 'REST', 'WORK', 'DEFAULT_CONFIG', 'DEFAULT_P2P',
+                  'DEFAULT_P2P_HOST', 'DEFAULT_REST', 'P2P_HOST'):
+        if hasattr(real_lifecycle, _attr):
+            setattr(lifecycle, _attr, getattr(real_lifecycle, _attr))
     lifecycle.SCALA_APP_VERSION = 'fake'
     lifecycle.node_binary = lambda: '/fake/ergo-node'
-    lifecycle.classpath_file = lambda: Path('/fake/classpath')
+    lifecycle.node_binary_provenance = lambda: {'fake': True}
+    lifecycle.classpath_file = lambda node='scala': Path('/fake/classpath')
+    lifecycle.scala_app_version = lambda node='scala': 'fake'
+    lifecycle.node_build = lambda node: 'stock'
 
     def start(names):
         calls.append(('start', tuple(names)))
@@ -1721,7 +3589,25 @@ def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
             self.failures.append({'assertion': assertion, 'message': message})
 
     smoke.Run = Run
-    return lifecycle, smoke
+
+    # The build registry would VERIFY a real provisioned build (hashing
+    # its class output); the driver only needs a summary bound to the
+    # launch classpath the fake lifecycle reports.
+    builds = types.ModuleType('builds')
+
+    class BuildError(Exception):
+        pass
+
+    class _Build:
+        def __init__(self, name):
+            self.name = name
+
+        def summary(self):
+            return {'build': self.name, 'classpath': '/fake/classpath'}
+
+    builds.BuildError = BuildError
+    builds.load = _Build
+    return lifecycle, smoke, builds
 
 
 def _drive(name, scenario_run, tmp, **faults):
@@ -1734,19 +3620,31 @@ def _drive(name, scenario_run, tmp, **faults):
     CAMPAIGN_WORK, CONF, WORK = tmp / 'campaign', tmp / 'campaign' / 'conf', tmp / 'work'
     WORK.mkdir(parents=True, exist_ok=True)
     calls = []
-    fake_lifecycle, fake_smoke = _fake_node_modules(WORK, calls, **faults)
+    fake_lifecycle, fake_smoke, fake_builds = _fake_node_modules(
+        WORK, calls, **faults)
     module = types.ModuleType(f'fake_{name}')
     module.__doc__ = 'A probe scenario.'
     module.NODES = SCENARIO_NODES[name]
     module.run = scenario_run
-    real_modules = {k: sys.modules.get(k) for k in ('lifecycle', 'smoke')}
+    real_modules = {k: sys.modules.get(k)
+                    for k in ('lifecycle', 'smoke', 'builds')}
     real_scenario = SCENARIOS[name]
+    common = common_module()
+    real_accounting = common.reconstruction_accounting
+    # The accounting reads the nodes' feeds and logs; its own rules are
+    # tested on their own. Here the driver only has to CALL it, for every
+    # scenario, before the verdict.
+    common.reconstruction_accounting = lambda ctx: (
+        calls.append(('reconstruction_accounting', tuple(ctx.roles)))
+        or {'fields': list(common.ACCOUNTING_FIELDS), 'probe': True})
     sys.modules['lifecycle'], sys.modules['smoke'] = fake_lifecycle, fake_smoke
+    sys.modules['builds'] = fake_builds
     SCENARIOS[name] = module
     raised = None
     try:
         args = types.SimpleNamespace(attempt=check_attempt_cap(name), fresh=False,
-                                     timeout=5, ordering_blocks=None)
+                                     timeout=5, ordering_blocks=None,
+                                     reference_follower=None, build='stock')
         try:
             evidence = run_scenario(name, args)
         except BaseException as error:  # noqa: BLE001 — the probe inspects it
@@ -1755,6 +3653,7 @@ def _drive(name, scenario_run, tmp, **faults):
         return evidence, calls, raised, read_attempts()
     finally:
         SCENARIOS[name] = real_scenario
+        common.reconstruction_accounting = real_accounting
         for key, value in real_modules.items():
             if value is None:
                 sys.modules.pop(key, None)
@@ -1776,6 +3675,11 @@ def _self_test_driver():
         evidence, calls, raised, _ = _drive('steady', lambda ctx: None, tmp / 'clean')
         assert raised is None and evidence['result'] == 'PASS', evidence['result']
         assert stopped(calls), calls
+        # Every scenario's evidence carries the reconstruction accounting
+        # and the build identity of each Scala role.
+        assert any(c[0] == 'reconstruction_accounting' for c in calls), calls
+        assert evidence['reconstruction_accounting'].get('probe'), evidence
+        assert evidence['builds']['scala_miner']['build'] == 'stock', evidence
 
         # Evidence collection throws AFTER the scenario body succeeded —
         # the shape codex named: it used to bypass node shutdown and
@@ -2196,6 +4100,16 @@ def main():
     parser.add_argument('--force-attempt', action='store_true',
                         help='run past the three-attempt cap (controller ruling '
                              'required — say why in the report)')
+    parser.add_argument('--build', default='stock',
+                        help='the provisioned Scala build every *_patched '
+                             'role runs (scripts/devnet-matrix/builds.toml); '
+                             'every other Scala role stays on stock, so a run '
+                             'is base+one-patch vs base')
+    parser.add_argument('--reference-follower', default=None,
+                        choices=('stock', 'patched', 'both'),
+                        help='which Scala reference follower(s) to run beside '
+                             'the Rust one; accepted by '
+                             + ', '.join(REFERENCE_FOLLOWER_SCENARIOS))
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
     if args.self_test:
@@ -2206,6 +4120,15 @@ def main():
         parser.error('--scenario is required (or --self-test)')
 
     sys.path.insert(0, str(HERE))
+    # Refused HERE rather than at the first spawn: an unknown build must
+    # not start a devnet, and a declared-but-unprovisioned one must say
+    # what would provision it. The resolved port band is checked in the
+    # same breath, for the same reason.
+    check_band(CAMPAIGN_P2P, CAMPAIGN_REST)
+    # A hand-set classpath would bypass `Build.verify()` for the node it
+    # names, and the run would still record `--build` in its evidence.
+    check_no_classpath_override(os.environ)
+    check_build(args.build)
     names = list(ORDER) if args.scenario == 'all' else [args.scenario]
     # The node set is fixed for the whole process: `lifecycle.REST` and
     # `smoke.URLS` are read at import time, so one process drives one
@@ -2216,6 +4139,9 @@ def main():
             result = subprocess.run(
                 [sys.executable, str(HERE / 'campaign.py'), '--scenario', name,
                  '--timeout', str(args.timeout)]
+                + ['--build', args.build]
+                + (['--reference-follower', args.reference_follower]
+                   if args.reference_follower else [])
                 + (['--fresh'] if args.fresh else [])
                 + (['--force-attempt'] if args.force_attempt else []), cwd=ROOT)
             if result.returncode != 0:
@@ -2228,7 +4154,8 @@ def main():
         parser.error(f'unknown scenario {name!r}; have {sorted(SCENARIO_NODES)}')
     # BEFORE the scenario module — and therefore before `smoke` — is
     # imported: `smoke.URLS` is frozen at its import.
-    configure_environment(name, SCENARIO_NODES[name])
+    role_set = resolve_roles(name, args.reference_follower)
+    configure_environment(name, nodes_for_roles(role_set), role_set, args.build)
     # Enforced BEFORE anything is started: a refused attempt must not
     # leave a devnet running or overwrite the canonical evidence.
     args.attempt = check_attempt_cap(name, force=args.force_attempt)
@@ -2236,15 +4163,19 @@ def main():
     print(f'{name}: {evidence["result"]} '
           f'({len(evidence.get("divergences") or [])} divergences, '
           f'{evidence.get("samples")} samples)')
+    # A measurement scenario's one line, printed beside its verdict.
+    if evidence.get('result_line'):
+        print('  ' + evidence['result_line'])
     for failure in evidence.get('failures') or []:
         print(f'  - {failure["message"]}')
     for entry in evidence.get('not_measured') or []:
         print(f'  ~ NOT MEASURED: {entry["message"]}')
-    # NOT MEASURED is not a pass, and it is not an error the runner
-    # should treat as a broken scenario either: it exits 0 with the
-    # verdict on the line above, so a campaign does not abort on a
-    # limitation of the host.
-    return 0 if evidence['result'] in ('PASS', 'NOT MEASURED') else 1
+    # A completed MEASUREMENT exits 0 like a PASS: it did what it was
+    # asked; an INCOMPLETE one does not. NOT MEASURED is not a pass, and
+    # it is not an error the runner should treat as a broken scenario
+    # either: it exits 0 with the verdict on the line above, so a
+    # campaign does not abort on a limitation of the host.
+    return 0 if evidence['result'] in OK_RESULTS else 1
 
 
 if __name__ == '__main__':

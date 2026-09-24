@@ -58,20 +58,13 @@ ADVERSARY_SOURCE = '127.211.0.1'
 # transactions arrive, assemble, and hash to the wrong root.
 MISMATCH_REASONS = tuple(smoke.MERKLE_MISMATCH_REASONS)
 
+# This scenario runs one Scala node and it is the miner.
+MINER = 'scala'
+
 
 def _fund(ctx):
-    deadline = min(ctx.run.deadline, time.monotonic() + 900)
-    balance = 0
-    while time.monotonic() < deadline:
-        try:
-            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
-        except Unavailable:
-            balance = 0
-        if balance:
-            break
-        ctx.run.idle(1)
-    address = (api_retry('scala', '/wallet/addresses', ctx.run.deadline,
-                         what='the miner wallet address') or [None])[0]
+    """The shared workload's funding wait, with this scenario's note."""
+    balance, address = common.fund_miner(ctx, MINER)
     ctx.note('funding', {'balance_nano': balance, 'address': address})
     return balance, address
 
@@ -79,16 +72,8 @@ def _fund(ctx):
 def _pump(ctx, address, sent):
     """Keep a payment in flight, so the input chain the miner seals is
     never empty and the ordering blocks carry transactions to get wrong."""
-    for _ in range(PAYMENTS_PER_BLOCK):
-        try:
-            status, txid = smoke.request(
-                'scala', '/wallet/payment/send',
-                [{'address': address, 'value': PAYMENT_NANOERG}])
-        except (OSError, ValueError):
-            continue
-        if status == 200 and txid:
-            sent.append(txid)
-    return sent
+    return common.pump_payments(ctx, address, sent, MINER,
+                                PAYMENTS_PER_BLOCK, PAYMENT_NANOERG)
 
 
 def _adversary_binary():
