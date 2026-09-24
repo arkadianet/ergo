@@ -15,6 +15,7 @@ use utoipa::ToSchema;
 
 use super::{offset_collection, ListQuery, OperatorState};
 use crate::traits::VotingControlError;
+use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::dto::Collection;
 
@@ -104,38 +105,45 @@ pub(crate) struct VotesHistory {
     get, path = "/api/v1/voting/history", tag = "voting",
     responses(
         (status = 200, description = "Per-epoch parameter changes", body = VotesHistory),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
     let chain = match s.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
-    let h = chain.votes_history();
-    Json(VotesHistory {
-        epoch_length: h.epoch_length,
-        current_height: h.current_height,
-        changes: h
-            .changes
-            .into_iter()
-            .map(|c| VoteChange {
-                height: c.height,
-                params: c
-                    .params
+    s.blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let h = chain.votes_history();
+            Json(VotesHistory {
+                epoch_length: h.epoch_length,
+                current_height: h.current_height,
+                changes: h
+                    .changes
                     .into_iter()
-                    .map(|p| ParamChange {
-                        id: p.id,
-                        name: p.name,
-                        description: p.description,
-                        from: p.from,
-                        to: p.to,
+                    .map(|c| VoteChange {
+                        height: c.height,
+                        params: c
+                            .params
+                            .into_iter()
+                            .map(|p| ParamChange {
+                                id: p.id,
+                                name: p.name,
+                                description: p.description,
+                                from: p.from,
+                                to: p.to,
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
-            .collect(),
-    })
-    .into_response()
+            .into_response()
+        })
+        .await
 }
 
 /// `GET /api/v1/voting/candidate` — T0, seam-deferred. The next-block vote-byte

@@ -56,6 +56,8 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 /// unconditionally and gates *inside* each handler, mirroring [`crate::v1::V1State`].
 #[derive(Clone)]
 pub struct OperatorState {
+    /// Shared per-node capacity for blocking chain reads.
+    pub blocking: crate::v1::BlockingReads,
     /// Snapshot reader — every `node/*` read, `network/peers[/connected]`, and
     /// the `voting/*` reads project off this.
     pub read: Arc<dyn NodeReadState>,

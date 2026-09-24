@@ -20,6 +20,7 @@ use super::{
     ListQuery, V1State,
 };
 use crate::compat::ChainReadError;
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::V1Error;
 use crate::v1::error::{v1_error, Reason};
@@ -112,13 +113,14 @@ fn height_window_page(
     responses(
         (status = 200, description = "Block summaries", body = Collection<V1BlockSummary>),
         (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQuery>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let order = match parse_order(q.order.as_deref()) {
@@ -130,30 +132,36 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
         Err(boxed) => return *boxed,
     };
     let limit = clamp_limit(q.limit, 25, 200);
-    let tip = state.read.status().best_full_block_height;
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let tip = state.read.sync().best_full_block_height;
 
-    let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
-    let (window_len, page) = match height_window_page(&heights, limit, |h| {
-        chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
-    }) {
-        Ok(page) => page,
-        Err(error) => return chain_read_failed(error),
-    };
-    let mut items = Vec::new();
-    for &h in &heights[..window_len] {
-        let ids = match chain.try_header_ids_at_height(h) {
-            Ok(ids) => ids,
-            Err(error) => return chain_read_failed(error),
-        };
-        if let Some(id) = ids.first() {
-            match chain.try_full_block_by_id(id) {
-                Ok(Some(fb)) => items.push(block_summary_from_scala(state.network, &fb)),
-                Ok(None) => {}
+            let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
+            let (window_len, page) = match height_window_page(&heights, limit, |h| {
+                chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
+            }) {
+                Ok(page) => page,
                 Err(error) => return chain_read_failed(error),
+            };
+            let mut items = Vec::new();
+            for &h in &heights[..window_len] {
+                let ids = match chain.try_header_ids_at_height(h) {
+                    Ok(ids) => ids,
+                    Err(error) => return chain_read_failed(error),
+                };
+                if let Some(id) = ids.first() {
+                    match chain.try_full_block_by_id(id) {
+                        Ok(Some(fb)) => items.push(block_summary_from_scala(state.network, &fb)),
+                        Ok(None) => {}
+                        Err(error) => return chain_read_failed(error),
+                    }
+                }
             }
-        }
-    }
-    Json(Collection { items, page }).into_response()
+            Json(Collection { items, page }).into_response()
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/blocks/{header_id}` — single full block.
@@ -164,24 +172,31 @@ pub async fn list_blocks(State(state): State<V1State>, V1Query(q): V1Query<ListQ
         (status = 200, description = "Full block", body = V1Block),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
-        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    let tip = state.read.status().best_full_block_height;
-    match chain.try_full_block_by_id(&id) {
-        Ok(Some(fb)) => Json(block_from_scala(state.network, &fb, tip)).into_response(),
-        Ok(None) => block_not_found(),
-        Err(error) => chain_read_failed(error),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let tip = state.read.sync().best_full_block_height;
+            match chain.try_full_block_by_id(&id) {
+                Ok(Some(fb)) => Json(block_from_scala(state.network, &fb, tip)).into_response(),
+                Ok(None) => block_not_found(),
+                Err(error) => chain_read_failed(error),
+            }
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/blocks/{header_id}/transactions` — the block's tx
@@ -193,35 +208,42 @@ pub async fn block_by_id(State(state): State<V1State>, Path(id): Path<String>) -
         (status = 200, description = "Block transactions (single page)", body = Collection<V1BlockTx>),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
-        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.try_block_transactions_by_id(&id) {
-        Ok(Some(bt)) => {
-            let tip = state.read.status().best_full_block_height;
-            let height = match chain.try_header_by_id(&id) {
-                Ok(header) => header.map(|h| h.height),
-                Err(error) => return chain_read_failed(error),
-            };
-            let items = bt
-                .transactions
-                .iter()
-                .map(|tx| block_tx_from_scala(state.network, tx, height, tip))
-                .collect();
-            Json(Collection::single_page(items)).into_response()
-        }
-        Ok(None) => block_not_found(),
-        Err(error) => chain_read_failed(error),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            match chain.try_block_transactions_by_id(&id) {
+                Ok(Some(bt)) => {
+                    let tip = state.read.sync().best_full_block_height;
+                    let height = match chain.try_header_by_id(&id) {
+                        Ok(header) => header.map(|h| h.height),
+                        Err(error) => return chain_read_failed(error),
+                    };
+                    let items = bt
+                        .transactions
+                        .iter()
+                        .map(|tx| block_tx_from_scala(state.network, tx, height, tip))
+                        .collect();
+                    Json(Collection::single_page(items)).into_response()
+                }
+                Ok(None) => block_not_found(),
+                Err(error) => chain_read_failed(error),
+            }
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/blocks/at-height/{height}` — header ids at a height
@@ -232,8 +254,9 @@ pub async fn block_transactions(State(state): State<V1State>, Path(id): Path<Str
     responses(
         (status = 200, description = "Header ids at height (single page)", body = Collection<String>),
         (status = 400, description = "Height is not a non-negative integer", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn blocks_at_height(
@@ -241,18 +264,24 @@ pub async fn blocks_at_height(
     Path(height): Path<String>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let height = match parse_height(&height) {
         Ok(h) => h,
         Err(e) => return *e,
     };
-    let ids = match chain.try_header_ids_at_height(height) {
-        Ok(ids) => ids,
-        Err(error) => return chain_read_failed(error),
-    };
-    Json(Collection::single_page(ids)).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let ids = match chain.try_header_ids_at_height(height) {
+                Ok(ids) => ids,
+                Err(error) => return chain_read_failed(error),
+            };
+            Json(Collection::single_page(ids)).into_response()
+        })
+        .await
 }
 
 /// `POST /api/v1/chain/blocks/by-ids` — bulk full-block fetch; request order
@@ -263,8 +292,9 @@ pub async fn blocks_at_height(
     responses(
         (status = 200, description = "Full blocks found (single page, misses dropped)", body = Collection<V1Block>),
         (status = 400, description = "Malformed id or more than 200 ids", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn blocks_by_ids(
@@ -272,7 +302,7 @@ pub async fn blocks_by_ids(
     V1Json(ids): V1Json<Vec<String>>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if ids.len() > 200 {
@@ -285,16 +315,22 @@ pub async fn blocks_by_ids(
     if ids.iter().any(|id| !valid_modifier_id(id)) {
         return invalid_hex();
     }
-    let tip = state.read.status().best_full_block_height;
-    let mut items = Vec::new();
-    for id in &ids {
-        match chain.try_full_block_by_id(id) {
-            Ok(Some(fb)) => items.push(block_from_scala(state.network, &fb, tip)),
-            Ok(None) => {}
-            Err(error) => return chain_read_failed(error),
-        }
-    }
-    Json(Collection::single_page(items)).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let tip = state.read.sync().best_full_block_height;
+            let mut items = Vec::new();
+            for id in &ids {
+                match chain.try_full_block_by_id(id) {
+                    Ok(Some(fb)) => items.push(block_from_scala(state.network, &fb, tip)),
+                    Ok(None) => {}
+                    Err(error) => return chain_read_failed(error),
+                }
+            }
+            Json(Collection::single_page(items)).into_response()
+        })
+        .await
 }
 
 // ----- chain/headers ------------------------------------------------------
@@ -311,8 +347,9 @@ pub async fn blocks_by_ids(
     responses(
         (status = 200, description = "Header objects", body = Collection<V1Header>),
         (status = 400, description = "Invalid order/cursor/limit", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn list_headers(
@@ -320,7 +357,7 @@ pub async fn list_headers(
     V1Query(q): V1Query<ListQuery>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let order = match parse_order(q.order.as_deref()) {
@@ -332,30 +369,36 @@ pub async fn list_headers(
         Err(boxed) => return *boxed,
     };
     let limit = clamp_limit(q.limit, 100, 1000);
-    let tip = state.read.status().best_header_height;
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let tip = state.read.sync().best_header_height;
 
-    let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
-    let (window_len, page) = match height_window_page(&heights, limit, |h| {
-        chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
-    }) {
-        Ok(page) => page,
-        Err(error) => return chain_read_failed(error),
-    };
-    let mut items = Vec::new();
-    for &h in &heights[..window_len] {
-        let ids = match chain.try_header_ids_at_height(h) {
-            Ok(ids) => ids,
-            Err(error) => return chain_read_failed(error),
-        };
-        if let Some(id) = ids.first() {
-            match chain.try_header_by_id(id) {
-                Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
-                Ok(None) => {}
+            let heights = candidate_heights(cursor.map(|c| c.h), order, tip, limit + 1);
+            let (window_len, page) = match height_window_page(&heights, limit, |h| {
+                chain.try_header_ids_at_height(h).map(|ids| !ids.is_empty())
+            }) {
+                Ok(page) => page,
                 Err(error) => return chain_read_failed(error),
+            };
+            let mut items = Vec::new();
+            for &h in &heights[..window_len] {
+                let ids = match chain.try_header_ids_at_height(h) {
+                    Ok(ids) => ids,
+                    Err(error) => return chain_read_failed(error),
+                };
+                if let Some(id) = ids.first() {
+                    match chain.try_header_by_id(id) {
+                        Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
+                        Ok(None) => {}
+                        Err(error) => return chain_read_failed(error),
+                    }
+                }
             }
-        }
-    }
-    Json(Collection { items, page }).into_response()
+            Json(Collection { items, page }).into_response()
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/headers/{header_id}` — single header object.
@@ -366,23 +409,28 @@ pub async fn list_headers(
         (status = 200, description = "Header object", body = V1Header),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No header with that id", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.try_header_by_id(&id) {
-        Ok(Some(h)) => Json(header_from_scala(state.network, &h)).into_response(),
-        Ok(None) => header_not_found(),
-        Err(error) => chain_read_failed(error),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || match chain.try_header_by_id(&id) {
+            Ok(Some(h)) => Json(header_from_scala(state.network, &h)).into_response(),
+            Ok(None) => header_not_found(),
+            Err(error) => chain_read_failed(error),
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/headers/at-height/{height}` — full header objects at a
@@ -393,8 +441,9 @@ pub async fn header_by_id(State(state): State<V1State>, Path(id): Path<String>) 
     responses(
         (status = 200, description = "Header objects at height (single page)", body = Collection<V1Header>),
         (status = 400, description = "Height is not a non-negative integer", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn headers_at_height(
@@ -402,26 +451,32 @@ pub async fn headers_at_height(
     Path(height): Path<String>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let height = match parse_height(&height) {
         Ok(h) => h,
         Err(e) => return *e,
     };
-    let ids = match chain.try_header_ids_at_height(height) {
-        Ok(ids) => ids,
-        Err(error) => return chain_read_failed(error),
-    };
-    let mut items = Vec::new();
-    for id in &ids {
-        match chain.try_header_by_id(id) {
-            Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
-            Ok(None) => {}
-            Err(error) => return chain_read_failed(error),
-        }
-    }
-    Json(Collection::single_page(items)).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let ids = match chain.try_header_ids_at_height(height) {
+                Ok(ids) => ids,
+                Err(error) => return chain_read_failed(error),
+            };
+            let mut items = Vec::new();
+            for id in &ids {
+                match chain.try_header_by_id(id) {
+                    Ok(Some(header)) => items.push(header_from_scala(state.network, &header)),
+                    Ok(None) => {}
+                    Err(error) => return chain_read_failed(error),
+                }
+            }
+            Json(Collection::single_page(items)).into_response()
+        })
+        .await
 }
 
 // ----- chain/modifiers + proofs ------------------------------------------
@@ -436,28 +491,35 @@ pub async fn headers_at_height(
         (status = 200, description = "The modifier, tagged by kind", body = V1Modifier),
         (status = 400, description = "Malformed modifier id", body = V1Error),
         (status = 404, description = "No modifier with that id (block_not_found)", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    let tip = state.read.status().best_full_block_height;
-    match chain.try_modifier_by_id(&id) {
-        Ok(Some(section)) => {
-            Json(modifier_from_scala(state.network, &section, tip)).into_response()
-        }
-        // No `modifier_not_found` in the canonical enum; a missing block-graph
-        // object answers `block_not_found`.
-        Ok(None) => block_not_found(),
-        Err(error) => chain_read_failed(error),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let tip = state.read.sync().best_full_block_height;
+            match chain.try_modifier_by_id(&id) {
+                Ok(Some(section)) => {
+                    Json(modifier_from_scala(state.network, &section, tip)).into_response()
+                }
+                // No `modifier_not_found` in the canonical enum; a missing block-graph
+                // object answers `block_not_found`.
+                Ok(None) => block_not_found(),
+                Err(error) => chain_read_failed(error),
+            }
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/proofs/{header_id}` — the block's AD-proofs section.
@@ -470,36 +532,43 @@ pub async fn modifier_by_id(State(state): State<V1State>, Path(id): Path<String>
         (status = 200, description = "AD-proofs section", body = V1BlockAdProofs),
         (status = 400, description = "Malformed header id", body = V1Error),
         (status = 404, description = "No block with that header id", body = V1Error),
-        (status = 500, description = "Block is stored but could not be serialised", body = V1Error),
-        (status = 503, description = "AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable", body = V1Error),
+        (status = 500, description = "Block is stored but could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String>) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     if !valid_modifier_id(&id) {
         return invalid_hex();
     }
-    match chain.try_full_block_by_id(&id) {
-        Ok(Some(fb)) => match fb.ad_proofs {
-            Some(p) => Json(V1BlockAdProofs {
-                header_id: id,
-                proof_bytes: p.proof_bytes,
-                digest: p.digest,
-                size_bytes: p.size,
-            })
-            .into_response(),
-            None => v1_error(
-                Reason::AdProofsUnavailable,
-                "the block exists but its AD-proofs section is not retained",
-                "AD-proofs are pruned in UTXO / non-archival mode",
-            ),
-        },
-        Ok(None) => block_not_found(),
-        Err(error) => chain_read_failed(error),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            match chain.try_full_block_by_id(&id) {
+                Ok(Some(fb)) => match fb.ad_proofs {
+                    Some(p) => Json(V1BlockAdProofs {
+                        header_id: id,
+                        proof_bytes: p.proof_bytes,
+                        digest: p.digest,
+                        size_bytes: p.size,
+                    })
+                    .into_response(),
+                    None => v1_error(
+                        Reason::AdProofsUnavailable,
+                        "the block exists but its AD-proofs section is not retained",
+                        "AD-proofs are pruned in UTXO / non-archival mode",
+                    ),
+                },
+                Ok(None) => block_not_found(),
+                Err(error) => chain_read_failed(error),
+            }
+        })
+        .await
 }
 
 /// `GET /api/v1/chain/proofs/{header_id}/transactions/{tx_id}` — Merkle
@@ -514,8 +583,9 @@ pub async fn block_ad_proofs(State(state): State<V1State>, Path(id): Path<String
         (status = 200, description = "Merkle membership proof", body = V1MerkleProof),
         (status = 400, description = "Malformed header or tx id", body = V1Error),
         (status = 404, description = "No block, or tx not in that block", body = V1Error),
-        (status = 500, description = "Stored chain record could not be serialised", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn proof_for_tx(
@@ -526,7 +596,7 @@ pub async fn proof_for_tx(
         Ok(c) => c,
         Err(e) => return *e,
     };
-    merkle_membership_proof(chain.as_ref(), &header_id, &tx_id)
+    merkle_membership_proof(&state.blocking, chain.clone(), header_id, tx_id).await
 }
 
 /// Shared Merkle membership-proof core (Overlap O2): the ONE implementation
@@ -536,49 +606,54 @@ pub async fn proof_for_tx(
 /// [`NodeChainQuery::try_proof_for_tx`](crate::compat::NodeChainQuery::try_proof_for_tx),
 /// validating both ids and mapping the `None` return (header unknown OR tx not
 /// in that block) to the honest `tx_not_in_block` 404.
-pub(super) fn merkle_membership_proof(
-    chain: &dyn crate::compat::NodeChainQuery,
-    header_id: &str,
-    tx_id: &str,
+pub(super) async fn merkle_membership_proof(
+    blocking: &crate::v1::BlockingReads,
+    chain: std::sync::Arc<dyn crate::compat::NodeChainQuery>,
+    header_id: String,
+    tx_id: String,
 ) -> Response {
-    if !valid_modifier_id(header_id) {
+    if !valid_modifier_id(&header_id) {
         return invalid_hex();
     }
-    if !valid_modifier_id(tx_id) {
+    if !valid_modifier_id(&tx_id) {
         return v1_error(
             Reason::InvalidTxId,
             "tx_id is not a 64-character lowercase hex string",
             "supply an unprefixed lowercase hex transaction id",
         );
     }
-    match chain.try_proof_for_tx(header_id, tx_id) {
-        Ok(Some(mp)) => {
-            let levels = mp
-                .levels
-                .into_iter()
-                .map(|(sibling, side)| V1MerkleLevel {
-                    sibling,
-                    side: if side == 0 {
-                        MerkleSide::Left
-                    } else {
-                        MerkleSide::Right
-                    },
-                })
-                .collect();
-            Json(V1MerkleProof {
-                tx_id: tx_id.to_string(),
-                levels,
-            })
-            .into_response()
-        }
-        Err(error) => chain_read_failed(error),
-        // Header unknown OR tx not in that block — a real 404.
-        Ok(None) => v1_error(
-            Reason::TxNotInBlock,
-            "no membership proof: unknown block or tx not in it",
-            "verify the header id and that the tx is included in that block",
-        ),
-    }
+    blocking
+        .run(ReadLane::Point, move || {
+            match chain.try_proof_for_tx(&header_id, &tx_id) {
+                Ok(Some(mp)) => {
+                    let levels = mp
+                        .levels
+                        .into_iter()
+                        .map(|(sibling, side)| V1MerkleLevel {
+                            sibling,
+                            side: if side == 0 {
+                                MerkleSide::Left
+                            } else {
+                                MerkleSide::Right
+                            },
+                        })
+                        .collect();
+                    Json(V1MerkleProof {
+                        tx_id: tx_id.to_string(),
+                        levels,
+                    })
+                    .into_response()
+                }
+                Err(error) => chain_read_failed(error),
+                // Header unknown OR tx not in that block — a real 404.
+                Ok(None) => v1_error(
+                    Reason::TxNotInBlock,
+                    "no membership proof: unknown block or tx not in it",
+                    "verify the header id and that the tx is included in that block",
+                ),
+            }
+        })
+        .await
 }
 
 #[cfg(test)]

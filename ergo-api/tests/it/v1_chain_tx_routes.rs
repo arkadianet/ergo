@@ -501,6 +501,7 @@ impl Default for Deps {
 fn app(deps: Deps) -> Router {
     let mempool: Arc<dyn MempoolView> = Arc::new(NoopMempoolView::new());
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: deps.read,
         chain: deps.chain,
         indexer: deps.indexer,
