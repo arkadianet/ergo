@@ -56,6 +56,9 @@ pub enum PopowByIdLookup {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    /// Invalid manifest metadata after independently authenticating every chunk.
+    #[error("invalid snapshot manifest: {0}")]
+    InvalidSnapshotManifest(String),
     #[error("redb error: {0}")]
     Db(#[source] Box<redb::Error>),
     #[error("redb database error: {0}")]

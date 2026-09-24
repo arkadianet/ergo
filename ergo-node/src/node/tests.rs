@@ -1023,7 +1023,9 @@ fn inbound_manifest_rejects_malformed_bytes_before_latch() {
         Instant::now(),
     );
 
-    assert!(actions.is_empty());
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
     assert!(!matches!(
         state.snapshot_bootstrap.state(),
         BootstrapState::ManifestVerified { .. }
@@ -1072,7 +1074,9 @@ fn inbound_manifest_rejects_duplicate_expected_ids_before_latch() {
         Instant::now(),
     );
 
-    assert!(actions.is_empty());
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
     assert!(!matches!(
         state.snapshot_bootstrap.state(),
         BootstrapState::ManifestVerified { .. }
@@ -1150,7 +1154,9 @@ fn inbound_manifest_rejects_same_root_with_different_tree_height() {
         &payload,
         Instant::now(),
     );
-    assert!(actions.is_empty());
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
     assert!(!matches!(
         state.snapshot_bootstrap.state(),
         BootstrapState::ManifestVerified { .. }
@@ -1199,7 +1205,7 @@ fn empty_reconstructed_tree() -> ergo_state::avl::snapshot_codec::ReconstructedT
 /// PoW-valid or otherwise consensus-checked — `install_reconstructed_snapshot`
 /// only reads `(height, state_root)` off the persisted bytes via
 /// `ergo_ser::header::read_header`, it never re-validates them.
-fn synthetic_header_with_state_root(
+pub(super) fn synthetic_header_with_state_root(
     height: u32,
     state_root: ergo_primitives::digest::ADDigest,
 ) -> ([u8; 32], Vec<u8>) {

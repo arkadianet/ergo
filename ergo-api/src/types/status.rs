@@ -333,6 +333,8 @@ pub struct ApiBootstrapStatus {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiBootstrapPhase {
+    /// Local failure stopped bootstrap; operator intervention is required.
+    Halted,
     /// Outbound peer-query fan-out; no manifest selected yet.
     Discovery,
     /// Manifest selected by quorum; download in flight.

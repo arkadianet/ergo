@@ -710,21 +710,17 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         )
     {
         let Some(bytes) = state.snapshot_bootstrap.take_verified_manifest_bytes() else {
-            warn!(
-                "Mode 2: verified manifest bytes missing during assembly initialization; recovering",
+            halt_snapshot_bootstrap(
+                state,
+                &"verified manifest bytes missing during assembly initialization",
             );
-            recover_snapshot_bootstrap(state);
             return;
         };
         let expected_ids =
             match ergo_state::avl::snapshot_codec::enumerate_expected_chunk_ids(&bytes) {
                 Ok(ids) => ids,
                 Err(e) => {
-                    warn!(
-                        error = %e,
-                        "Mode 2: manifest enumeration failed; recovering",
-                    );
-                    recover_snapshot_bootstrap(state);
+                    halt_snapshot_bootstrap(state, &e);
                     return;
                 }
             };
@@ -742,8 +738,7 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         && state.reconstructed_tree.is_none()
         && state.pending_manifest_bytes.is_none()
     {
-        warn!("Mode 2: chunk assembly is missing its manifest handoff; recovering");
-        recover_snapshot_bootstrap(state);
+        halt_snapshot_bootstrap(state, &"chunk assembly is missing its manifest handoff");
         return;
     }
 
@@ -839,17 +834,15 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
                         state.reconstructed_tree = Some(tree);
                     }
                     Err(e) => {
-                        warn!(
-                            error = %e,
-                            "Mode 2: reconstruction failed; recovering",
-                        );
-                        recover_snapshot_bootstrap(state);
+                        handle_snapshot_reconstruction_error(state, e);
                     }
                 }
             }
             _ => {
-                warn!("Mode 2: assembly complete but missing chunks or manifest bytes; recovering",);
-                recover_snapshot_bootstrap(state);
+                halt_snapshot_bootstrap(
+                    state,
+                    &"assembly complete but missing chunks or manifest bytes",
+                );
             }
         }
     }
@@ -930,15 +923,8 @@ pub(crate) fn resolve_install_anchor(
     })
 }
 
-/// Put a taken-but-not-yet-installed `reconstructed_tree` back so
-/// the next `sync_tick` can retry the install. Centralizes the
-/// restore so `install_reconstructed_snapshot`'s early returns
-/// (and PR #313's checkpoint-anchor early return in the same
-/// function) converge on one call site instead of each
-/// reimplementing `state.reconstructed_tree = Some(reconstructed)`.
-/// Deliberately NOT used by the `InstallAnchor::UnreachableGap`
-/// arm, which abandons this manifest/epoch rather than deferring
-/// a retry of it.
+/// Retain the one-shot reconstruction while header catchup or a checkpoint
+/// anchor is still pending. Recovery and local failures discard it instead.
 fn defer_reconstructed_tree(
     state: &mut NodeState,
     reconstructed: ergo_state::avl::snapshot_codec::ReconstructedTree,
@@ -946,56 +932,66 @@ fn defer_reconstructed_tree(
     state.reconstructed_tree = Some(reconstructed);
 }
 
-fn recover_snapshot_bootstrap(state: &mut NodeState) {
+/// Discard a failed epoch and penalize only an attributable supplier.
+pub(super) fn recover_snapshot_bootstrap(
+    state: &mut NodeState,
+    culprit: Option<PeerId>,
+) -> Vec<ergo_sync::coordinator::Action> {
     state.chunk_assembly = None;
     state.pending_manifest_bytes = None;
     state.reconstructed_tree = None;
-
-    match state
-        .snapshot_bootstrap
-        .voters_for_selected_manifest()
+    state.snapshot_bootstrap.reject_current_manifest(culprit);
+    culprit
         .into_iter()
-        .next()
-    {
-        Some(peer) => state
-            .snapshot_bootstrap
-            .reject_manifest_and_evict_voter(peer),
-        None => state.snapshot_bootstrap.drop_verified_manifest(),
+        .map(|peer| ergo_sync::coordinator::Action::Penalize {
+            peer,
+            penalty: ergo_p2p::peer::Penalty::Misbehavior,
+        })
+        .collect()
+}
+
+pub(super) fn halt_snapshot_bootstrap(state: &mut NodeState, reason: &dyn std::fmt::Display) {
+    tracing::error!(error = %reason, "snapshot bootstrap stopped; operator intervention required");
+    state.chunk_assembly = None;
+    state.pending_manifest_bytes = None;
+    state.reconstructed_tree = None;
+    state.snapshot_bootstrap.halt();
+}
+
+fn handle_snapshot_reconstruction_error(
+    state: &mut NodeState,
+    error: ergo_state::store::StateError,
+) {
+    if matches!(
+        error,
+        ergo_state::store::StateError::InvalidSnapshotManifest(_)
+    ) {
+        warn!(error = %error, "Mode 2: invalid manifest metadata; rejecting snapshot epoch");
+        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
+        let actions = recover_snapshot_bootstrap(state, culprit);
+        flush_actions(state, actions);
+    } else {
+        // Manifest parsing and chunk authentication already succeeded at ingress.
+        // Repeating those operations or splicing arenas cannot implicate a new peer.
+        halt_snapshot_bootstrap(state, &error);
     }
-    state.snapshot_bootstrap.reopen_discovery_if_below_quorum();
 }
 
 /// Mode 2 consume-side: install the reconstructed UTXO snapshot
 /// into the running `StateStore`. Final step of bootstrap.
 ///
-/// Re-verifies trust at install time: looks up
-/// `header.state_root` at the snapshot height again and confirms
-/// the reconstructed tree's root still matches. This catches
-/// reorgs that may have flipped the canonical header at the
-/// snapshot height between 2g's trust check and now. On
-/// mismatch, the mismatch is permanent (a code bug, not a
-/// transient condition) — the tree is put back so the function
-/// stays retry-safe, but the same check will keep failing every
-/// tick and the operator restarts with a fresh data_dir.
+/// Re-fetches the canonical header before installation. Unreachable epochs
+/// return to discovery and are excluded for the rest of this session. Local
+/// errors (including store refusal, I/O and broken invariants) stop bootstrap
+/// with an ERROR and leave peer votes untouched. Authenticated data that no
+/// longer matches the canonical root is a reorg, so its epoch is abandoned
+/// without penalizing the supplier.
 ///
-/// On success, sets `best_full_block_height = snapshot_height`
-/// and `best_full_block_id = header_id`, atomically with the
-/// AVL_NODES bulk-write and STATE_META update. The normal block-
-/// sync path then takes over from `snapshot_height + 1`.
-///
-/// Every early return below that has not moved `reconstructed`
-/// into [`defer_reconstructed_tree`] (or handed it to
-/// `install_snapshot_state` at the bottom) MUST route through
-/// that helper first. Reconstruction is one-shot: the step-3
-/// trigger above requires both `chunk_assembly` completion and
-/// `pending_manifest_bytes`, and this function's `take()` already
-/// consumed both (`take_chunks()` + `.take()`) by the time any of
-/// these arms run. Drop the tree here without restoring it and no
-/// later tick can ever rebuild it — bootstrap silently stalls
-/// forever with a verified manifest it can never install. The one
-/// deliberate exception is `InstallAnchor::UnreachableGap`: that
-/// arm is abandoning this manifest/epoch on purpose, not deferring
-/// a retry of the same one, so the stale tree must NOT come back.
+/// Reachable header gaps and pending checkpoint anchors retain the reconstructed
+/// tree for a later tick. Reconstruction consumes the manifest and chunks once;
+/// deferral must retain the tree, while recovery and halt clear the entire handoff.
+/// On success, the store atomically installs the tree and snapshot chain position,
+/// then normal block sync resumes at `snapshot_height + 1`.
 fn install_reconstructed_snapshot(state: &mut NodeState) {
     let Some(reconstructed) = state.reconstructed_tree.take() else {
         return;
@@ -1012,7 +1008,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 state = ?other,
                 "Mode 2: install called without ManifestVerified — bootstrap halted",
             );
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &"install called without ManifestVerified");
+            return;
         }
     };
 
@@ -1022,15 +1019,17 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
         warn!(
             reconstructed = %hex::encode(reconstructed.root_label.as_bytes()),
             manifest_id = %hex::encode(manifest_id),
-            "Mode 2: reconstructed root mismatches manifest_id; recovering",
+            "Mode 2: reconstructed root mismatches manifest_id",
         );
-        recover_snapshot_bootstrap(state);
+        halt_snapshot_bootstrap(
+            state,
+            &"reconstructed root mismatches authenticated manifest",
+        );
         return;
     }
 
     // Re-fetch the canonical header at snapshot_height. A reorg
-    // since the earlier trust check would flip this; the install
-    // would then refuse on root mismatch and the operator restarts.
+    // since the earlier trust check can change the committed state root.
     let header_id = match resolve_install_anchor(
         state
             .store
@@ -1047,19 +1046,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             return defer_reconstructed_tree(state, reconstructed);
         }
         Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
-            // Reaching this arm at install time (rather than at
-            // manifest-verify time in `messaging/manifest.rs`) means
-            // the NiPoPoW proof landed AFTER this manifest already
-            // verified against the canonical header — a narrow
-            // tick-ordering race; Scala has no install-time check
-            // here at all. The manifest itself is not dishonest, it
-            // is just unreachable now: forward catchup can never
-            // index below `dense_from_height`. Self-heal exactly like
-            // the manifest-phase arm — drop the now-unreachable
-            // manifest and any in-flight chunk-assembly state for it,
-            // evict its voter, and fall back to discovery so a voter
-            // advertising a reachable epoch can be selected instead,
-            // rather than halting the node permanently.
+            // A proof can arrive after manifest verification. This epoch is
+            // now unreachable, so exclude it without blaming its honest server.
             warn!(
                 height = snapshot_height,
                 dense_from_height,
@@ -1068,7 +1056,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                  verified manifest is unreachable from this proof; dropping it \
                  and returning to manifest discovery for a reachable epoch.",
             );
-            recover_snapshot_bootstrap(state);
+            let actions = recover_snapshot_bootstrap(state, None);
+            flush_actions(state, actions);
             return;
         }
         Ok(InstallAnchor::AboveTip) => {
@@ -1076,30 +1065,48 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 height = snapshot_height,
                 "Mode 2: install — snapshot height above best_header_height; halted",
             );
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &"snapshot height above best header tip");
+            return;
         }
         Err(e) => {
-            warn!(error = %e, "Mode 2: install — chain index lookup failed; halted");
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
     let header_bytes = match state.store.get_header(&header_id) {
         Ok(Some(b)) => b,
-        _ => {
-            warn!(
-                header_id = %hex::encode(header_id),
-                "Mode 2: install — header bytes missing; halted",
-            );
-            return defer_reconstructed_tree(state, reconstructed);
+        Ok(None) => {
+            halt_snapshot_bootstrap(state, &"snapshot header bytes missing");
+            return;
+        }
+        Err(e) => {
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
     let header = match read_header(&mut VlqReader::new(&header_bytes)) {
         Ok(h) => h,
         Err(e) => {
-            warn!(error = %e, "Mode 2: install — header parse failed; halted");
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
+
+    if ergo_sync::snapshot_bootstrap::verify_manifest_against_state_root(
+        &manifest_id,
+        reconstructed.tree_height,
+        &header.state_root,
+    )
+    .is_err()
+    {
+        warn!(
+            height = snapshot_height,
+            "snapshot canonical state root changed; abandoning epoch"
+        );
+        let actions = recover_snapshot_bootstrap(state, None);
+        flush_actions(state, actions);
+        return;
+    }
 
     let snapshot_height_u32 = snapshot_height as u32;
 
@@ -1120,12 +1127,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             Ok(ergo_state::chain::HeightLookup::SparseGap)
             | Ok(ergo_state::chain::HeightLookup::AboveTip) => None,
             Err(e) => {
-                warn!(
-                    error = %e,
-                    "Mode 2: install — checkpoint-height chain lookup failed; \
-                     deferring (retried next tick)",
-                );
-                return defer_reconstructed_tree(state, reconstructed);
+                halt_snapshot_bootstrap(state, &e);
+                return;
             }
         };
         if let Err(e) = ergo_sync::snapshot_bootstrap::snapshot_install_anchor_check(
@@ -1237,11 +1240,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             state.executor.reset_recovery_done();
         }
         Err(e) => {
-            warn!(
-                error = %e,
-                "Mode 2: install failed; recovering",
-            );
-            recover_snapshot_bootstrap(state);
+            halt_snapshot_bootstrap(state, &e);
         }
     }
 }
@@ -1418,6 +1417,7 @@ mod tests {
     };
     use ergo_state::store::StateStore;
     use ergo_state::test_helpers::nipopow_proof_dense_from_2;
+    use ergo_state::HeaderSectionStore;
     use ergo_sync::snapshot_bootstrap::BootstrapState;
 
     // ----- helpers -----
@@ -1663,17 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn install_reconstructed_snapshot_unreachable_gap_evicts_latched_voter_not_selected() {
-        // CodeRabbit #319 (PRRT_kwDOSmAf_c6feH2x): the `UnreachableGap`
-        // recovery arm used `voter_for_selected_manifest()`, which reads the
-        // live `selected` tally. `selected` is recomputed on every vote
-        // regardless of whether a manifest is already `verified` — so once
-        // manifest A verifies and a later quorum selects a higher-height
-        // manifest B, `selected` silently flips to B while `state()` still
-        // reports A. Evicting "the selected manifest's voter" then evicts a
-        // B voter and clears A's latch, leaving A retryable and damaging B's
-        // still-good quorum. The fix targets `voters_for_selected_manifest()`
-        // (verified > pending > selected), which stays pinned to A.
+    fn install_reconstructed_snapshot_unreachable_gap_rejects_latched_epoch_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = popow_sparse_store(&dir);
 
@@ -1714,10 +1704,7 @@ mod tests {
                 height: DENSE_TIP_HEIGHT as i32,
                 manifest_id: manifest_b,
             },
-            "recovering from A's UnreachableGap must evict an A voter and drop \
-             A's latch, leaving B's untouched 3-vote quorum selected — the \
-             buggy `voter_for_selected_manifest()` path evicted a B voter \
-             instead, which would drop B below quorum here",
+            "rejecting unreachable A must preserve B's quorum",
         );
         assert!(
             state.reconstructed_tree.is_none(),
@@ -1745,7 +1732,11 @@ mod tests {
             tree_height: 0,
         });
 
-        recover_snapshot_bootstrap(&mut state);
+        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
+        let actions = recover_snapshot_bootstrap(&mut state, culprit);
+        assert!(
+            matches!(actions.as_slice(), [ergo_sync::coordinator::Action::Penalize { peer, .. }] if Some(*peer) == culprit)
+        );
 
         assert!(state.chunk_assembly.is_none());
         assert!(state.pending_manifest_bytes.is_none());
@@ -1759,49 +1750,40 @@ mod tests {
     }
 
     #[test]
-    fn recover_snapshot_bootstrap_rotates_provider_when_quorum_remains() {
+    fn recover_snapshot_bootstrap_many_voters_penalizes_recorded_server() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
-        let manifest_id = [0xAA; 32];
-        let mut boot = ergo_sync::snapshot_bootstrap::SnapshotBootstrap::new();
-        for port in 1..=4u16 {
-            let peer = synthetic_voter(port);
-            boot.on_snapshots_info(peer, &[(52_224, manifest_id)]);
-            boot.mark_queried(peer);
+        let id = [0xAA; 32];
+        for port in 1..=32 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port), &[(100, id)]);
         }
-        let (peer, height, id) = boot.should_request_manifest().unwrap();
-        boot.mark_manifest_requested(peer, height, id, std::time::Instant::now());
-        boot.accept_verified_manifest(Vec::new());
-        let before = boot.voters_for_selected_manifest();
-        state.snapshot_bootstrap = boot;
-        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
-            nodes: Vec::new(),
-            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
-            tree_height: 0,
-        });
-
-        recover_snapshot_bootstrap(&mut state);
-
-        let after = state.snapshot_bootstrap.voters_for_selected_manifest();
-        let evicted = before
-            .iter()
-            .copied()
-            .find(|peer| !after.contains(peer))
-            .expect("recovery evicts one voter");
-        assert_eq!(
-            state.snapshot_bootstrap.state(),
-            BootstrapState::Selected {
-                height: 52_224,
-                manifest_id,
-            }
+        let server = state.snapshot_bootstrap.voters_for_selected_manifest()[1];
+        state.snapshot_bootstrap.mark_manifest_requested(
+            server,
+            100,
+            id,
+            std::time::Instant::now(),
         );
-        let (next, _, _) = state.snapshot_bootstrap.should_request_manifest().unwrap();
-        assert_ne!(next, evicted);
-        assert!(!state.snapshot_bootstrap.should_query(&next));
+        state.snapshot_bootstrap.accept_verified_manifest(vec![]);
+        state.snapshot_bootstrap.take_verified_manifest_bytes();
+        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
+        let actions = recover_snapshot_bootstrap(&mut state, culprit);
+        assert!(
+            matches!(actions.as_slice(), [ergo_sync::coordinator::Action::Penalize { peer, .. }] if *peer == server)
+        );
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        for port in 1..=32 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port), &[(100, id)]);
+        }
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
     }
 
     #[test]
-    fn install_reconstructed_snapshot_failure_does_not_leave_consumed_latch() {
+    fn install_reconstructed_snapshot_store_refusal_halts_without_rotating_peers() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = popow_sparse_store(&dir);
         let canonical_id = store
@@ -1812,7 +1794,12 @@ mod tests {
             .test_force_set_best_full_block_unsafe(canonical_id, DENSE_TIP_HEIGHT)
             .unwrap();
         let mut state = crate::node::tests::make_state_with_store(store);
-        let manifest_id = [0xAA; 32];
+        let header_bytes = state.store.get_header(&canonical_id).unwrap().unwrap();
+        let header = ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(
+            &header_bytes,
+        ))
+        .unwrap();
+        let manifest_id: [u8; 32] = header.state_root.as_bytes()[..32].try_into().unwrap();
         state.snapshot_bootstrap = verified_bootstrap(DENSE_TIP_HEIGHT as i32, manifest_id, 1);
         for port in 1..=3u16 {
             state.snapshot_bootstrap.mark_queried(synthetic_voter(port));
@@ -1824,15 +1811,21 @@ mod tests {
         state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
             nodes: Vec::new(),
             root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
-            tree_height: 0,
+            tree_height: header.state_root.tree_height_byte(),
         });
 
+        let voters = state.snapshot_bootstrap.voters_for_selected_manifest();
         install_reconstructed_snapshot(&mut state);
+        assert_eq!(
+            state.snapshot_bootstrap.voters_for_selected_manifest(),
+            voters
+        );
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
 
         assert!(state.chunk_assembly.is_none());
         assert!(state.pending_manifest_bytes.is_none());
         assert!(state.reconstructed_tree.is_none());
-        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
         assert!(state
             .snapshot_bootstrap
             .take_verified_manifest_bytes()
@@ -1840,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn install_reconstructed_snapshot_root_mismatch_recovers() {
+    fn install_reconstructed_snapshot_root_mismatch_halts() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
         let manifest_id = [0xAA; 32];
@@ -1863,11 +1856,11 @@ mod tests {
         assert!(state.chunk_assembly.is_none());
         assert!(state.pending_manifest_bytes.is_none());
         assert!(state.reconstructed_tree.is_none());
-        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
     }
 
     #[test]
-    fn drive_chunk_download_recovers_missing_manifest_handoff() {
+    fn drive_chunk_download_missing_manifest_handoff_halts() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
         let manifest_id = [0xAA; 32];
@@ -1882,6 +1875,42 @@ mod tests {
         assert!(state.chunk_assembly.is_none());
         assert!(state.pending_manifest_bytes.is_none());
         assert!(state.reconstructed_tree.is_none());
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+    }
+
+    #[test]
+    fn reconstruction_local_error_halts_without_rotating_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        let voters = state.snapshot_bootstrap.voters_for_selected_manifest();
+        super::handle_snapshot_reconstruction_error(
+            &mut state,
+            ergo_state::store::StateError::Serialization("splice invariant".into()),
+        );
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+        assert_eq!(
+            state.snapshot_bootstrap.voters_for_selected_manifest(),
+            voters
+        );
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+    }
+
+    #[test]
+    fn reconstruction_manifest_metadata_error_rejects_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        super::handle_snapshot_reconstruction_error(
+            &mut state,
+            ergo_state::store::StateError::InvalidSnapshotManifest("separator mismatch".into()),
+        );
         assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port), &[(100, [0xAA; 32])]);
+        }
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
     }
 }

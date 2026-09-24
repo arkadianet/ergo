@@ -1123,6 +1123,7 @@ components:
         [`ApiBootstrapStatus`]. UI maps each variant to a human label and
         phase indicator.
       enum:
+      - halted
       - discovery
       - manifest_requested
       - manifest_verified
