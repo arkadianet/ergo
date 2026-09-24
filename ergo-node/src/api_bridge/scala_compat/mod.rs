@@ -23,6 +23,7 @@ pub struct ScalaCompatStatic {
     pub name: String,
     pub app_version: String,
     pub network: String,
+    pub voting_length: u32,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
     /// The same configured admission floor used by the mempool.
@@ -177,11 +178,7 @@ impl NodeChainQuery for ScalaCompatBridge {
         let current_height = snap.tip.best_full_block.height;
         // Epoch length is network-fixed; surfaced so the UI can explain that
         // changes only land on `voting_length`-block boundaries.
-        let epoch_length = match self.static_cfg.network.as_str() {
-            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
-            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
-            _ => 0,
-        };
+        let epoch_length = self.static_cfg.voting_length;
         match self.store_reader.voted_params_history() {
             Ok(rows) => build_votes_history(&rows, epoch_length, current_height),
             Err(e) => {
@@ -1130,8 +1127,57 @@ fn with_pool_cost(
 
 #[cfg(test)]
 mod votes_history_tests {
-    use super::build_votes_history;
+    use super::{build_votes_history, ScalaCompatBridge, ScalaCompatStatic};
+    use ergo_api::types::{ApiInfo, ApiVotesHistory, ApiWeightFunction};
+    use ergo_api::NodeChainQuery;
+    use ergo_chain_spec::{ChainSpec, Network};
     use ergo_validation::scala_launch;
+    use std::sync::Arc;
+
+    // ----- helpers -----
+
+    fn votes_history_for_network(network: Network) -> ApiVotesHistory {
+        let spec = ChainSpec::for_network(network);
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+        let snap = crate::snapshot::NodeSnapshot::empty(
+            ApiInfo {
+                agent_name: "test".into(),
+                node_name: "test".into(),
+                network: network.as_str().into(),
+                version: "test".into(),
+                started_at_unix_ms: 0,
+                uptime_seconds: 0,
+                target_block_interval_ms: spec.block_timing.desired_interval_ms,
+            },
+            ApiWeightFunction::Cost,
+        );
+        let bridge = ScalaCompatBridge::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(snap)),
+            ScalaCompatStatic {
+                name: "test".into(),
+                app_version: "test".into(),
+                network: network.as_str().into(),
+                launch_time_unix_ms: 0,
+                voting_length: spec.voting.voting_length,
+                rest_api_url: None,
+                min_relay_fee_nano_erg: 0,
+            },
+            store.reader_handle(),
+            spec.difficulty,
+        );
+        bridge.votes_history()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn votes_history_devnet_epoch_length_matches_chain_spec() {
+        assert_eq!(
+            votes_history_for_network(Network::Devnet).epoch_length,
+            33_554_432
+        );
+    }
 
     /// Only boundaries where a parameter actually changed appear, each decoded
     /// (id/name/description) with the correct from→to, ascending by height.
@@ -1184,5 +1230,25 @@ mod votes_history_tests {
     fn build_votes_history_empty_when_only_genesis() {
         let h = build_votes_history(&[scala_launch()], 1024, 0);
         assert!(h.changes.is_empty());
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn votes_history_mainnet_epoch_length_is_1024() {
+        // Scala ergo-scala/src/main/resources/application.conf:239 (mainnet default).
+        assert_eq!(
+            votes_history_for_network(Network::Mainnet).epoch_length,
+            1024
+        );
+    }
+
+    #[test]
+    fn votes_history_testnet_epoch_length_is_128() {
+        // Scala ergo-scala/src/main/resources/testnet.conf:46.
+        assert_eq!(
+            votes_history_for_network(Network::Testnet).epoch_length,
+            128
+        );
     }
 }

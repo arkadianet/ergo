@@ -304,6 +304,7 @@ pub(super) async fn bind(
         name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
+        voting_length: config.chain_spec.voting.voting_length,
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
