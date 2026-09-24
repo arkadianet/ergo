@@ -241,7 +241,7 @@ pub fn validate_full_block_with_costs(
     check_block_transactions_size(
         block_transactions,
         header.version,
-        ctx.params.max_block_size,
+        ctx.rule_306_max_block_size,
     )?;
 
     // 5. Per-tx validation with intra-block UTXO overlay
@@ -532,7 +532,7 @@ fn validate_full_block_parallel_impl(
     check_block_transactions_size(
         block_transactions,
         header.version,
-        ctx.params.max_block_size,
+        ctx.rule_306_max_block_size,
     )?;
 
     // Layered parallel tx validation

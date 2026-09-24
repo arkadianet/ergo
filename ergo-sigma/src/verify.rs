@@ -5,6 +5,8 @@ use super::schnorr;
 use super::{GROUP_SIZE, SOUNDNESS_BYTES};
 use crate::blake2b256;
 
+use ergo_ser::sigma_value::is_valid_cthreshold_shape;
+
 pub use ergo_ser::sigma_value::SigmaBoolean;
 
 /// Per-leaf data extracted from a fully-parsed sigma proof tree.
@@ -239,6 +241,8 @@ pub enum SigmaVerifyError {
     /// proof is structurally invalid.
     #[error("empty children in conjecture")]
     EmptyChildren,
+    #[error("invalid Cthreshold: k={k}, n={n}")]
+    InvalidThreshold { k: u16, n: usize },
     /// A `TrivialProp` appeared as a conjecture child during proof parsing.
     /// Reduction (`AtLeast.reduce`, `SigmaOr` / `SigmaAnd`) must fold these
     /// out before verification; reaching the parser means that invariant was
@@ -246,6 +250,33 @@ pub enum SigmaVerifyError {
     /// consensus transaction-verification path.
     #[error("unexpected trivial proposition as conjecture child")]
     UnexpectedTrivialChild,
+}
+
+fn validate_cthreshold_shape(k: u16, children: &[SigmaBoolean]) -> Result<usize, SigmaVerifyError> {
+    let n = children.len();
+    if is_valid_cthreshold_shape(k, n) {
+        Ok(n)
+    } else {
+        Err(SigmaVerifyError::InvalidThreshold { k, n })
+    }
+}
+
+fn validate_cthreshold_tree(proposition: &SigmaBoolean) -> Result<(), SigmaVerifyError> {
+    match proposition {
+        SigmaBoolean::Cthreshold { k, children } => {
+            validate_cthreshold_shape(*k, children)?;
+            for child in children {
+                validate_cthreshold_tree(child)?;
+            }
+        }
+        SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
+            for child in children {
+                validate_cthreshold_tree(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Verify a sigma proof against a proposition and message.
@@ -265,6 +296,7 @@ pub fn verify_sigma_proof(
     }
 
     if proof_bytes.is_empty() {
+        validate_cthreshold_tree(proposition)?;
         return Ok(false);
     }
 
@@ -294,6 +326,10 @@ fn parse_and_compute_challenges(
     offset: &mut usize,
     challenge_opt: Option<&[u8]>,
 ) -> Result<UncheckedTree, SigmaVerifyError> {
+    if let SigmaBoolean::Cthreshold { k, children } = prop {
+        validate_cthreshold_shape(*k, children)?;
+    }
+
     // Read or use provided challenge
     let challenge = if let Some(c) = challenge_opt {
         c.to_vec()
@@ -376,14 +412,19 @@ fn parse_and_compute_challenges(
             })
         }
         SigmaBoolean::Cthreshold { k, children } => {
+            let n = validate_cthreshold_shape(*k, children)?;
             if children.is_empty() {
                 return Err(SigmaVerifyError::EmptyChildren);
             }
-            let n = children.len();
-            let n_coeffs = n - *k as usize;
+            let n_coeffs = n
+                .checked_sub(usize::from(*k))
+                .ok_or(SigmaVerifyError::InvalidThreshold { k: *k, n })?;
 
             // Read polynomial coefficients (n-k coefficients, each SOUNDNESS_BYTES)
-            let coeff_bytes = read_bytes(proof, offset, SOUNDNESS_BYTES * n_coeffs)?;
+            let coeff_size = SOUNDNESS_BYTES
+                .checked_mul(n_coeffs)
+                .ok_or(SigmaVerifyError::ProofTooShort { offset: *offset })?;
+            let coeff_bytes = read_bytes(proof, offset, coeff_size)?;
 
             // Build polynomial: zero coefficient = challenge, rest from proof
             let challenge_arr: [u8; SOUNDNESS_BYTES] = challenge
@@ -577,11 +618,14 @@ fn fiat_shamir_tree_to_bytes(tree: &UncheckedTree) -> Vec<u8> {
 }
 
 fn read_bytes(proof: &[u8], offset: &mut usize, n: usize) -> Result<Vec<u8>, SigmaVerifyError> {
-    if *offset + n > proof.len() {
+    let end = (*offset)
+        .checked_add(n)
+        .ok_or(SigmaVerifyError::ProofTooShort { offset: *offset })?;
+    if end > proof.len() {
         return Err(SigmaVerifyError::ProofTooShort { offset: *offset });
     }
-    let bytes = proof[*offset..*offset + n].to_vec();
-    *offset += n;
+    let bytes = proof[*offset..end].to_vec();
+    *offset = end;
     Ok(bytes)
 }
 
@@ -592,9 +636,11 @@ fn read_bytes_padded(proof: &[u8], offset: &mut usize, n: usize) -> Vec<u8> {
     let remaining = proof.len().saturating_sub(*offset);
     let to_read = remaining.min(n);
     let pad = n - to_read;
+    let start = (*offset).min(proof.len());
+    let end = start.checked_add(to_read).unwrap_or(proof.len());
     let mut result = vec![0u8; pad];
-    result.extend_from_slice(&proof[*offset..*offset + to_read]);
-    *offset += to_read;
+    result.extend_from_slice(&proof[start..end]);
+    *offset = end;
     result
 }
 
@@ -608,6 +654,66 @@ fn xor_bytes(buf: &mut [u8], other: &[u8]) {
 mod tests {
     use super::*;
     use ergo_primitives::group_element::GroupElement;
+
+    fn threshold_prop(k: u16, n: usize) -> SigmaBoolean {
+        SigmaBoolean::Cthreshold {
+            k,
+            children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([2u8; 33])); n],
+        }
+    }
+
+    #[test]
+    fn cthreshold_invalid_shapes_return_typed_errors() {
+        for (k, n) in [(2u16, 1usize), (u16::MAX, 1), (0, 256)] {
+            let prop = threshold_prop(k, n);
+            let result = verify_sigma_proof(&prop, &[], b"msg");
+            assert!(matches!(
+                result,
+                Err(SigmaVerifyError::InvalidThreshold {
+                    k: actual_k,
+                    n: actual_n,
+                }) if actual_k == k && actual_n == n
+            ));
+        }
+    }
+
+    #[test]
+    fn cand_and_cor_reject_nested_invalid_cthreshold_with_empty_proof() {
+        let invalid = threshold_prop(2, 1);
+        for prop in [
+            SigmaBoolean::Cand(vec![SigmaBoolean::Cor(vec![invalid.clone()])]),
+            SigmaBoolean::Cor(vec![SigmaBoolean::Cand(vec![invalid])]),
+        ] {
+            assert!(matches!(
+                verify_sigma_proof(&prop, &[], b"msg"),
+                Err(SigmaVerifyError::InvalidThreshold { k: 2, n: 1 })
+            ));
+        }
+    }
+
+    #[test]
+    fn cthreshold_valid_boundaries_are_not_invalid() {
+        for n in [1usize, 255] {
+            let prop = threshold_prop(n as u16, n);
+            let result = verify_sigma_proof(&prop, &[0u8; SOUNDNESS_BYTES + GROUP_SIZE], b"msg");
+            assert!(!matches!(
+                result,
+                Err(SigmaVerifyError::InvalidThreshold { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn read_bytes_rejects_offset_overflow() {
+        let mut offset = usize::MAX;
+        let result = read_bytes(&[0], &mut offset, 1);
+        assert!(matches!(
+            result,
+            Err(SigmaVerifyError::ProofTooShort { offset: pos })
+                if pos == usize::MAX
+        ));
+        assert_eq!(offset, usize::MAX);
+    }
 
     // A reduced sigma tree must never carry a nested TrivialProp child —
     // `AtLeast.reduce` / `SigmaOr` / `SigmaAnd` fold them out before proof
