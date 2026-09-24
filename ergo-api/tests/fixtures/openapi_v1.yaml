@@ -1160,13 +1160,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1202,13 +1208,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1244,13 +1256,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1288,13 +1306,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1334,13 +1358,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1388,13 +1418,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1430,13 +1466,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1474,13 +1516,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1521,13 +1569,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1568,13 +1622,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable
+          description: 'AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1620,13 +1680,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1774,13 +1840,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Proof failed to serialize
+          description: Proof failed to serialize; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable
+          description: 'This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1830,8 +1902,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Interlink data not retained on this node (pruned), or chain reader unavailable
+          description: 'Interlink data not retained on this node (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1881,13 +1965,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Stored chain record could not be serialised
+          description: Stored chain record could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2325,8 +2415,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiMinerStats'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3679,8 +3781,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3812,8 +3926,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3971,8 +4097,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Emission schedule not wired on this node
+          description: 'Emission schedule not wired on this node; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4530,8 +4668,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VotesHistory'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:

@@ -458,6 +458,7 @@ fn security() -> Arc<ApiSecurity> {
 /// Full-featured app: chain + admin + mining all wired.
 fn app_full(auth: Arc<V1AuthConfig>) -> Router {
     let state = OperatorState {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),
@@ -471,6 +472,7 @@ fn app_full(auth: Arc<V1AuthConfig>) -> Router {
 /// App with a chosen admin (for the voting-error + shutdown-spy paths).
 fn app_with_admin(admin: Arc<SpyAdmin>, auth: Arc<V1AuthConfig>) -> Router {
     let state = OperatorState {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(admin),
@@ -484,6 +486,7 @@ fn app_with_admin(admin: Arc<SpyAdmin>, auth: Arc<V1AuthConfig>) -> Router {
 /// App with mining absent (honest `mining_disabled`).
 fn app_no_mining(auth: Arc<V1AuthConfig>) -> Router {
     let state = OperatorState {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: Arc::new(StubRead),
         chain: Some(Arc::new(StubChain)),
         admin: Some(Arc::new(SpyAdmin::default())),

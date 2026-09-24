@@ -55,6 +55,8 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 /// of a bare 404 — v1 mounts unconditionally and gates *inside* the handler.
 #[derive(Clone)]
 pub struct V1State {
+    /// Shared per-node capacity for blocking chain reads.
+    pub blocking: crate::v1::BlockingReads,
     /// Snapshot reader (tip heights for cursor walks + confirmation math).
     pub read: Arc<dyn NodeReadState>,
     /// Live-store chain reader — the hook for every `chain/*` route.
