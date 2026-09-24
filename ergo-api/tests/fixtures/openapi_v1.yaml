@@ -305,8 +305,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -367,13 +379,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the address transaction summary
+          description: Failed to assemble the address transaction summary; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable, or extra index syncing/halted
+          description: 'Chain reader unavailable, or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -478,8 +496,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -542,8 +572,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -608,8 +650,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -672,8 +726,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -747,8 +813,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -825,8 +903,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -901,8 +991,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -977,8 +1079,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1053,8 +1167,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1106,13 +1232,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the box response
+          description: Failed to assemble the box response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2332,6 +2464,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/mining/candidate:
     get:
       tags:
@@ -3003,13 +3153,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Price discovery index read failed
+          description: Price discovery index read failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index unavailable or price discovery incomplete
+          description: 'Extra index unavailable or price discovery incomplete; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3108,13 +3264,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Registry data bug (bad identifying-token key), or box assembly failed
+          description: Registry data bug (bad identifying-token key), or box assembly failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted
+          description: 'No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4006,8 +4168,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4177,8 +4351,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4229,8 +4415,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4275,8 +4473,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4589,13 +4799,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the transaction response
+          description: Failed to assemble the transaction response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4630,7 +4846,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the confirmed transaction status
+          description: Failed to assemble the confirmed transaction status; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:

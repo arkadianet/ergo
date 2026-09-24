@@ -19,6 +19,7 @@ use serde_json::Value;
 use super::dto::{v1box_from_indexed_box, Collection};
 use super::extract::{V1Json, V1Query};
 use super::{parse_id32, V1State};
+use crate::v1::blocking::ReadLane;
 use crate::v1::decode::registry::{entry_by_id, MatchKind, ProtocolEntry, REGISTRY};
 use crate::v1::error::{v1_error, Reason, V1Error};
 
@@ -267,8 +268,9 @@ pub(crate) struct ProtocolStateResponse {
         (status = 400, description = "box_role does not match this protocol's identifying-token role", body = V1Error),
         (status = 404, description = "No protocol with that id, or the protocol has no singleton to resolve", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 500, description = "Registry data bug (bad identifying-token key), or box assembly failed", body = V1Error),
-        (status = 503, description = "No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted", body = V1Error),
+        (status = 500, description = "Registry data bug (bad identifying-token key), or box assembly failed; internal_error on read failure", body = V1Error),
+        (status = 503, description = "No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn protocol_state(
@@ -313,7 +315,7 @@ pub async fn protocol_state(
     };
 
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(matcher.key) else {
@@ -324,44 +326,50 @@ pub async fn protocol_state(
         );
     };
     let tid = TokenId::from_bytes(raw);
-    let boxes = idx.token_unspent_paged(
-        &tid,
-        IdxPage {
-            offset: 0,
-            limit: 1,
-        },
-        SortDir::Desc,
-    );
-    let Some(b) = boxes.into_iter().next() else {
-        return v1_error(
-            Reason::StateUnavailable,
-            "no unspent box currently holds this protocol's singleton NFT",
-            "the singleton may be mid-reorg, or the protocol is uninitialized",
-        );
-    };
-    let best = state.read.status().best_full_block_height;
-    let v1box = match v1box_from_indexed_box(state.network, &b, best, true) {
-        Ok(v) => v,
-        Err(d) => {
-            return v1_error(
-                Reason::InternalError,
-                "failed to assemble the singleton box",
-                d,
-            )
-        }
-    };
-    let contract = v1box
-        .decoded
-        .and_then(|d| d.get("contract").cloned())
-        .unwrap_or(Value::Null);
-    Json(ProtocolStateResponse {
-        protocol_id: entry.id,
-        box_role: matcher.box_role,
-        box_id: v1box.box_id,
-        height: v1box.inclusion_height,
-        as_of_height: best,
-        confirmed: v1box.confirmed,
-        contract,
-    })
-    .into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let boxes = idx.token_unspent_paged(
+                &tid,
+                IdxPage {
+                    offset: 0,
+                    limit: 1,
+                },
+                SortDir::Desc,
+            );
+            let Some(b) = boxes.into_iter().next() else {
+                return v1_error(
+                    Reason::StateUnavailable,
+                    "no unspent box currently holds this protocol's singleton NFT",
+                    "the singleton may be mid-reorg, or the protocol is uninitialized",
+                );
+            };
+            let best = state.read.sync().best_full_block_height;
+            let v1box = match v1box_from_indexed_box(state.network, &b, best, true) {
+                Ok(v) => v,
+                Err(d) => {
+                    return v1_error(
+                        Reason::InternalError,
+                        "failed to assemble the singleton box",
+                        d,
+                    )
+                }
+            };
+            let contract = v1box
+                .decoded
+                .and_then(|d| d.get("contract").cloned())
+                .unwrap_or(Value::Null);
+            Json(ProtocolStateResponse {
+                protocol_id: entry.id,
+                box_role: matcher.box_role,
+                box_id: v1box.box_id,
+                height: v1box.inclusion_height,
+                as_of_height: best,
+                confirmed: v1box.confirmed,
+                contract,
+            })
+            .into_response()
+        })
+        .await
 }

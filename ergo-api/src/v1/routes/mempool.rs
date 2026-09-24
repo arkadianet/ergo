@@ -39,6 +39,7 @@ use super::{parse_id32, V1State};
 use crate::blockchain::build_indexed_box_response;
 use crate::compat::NodeChainQuery;
 use crate::types::ApiMempoolTransaction;
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
 
@@ -359,6 +360,9 @@ pub async fn transactions(
         (status = 200, description = "Pooled tx + resolved io_box inputs/outputs", body = V1MempoolTxDetail),
         (status = 400, description = "Malformed tx id", body = V1Error),
         (status = 404, description = "Not in this node's mempool", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Read capacity busy (overloaded, Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn transaction_by_id(
@@ -375,32 +379,40 @@ pub async fn transaction_by_id(
             "the id is well-formed but not in this node's mempool",
         );
     };
-    let tx = mempool_tx_from_api(&row);
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let tx = mempool_tx_from_api(&row);
 
-    // io resolution rides the coherent single-snapshot pool read; when the
-    // overlay is a no-op view the row still returns with empty io.
-    let (inputs, data_inputs, outputs) = match state.mempool.pool_tx_detail(&TxId::from_bytes(raw))
-    {
-        Some((bytes, pool_outputs)) => match resolve_io(&state, &bytes, &pool_outputs) {
-            Ok(io) => io,
-            Err(detail) => {
-                return v1_error(
-                    Reason::InternalError,
-                    "failed to resolve the pooled transaction io",
-                    detail,
-                )
-            }
-        },
-        None => (Vec::new(), Vec::new(), Vec::new()),
-    };
+            // io resolution rides the coherent single-snapshot pool read; when the
+            // overlay is a no-op view the row still returns with empty io.
+            let (inputs, data_inputs, outputs) = match state
+                .mempool
+                .pool_tx_detail(&TxId::from_bytes(raw))
+            {
+                Some((bytes, pool_outputs)) => match resolve_io(&state, &bytes, &pool_outputs) {
+                    Ok(io) => io,
+                    Err(detail) => {
+                        return v1_error(
+                            Reason::InternalError,
+                            "failed to resolve the pooled transaction io",
+                            detail,
+                        )
+                    }
+                },
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            };
 
-    Json(V1MempoolTxDetail {
-        tx,
-        inputs,
-        data_inputs,
-        outputs,
-    })
-    .into_response()
+            Json(V1MempoolTxDetail {
+                tx,
+                inputs,
+                data_inputs,
+                outputs,
+            })
+            .into_response()
+        })
+        .await
 }
 
 type ResolvedIo = (Vec<V1IoBox>, Vec<String>, Vec<V1IoBox>);
