@@ -134,6 +134,16 @@ pub(super) fn build_events_projection(
                     ev.header_id = Some(header_id);
                     ev.detail = Some(reason);
                 }
+                K::OrderingReconstructSkipped {
+                    height,
+                    header_id,
+                    reason,
+                } => {
+                    ev.kind = "ordering_reconstruct_skipped".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.detail = Some(reason);
+                }
             }
             ev
         })
@@ -194,6 +204,49 @@ mod tests {
     /// event; a reconstructed event carries no `detail` at all. This
     /// pins that, and the field names the harness reads, so the guard
     /// cannot silently go looking for a shape again.
+    /// A block the follower had NO input chain for goes straight to a
+    /// full download and used to emit nothing at all, so the fallback
+    /// counter undercounted the downloads it was meant to measure — the
+    /// devnet `evict` scenario recorded six ordering blocks with zero
+    /// reconstructions AND zero fallbacks. This pins the third outcome's
+    /// serialized shape, which the campaign parses alongside the others.
+    #[test]
+    fn a_skipped_reconstruction_reports_its_reason_as_detail() {
+        use crate::node::event_feed::{EventFeedRing, FeedEventKind};
+
+        let mut ring = EventFeedRing::new();
+        ring.push(
+            1_700_000_000_003,
+            FeedEventKind::OrderingReconstructSkipped {
+                height: 44,
+                header_id: "no-chain".to_string(),
+                reason: "no_chain".to_string(),
+            },
+        );
+
+        let events = build_events_projection(&ring);
+        let skipped = serde_json::to_value(&events.events[0]).unwrap();
+
+        assert_eq!(
+            skipped,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_003u64,
+                "kind": "ordering_reconstruct_skipped",
+                "height": 44,
+                "headerId": "no-chain",
+                "detail": "no_chain",
+            })
+        );
+        // It is NOT a reconstruction: a harness tallying rebuild
+        // outcomes must never count this one as one.
+        assert!(
+            skipped.get("txs").is_none(),
+            "a skipped reconstruction assembled nothing: {skipped}"
+        );
+        assert!(skipped.get("reconstructedOrder").is_none(), "{skipped}");
+    }
+
     #[test]
     fn reconstruction_events_have_the_shape_the_smoke_harness_parses() {
         use crate::node::event_feed::{EventFeedRing, FeedEventKind};

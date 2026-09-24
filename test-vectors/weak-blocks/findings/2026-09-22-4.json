@@ -2,7 +2,7 @@
   "id": "2026-09-22-4",
   "title": "F5 measured - the follower looks the collected input chain up under a key that never has one",
   "severity": "divergence",
-  "component": "scala (upstream) - ergoplatform/ergo weak-blocks @ 31a8de804f7328704f2753a1cf151dda8f64689f",
+  "component": "the FINDING is about scala (upstream) \u2014 ergoplatform/ergo weak-blocks @ 31a8de804f7328704f2753a1cf151dda8f64689f \u2014 but the NINE FALLBACKS recorded below are a measurement of the RUST PORT run with Scala's lookup key, not a measurement of a Scala node",
   "status": "open",
   "spec_finding": "F5",
   "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (round 2)",
@@ -22,5 +22,11 @@
     ]
   },
   "upstream_action": "processOrderingBlock should look the chain up under the announced block's PARENT, matching getBestOrderingCollectedInputBlocksTransactions.",
-  "controller_note": "D5 goes beyond the round-2 ruling, which named only D4. It is the same shape (Scala's behaviour first, the miner's as fallback, both reportable) and the gate cannot pass without it: with an empty input chain the D4 order choice is vacuous. Flagged for confirmation."
+  "controller_note": "D5 goes beyond the round-2 ruling, which named only D4. It is the same shape (Scala's behaviour first, the miner's as fallback, both reportable) and the gate cannot pass without it: with an empty input chain the D4 order choice is vacuous. Flagged for confirmation.",
+  "measurement_provenance": {
+    "measured_on": "the Rust port (ergo-node), configured to use Scala's own reconstruction key (the announced header's own id)",
+    "not_measured_on": "a Scala node \u2014 no Scala follower measurement exists",
+    "number": "9 of 9 post-restart ordering blocks fell back under root_mismatch",
+    "why_it_matters": "quoting this as \"Scala: 100% fallback\" would attribute a Rust measurement to Scala. The reference follower half of the comparison is structurally unobtainable on a single host (two Scala nodes cannot dial each other; the Rust follower relays nothing to an unqualified peer), and is recorded as NOT MEASURED by the campaign."
+  }
 }

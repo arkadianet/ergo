@@ -26,7 +26,7 @@
 //!
 //! Usage:
 //!   cargo run --release --example p2p_adversary -- \
-//!       <host:port> <testnet|mainnet> <api-host:port> <scenario> [args...]
+//!       <host:port> <devnet|testnet|mainnet> <api-host:port> <scenario> [args...]
 //!
 //! Scenarios (expected outcome under #283 admission/deadlines + #285
 //! progress-only inactivity — informational until those land on `main`):
@@ -55,6 +55,30 @@
 //!   keepalive_only        unknown-code frame every 60 s; expect ~600 s
 //!                         eviction — an unrecognized code is drained but
 //!                         never counted as progress
+//!   input_block_wrong_body <secs>
+//!                         answers the follower's input-block body
+//!                         requests (code 105) with bodies the
+//!                         announcement does not commit to, forcing the
+//!                         ordering-block rebuild to compute a
+//!                         transactions root that cannot match the
+//!                         header's. Used by the campaign's `evict`
+//!                         scenario, which reads the resulting fallback
+//!                         off the event feed.
+//!   input_block_flood <a> <d>
+//!                         the Matrix (input blocks) flood, plan 2 task 9:
+//!                         `a` input-block announcements (code 100) at the
+//!                         node's height + 1, each naming a RANDOM parent
+//!                         input block the node has never seen, followed by
+//!                         `d` bogus `InputBlockTransactions` (code 104)
+//!                         deliveries for input block ids nobody requested.
+//!                         Expect every spec §7.4 bound to hold — staged
+//!                         bytes and the disconnected waitlist stay under
+//!                         their caps, the honest peer is never penalised,
+//!                         and the chain keeps advancing. The campaign
+//!                         (`scripts/devnet-matrix/campaign.py --scenario
+//!                         flood`) reads those bounds off
+//!                         `/api/v1/status.input_blocks`; this side only
+//!                         has to deliver the traffic and say it did.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -67,8 +91,17 @@ use ergo_p2p::handshake::{
     deserialize_handshake_with_consumed, serialize_handshake, Handshake, HandshakeError, PeerSpec,
     Version,
 };
+use ergo_p2p::message::input_blocks::{
+    deserialize_input_block_txs_request, serialize_input_block, serialize_input_block_txs,
+    InputBlockTxs, CODE_INPUT_BLOCK, CODE_INPUT_BLOCK_TXS, CODE_INPUT_BLOCK_TXS_REQUEST,
+};
 use ergo_p2p::message::{serialize_sync_info, SyncInfo};
 use ergo_primitives::digest::blake2b256;
+use ergo_primitives::group_element::GroupElement;
+use ergo_ser::autolykos::AutolykosSolution;
+use ergo_ser::batch_merkle_proof::BatchMerkleProof;
+use ergo_ser::header::Header;
+use ergo_ser::input_block::{InputBlockAnnouncement, InputBlockFields};
 
 /// Mirrors the (currently private) `ergo_p2p::connection::MAX_PAYLOAD_SIZE`
 /// this harness was written against for #283/#285; kept local so the
@@ -112,6 +145,22 @@ fn parse_frame_header(magic: &[u8; 4], buf: &[u8]) -> Result<Option<FrameHead>, 
 
 /// Message code the node's dispatcher has no arm for: ignored, never
 /// penalized, and (per `dispatch.rs`) deliberately NOT progress.
+/// What these scenarios claim to speak. 6.0.2 for everything that tests
+/// framing and admission; the Matrix flood overrides it, because a node
+/// is entitled to ignore input-block traffic from a peer that never
+/// claimed to speak the protocol, and a flood the node ignored would
+/// pass the §7.4 bounds by not having happened.
+const DEFAULT_PEER_VERSION: Version = Version {
+    major: 6,
+    minor: 0,
+    patch: 2,
+};
+const SUBBLOCKS_PEER_VERSION: Version = Version {
+    major: 6,
+    minor: 5,
+    patch: 0,
+};
+
 const CODE_UNKNOWN: u8 = 200;
 const CODE_GET_PEERS: u8 = 1;
 const CODE_PEERS: u8 = 2;
@@ -174,6 +223,15 @@ struct Conn {
 impl Conn {
     /// Connect from `src`, then complete the raw handshake.
     async fn open(src: Ipv4Addr, target: SocketAddr, magic: [u8; 4]) -> std::io::Result<Self> {
+        Self::open_as(src, target, magic, DEFAULT_PEER_VERSION).await
+    }
+
+    async fn open_as(
+        src: Ipv4Addr,
+        target: SocketAddr,
+        magic: [u8; 4],
+        version: Version,
+    ) -> std::io::Result<Self> {
         let socket = TcpSocket::new_v4()?;
         // Deliberately NOT SO_REUSEADDR. These scenarios churn hundreds
         // of short-lived connections from a handful of source addresses,
@@ -190,11 +248,7 @@ impl Conn {
                 .as_millis() as u64,
             peer_spec: PeerSpec {
                 agent_name: "ergoref".into(),
-                version: Version {
-                    major: 6,
-                    minor: 0,
-                    patch: 2,
-                },
+                version,
                 node_name: format!("adv-{src}"),
                 // No declared address: we do not want the node adding
                 // these throwaway sockets to its address book.
@@ -271,6 +325,46 @@ impl Conn {
 
     /// Wait for a frame with `code`. Returns the elapsed time, or None on
     /// timeout / close.
+    /// Read the next whole frame, returning `(code, payload)`.
+    ///
+    /// `wait_for_code` discards payloads; the wrong-body scenario has to
+    /// READ them — it answers a request whose input-block id and weak
+    /// ids are in the frame it just received.
+    async fn next_frame(&mut self, max: Duration) -> Option<(u8, Vec<u8>)> {
+        let start = Instant::now();
+        let mut tmp = [0u8; 65536];
+        loop {
+            if let Ok(Some(h)) = parse_frame_header(&self.magic, &self.buf) {
+                let total = if h.payload_len == 0 {
+                    HEADER_LENGTH
+                } else {
+                    HEADER_LENGTH + 4 + h.payload_len
+                };
+                if self.buf.len() >= total {
+                    let frame: Vec<u8> = self.buf.drain(..total).collect();
+                    let payload = if h.payload_len == 0 {
+                        Vec::new()
+                    } else {
+                        frame[HEADER_LENGTH + 4..].to_vec()
+                    };
+                    return Some((h.code, payload));
+                }
+            } else if self.buf.len() >= HEADER_LENGTH {
+                // Unparsable head: drop the buffer rather than spin.
+                self.buf.clear();
+            }
+            let left = max.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(left, self.stream.read(&mut tmp)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => return None,
+                Ok(Ok(n)) => self.buf.extend_from_slice(&tmp[..n]),
+                Err(_) => return None,
+            }
+        }
+    }
+
     async fn wait_for_code(&mut self, code: u8, max: Duration) -> Option<Duration> {
         let start = Instant::now();
         let mut tmp = [0u8; 65536];
@@ -376,6 +470,457 @@ struct Ctx {
 
 fn src(k: u8) -> Ipv4Addr {
     Ipv4Addr::new(127, k, 0, 1)
+}
+
+/// A deterministic pseudo-random 32-byte value.
+///
+/// Deterministic on purpose: a flood that cannot be replayed cannot be
+/// used to reproduce whatever it provoked, and `rand` is not a
+/// dependency of this crate. One blake2b256 per draw is far cheaper than
+/// the framing around it.
+fn draw(seed: u64, tag: u8, i: u32) -> [u8; 32] {
+    let mut bytes = [0u8; 13];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    bytes[8] = tag;
+    bytes[9..].copy_from_slice(&i.to_be_bytes());
+    *blake2b256(&bytes).as_bytes()
+}
+
+/// One bogus input-block announcement at `height`, naming a parent input
+/// block that does not exist.
+///
+/// Everything in it is syntactically well-formed — the node must parse
+/// it, decide it is unusable, and bound what it keeps. A malformed frame
+/// would be rejected by the codec and would test nothing about §7.4.
+fn bogus_announcement(seed: u64, i: u32, height: u32, parent_id: [u8; 32]) -> Vec<u8> {
+    let mut pk = [0u8; 33];
+    // The secp256k1 generator, so the point decodes; the solution is not
+    // a valid PoW and is not meant to be.
+    pk[0] = 0x02;
+    pk[1..].copy_from_slice(&hex_literal_generator_x());
+    let announcement = InputBlockAnnouncement {
+        version: 4,
+        header: Header {
+            version: 4,
+            parent_id: draw(seed, 1, i).into(),
+            ad_proofs_root: draw(seed, 2, i).into(),
+            transactions_root: draw(seed, 3, i).into(),
+            state_root: {
+                let mut root = [0u8; 33];
+                root[..32].copy_from_slice(&draw(seed, 4, i));
+                root.into()
+            },
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            extension_root: draw(seed, 5, i).into(),
+            n_bits: 0x004e_2000,
+            height,
+            votes: [0, 0, 0],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from_bytes(pk),
+                nonce: draw(seed, 6, i)[..8].try_into().expect("8 bytes"),
+            },
+        },
+        fields: InputBlockFields {
+            prev_input_block_id: Some(parent_id),
+            transactions_digest: draw(seed, 7, i),
+            prev_transactions_digest: draw(seed, 8, i),
+            proof: BatchMerkleProof {
+                indices: Vec::new(),
+                proofs: Vec::new(),
+            },
+        },
+        weak_tx_ids: Some(Vec::new()),
+        unparsed_bytes: Vec::new(),
+    };
+    serialize_input_block(&announcement).expect("a well-formed announcement serializes")
+}
+
+/// Answer the follower's input-block body requests with the WRONG body.
+///
+/// The `evict` scenario needs the reconstruction fallback to fire, and
+/// no configuration lever produces it: the follower assembles from its
+/// mempool as well as its input-block cache, so starving the cache does
+/// not starve the rebuild. A peer that answers a body request with
+/// transactions the announcement does not commit to does, because the
+/// rebuilt transactions root then cannot match the header's.
+///
+/// The adversary makes itself a source the follower will ask: it relays
+/// every input-block announcement the follower sends it straight back,
+/// which registers it as an announcer for that id, and then answers the
+/// resulting `RequestInputBlockTransactions` (code 105) with an
+/// `InputBlockTransactions` (code 104) carrying a body list that does
+/// not correspond to the requested weak ids.
+///
+/// It reports how many requests it answered. Whether the follower then
+/// fell back is read off the event feed by the campaign — this side
+/// only has to deliver the wrong bodies and say that it did.
+async fn input_block_wrong_body(ctx: &Ctx, seconds: u64) -> bool {
+    println!("[wrong_body] answering 105 requests with mismatched bodies for {seconds}s");
+    let mut conn =
+        match Conn::open_as(src(211), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+            Ok(c) => c,
+            Err(e) => {
+                println!("FAIL input_block_wrong_body: connect failed: {e}");
+                return false;
+            }
+        };
+    // Built once, and checked once: a decoy that does not serialize would
+    // be skipped for every id and the run would report "pushed 0" with
+    // nothing to say why — which is what two campaign attempts did.
+    let decoy = decoy_transaction();
+    let decoy_frame_for = |id: [u8; 32]| -> Result<Vec<u8>, String> {
+        let payload = serialize_input_block_txs(&InputBlockTxs {
+            input_block_id: id,
+            transactions: vec![decoy.clone()],
+        })
+        .map_err(|e| format!("decoy body does not serialize: {e:?}"))?;
+        Ok(full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload))
+    };
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut tally = WrongBodyTally::default();
+    let mut last_report = Instant::now();
+    // Input block ids we have already pushed a wrong body for.
+    let mut served: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut last_poll = Instant::now()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap_or_else(Instant::now);
+    while Instant::now() < deadline {
+        // The follower does not relay input-block announcements to this
+        // peer — two runs saw zero — so waiting to be told an id never
+        // produces one. Its REST surface publishes the same ids, and a
+        // body can be pushed for them unsolicited.
+        if last_poll.elapsed() >= Duration::from_secs(1) {
+            last_poll = Instant::now();
+            tally.polls += 1;
+            match api_get(&ctx.api, "/blocks/bestInputChain").await {
+                Err(e) => tally.note_problem(format!("{e}")),
+                Ok((_, body)) => {
+                    tally.last_body_len = body.len();
+                    // `bestOrdering` is a 64-hex string too, and it is NOT
+                    // an input block: pushing a body for it only ever
+                    // produced an `UnknownBlock` drop. It is kept as the
+                    // tree the pushed ids sit under, so the campaign can
+                    // attribute a fallback to the ordering block that
+                    // closes that tree.
+                    let ordering = json_hex_field(&body, "bestOrdering");
+                    let ids: Vec<[u8; 32]> = json_hex_ids(&body)
+                        .into_iter()
+                        .filter(|id| Some(*id) != ordering)
+                        .collect();
+                    tally.ids_seen += ids.len() as u32;
+                    if ids.is_empty() {
+                        // "No ids" and "the request failed" are different
+                        // answers; keep a snippet of the former.
+                        let tail: String = body
+                            .chars()
+                            .rev()
+                            .take(160)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        tally.note_problem(format!("no ids in {} bytes: {tail}", body.len()));
+                    }
+                    for id in ids {
+                        if served.contains(&id) {
+                            continue;
+                        }
+                        let frame = match decoy_frame_for(id) {
+                            Ok(f) => f,
+                            Err(problem) => {
+                                tally.note_problem(problem);
+                                continue;
+                            }
+                        };
+                        if conn.stream.write_all(&frame).await.is_err() {
+                            tally.note_problem("the follower closed the connection".into());
+                            break;
+                        }
+                        served.insert(id);
+                        tally.pushed += 1;
+                        // The ids we pushed a wrong body FOR, and the tree
+                        // they sit under, so the campaign can prove
+                        // delivery against the node's own receipt line and
+                        // attribute a mismatch fallback to one of them
+                        // rather than to a natural mismatch.
+                        println!(
+                            "[wrong_body] pushed id={} ordering={}",
+                            hex::encode(id),
+                            ordering.map(hex::encode).unwrap_or_else(|| "none".into())
+                        );
+                    }
+                }
+            }
+        }
+        let left = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            Duration::from_millis(500),
+        );
+        let Some((code, payload)) = conn.next_frame(left).await else {
+            if Instant::now() >= deadline {
+                break;
+            }
+            continue;
+        };
+        match code {
+            // An announcement the follower relayed to us: echo it back,
+            // which is what would make us a peer it asks for the bodies,
+            // and push a wrong body for it unsolicited, because the
+            // follower asks the block's original announcer and the echo
+            // arrives second (`AlreadyKnown`).
+            CODE_INPUT_BLOCK => {
+                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+                if conn.stream.write_all(&frame).await.is_err() {
+                    break;
+                }
+                tally.relayed += 1;
+                if let Some(id) = announced_input_block_id(&payload) {
+                    if served.insert(id) {
+                        match decoy_frame_for(id) {
+                            Ok(frame) => {
+                                if conn.stream.write_all(&frame).await.is_err() {
+                                    break;
+                                }
+                                tally.pushed += 1;
+                                println!(
+                                    "[wrong_body] pushed id={} ordering=relayed",
+                                    hex::encode(id)
+                                );
+                            }
+                            Err(problem) => tally.note_problem(problem),
+                        }
+                    }
+                }
+            }
+            // The request we exist to answer badly.
+            CODE_INPUT_BLOCK_TXS_REQUEST => {
+                tally.requests += 1;
+                let Ok(request) = deserialize_input_block_txs_request(&payload) else {
+                    continue;
+                };
+                // A body list that does NOT correspond to the requested
+                // weak ids: one transaction whose own weak id is nothing
+                // anybody asked for.
+                match decoy_frame_for(request.input_block_id) {
+                    Ok(frame) => {
+                        if conn.stream.write_all(&frame).await.is_err() {
+                            break;
+                        }
+                        tally.answered += 1;
+                        println!(
+                            "[wrong_body] answered id={}",
+                            hex::encode(request.input_block_id)
+                        );
+                    }
+                    Err(problem) => tally.note_problem(problem),
+                }
+            }
+            _ => {}
+        }
+        // Report as we go and FLUSH: stdout to a pipe is block-buffered,
+        // so the closing summary was lost when the scenario terminated
+        // the harness and the campaign saw only the banner.
+        if last_report.elapsed() >= Duration::from_secs(10) {
+            last_report = Instant::now();
+            tally.report();
+        }
+    }
+    tally.report();
+    let ok = tally.answered > 0 || tally.pushed > 0;
+    println!(
+        "{} input_block_wrong_body: mismatched bodies were delivered to the follower",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    ok
+}
+
+/// What `input_block_wrong_body` did, reported as it goes.
+#[derive(Default)]
+struct WrongBodyTally {
+    relayed: u32,
+    pushed: u32,
+    requests: u32,
+    answered: u32,
+    polls: u32,
+    ids_seen: u32,
+    last_body_len: usize,
+    /// The FIRST problem hit, kept so "the request failed", "there were
+    /// no ids" and "the body would not serialize" stop looking alike.
+    first_problem: Option<String>,
+}
+
+impl WrongBodyTally {
+    fn note_problem(&mut self, problem: String) {
+        if self.first_problem.is_none() {
+            self.first_problem = Some(problem);
+        }
+    }
+
+    fn report(&self) {
+        use std::io::Write;
+        println!(
+            "[wrong_body] relayed {}, pushed {} unsolicited wrong bodies, \
+             saw {} body requests, answered {}; \
+             rest polls={} ids_seen={} last_body={}B first_problem={}",
+            self.relayed,
+            self.pushed,
+            self.requests,
+            self.answered,
+            self.polls,
+            self.ids_seen,
+            self.last_body_len,
+            self.first_problem.as_deref().unwrap_or("none")
+        );
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// The 32-byte hex value of one string field, e.g. `"bestOrdering":"…"`.
+fn json_hex_field(body: &str, key: &str) -> Option<[u8; 32]> {
+    let needle = format!("\"{key}\":");
+    let i = body.find(&needle)? + needle.len();
+    let rest = body[i..].trim_start().strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let v = hex::decode(&rest[..end]).ok()?;
+    <[u8; 32]>::try_from(v.as_slice()).ok()
+}
+
+/// Every 64-hex id in a JSON body, in order of appearance.
+///
+/// `/blocks/bestInputChain` answers with a bare array of ids under
+/// `bestInputBlocks`, so there is no `"id":` key to key off — this takes
+/// the quoted 32-byte hex strings directly.
+fn json_hex_ids(body: &str) -> Vec<[u8; 32]> {
+    let mut out = Vec::new();
+    for piece in body.split('"') {
+        if piece.len() != 64 {
+            continue;
+        }
+        if let Ok(v) = hex::decode(piece) {
+            if v.len() == 32 {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&v);
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
+/// The input block id an announcement frame commits to — its header id.
+fn announced_input_block_id(payload: &[u8]) -> Option<[u8; 32]> {
+    let ann = ergo_ser::input_block::parse_input_block_announcement(payload).ok()?;
+    let id = ann.id().ok()?;
+    Some(*id.as_bytes())
+}
+
+/// One transaction that commits to nothing the follower asked for: no
+/// inputs, no data inputs, no outputs. Constructed rather than parsed —
+/// the previous version parsed three bytes where the codec needs four
+/// (input, data-input, token-table and output counts), so it returned
+/// `None` on every call and the adversary pushed nothing at all.
+fn decoy_transaction() -> ergo_ser::transaction::Transaction {
+    ergo_ser::transaction::Transaction {
+        inputs: Vec::new(),
+        data_inputs: Vec::new(),
+        output_candidates: Vec::new(),
+    }
+}
+
+/// X coordinate of the secp256k1 generator.
+fn hex_literal_generator_x() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(
+        &hex::decode("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")
+            .expect("a constant hex literal"),
+    );
+    out
+}
+
+/// The Matrix flood: `announcements` bogus code-100 frames at height + 1
+/// with random parents, then `deliveries` bogus code-104 payloads for
+/// input blocks nobody asked about.
+///
+/// The verdict here is deliberately narrow: this side reports that it
+/// delivered the traffic and that the connection survived long enough to
+/// do so. Whether the node held its §7.4 bounds is read off
+/// `/api/v1/status.input_blocks` by the campaign, which is the only
+/// place that can compare the counters before and after.
+async fn input_block_flood(ctx: &Ctx, announcements: u32, deliveries: u32) -> bool {
+    let flood_height = height(&ctx.api).await.unwrap_or(1) as u32 + 1;
+    println!(
+        "[input_block_flood] {announcements} announcements at height {flood_height}, \
+         {deliveries} bogus code-104 deliveries"
+    );
+    let mut conn =
+        match Conn::open_as(src(210), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+            Ok(c) => c,
+            Err(e) => {
+                println!("FAIL input_block_flood: connect failed: {e}");
+                return false;
+            }
+        };
+    let seed = 0x4d61_7472_6978_0001; // "Matrix" + a run counter.
+    let started = Instant::now();
+    let mut sent = 0u32;
+    for i in 0..announcements {
+        // A random parent every time: each announcement is disconnected,
+        // which is exactly what the waitlist cap exists to bound.
+        let payload = bogus_announcement(seed, i, flood_height, draw(seed, 9, i));
+        let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+        if conn.stream.write_all(&frame).await.is_err() {
+            println!(
+                "[input_block_flood] connection closed after {sent} announcements \
+                 ({:?}) — a bounded node MAY drop the flooder",
+                started.elapsed()
+            );
+            break;
+        }
+        sent += 1;
+        if sent.is_multiple_of(500) {
+            // Let the node breathe: a write loop that never yields
+            // measures the loopback socket buffer, not the node.
+            tokio::task::yield_now().await;
+        }
+    }
+    let announced_in = started.elapsed();
+    let mut delivered = 0u32;
+    for i in 0..deliveries {
+        let payload = serialize_input_block_txs(&InputBlockTxs {
+            input_block_id: draw(seed, 10, i),
+            transactions: Vec::new(),
+        })
+        .expect("an empty transaction list serializes");
+        let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK_TXS, &payload);
+        if conn.stream.write_all(&frame).await.is_err() {
+            break;
+        }
+        delivered += 1;
+        if delivered.is_multiple_of(100) {
+            tokio::task::yield_now().await;
+        }
+    }
+    println!(
+        "[input_block_flood] sent {sent}/{announcements} announcements in {announced_in:?}, \
+         {delivered}/{deliveries} deliveries in {:?}",
+        started.elapsed() - announced_in
+    );
+    let after = height(&ctx.api).await;
+    println!("[input_block_flood] node fullHeight after: {after:?}");
+    // The flood is only a valid experiment if the traffic actually
+    // reached the node; the BOUNDS verdict belongs to the campaign.
+    let ok = sent > 0 && after.is_some();
+    println!(
+        "{} input_block_flood: node still answering REST after the flood",
+        if ok { "PASS" } else { "FAIL" }
+    );
+    ok
 }
 
 /// Header-only frames declaring MAX_PAYLOAD_SIZE: each must be cut at
@@ -819,17 +1364,22 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 4 {
         eprintln!(
-            "usage: p2p_adversary <host:port> <testnet|mainnet> <api-host:port> <scenario> [args]"
+            "usage: p2p_adversary <host:port> <devnet|testnet|mainnet> <api-host:port> <scenario> [args]"
         );
         std::process::exit(2);
     }
     let target: SocketAddr = args[0].parse().expect("host:port");
     // Authoritative magic from ergo-chain-spec (what the live node frames
     // with) — NOT framing::TESTNET_MAGIC, which is the stale PaiNet value.
-    let magic: [u8; 4] = if args[1] == "mainnet" {
-        [1, 0, 2, 4]
-    } else {
-        [2, 3, 2, 3]
+    // `devnet` is the Matrix recipe's private chain
+    // (`scripts/devnet-matrix/genesis.conf`: magicBytes = [7,7,7,7]);
+    // without it the campaign's flood would be framed with testnet magic
+    // and dropped before the handshake, which would look like a node
+    // that withstood a flood it never received.
+    let magic: [u8; 4] = match args[1].as_str() {
+        "mainnet" => [1, 0, 2, 4],
+        "devnet" => [7, 7, 7, 7],
+        _ => [2, 3, 2, 3],
     };
     let ctx = Ctx {
         target,
@@ -896,6 +1446,15 @@ async fn main() {
                 Duration::from_secs(720),
             )
             .await
+        }
+        "input_block_wrong_body" => {
+            let secs: u64 = rest.first().map_or(600, |s| s.parse().unwrap());
+            input_block_wrong_body(&ctx, secs).await
+        }
+        "input_block_flood" => {
+            let a: u32 = rest.first().map_or(10_000, |s| s.parse().unwrap());
+            let d: u32 = rest.get(1).map_or(1_000, |s| s.parse().unwrap());
+            input_block_flood(&ctx, a, d).await
         }
         other => {
             eprintln!("unknown scenario: {other}");

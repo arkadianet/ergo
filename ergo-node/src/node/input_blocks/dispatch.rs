@@ -143,7 +143,23 @@ pub(in crate::node) fn handle(
         }) {
             Ok(d) => {
                 let progress = answered(state, &peer, &d.input_block_id, ExpectedPhase::Bodies);
+                let delivered = d.transactions.len();
                 let bodies: Vec<Body> = d.transactions.into_iter().filter_map(body_of).collect();
+                // Receipt, before the processor decides anything: which
+                // peer delivered bodies for which block, and whether we
+                // had asked it. An unsolicited delivery is still handed
+                // to the processor (spec 9.2 step 5 — bodies are placed
+                // by announced weak id and admitted only through the
+                // digest check), so this line is the only record that
+                // one arrived at all.
+                debug!(
+                    peer = %peer,
+                    block = %hex::encode(d.input_block_id),
+                    delivered,
+                    usable = bodies.len(),
+                    solicited = progress,
+                    "input_blocks: bodies received"
+                );
                 let actions = feed(state, peer, now, &[], |from, tick| {
                     Event::TransactionsDelivered {
                         input_block_id: d.input_block_id,

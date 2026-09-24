@@ -775,6 +775,20 @@ class Run:
             'rust_ordering': rust_ordering,
             'scala_chain': reading['scala']['chain'].get('bestInputBlocks') or [],
             'rust_chain': reading['rust']['chain'].get('bestInputBlocks') or [],
+            # Present only when a second reference node is running (the
+            # M3 campaign's two-miner scenarios). Assertions 2 and 3 do
+            # not read it — they are defined against ONE miner — but a
+            # two-miner scenario cannot judge the follower against one
+            # miner's chain, and needs both.
+            'scala2_chain': (reading.get('scala2', {}).get('chain', {})
+                             .get('bestInputBlocks') or []),
+            # Its OWN ordering id, from the same call as its chain. Without
+            # it the second miner's chain could be attributed to whatever
+            # ordering block the FIRST miner happened to be on, which is
+            # how a two-miner evaluator ends up accepting a chain mixing
+            # members of two incompatible branches.
+            'scala2_ordering': (reading.get('scala2', {}).get('chain', {})
+                                .get('bestOrdering') or None),
             'scala_tip': scala_best or None,
             'rust_tip': rust_best or None,
         }
@@ -1274,17 +1288,28 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
     # application that came BEFORE a mismatch fallback says nothing
     # about how that fallback recovered, and an application before a
     # reconstruction is not a replacement of it.
-    reconstructed_at = {}   # height -> (index, header) of the last rebuild
+    # EVERY rebuild, not the last one per height: a node that rebuilt
+    # R6, had it replaced by S6, and then rebuilt S6 kept only the third
+    # event under the old map, and the replacement of the first
+    # disappeared with it.
+    reconstructions = []     # (index, height, header), in event order
     mismatch_fallbacks = []  # (index, event)
-    applications = []        # (index, height, header)
+    applications = []        # (index, height, header) — rebuilds included
+    # A mismatch fallback is the node REFUSING its own rebuild and
+    # downloading instead, so only a FULL-BLOCK application shows what it
+    # downloaded. Counting a later reconstruction as the recovery let a
+    # refusal be "verified" by the very mechanism it had just refused.
+    full_applications = []   # (index, height, header)
     for i, e in enumerate(ordering_events):
         height = e.get('height')
         header = e.get('header_id') or e.get('headerId')
         kind = e.get('kind')
         if kind in ('blockApplied', 'ordering_reconstructed'):
             applications.append((i, height, header))
+        if kind == 'blockApplied':
+            full_applications.append((i, height, header))
         if kind == 'ordering_reconstructed':
-            reconstructed_at[height] = (i, header)
+            reconstructions.append((i, height, header))
         elif kind == 'ordering_reconstruct_fallback':
             if (e.get('detail') or '') in MERKLE_MISMATCH_REASONS:
                 mismatch_fallbacks.append((i, e))
@@ -1293,8 +1318,9 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
     for i, e in mismatch_fallbacks:
         height = e.get('height')
         expected = scala_block_at_height.get(height)
-        # Only applications AFTER the fallback can be its recovery.
-        landed = [h for (j, hh, h) in applications
+        # Only FULL-BLOCK applications after the fallback can be its
+        # recovery.
+        landed = [h for (j, hh, h) in full_applications
                   if j > i and hh == height and h]
         if not landed or expected is None:
             # The node refused its own rebuild and we cannot show what it
@@ -1309,8 +1335,10 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
                                    'scala_block': expected,
                                    'applied_after_fallback': landed})
 
-    for height, (ri, header) in reconstructed_at.items():
-        # Only an application AFTER the reconstruction replaces it.
+    for ri, height, header in reconstructions:
+        # Only an application AFTER the reconstruction replaces it, and
+        # every rebuild at the height is judged on its own: a later,
+        # correct rebuild does not undo an earlier wrong one.
         later = [h for (j, hh, h) in applications
                  if j > ri and hh == height and h and h != header]
         if later:
@@ -1335,6 +1363,8 @@ def evaluate_mismatch_recovery(ordering_events, scala_block_at_height):
             {'unverifiable': unverifiable[:10]}))
     return {
         'mismatch_fallbacks': len(mismatch_fallbacks),
+        'reconstructions': len(reconstructions),
+        'full_applications': len(full_applications),
         'mismatch_reasons_checked': list(MERKLE_MISMATCH_REASONS),
         'bad_recoveries': bad_recoveries,
         'reconstructed_then_replaced': replaced,
@@ -1812,8 +1842,8 @@ def _self_test():
     # APPLIED: counted as F11 telemetry, not failed.
     t = PaymentOutcomeTracker({'b'})
     t.saw_in_ordering_block('b', 'O9', 9)
-    t.observe_pool('O9', {'b'}, rust_tip_height=9, rust_block_at={9: 'O9'})
-    t.observe_pool('O9', set(), rust_tip_height=9, rust_block_at={9: 'O9'})
+    t.observe_pool('O9', {'b'}, rust_tip_height=9, rust_chain={9: 'O9'})
+    t.observe_pool('O9', set(), rust_tip_height=9, rust_chain={9: 'O9'})
     t.cross_check_scala({'zz'})
     assert t.never_sealed == {'b': {'ordering_block': 'O9', 'height': 9}}, \
         t.never_sealed
@@ -1823,7 +1853,7 @@ def _self_test():
     # A never-sealed payment that never leaves the pool IS a failure.
     t2 = PaymentOutcomeTracker({'b'})
     t2.saw_in_ordering_block('b', 'O9', 9)
-    t2.observe_pool('O9', {'b'}, rust_tip_height=9, rust_block_at={9: 'O9'})
+    t2.observe_pool('O9', {'b'}, rust_tip_height=9, rust_chain={9: 'O9'})
     assert t2.never_sealed_still_pooled() == ['b'], t2.never_sealed_still_pooled()
 
     # ----- fix round 4, finding 1: codex's O8/O9 probe -----
@@ -1833,13 +1863,13 @@ def _self_test():
     # crediting it satisfied the exit condition an ordering block early.
     probe = PaymentOutcomeTracker({'p'})
     probe.saw_in_ordering_block('p', 'O9', 9)
-    probe.observe_pool('O8', set(), rust_tip_height=8, rust_block_at={8: 'O8'})
+    probe.observe_pool('O8', set(), rust_tip_height=8, rust_chain={8: 'O8'})
     assert probe.removed_after_ordering == {}, probe.removed_after_ordering
     assert probe.never_sealed_still_pooled() == ['p'], \
         'an absence under O8 must NOT credit a payment confirmed in O9'
     # Rust applies O9: now it credits.
     probe.observe_pool('O9', set(), rust_tip_height=9,
-                       rust_block_at={8: 'O8', 9: 'O9'})
+                       rust_chain={8: 'O8', 9: 'O9'})
     assert 'p' in probe.removed_after_ordering, probe.removed_after_ordering
     assert probe.never_sealed_still_pooled() == [], \
         probe.never_sealed_still_pooled()
@@ -1847,14 +1877,15 @@ def _self_test():
     # Right height, WRONG block — Rust is on a different chain there.
     forked = PaymentOutcomeTracker({'p'})
     forked.saw_in_ordering_block('p', 'O9', 9)
-    forked.observe_pool('X9', set(), rust_tip_height=9, rust_block_at={9: 'X9'})
+    forked.observe_pool('X9', set(), rust_tip_height=9, rust_chain={9: 'X9'})
     assert forked.never_sealed_still_pooled() == ['p'], \
         'a different block at that height is not the confirming block'
     # Deeper tip, with the confirming block an ancestor Rust applied.
     deeper = PaymentOutcomeTracker({'p'})
     deeper.saw_in_ordering_block('p', 'O9', 9)
     deeper.observe_pool('O11', set(), rust_tip_height=11,
-                        rust_block_at={9: 'O9', 11: 'O11'})
+                        rust_chain={9: 'O9', 10: 'O10', 11: 'O11'},
+                        rust_parent_of={'O11': 'O10', 'O10': 'O9'})
     assert 'p' in deeper.removed_after_ordering, deeper.removed_after_ordering
 
     # ----- fix round 4, finding 2: an unreadable miner corpus is stated -
@@ -1889,7 +1920,7 @@ def _self_test():
     # which the strict path was never exercised proved nothing.
     t = PaymentOutcomeTracker({'d'})
     t.saw_in_ordering_block('d', 'O9', 9)
-    t.observe_pool('O9', set(), rust_tip_height=9, rust_block_at={9: 'O9'})
+    t.observe_pool('O9', set(), rust_tip_height=9, rust_chain={9: 'O9'})
     t.cross_check_scala({'zz'})
     assert t.unresolved() == [] and not t.located, t.located
 
@@ -1897,7 +1928,7 @@ def _self_test():
     # FOLLOWER defect and must not hide in the telemetry bucket.
     t = PaymentOutcomeTracker({'e'})
     t.saw_in_ordering_block('e', 'O9', 9)
-    t.observe_pool('O9', set(), rust_tip_height=9, rust_block_at={9: 'O9'})
+    t.observe_pool('O9', set(), rust_tip_height=9, rust_chain={9: 'O9'})
     t.cross_check_scala({'e'})
     assert t.missing_on_rust == {'e': {'ordering_block': 'O9', 'height': 9}}, \
         t.missing_on_rust
@@ -2145,6 +2176,95 @@ def _self_test():
     finally:
         globals()['api'] = real_api
 
+    # ----- task 9 prep: the four defects parked at the round-4 cap -----
+    #
+    # All four live in guard branches that did not fire in the M2 runs
+    # (fallback = 0, never_sealed = 0). Task 9's fork / rollback /
+    # reconstruct_rate / evict scenarios drive every one of them, so a
+    # branch that cannot fail there would launder the campaign's verdict.
+
+    # (8b-1) Route (b) credit ignored ancestry. A payment confirmed in O9
+    # was credited off a height map the caller had cached BEFORE a reorg:
+    # Rust is on X10 whose height-9 block is X9, O9 is on the abandoned
+    # branch, and the absence from the pool says nothing about O9.
+    reorged = PaymentOutcomeTracker({'p'})
+    reorged.saw_in_ordering_block('p', 'O9', 9)
+    reorged.observe_pool('O9', {'p'}, rust_tip_height=9, rust_chain={9: 'O9'},
+                         rust_parent_of={'O9': 'O8'})
+    reorged.observe_pool('X10', set(), rust_tip_height=10,
+                         rust_chain={9: 'O9', 10: 'X10'},
+                         rust_parent_of={'X10': 'X9', 'X9': 'O8', 'O9': 'O8'})
+    assert reorged.removed_after_ordering == {}, reorged.removed_after_ordering
+    assert reorged.never_sealed_still_pooled() == ['p'], \
+        'a confirming block off the tip\'s ancestry must NOT credit an absence'
+    # The same shape with O9 genuinely on the tip's ancestry DOES credit.
+    on_chain = PaymentOutcomeTracker({'p'})
+    on_chain.saw_in_ordering_block('p', 'O9', 9)
+    on_chain.observe_pool('O10', set(), rust_tip_height=10,
+                          rust_chain={9: 'O9', 10: 'O10'},
+                          rust_parent_of={'O10': 'O9', 'O9': 'O8'})
+    assert 'p' in on_chain.removed_after_ordering, on_chain.removed_after_ordering
+    # A chain map that does not even describe the tip the pool was read
+    # under is stale by construction and may not credit anything.
+    stale = PaymentOutcomeTracker({'p'})
+    stale.saw_in_ordering_block('p', 'O9', 9)
+    stale.observe_pool('X10', set(), rust_tip_height=10, rust_chain={9: 'O9'})
+    assert stale.never_sealed_still_pooled() == ['p'], \
+        'a chain map missing the observed tip is not an observation of it'
+    # And the heights route (b) still needs are reported, so the driver
+    # knows which ones to resolve against Rust.
+    assert stale.pending_confirmation_heights() == {9}, \
+        stale.pending_confirmation_heights()
+    assert on_chain.pending_confirmation_heights() == set(), \
+        on_chain.pending_confirmation_heights()
+
+    # (8b-2) The cross-check exonerated the miner off a PARTIAL corpus:
+    # one readable input block made `corpus_available` true for all of
+    # them, so a payment sealed into a block whose body never arrived was
+    # counted as never sealed. Unread ids now leave route (b) unverified.
+    partial = PaymentOutcomeTracker({'v'})
+    partial.saw_in_ordering_block('v', 'O9', 9)
+    partial.cross_check_scala({'other'}, corpus_available=True,
+                              unread_block_ids=['ibB'])
+    assert partial.never_sealed_unverified == ['v'], \
+        'an unread Scala input block cannot exonerate the miner'
+    assert partial.summary()['scala_input_blocks_unread'] == ['ibB'], \
+        partial.summary()
+    assert partial.missing_on_rust == {}, 'silence still is not a verdict'
+    # With every observed block read, the same call verifies.
+    whole = PaymentOutcomeTracker({'v'})
+    whole.saw_in_ordering_block('v', 'O9', 9)
+    whole.cross_check_scala({'other'}, corpus_available=True, unread_block_ids=[])
+    assert whole.never_sealed_unverified == [], whole.never_sealed_unverified
+    assert whole.summary()['scala_input_blocks_unread'] == [], whole.summary()
+
+    # (8b-3) A mismatch fallback "recovered" by another RECONSTRUCTION.
+    # The node refused its own rebuild; only a full-block application at
+    # that height shows what it downloaded instead.
+    rebuild_after_refusal = evaluate_mismatch_recovery(
+        [ev('ordering_reconstruct_fallback', 5, 'S5', detail='root_mismatch'),
+         ev('ordering_reconstructed', 5, 'S5', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent')],
+        {5: 'S5'})
+    assert rebuild_after_refusal['unverifiable'], \
+        'a reconstruction is not the full download a mismatch fallback made'
+    assert rebuild_after_refusal['failures'], rebuild_after_refusal
+
+    # (8b-4) Only the LAST reconstruction per height was kept, so a
+    # rebuild that was swapped out and then re-rebuilt hid its own
+    # replacement.
+    rebuilt_twice = evaluate_mismatch_recovery(
+        [ev('ordering_reconstructed', 6, 'R6', txs=2,
+            reconstructedOrder='candidate', reconstructionKey='parent'),
+         ev('blockApplied', 6, 'S6', txs=2),
+         ev('ordering_reconstructed', 6, 'S6', txs=2,
+            reconstructedOrder='scala', reconstructionKey='parent')],
+        {6: 'S6'})
+    assert rebuilt_twice['reconstructed_then_replaced'], \
+        'the replaced first rebuild must still be reported'
+    assert any('replaced at their own height' in m
+               for m, _ in rebuilt_twice['failures']), rebuilt_twice
+
     print('self-test OK: evaluators behave as the round-5 definitions require')
 
 
@@ -2348,6 +2468,10 @@ class PaymentOutcomeTracker:
         # unverified because it was not.
         self.scala_corpus_available = True
         self.never_sealed_unverified = []
+        # Scala input blocks seen on its best input chain whose contents
+        # neither route ever served. While any remain, route (b) is
+        # unverified: the miner may have sealed the payment into one.
+        self.scala_input_blocks_unread = []
 
     # ----- sightings -----
 
@@ -2368,21 +2492,35 @@ class PaymentOutcomeTracker:
                                    'height': height}
 
     def observe_pool(self, ordering_tip, pool, rust_tip_height=None,
-                     rust_block_at=None):
+                     rust_chain=None, rust_parent_of=None):
         """One observation of Rust's unconfirmed pool at `ordering_tip`.
 
         Strict-path transactions keep the round-5 credit rule.
 
         Route (b) credits an absence ONLY once Rust has applied the
-        payment's own confirming ordering block: its tip must have
-        reached that height, and the block Rust holds at that height
-        must be the confirming one. `rust_block_at` maps height to the
-        header id Rust applied there. An absence observed before that is
-        not evidence the follower processed the block — a pool can be
-        empty for any number of reasons — and crediting it satisfied the
-        exit condition a whole ordering block early.
+        payment's own confirming ordering block ON THE CHAIN IT IS
+        CURRENTLY ON. Three things have to hold, and the third is the
+        defect parked from round 4:
+
+        * Rust's tip has reached the confirming height;
+        * `rust_chain` — height -> the header Rust holds there — names
+          the confirming block at that height, and names `ordering_tip`
+          at the tip height. A map that does not describe the tip the
+          pool was read under is stale by construction and credits
+          nothing;
+        * the confirming block is an ANCESTOR of `ordering_tip`, walked
+          through `rust_parent_of` (header -> parent header). Without
+          that walk a height map cached before a reorg still named O9 at
+          height 9 while Rust had switched to a branch carrying X9
+          there, and an empty pool under X10 credited a payment
+          confirmed on the abandoned branch.
+
+        An absence observed before all three is not evidence the
+        follower processed the block — a pool can be empty for any
+        number of reasons.
         """
-        rust_block_at = rust_block_at or {}
+        rust_chain = rust_chain or {}
+        rust_parent_of = rust_parent_of or {}
         for txid, route in self.route.items():
             if txid in pool:
                 continue
@@ -2409,7 +2547,14 @@ class PaymentOutcomeTracker:
                     continue
                 if rust_tip_height < height:
                     continue
-                if rust_block_at.get(height) != block:
+                if rust_chain.get(height) != block:
+                    continue
+                # The map has to describe the chain this pool was read
+                # under, not some chain Rust was on earlier.
+                if rust_chain.get(rust_tip_height) != ordering_tip:
+                    continue
+                if not self._is_ancestor(block, height, ordering_tip,
+                                         rust_tip_height, rust_parent_of):
                     continue
                 self.removed_after_ordering[txid] = {
                     'observed_under': ordering_tip,
@@ -2418,7 +2563,41 @@ class PaymentOutcomeTracker:
                     'confirming_height': height,
                 }
 
-    def cross_check_scala(self, scala_input_chain_txids, corpus_available=True):
+    @staticmethod
+    def _is_ancestor(block, height, tip, tip_height, parent_of):
+        """Is `block` at `height` on the branch ending at `tip`?
+
+        Walks `tip_height - height` parent links. An unknown link is NOT
+        an ancestry proof: the walk that cannot reach `block` returns
+        False, so a missing parent costs a sweep rather than crediting an
+        absence the run cannot justify.
+        """
+        if tip is None or block is None or height is None or tip_height is None:
+            return False
+        if tip_height == height:
+            return tip == block
+        cursor = tip
+        for _ in range(tip_height - height):
+            cursor = parent_of.get(cursor)
+            if cursor is None:
+                return False
+            if cursor == block:
+                return True
+        return cursor == block
+
+    def pending_confirmation_heights(self):
+        """Heights the driver still has to resolve against Rust's chain.
+
+        Only route-(b) payments that have not been credited need one, so
+        the driver reads Rust's blocks for a handful of heights rather
+        than the whole chain.
+        """
+        return {entry.get('height') for txid, entry in self.never_sealed.items()
+                if txid not in self.removed_after_ordering
+                and entry.get('height') is not None}
+
+    def cross_check_scala(self, scala_input_chain_txids, corpus_available=True,
+                          unread_block_ids=()):
         """Route (b) is only honest if the MINER never sealed it.
 
         `scala_input_chain_txids` is every transaction id Scala's own
@@ -2435,10 +2614,17 @@ class PaymentOutcomeTracker:
         never read the same as an empty answer from one that does.
         """
         self.scala_corpus_available = bool(corpus_available)
-        if not corpus_available:
+        self.scala_input_blocks_unread = sorted(set(unread_block_ids))
+        if not corpus_available or self.scala_input_blocks_unread:
+            # A PARTIAL corpus is not an exoneration. One readable input
+            # block used to make `corpus_available` true for the whole
+            # window, so a payment sealed into a block whose body never
+            # arrived was filed as "the miner never sealed it".
             self.never_sealed_unverified = sorted(self.never_sealed)
-            return
-        self.never_sealed_unverified = []
+            if not corpus_available:
+                return
+        else:
+            self.never_sealed_unverified = []
         for txid in sorted(self.never_sealed):
             if txid in scala_input_chain_txids:
                 self.missing_on_rust[txid] = self.never_sealed.pop(txid)
@@ -2468,6 +2654,7 @@ class PaymentOutcomeTracker:
             'located_in_rust_input_block': len(self.located),
             'never_sealed_by_miner': len(self.never_sealed),
             'scala_corpus_unavailable': not self.scala_corpus_available,
+            'scala_input_blocks_unread': self.scala_input_blocks_unread,
             'never_sealed_unverified': self.never_sealed_unverified,
             'missing_on_rust': sorted(self.missing_on_rust),
             'unresolved': self.unresolved(),
@@ -2512,6 +2699,55 @@ def d1_refusals_from_log():
             continue
         ids.update(re.findall(r'[0-9a-f]{64}', line))
     return ids
+
+
+# How many heights below the tip route (b) will resolve against Rust in
+# one sweep. A confirming block is credited within an ordering block or
+# two, so the window is small; a payment whose confirming height falls
+# further behind than this is left uncredited (and therefore reported)
+# rather than credited off an unwalkable ancestry.
+RUST_CHAIN_LOOKBACK = 16
+
+
+def resolve_rust_chain(heights, tip_height, tip_header, parent_cache):
+    """Rust's CURRENT best chain over the heights route (b) needs.
+
+    Read fresh from Rust every sweep rather than accumulated: the cached
+    height map this replaced still named the pre-reorg block at a height
+    Rust had since abandoned, and an empty pool under the new branch
+    credited a payment confirmed on the old one.
+
+    `parent_cache` maps header id -> parent header id. Headers are
+    immutable, so that one IS safe to keep across sweeps.
+    """
+    chain = {}
+    if tip_height is None or not tip_header:
+        return chain, parent_cache
+    chain[tip_height] = tip_header
+    wanted = {h for h in heights
+              if h is not None and 0 <= tip_height - h <= RUST_CHAIN_LOOKBACK}
+    if not wanted:
+        return chain, parent_cache
+    # Every height from the deepest one needed up to the tip: the
+    # ancestry walk follows parent links through the blocks in between.
+    for height in range(min(wanted), tip_height + 1):
+        try:
+            ids = api('rust', f'/blocks/at/{height}')
+        except Unavailable:
+            continue
+        if ids:
+            chain[height] = ids[0]
+    for header in list(chain.values()):
+        if header in parent_cache:
+            continue
+        try:
+            block_header = api('rust', f'/blocks/{header}/header')
+        except Unavailable:
+            continue
+        parent = (block_header or {}).get('parentId')
+        if parent:
+            parent_cache[header] = parent
+    return chain, parent_cache
 
 
 def assertion_6_mempool(run, evidence, count):
@@ -2582,10 +2818,17 @@ def assertion_6_mempool(run, evidence, count):
     # retry rather than the height — losing one made a confirmed payment
     # read as `unresolved` for the rest of the window.
     pending_heights = set()
-    # What Rust has APPLIED, height -> header id. Route (b) credits an
-    # absence only once Rust holds the payment's own confirming block.
-    rust_block_at = {}
+    # Route (b) credits an absence only once Rust holds the payment's
+    # own confirming block ON ITS CURRENT CHAIN. The height map is
+    # rebuilt from Rust each sweep (never accumulated); only the
+    # header -> parent links, which are immutable, are cached.
+    rust_parent_of = {}
+    rust_chain = {}
     rust_tip_height = None
+    # Scala input block ids seen on its best input chain, and those whose
+    # contents no route ever served. Unread ids leave route (b)
+    # unverified rather than exonerating the miner off a partial corpus.
+    scala_input_block_ids_seen = set()
     track_deadline = min(run.deadline, time.monotonic() + MEMPOOL_ROUTE_SECONDS)
     # Every input below comes from ONE sampler sweep: the ordering tip,
     # the chain the transaction ids are read against, and the pool. The
@@ -2625,17 +2868,20 @@ def assertion_6_mempool(run, evidence, count):
                 pool = reading['rust']['pool']
                 ever_in_rust_pool |= pool
                 rust_tip_height = reading['rust']['info'].get('fullHeight')
-                if rust_tip_height is not None and header_now:
-                    rust_block_at[rust_tip_height] = header_now
+                rust_chain, rust_parent_of = resolve_rust_chain(
+                    tracker.pending_confirmation_heights(), rust_tip_height,
+                    header_now, rust_parent_of)
                 tracker.observe_pool(header_now, pool,
                                      rust_tip_height=rust_tip_height,
-                                     rust_block_at=rust_block_at)
+                                     rust_chain=rust_chain,
+                                     rust_parent_of=rust_parent_of)
             else:
                 unstable_sweeps += 1
             # The miner's OWN input chain, for the cross-check: a payment
             # Scala sealed but Rust never served is a follower defect,
             # not a miner one, and must not hide in the telemetry bucket.
             for bid in reading['scala']['chain'].get('bestInputBlocks') or []:
+                scala_input_block_ids_seen.add(bid)
                 if bid in scala_ids_cache:
                     continue
                 found = scala_input_block_txids(bid, scala_routes_tried)
@@ -2669,14 +2915,19 @@ def assertion_6_mempool(run, evidence, count):
                 and not tracker.never_sealed_still_pooled():
             break
         run.idle(0.3)
+    unread_scala_input_blocks = sorted(
+        scala_input_block_ids_seen - set(scala_ids_cache))
     tracker.cross_check_scala(scala_input_chain_txids,
-                              corpus_available=bool(scala_input_chain_txids))
+                              corpus_available=bool(scala_input_chain_txids),
+                              unread_block_ids=unread_scala_input_blocks)
+    result['scala_input_blocks_seen'] = len(scala_input_block_ids_seen)
+    result['scala_input_blocks_unread_count'] = len(unread_scala_input_blocks)
     result['sweeps_skipped_tip_moved'] = unstable_sweeps
     result['route_window_seconds'] = MEMPOOL_ROUTE_SECONDS
     result['scala_input_chain_txids_seen'] = len(scala_input_chain_txids)
     result['scala_routes_tried'] = sorted(scala_routes_tried)
     result['ordering_heights_unread'] = sorted(pending_heights)
-    result['rust_applied_heights'] = len(rust_block_at)
+    result['rust_chain_heights_resolved'] = len(rust_chain)
     in_input_block = tracker.located
     credited = tracker.credited
     confirmed_by_ordering = tracker.confirmed_by_ordering

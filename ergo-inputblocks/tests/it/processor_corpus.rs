@@ -351,6 +351,44 @@ fn forks_spanning_across_multiple_ordering_blocks() {
     assert!(h.p.announcement(&id(&f2b)).is_some());
 }
 
+/// `forks(&tip)` reports only the CURRENT ordering tip, so a tree kept
+/// under any other ordering id was invisible to an operator (and to the
+/// campaign's rollback check). `retained_trees` lists every one.
+#[test]
+fn retained_trees_lists_every_ordering_id_not_only_the_tip() {
+    let mut h = Harness::new();
+    let ib1 = h.ann(ORD, None, &[]);
+    h.apply_empty(&ib1);
+    let ib2 = h.ann(ORD2, None, &[]);
+    h.apply_empty(&ib2);
+    assert_eq!(h.p.best_input_chain(), vec![id(&ib1)]);
+
+    let retained = h.p.retained_trees();
+    let ord = retained
+        .iter()
+        .find(|t| t.ordering_id == ORD)
+        .expect("ORD listed");
+    let ord2 = retained
+        .iter()
+        .find(|t| t.ordering_id == ORD2)
+        .expect("the NON-tip ordering id is listed too");
+    assert_eq!((ord.forks, ord.records), (1, 1));
+    assert_eq!((ord2.forks, ord2.records), (1, 1));
+    assert!(ord.tree && ord2.tree);
+    assert_eq!(retained.len(), 2);
+
+    // Once the chain moves past both, the trees go (records stay inside
+    // the pruning window, and are reported as records without a tree).
+    h.ordering_applied([0xB1; 32], FULL + 1);
+    let after = h.p.retained_trees();
+    assert!(after.iter().all(|t| !t.tree && t.forks == 0), "{after:?}");
+    assert_eq!(after.iter().map(|t| t.records).sum::<usize>(), 2);
+    h.ordering_applied([0xB2; 32], FULL + 2);
+    h.ordering_applied([0xB3; 32], FULL + 3);
+    h.ordering_applied([0xB4; 32], FULL + 4);
+    assert!(h.p.retained_trees().is_empty());
+}
+
 // ----- ordering-block announcements -----
 
 #[test]

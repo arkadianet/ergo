@@ -101,6 +101,16 @@ pub(crate) enum FeedEventKind {
         header_id: String,
         reason: String,
     },
+    /// An announced ordering block went straight to a full download
+    /// without a reconstruction being attempted — the node held no input
+    /// chain to rebuild from. Distinct from a fallback, where a rebuild
+    /// WAS attempted and refused: counting these as neither is what made
+    /// the fallback total undercount full downloads.
+    OrderingReconstructSkipped {
+        height: u32,
+        header_id: String,
+        reason: String,
+    },
 }
 
 /// Previous-tick observations the differ compares against. `primed=false`
@@ -580,6 +590,9 @@ mod tests {
                 } => format!("reconstructed:{order}:{key}:{height}"),
                 FeedEventKind::OrderingReconstructFallback { reason, .. } => {
                     format!("reconstruct_fallback:{reason}")
+                }
+                FeedEventKind::OrderingReconstructSkipped { reason, .. } => {
+                    format!("reconstruct_skipped:{reason}")
                 }
             })
             .collect()
