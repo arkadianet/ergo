@@ -65,25 +65,49 @@ pub(crate) fn migrate_schema(db: &Arc<Database>) -> Result<(), StateError> {
         });
     }
 
+    let mut invalidate = false;
     let expected_id = match height {
-        None | Some(0) => None,
-        Some(height) => Some(read_chain_index_header(db, height)?),
-    };
-    if let (Some(stored), Some(expected)) = (stored_id, expected_id) {
-        if stored != expected {
-            return Err(StateError::DbCorruption {
-                table: "wallet_scan_header_id",
-                key: String::new(),
-                reason: "cursor header does not match chain_index".to_string(),
-            });
+        None => {
+            invalidate |= stored_id.is_some();
+            None
         }
-    }
+        Some(0) => {
+            invalidate |= stored_id.is_some();
+            None
+        }
+        Some(height) => match read_chain_index_header(db, height) {
+            Ok(expected) if stored_id.is_some_and(|stored| stored != expected) => {
+                tracing::warn!(
+                    height,
+                    "wallet scan cursor header does not match chain_index; invalidating wallet"
+                );
+                invalidate = true;
+                None
+            }
+            Ok(expected) => Some(expected),
+            Err(error) => {
+                tracing::warn!(
+                    height,
+                    %error,
+                    "wallet scan cursor cannot be anchored in chain_index; invalidating wallet"
+                );
+                invalidate = true;
+                None
+            }
+        },
+    };
 
     let txn = crate::begin_write_qr(db)?;
     {
         let mut version_table = txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)?;
+        let mut height_table = txn.open_table(tables::WALLET_SCAN_HEIGHT)?;
         let mut header_table = txn.open_table(tables::WALLET_SCAN_HEADER_ID)?;
-        if let Some(header_id) = expected_id {
+        if invalidate {
+            height_table.remove(())?;
+            header_table.remove(())?;
+            txn.open_table(tables::WALLET_SCAN_INVALIDATED)?
+                .insert((), true)?;
+        } else if let Some(header_id) = expected_id {
             header_table.insert((), header_id)?;
         } else {
             header_table.remove(())?;
@@ -190,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_schema_rejects_legacy_cursor_without_chain_index() {
+    fn migrate_schema_invalidates_legacy_cursor_without_chain_index() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         {
@@ -202,14 +226,68 @@ mod tests {
             txn.commit().unwrap();
         }
 
-        assert!(matches!(
-            migrate_schema(&db),
-            Err(StateError::DbCorruption {
-                table: "chain_index",
-                ..
-            })
-        ));
+        migrate_schema(&db).unwrap();
         let txn = db.begin_read().unwrap();
-        assert!(txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE).is_err());
+        assert!(txn
+            .open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .map(|row| row.value())
+            .unwrap_or(false));
+        assert!(txn
+            .open_table(tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .map(|row| row.value()),
+            Some(WALLET_SCHEMA_VERSION)
+        );
+    }
+
+    #[test]
+    fn migrate_schema_invalidates_cursor_header_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let chain_id = [0x42; 32];
+        let stored_id = [0x43; 32];
+        {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(CHAIN_INDEX)
+                .unwrap()
+                .insert(7u64, chain_id.as_slice())
+                .unwrap();
+            txn.open_table(tables::WALLET_SCAN_HEIGHT)
+                .unwrap()
+                .insert((), 7u32)
+                .unwrap();
+            txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+                .unwrap()
+                .insert((), stored_id)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+
+        migrate_schema(&db).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert!(txn
+            .open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .map(|row| row.value())
+            .unwrap_or(false));
+        assert!(txn
+            .open_table(tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .is_none());
     }
 }
