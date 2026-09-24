@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask};
 use ergo_mempool::weight;
+use ergo_primitives::digest::blake2b256;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::header::read_header;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::SyncExecutor;
@@ -57,19 +60,54 @@ fn check_configured_genesis(
     }
     let actual = store
         .get_header_id_at_height(1)
-        .map_err(|e| format!("boot: failed to read canonical genesis header id: {e}"))?;
-    match actual {
-        Some(actual) if actual == expected => Ok(()),
-        Some(actual) => Err(format!(
+        .map_err(|e| format!("boot: failed to read canonical genesis header id: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store has no canonical header at height 1 (best_header_height = {})",
+                chain.best_header_height
+            )
+        })?;
+    if actual != expected {
+        return Err(format!(
             "boot: configured genesis id mismatch: expected {}, got {}",
             hex::encode(expected),
             hex::encode(actual)
-        )),
-        None => Err(format!(
-            "boot: Dense store has no canonical header at height 1 (best_header_height = {})",
-            chain.best_header_height
-        )),
+        ));
     }
+    let bytes = store
+        .get_header(&actual)
+        .map_err(|e| format!("boot: failed to read stored genesis header: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store is missing stored genesis header {}",
+                hex::encode(actual)
+            )
+        })?;
+    let computed = blake2b256(&bytes);
+    if computed.as_bytes() != &actual {
+        return Err(format!(
+            "boot: stored genesis header hash mismatch: expected {}, got {}",
+            hex::encode(actual),
+            hex::encode(computed.as_bytes())
+        ));
+    }
+    let mut reader = VlqReader::new(&bytes);
+    let header = read_header(&mut reader)
+        .map_err(|e| format!("boot: failed to decode stored genesis header: {e}"))?;
+    if reader.remaining() != 0 {
+        return Err(format!(
+            "boot: stored genesis header has {} trailing bytes",
+            reader.remaining()
+        ));
+    }
+    if header.height != 1 || header.parent_id.as_bytes() != &[0u8; 32] {
+        return Err(format!(
+            "boot: stored genesis header fields mismatch: height={}, parent_id={}",
+            header.height,
+            hex::encode(header.parent_id.as_bytes())
+        ));
+    }
+    Ok(())
 }
 
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
@@ -588,30 +626,105 @@ mod tests {
     use ergo_state::store::StateStore;
     use ergo_state::{DigestStateStore, StateBackendKind};
 
-    #[test]
-    fn configured_genesis_check_rejects_wrong_dense_genesis() {
+    fn mainnet_header_bytes(height: u32) -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["height"].as_u64() == Some(u64::from(height)))
+            .unwrap();
+        hex::decode(row["bytes"].as_str().unwrap()).unwrap()
+    }
+
+    fn store_with_genesis_header() -> (tempfile::TempDir, StateStore, [u8; 32]) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
         store.initialize_genesis(&[]).unwrap();
-        let actual = [0x11; 32];
+        let bytes = mainnet_header_bytes(1);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
         store
             .store_validated_header(
                 &actual,
-                &[0x01],
+                &bytes,
                 &HeaderMeta {
                     parent_id: [0u8; 32],
                     height: 1,
                     cumulative_score: vec![1],
                     pow_validity: 1,
-                    timestamp: 0,
+                    timestamp: header.timestamp,
                 },
                 Some((1, vec![1])),
             )
             .unwrap();
+        (dir, store, actual)
+    }
+
+    #[test]
+    fn configured_genesis_check_validates_stored_header() {
+        let (_dir, store, actual) = store_with_genesis_header();
         let store = StateBackendKind::Utxo(store);
 
         assert!(check_configured_genesis(&store, Some(actual)).is_ok());
         assert!(check_configured_genesis(&store, Some([0x22; 32])).is_err());
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_missing_stored_header() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store.test_remove_header_row_unsafe(&actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("missing stored genesis header"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_stored_hash_mismatch() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store
+            .test_corrupt_header_bytes_unsafe(&actual, b"not a header")
+            .unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("hash mismatch"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_non_genesis_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let bytes = mainnet_header_bytes(2);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &actual,
+                &bytes,
+                &HeaderMeta {
+                    parent_id: *header.parent_id.as_bytes(),
+                    height: 2,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(actual, 2, vec![1])
+            .unwrap();
+        store.test_force_put_header_chain_index(1, &actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("fields mismatch"));
     }
 
     #[tokio::test]
