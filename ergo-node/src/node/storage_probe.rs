@@ -2,14 +2,20 @@
 //!
 //! Filesystem probes can hang on network mounts. A dedicated, detached thread
 //! publishes complete samples so API requests and shutdown never wait for them.
+//! Samples expire if the worker stops publishing. The worker keeps only a weak
+//! reference between probes and exits after waking when all readers are gone.
+//! Shutdown never joins the worker, since an in-flight probe may hang indefinitely.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 
 use crate::api_bridge::HostPaths;
+
+/// Six times the production 10 s interval; a hung probe must not serve old gauges forever.
+const MAX_SAMPLE_AGE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageSample {
@@ -19,19 +25,40 @@ pub struct StorageSample {
     pub disk_total_bytes: Option<u64>,
 }
 
-/// Lock-free slot containing a complete sample, or nothing before the first probe.
+/// Lock-free slot exposing a complete sample, or nothing before the first probe
+/// and once the last sample expires.
 #[derive(Default)]
 pub struct LiveStorage {
-    sample: ArcSwapOption<StorageSample>,
+    sample: ArcSwapOption<CapturedSample>,
+}
+
+struct CapturedSample {
+    sample: StorageSample,
+    captured_at: Instant,
 }
 
 impl LiveStorage {
     pub fn latest(&self) -> Option<StorageSample> {
-        self.sample.load().as_deref().copied()
+        self.sample
+            .load()
+            .as_deref()
+            .filter(|sample| sample.captured_at.elapsed() <= MAX_SAMPLE_AGE)
+            .map(|sample| sample.sample)
     }
 
     pub fn store_sample(&self, sample: StorageSample) {
-        self.sample.store(Some(Arc::new(sample)));
+        self.sample.store(Some(Arc::new(CapturedSample {
+            sample,
+            captured_at: Instant::now(),
+        })));
+    }
+
+    #[cfg(test)]
+    fn store_sample_at(&self, sample: StorageSample, captured_at: Instant) {
+        self.sample.store(Some(Arc::new(CapturedSample {
+            sample,
+            captured_at,
+        })));
     }
 }
 
@@ -47,19 +74,31 @@ pub fn sample(paths: &HostPaths) -> StorageSample {
     }
 }
 
-/// Spawn a process-lifetime thread, sampling immediately and then every `every`.
-/// Like telemetry, the thread is detached; shutdown never joins a hung probe.
+/// Spawn a thread sampling immediately and then every `every` while readers exist.
+/// The thread is detached; shutdown never joins a hung probe.
 pub fn spawn(paths: HostPaths, every: Duration) -> Arc<LiveStorage> {
+    let (live, _thread) = spawn_inner(paths, every);
+    live
+}
+
+fn spawn_inner(
+    paths: HostPaths,
+    every: Duration,
+) -> (Arc<LiveStorage>, std::thread::JoinHandle<()>) {
     let live = Arc::new(LiveStorage::default());
-    let writer = Arc::clone(&live);
-    std::thread::Builder::new()
+    let writer = Arc::downgrade(&live);
+    let thread = std::thread::Builder::new()
         .name("storage-probe".into())
         .spawn(move || loop {
+            let Some(writer) = writer.upgrade() else {
+                break;
+            };
             writer.store_sample(sample(&paths));
+            drop(writer);
             std::thread::sleep(every);
         })
         .expect("storage-probe thread spawn");
-    live
+    (live, thread)
 }
 
 /// On-disk sizes of the two redb stores, read by the sampler. Plain
@@ -147,7 +186,67 @@ mod tests {
         }
     }
 
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "storage probe deadline exceeded");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn spawn_publishes_first_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(&paths.state_db, b"redb-payload").unwrap();
+        std::fs::write(&paths.index_db, [0u8; 567]).unwrap();
+        let live = spawn(paths, Duration::from_millis(20));
+
+        wait_until(|| live.latest().is_some());
+        let sample = live.latest().unwrap();
+        assert_eq!(sample.state_db_bytes, Some(12));
+        assert_eq!(sample.index_db_bytes, Some(567));
+        let free = sample
+            .disk_free_bytes
+            .expect("tempdir is on a mounted volume");
+        let total = sample
+            .disk_total_bytes
+            .expect("tempdir is on a mounted volume");
+        assert!(free <= total);
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn spawn_refreshes_sample_periodically() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let file = std::fs::File::create(&paths.state_db).unwrap();
+        file.set_len(12).unwrap();
+        let live = spawn(paths, Duration::from_millis(20));
+
+        wait_until(|| {
+            live.latest()
+                .is_some_and(|sample| sample.state_db_bytes == Some(12))
+        });
+        file.set_len(1234).unwrap();
+        wait_until(|| {
+            live.latest()
+                .is_some_and(|sample| sample.state_db_bytes == Some(1234))
+        });
+    }
+
+    #[test]
+    fn spawn_thread_exits_after_live_storage_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (live, thread) = spawn_inner(paths(dir.path()), Duration::from_millis(20));
+        wait_until(|| live.latest().is_some());
+
+        drop(live);
+        wait_until(|| thread.is_finished());
+        thread.join().unwrap();
+    }
 
     #[test]
     fn sample_reads_db_sizes_and_disk_space() {
@@ -202,6 +301,25 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn latest_is_none_when_sample_is_stale() {
+        let live = LiveStorage::default();
+        let sample = StorageSample {
+            state_db_bytes: Some(12),
+            index_db_bytes: Some(567),
+            disk_free_bytes: Some(100),
+            disk_total_bytes: Some(200),
+        };
+        live.store_sample_at(
+            sample,
+            Instant::now() - MAX_SAMPLE_AGE - Duration::from_secs(1),
+        );
+        assert_eq!(live.latest(), None);
+
+        live.store_sample(sample);
+        assert_eq!(live.latest(), Some(sample));
+    }
 
     #[test]
     fn sample_missing_files_are_none() {
