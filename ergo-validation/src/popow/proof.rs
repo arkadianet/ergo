@@ -222,7 +222,11 @@ impl NipopowProofExt for NipopowProof {
             return true;
         }
         let suffix_head_height = self.suffix_head.header.height;
-        let epoch_length = epoch_length_for_height(suffix_head_height, chain_config);
+        // Scala NipopowProof.scala:85-89 selects the configured EIP-37
+        // epoch length even for proofs preceding activation.
+        let epoch_length = chain_config
+            .eip37_epoch_length
+            .unwrap_or(chain_config.epoch_length);
         let chain = self.headers_chain();
 
         // Scala: linear scan with a `lastIndex` cursor for amortized
@@ -405,16 +409,6 @@ fn use_last_epochs_for_config(chain_config: &DifficultyParams) -> u32 {
     chain_config.use_last_epochs
 }
 
-fn epoch_length_for_height(height: u32, chain_config: &DifficultyParams) -> u32 {
-    match (
-        chain_config.eip37_activation_height,
-        chain_config.eip37_epoch_length,
-    ) {
-        (Some(activation), Some(epoch_len)) if height >= activation => epoch_len,
-        _ => chain_config.epoch_length,
-    }
-}
-
 /// Scala parity: `DifficultyAdjustment.nextRecalculationHeight`
 /// (`DifficultyAdjustment.scala:27-33`).
 fn next_recalculation_height(height: u32, epoch_length: u32) -> u32 {
@@ -457,9 +451,12 @@ fn previous_heights_required_for_recalculation(
     }
 }
 
+/// Heights needed for the next difficulty recalculation after `height`.
+///
+/// `epoch_length` must be nonzero.
 /// Scala parity: `DifficultyAdjustment.heightsForNextRecalculation`
 /// (`DifficultyAdjustment.scala:53-55`).
-fn heights_for_next_recalculation(
+pub fn heights_for_next_recalculation(
     height: u32,
     epoch_length: u32,
     use_last_epochs: u32,
@@ -952,5 +949,29 @@ mod tests {
         assert!(p.has_valid_difficulty_headers(&mainnet()));
         assert!(p.has_valid_per_header_pow());
         assert!(p.is_valid(&mainnet()));
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn difficulty_headers_pre_activation_uses_scala_proof_epoch() {
+        // NipopowProof.scala:85-100 uses eip37EpochLength regardless of
+        // activation. At H=2049 the required heights are 1152..=2176,
+        // filtered to heights below H, so 1024 is not required.
+        let mut head = header(HEIGHT_2_HEX);
+        head.height = 2049;
+        let prefix = [1, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+            .into_iter()
+            .map(|height| {
+                let mut h = header(GENESIS_HEX);
+                h.height = height;
+                popow_hdr(h, vec![])
+            })
+            .collect();
+        let mut p = proof(prefix, popow_hdr(head, vec![]), vec![]);
+        p.continuous = true;
+        assert!(p.has_valid_difficulty_headers(&mainnet()));
+        p.prefix.retain(|entry| entry.header.height != 1280);
+        assert!(!p.has_valid_difficulty_headers(&mainnet()));
     }
 }
