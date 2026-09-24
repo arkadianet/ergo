@@ -261,6 +261,24 @@ fn validate_cthreshold_shape(k: u16, children: &[SigmaBoolean]) -> Result<usize,
     }
 }
 
+fn validate_cthreshold_tree(proposition: &SigmaBoolean) -> Result<(), SigmaVerifyError> {
+    match proposition {
+        SigmaBoolean::Cthreshold { k, children } => {
+            validate_cthreshold_shape(*k, children)?;
+            for child in children {
+                validate_cthreshold_tree(child)?;
+            }
+        }
+        SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
+            for child in children {
+                validate_cthreshold_tree(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Verify a sigma proof against a proposition and message.
 ///
 /// This is the top-level entry point that handles AND/OR composition.
@@ -270,10 +288,6 @@ pub fn verify_sigma_proof(
     proof_bytes: &[u8],
     message: &[u8],
 ) -> Result<bool, SigmaVerifyError> {
-    if let SigmaBoolean::Cthreshold { k, children } = proposition {
-        validate_cthreshold_shape(*k, children)?;
-    }
-
     // Trivial propositions don't need proof verification
     match proposition {
         SigmaBoolean::TrivialProp(true) => return Ok(true),
@@ -282,6 +296,7 @@ pub fn verify_sigma_proof(
     }
 
     if proof_bytes.is_empty() {
+        validate_cthreshold_tree(proposition)?;
         return Ok(false);
     }
 
@@ -658,6 +673,20 @@ mod tests {
                     k: actual_k,
                     n: actual_n,
                 }) if actual_k == k && actual_n == n
+            ));
+        }
+    }
+
+    #[test]
+    fn cand_and_cor_reject_nested_invalid_cthreshold_with_empty_proof() {
+        let invalid = threshold_prop(2, 1);
+        for prop in [
+            SigmaBoolean::Cand(vec![SigmaBoolean::Cor(vec![invalid.clone()])]),
+            SigmaBoolean::Cor(vec![SigmaBoolean::Cand(vec![invalid])]),
+        ] {
+            assert!(matches!(
+                verify_sigma_proof(&prop, &[], b"msg"),
+                Err(SigmaVerifyError::InvalidThreshold { k: 2, n: 1 })
             ));
         }
     }
