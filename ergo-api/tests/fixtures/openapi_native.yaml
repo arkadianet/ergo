@@ -1188,6 +1188,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -2190,6 +2195,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiRecentBlock:
       type: object
@@ -3693,6 +3699,17 @@ components:
             - idle
       - type: object
         required:
+        - detail
+        - type
+        properties:
+          detail:
+            type: string
+          type:
+            type: string
+            enum:
+            - required
+      - type: object
+        required:
         - fromHeight
         - type
         properties:
@@ -3716,8 +3733,8 @@ components:
             enum:
             - unavailable
       description: |-
-        Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
-        state; `unavailable` is returned only on a backend that cannot replay blocks.
+        Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+        `unavailable` means the backend cannot replay blocks.
     RestoreRequest:
       type: object
       description: '`POST /api/v1/wallet/restore` request. Secrets body-only, never logged.'
@@ -4289,7 +4306,7 @@ components:
           minimum: 0
         scanInvalidated:
           type: boolean
-          description: The wallet scan was invalidated (balances/addresses may be stale until a rescan).
+          description: The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
         tipHeight:
           type: integer
           format: int32

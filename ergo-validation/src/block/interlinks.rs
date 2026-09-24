@@ -157,7 +157,7 @@ mod interlinks_tests {
         // Set up: parent header with some parent interlinks.
         // Current interlinks must equal update_interlinks(parent_header,
         // parent_links).
-        let parent = test_header(10, 0x20000000);
+        let parent = test_header(10, 0x1a017650);
         let parent_links = vec![
             ModifierId::from_bytes([0xAA; 32]),
             ModifierId::from_bytes([0xBB; 32]),
@@ -173,7 +173,7 @@ mod interlinks_tests {
 
     #[test]
     fn validate_interlinks_rejects_structure_mismatch() {
-        let parent = test_header(10, 0x20000000);
+        let parent = test_header(10, 0x1a017650);
         let parent_links = vec![ModifierId::from_bytes([0xAA; 32])];
         let expected = update_interlinks(&parent, &parent_links)
             .expect("test fixture parent header serializes");
@@ -204,10 +204,8 @@ mod interlinks_tests {
         // interlink fields, parent header is non-genesis. Before
         // the guard, this would hit `update_interlinks` `assert!`
         // and panic. Must surface as rule 402 with the named reason.
-        let mut parent = test_header(10, 0x20000000);
-        // Non-genesis: any non-zero parent_id byte breaks the
-        // `parent_id == [0; 32]` test in `is_genesis`.
-        parent.parent_id = ModifierId::from_bytes([0xFF; 32]);
+        let parent = test_header(2, 0x1a017650);
+        // Height 2 is non-genesis even when its parent id is zero.
 
         let parent_ext = ext_with_fields([0; 32], vec![]); // no interlink fields
         let current_ext = ext_with_links([1; 32], &[ModifierId::from_bytes([0xCC; 32])]);
@@ -228,7 +226,7 @@ mod interlinks_tests {
     fn validate_interlinks_rejects_encoding_failure() {
         // Current extension has an interlinks field whose value is
         // an invalid length (rule 401 — decode error).
-        let parent = test_header(10, 0x20000000);
+        let parent = test_header(10, 0x1a017650);
         let parent_links = vec![ModifierId::from_bytes([0xAA; 32])];
         let parent_ext = ext_with_links([0; 32], &parent_links);
 
@@ -250,7 +248,7 @@ mod interlinks_tests {
         // Parent extension itself has malformed interlinks.
         // Scala's `Failure(...) == Failure(...)` is always false, so
         // rule 402 fires. We map that to InterlinkStructureMismatch.
-        let parent = test_header(10, 0x20000000);
+        let parent = test_header(10, 0x1a017650);
         let bad_parent_field = ExtensionField {
             key: [INTERLINKS_VECTOR_PREFIX, 0],
             value: vec![0x01], // 1 byte, expected 33
@@ -285,7 +283,7 @@ mod interlinks_tests {
         // the assertion-on-empty-prev case is documented as caller
         // responsibility (Scala's `require` is the matching
         // behavior).
-        let parent = test_header(0, 0x20000000); // genesis (height 0)
+        let parent = test_header(1, 0x1a017650); // genesis (height 1)
         let parent_ext = ext_with_fields([0; 32], vec![]);
         let expected =
             update_interlinks(&parent, &[]).expect("test fixture genesis header serializes");

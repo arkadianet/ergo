@@ -118,6 +118,16 @@ pub enum StateError {
         mode_description: String,
         best_header_height: u32,
     },
+    #[error(
+        "apply_popow_proof refused: store is not fresh \
+         (best_header_id={}, best_header_height={})",
+        hex::encode(current_header_id),
+        current_header_height
+    )]
+    ApplyPopowProofNotFresh {
+        current_header_id: [u8; 32],
+        current_header_height: u32,
+    },
     /// `apply_popow_proof` refused because the store already has
     /// full-block state applied. Reciprocal guard to
     /// `install_snapshot_state`'s own check:

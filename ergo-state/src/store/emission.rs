@@ -559,7 +559,21 @@ mod tests {
         (store, id)
     }
 
-    fn apply(store: &mut StateStore, height: u32, txs: Vec<Transaction>, nonce: u64) -> [u8; 32] {
+    fn apply(
+        store: &mut StateStore,
+        height: u32,
+        mut txs: Vec<Transaction>,
+        nonce: u64,
+    ) -> [u8; 32] {
+        // These unchecked state tests need no UTXO effects when emission is
+        // omitted, but a stored section must be non-empty (BlockTransactions.scala:42).
+        if txs.is_empty() {
+            txs.push(Transaction {
+                inputs: vec![],
+                data_inputs: vec![],
+                output_candidates: vec![],
+            });
+        }
         let (removes, inserts) =
             StateStore::build_utxo_changes_raw(&txs.iter().collect::<Vec<_>>()).unwrap();
         let (root, _) = super::super::dry_run::apply_change_set_via_prover(

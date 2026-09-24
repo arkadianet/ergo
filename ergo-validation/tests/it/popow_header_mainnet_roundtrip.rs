@@ -197,10 +197,10 @@ fn popow_header_roundtrips_byte_identical_against_scala_corpus_h2_and_h3() {
 }
 
 #[test]
-fn popow_header_genesis_height_1_vacuous_empty_proof() {
+fn popow_header_genesis_height_1_canonical_empty_proof() {
     // Genesis (h=1) has 0 extension fields in mainnet. The PoPowHeader
-    // built from genesis with empty interlinks must carry an empty
-    // interlinks_proof and round-trip identically. Matches Scala
+    // built from genesis with empty interlinks must carry the canonical
+    // empty proof bytes and round-trip identically. Matches Scala
     // `PoPowHeader.scala:58-60` vacuous-proof case.
     let blocks = load_blocks();
     let genesis = blocks.iter().find(|b| b.height == 1).unwrap();

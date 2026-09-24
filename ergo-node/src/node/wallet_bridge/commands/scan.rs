@@ -63,21 +63,19 @@ pub(crate) struct RescanScanMatcher {
 }
 
 impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
+    #[allow(clippy::result_large_err)]
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
         boxes
             .iter()
             .map(|bytes| {
                 let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-                match ergo_ser::ergo_box::read_ergo_box(&mut r) {
-                    Ok(b) => self.registry.matching_scan_ids(&b),
-                    // On-chain boxes were already validated, so a parse failure
-                    // here is a serializer fault, not bad input — surface it and
-                    // degrade that box to "no match" rather than abort the rescan.
-                    Err(e) => {
-                        tracing::error!(error = %e, "scan rescan: output box parse failed; no match");
-                        Vec::new()
-                    }
-                }
+                let b = ergo_ser::ergo_box::read_ergo_box(&mut r).map_err(|e| {
+                    redb::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("scan rescan output box parse failed: {e}"),
+                    ))
+                })?;
+                Ok(self.registry.matching_scan_ids(&b))
             })
             .collect()
     }
@@ -2135,23 +2133,69 @@ mod tests {
         // the contract `rescan_full_rebuild` relies on.
         let hit = serialize_box_json(&box_json_with_asset(0x11));
         let miss = serialize_box_json(&box_json(5, 100, 0x77, 0));
-        let out = matcher.match_boxes(&[hit.as_slice(), miss.as_slice()]);
+        let out = matcher
+            .match_boxes(&[hit.as_slice(), miss.as_slice()])
+            .unwrap();
         assert_eq!(out, vec![vec![11u16], vec![]]);
     }
 
+    #[allow(clippy::result_large_err)]
     #[test]
-    fn rescan_matcher_degrades_unparseable_box_to_no_match() {
-        use ergo_state::wallet::scan::ScanRescanMatcher;
+    fn rescan_matcher_rejects_unparseable_box_and_invalidates_rescan() {
+        use ergo_state::wallet::scan::{
+            OwnedBlockOutput, RescanBlock, RescanTx, ScanRescanMatcher, WalletScanService,
+        };
+        use std::sync::Arc;
+
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap();
         let matcher = build_rescan_matcher(&db).unwrap().unwrap();
-
-        // Garbage bytes can't be a box: degrade that slot to "no match" rather
-        // than abort the whole rescan. Result count still matches input count.
-        let good = serialize_box_json(&box_json_with_asset(0x11));
         let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
-        let out = matcher.match_boxes(&[bad, good.as_slice()]);
-        assert_eq!(out, vec![vec![], vec![11u16]]);
+
+        assert!(matcher.match_boxes(&[bad]).is_err());
+
+        let block = RescanBlock {
+            block_id: [0xE1; 32],
+            txs: vec![RescanTx {
+                tx_id: [0x01; 32],
+                inputs: vec![],
+                outputs: vec![OwnedBlockOutput {
+                    box_id: [0xA1; 32],
+                    output_index: 0,
+                    ergo_tree_bytes: vec![0x00],
+                    value: 1_000_000,
+                    assets: vec![],
+                    miner_reward_pubkey: None,
+                    box_bytes: bad.to_vec(),
+                }],
+            }],
+        };
+        let db = Arc::new(db);
+        let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+            Ok((h == 1).then_some(block.clone()))
+        };
+
+        let result = WalletScanService::rescan_full_rebuild(
+            &db,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeMap::new(),
+            0,
+            1,
+            read_block,
+            || -> Result<u32, redb::Error> { Ok(1) },
+            || false,
+            Some(&matcher),
+        );
+
+        assert!(result.is_err());
+        let txn = db.begin_read().unwrap();
+        let table = txn
+            .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+            .unwrap();
+        assert_eq!(
+            table.get(()).unwrap().map(|value| value.value()),
+            Some(true)
+        );
     }
 
     #[test]

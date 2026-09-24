@@ -2699,11 +2699,12 @@ impl StateStore {
     /// security argument lives one layer up.
     ///
     /// Precondition: the store is in `HeaderAvailability::Dense` mode
-    /// with `best_header_height == 0` (fresh node). Calling this on
-    /// a node that already has chain state returns
-    /// `StateError::ApplyPopowProofWrongMode` rather than
-    /// overwriting; the re-bootstrap case is operator-driven (wipe
-    /// data_dir).
+    /// with `best_header_height == 0` (fresh node). A Dense store with
+    /// an existing header tip returns `StateError::ApplyPopowProofNotFresh`;
+    /// a non-Dense store returns `StateError::ApplyPopowProofWrongMode`,
+    /// and a store with full-block state returns
+    /// `StateError::ApplyPopowProofRefused`. The re-bootstrap case is
+    /// operator-driven (wipe data_dir).
     ///
     /// Does NOT touch `CHAIN_INDEX` (full-block index) or
     /// `best_full_block_*`. The Mode 2 snapshot bootstrap remains

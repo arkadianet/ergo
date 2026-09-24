@@ -26,11 +26,11 @@ struct FakeMatcher {
 }
 
 impl ScanRescanMatcher for FakeMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        boxes
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
+        Ok(boxes
             .iter()
             .map(|b| self.by_box_bytes.get(*b).cloned().unwrap_or_default())
-            .collect()
+            .collect())
     }
 }
 
@@ -258,8 +258,8 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
 /// returns an empty Vec regardless of input count.
 struct BadCountMatcher;
 impl ScanRescanMatcher for BadCountMatcher {
-    fn match_boxes(&self, _boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        Vec::new() // wrong length whenever the block has ≥1 output box
+    fn match_boxes(&self, _boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
+        Ok(Vec::new()) // wrong length whenever the block has ≥1 output box
     }
 }
 
@@ -270,6 +270,137 @@ fn read_invalidated(db: &Database) -> Option<bool> {
         Err(_) => return None,
     };
     t.get(()).unwrap().map(|g| g.value())
+}
+
+fn empty_block(id: u8) -> RescanBlock {
+    RescanBlock {
+        block_id: [id; 32],
+        txs: vec![],
+    }
+}
+
+#[test]
+fn successful_full_rebuild_clears_invalidation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+        Ok((h == 1).then_some(block.clone()))
+    };
+
+    WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        read_block,
+        || Ok(1),
+        || false,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(read_invalidated(&db), Some(false));
+}
+
+#[test]
+fn missing_interior_block_aborts_and_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+        Ok((h == 1).then_some(block.clone()))
+    };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        read_block,
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn partial_replay_failure_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+        if h == 1 {
+            Ok(Some(block.clone()))
+        } else {
+            Err(redb::Error::Io(std::io::Error::other("replay failure")))
+        }
+    };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        1,
+        2,
+        read_block,
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn read_tip_failure_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block =
+        move |_h: u32| -> Result<Option<RescanBlock>, redb::Error> { Ok(Some(block.clone())) };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        read_block,
+        || Err(redb::Error::Io(std::io::Error::other("tip failure"))),
+        || false,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn cancellation_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        |_h| Ok(None),
+        || Ok(1),
+        || true,
+        None,
+    );
+
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(read_invalidated(&db), Some(true));
 }
 
 #[test]

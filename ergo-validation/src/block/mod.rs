@@ -120,6 +120,7 @@ pub struct BlockValidationContext<'a> {
     pub utxo: &'a dyn UtxoView,
     /// Votable protocol parameters at the current epoch.
     pub params: &'a ProtocolParams,
+    pub rule_306_max_block_size: u32,
     /// Voting epoch length in blocks (Scala `votingSettings.votingLength`).
     /// Mainnet 1024, testnet 128. Drives rule 215 (`hdrVotesUnknown`) —
     /// the rule only fires on headers at heights where `height %

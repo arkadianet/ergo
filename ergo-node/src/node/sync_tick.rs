@@ -75,8 +75,7 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
     // proof apply can complete before snapshot manifest verification
     // needs a canonical header at snapshot_height. No-op
-    // unless `[node] nipopow_bootstrap = true` AND history is
-    // empty AND the reducer hasn't reached terminal state.
+    // unless NiPoPoW bootstrap is enabled and the reducer is active.
     drive_popow_bootstrap(state, now);
 
     // 0. Mode 2 consume-side discovery fan-out. No-op unless this
@@ -322,7 +321,9 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
     } else {
         state.sync_interval_stable
     };
-    if now.duration_since(state.last_sync_broadcast) >= broadcast_interval {
+    if !super::sync_helpers::popow_blocks_sync_info(state)
+        && now.duration_since(state.last_sync_broadcast) >= broadcast_interval
+    {
         state.last_sync_broadcast = now;
 
         let connected: Vec<(PeerId, SyncVersion)> = state
@@ -487,10 +488,10 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     use ergo_validation::popow::NipopowVerificationResult;
 
     // Activity gate: the reducer stays active while the store is
-    // still in Dense mode (no proof applied yet). We deliberately do
-    // NOT gate on `best_header_height == 0` — normal header sync can
-    // race ahead between boot and quorum-met, but apply_popow_proof
-    // only refuses to run after the mode flips to PoPowSparse.
+    // still in Dense mode (no proof applied yet). The store's
+    // fresh-only precondition rejects a Dense store whose header tip
+    // is nonzero; that refusal is handled below without changing the
+    // existing header tables.
     let store_is_dense = matches!(
         state.store.chain_state_meta().header_availability,
         ergo_state::chain::HeaderAvailability::Dense
@@ -498,12 +499,7 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     let Some(popow) = state.popow_bootstrap.as_mut() else {
         return;
     };
-    if !store_is_dense
-        || matches!(
-            popow.state(),
-            ergo_sync::popow_bootstrap::PopowBootstrapState::Applied
-        )
-    {
+    if !store_is_dense || popow.is_terminal() {
         return;
     }
 
@@ -585,12 +581,12 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
                 Err(e) => {
                     warn!(
                         error = %e,
-                        "NiPoPoW: apply_popow_proof failed; bootstrap aborted",
+                        "NiPoPoW: proof application refused; bootstrap abandoned",
                     );
-                    // Best-effort: clear the reducer so subsequent
-                    // ticks don't loop on the same proof.
+                    // Terminal failure releases outbound header sync without
+                    // reporting a proof that never committed as applied.
                     if let Some(popow) = state.popow_bootstrap.as_mut() {
-                        popow.mark_applied();
+                        popow.mark_abandoned(e.to_string());
                     }
                 }
             }
@@ -1415,10 +1411,15 @@ mod tests {
         install_reconstructed_snapshot, recover_snapshot_bootstrap, resolve_install_anchor,
         InstallAnchor,
     };
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::read_header;
+    use ergo_ser::popow_proof::NipopowProof;
     use ergo_state::store::StateStore;
     use ergo_state::test_helpers::nipopow_proof_dense_from_2;
     use ergo_state::HeaderSectionStore;
     use ergo_sync::snapshot_bootstrap::BootstrapState;
+    use ergo_validation::popow::algos::{build_popow_header, pack_interlinks, update_interlinks};
+    use ergo_validation::popow::proof::check_popow_header_interlinks_proof;
 
     // ----- helpers -----
 
@@ -1445,6 +1446,87 @@ mod tests {
     /// `dense_from_height` the fixture proof commits.
     const PROOF_DENSE_FROM_HEIGHT: u32 = 2;
 
+    fn production_profile_popow_proof() -> NipopowProof {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/headers_1_2000.json"
+        ))
+        .unwrap();
+        let headers: Vec<_> = rows
+            .iter()
+            .take(11)
+            .map(|row| {
+                let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+                read_header(&mut VlqReader::new(&bytes)).unwrap()
+            })
+            .collect();
+        assert_eq!(headers.len(), 11);
+        for (index, header) in headers.iter().enumerate() {
+            assert_eq!(header.height, index as u32 + 1);
+        }
+
+        let mut interlinks = Vec::new();
+        let mut popow_headers = Vec::with_capacity(headers.len());
+        for (index, header) in headers.iter().enumerate() {
+            if index > 0 {
+                interlinks = update_interlinks(&headers[index - 1], &interlinks).unwrap();
+            }
+            let extension_fields = pack_interlinks(&interlinks);
+            popow_headers.push(
+                build_popow_header(header.clone(), interlinks.clone(), &extension_fields).unwrap(),
+            );
+        }
+        assert_eq!(popow_headers[0].interlinks_proof, vec![0u8; 8]);
+        for popow_header in popow_headers.iter().skip(1) {
+            assert!(!popow_header.interlinks.is_empty());
+            assert!(check_popow_header_interlinks_proof(popow_header));
+        }
+
+        NipopowProof {
+            m: ergo_p2p::types::P2P_NIPOPOW_PROOF_M as u32,
+            k: ergo_p2p::types::P2P_NIPOPOW_PROOF_K as u32,
+            prefix: vec![popow_headers[0].clone()],
+            suffix_head: popow_headers[1].clone(),
+            suffix_tail: headers[2..].to_vec(),
+            continuous: true,
+        }
+    }
+
+    fn fresh_popow() -> ergo_sync::popow_bootstrap::PopowBootstrap {
+        ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            2,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        )
+    }
+
+    fn sync_info_count(rx: &mut crate::peer_loop::outbound::Receiver) -> usize {
+        let mut count = 0;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.code == ergo_p2p::message::CODE_SYNC_INFO {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn reply_to_sync(
+        state: &mut crate::node::NodeState,
+        peer: ergo_p2p::peer::PeerId,
+        now: std::time::Instant,
+    ) {
+        let actions = state.coordinator.on_sync_info(
+            peer,
+            state.registry.peers[&peer].sync_version,
+            &ergo_p2p::message::SyncInfo::V1 {
+                header_ids: vec![[1; 32]],
+            },
+            &state.store,
+            now,
+        );
+        // Exercise the real dispatch boundary for reciprocal replies.
+        super::flush_actions(state, actions);
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -1467,6 +1549,100 @@ mod tests {
         let now = base + ergo_p2p::peer::INACTIVE_TIMEOUT + std::time::Duration::from_secs(100);
         super::handle_sync_tick_at(&mut state, now);
         assert_eq!(state.peer_manager.peer_count(), 0);
+    }
+
+    #[test]
+    fn sync_info_fresh_popow_waits_until_proof_applied() {
+        use ergo_p2p::peer::SyncVersion;
+        use std::time::{Duration, Instant};
+        for version in [SyncVersion::V1, SyncVersion::V2] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+            state.popow_bootstrap = Some(fresh_popow());
+            let peer = "127.0.0.1:19001".parse().unwrap();
+            let now = Instant::now();
+            let mut rx = crate::node::tests::connect_test_peer(&mut state, peer, now);
+            state.registry.peers.get_mut(&peer).unwrap().sync_version = version;
+            state.last_sync_broadcast = now - Duration::from_secs(60);
+            let last_broadcast = state.last_sync_broadcast;
+            state.enable_anchor_scheduler = true;
+
+            crate::node::sync_helpers::send_initial_sync_info(&mut state, &peer, version, now);
+            reply_to_sync(&mut state, peer, now);
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(sync_info_count(&mut rx), 0);
+            assert_eq!(state.last_sync_broadcast, last_broadcast);
+            assert!(state
+                .coordinator
+                .sync_state_mut()
+                .not_synced_or_outdated(peer, now));
+            assert!(state.registry.peers.contains_key(&peer));
+
+            let proof = production_profile_popow_proof();
+            let popow = state.popow_bootstrap.as_mut().unwrap();
+            popow.mark_requested(peer, now);
+            assert!(matches!(
+                popow.on_proof_received(peer, proof.clone()),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(
+                sync_info_count(&mut rx),
+                0,
+                "one proof must not release quorum=2"
+            );
+            let other = "127.0.0.1:19002".parse().unwrap();
+            let popow = state.popow_bootstrap.as_mut().unwrap();
+            popow.mark_requested(other, now);
+            assert!(matches!(
+                popow.on_proof_received(other, proof),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
+
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(
+                state.popow_bootstrap.as_ref().unwrap().state(),
+                ergo_sync::popow_bootstrap::PopowBootstrapState::Applied
+            );
+            assert_eq!(
+                sync_info_count(&mut rx),
+                1,
+                "apply must release periodic sync in the same tick"
+            );
+            reply_to_sync(&mut state, peer, now + Duration::from_secs(1));
+            assert_eq!(sync_info_count(&mut rx), 1);
+            crate::node::sync_helpers::send_initial_sync_info(&mut state, &peer, version, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+        }
+    }
+
+    #[test]
+    fn sync_info_without_popow_or_after_abandonment_sends_normally() {
+        use std::time::{Duration, Instant};
+        for abandoned in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+            if abandoned {
+                let mut popow = fresh_popow();
+                popow.mark_abandoned("proof could not be applied".into());
+                state.popow_bootstrap = Some(popow);
+            }
+            let peer = "127.0.0.1:19001".parse().unwrap();
+            let now = Instant::now();
+            let mut rx = crate::node::tests::connect_test_peer(&mut state, peer, now);
+            state.last_sync_broadcast = now - Duration::from_secs(60);
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+            reply_to_sync(&mut state, peer, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+            crate::node::sync_helpers::send_initial_sync_info(
+                &mut state,
+                &peer,
+                ergo_p2p::peer::SyncVersion::V2,
+                now,
+            );
+            assert_eq!(sync_info_count(&mut rx), 1);
+        }
     }
 
     #[test]
@@ -1521,6 +1697,50 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn sync_tick_dense_header_tip_advanced_abandons_popow_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let seeded = ergo_state::test_helpers::seed_dense_mainnet_headers(&mut store, 1).unwrap();
+        let (tip_height, tip_id) = *seeded.last().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(store);
+
+        let proof = production_profile_popow_proof();
+        let mut popow = ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            1,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        );
+        let peer: ergo_p2p::peer::PeerId = "127.0.0.1:19001".parse().unwrap();
+        let now = std::time::Instant::now();
+        popow.mark_requested(peer, now);
+        assert!(matches!(
+            popow.on_proof_received(peer, proof),
+            ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+        ));
+        assert!(popow.quorum_reached());
+        state.popow_bootstrap = Some(popow);
+        assert!(!crate::node::sync_helpers::popow_blocks_sync_info(&state));
+
+        super::drive_popow_bootstrap(&mut state, now);
+
+        let store = state.store.as_utxo().unwrap();
+        assert_eq!(store.chain_state().best_header_height, tip_height);
+        assert_eq!(store.chain_state().best_header_id, tip_id);
+        assert!(matches!(
+            store.chain_state().header_availability,
+            ergo_state::chain::HeaderAvailability::Dense
+        ));
+        assert!(matches!(
+            state.popow_bootstrap.as_ref().unwrap().state(),
+            ergo_sync::popow_bootstrap::PopowBootstrapState::Abandoned { reason }
+                if reason.contains("store is not fresh")
+        ));
+        assert!(!crate::node::sync_helpers::popow_blocks_sync_info(&state));
+        super::drive_popow_bootstrap(&mut state, now);
+        assert!(state.popow_bootstrap.as_ref().unwrap().is_terminal());
+    }
 
     #[test]
     fn resolve_install_anchor_sparse_prefix_height_is_unreachable_not_deferred() {
