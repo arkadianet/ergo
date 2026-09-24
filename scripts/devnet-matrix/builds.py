@@ -534,9 +534,10 @@ def _self_test():
         'a1bd938effb7f5acabfe5230a5ef20fe0d50ae62', known['base'].declared
     # `root` is the shared archive, resolved against this worktree's repo
     # root, so every sibling checkout finds the same directories.
-    assert known['base'].work_dir.parent == \
-        (ROOT / '../matrix-evidence/scala-builds').resolve(), \
-        known['base'].work_dir
+    # MATRIX_BUILDS_ROOT, when set, overrides that root.
+    expected_root = (_resolve_root({}) if os.environ.get('MATRIX_BUILDS_ROOT')
+                     else (ROOT / '../matrix-evidence/scala-builds').resolve())
+    assert known['base'].work_dir.parent == expected_root, known['base'].work_dir
     # A build moved here from a deleted worktree keeps a classpath that
     # names the old directories. It is refused with the reason, never
     # hashed as an empty build.

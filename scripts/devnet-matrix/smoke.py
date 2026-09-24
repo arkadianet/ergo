@@ -1163,22 +1163,26 @@ def flatten_counters(value, prefix=''):
     return out
 
 
-def counter_increase(values):
+def counter_increase(values, restarts=None):
     """How much a per-process counter grew over a sequence of readings.
 
     A reading LOWER than the previous one is a new process (a restart
     resets the in-memory store), whose count grew from zero to that
-    reading. Returns `(increase, resets)`; the first reading is the
-    baseline, never counted. Pure.
+    reading. So is a reading marked in `restarts` (booleans parallel to
+    `values`: the process was seen down since the previous reading), even
+    when it is higher: a new process can count past the old reading
+    before the next sample. Returns `(increase, resets)`; the first
+    reading is the baseline, never counted. Pure.
     """
     increase, resets, previous = 0, 0, None
-    for value in values:
+    for i, value in enumerate(values):
+        restarted = bool(restarts[i]) if restarts is not None else False
         if previous is not None:
-            if value >= previous:
-                increase += value - previous
-            else:
+            if restarted or value < previous:
                 resets += 1
                 increase += value
+            else:
+                increase += value - previous
         previous = value
     return increase, resets
 
@@ -1191,8 +1195,19 @@ def pending_store_summary(samples, node):
     reading at the first sample, so counts from before the window are
     visible rather than silently included or dropped.
     """
-    readings = [(s.get('at'), (s.get('pending') or {}).get(node))
-                for s in samples if node in (s.get('pending') or {})]
+    readings, restarted, seen_down = [], [], False
+    for s in samples:
+        # A sample that lists the node as down marks its next present
+        # reading as a new process, whatever that reading's value.
+        if node in (s.get('down') or ()):
+            seen_down = True
+        if node not in (s.get('pending') or {}):
+            continue
+        reading = s['pending'][node]
+        readings.append((s.get('at'), reading))
+        if isinstance(reading, dict):
+            restarted.append(seen_down)
+            seen_down = False
     present = [(at, r) for at, r in readings if isinstance(r, dict)]
     out = {'node': node, 'samples': len(readings),
            'samples_with_store': len(present)}
@@ -1207,8 +1222,16 @@ def pending_store_summary(samples, node):
     counters = sorted({k for f in flat for k in f} - set(PENDING_GAUGES))
     out['counters'] = {}
     for key in counters:
-        values = [f[key] for f in flat if key in f]
-        increase, resets = counter_increase(values)
+        values, marks, carried = [], [], False
+        for f, mark in zip(flat, restarted):
+            # A restart marker on a reading without this key applies to
+            # the key's next reading.
+            carried = carried or mark
+            if key in f:
+                values.append(f[key])
+                marks.append(carried)
+                carried = False
+        increase, resets = counter_increase(values, marks)
         out['counters'][key] = {'at_first_sample': values[0],
                                 'increase': increase, 'resets': resets}
     return out
@@ -2742,6 +2765,24 @@ def _self_test_pending_and_restart():
         'at_first_sample': 0, 'increase': 8, 'resets': 1}, summary
     assert summary['counters']['drops.expired']['increase'] == 2, summary
     assert 'size' not in summary['counters'], 'a gauge is not a counter'
+    # A restart seen only through `down`: the new process counted past
+    # the old reading before it was sampled (3, down, 5): +5, one reset.
+    assert counter_increase([3, 5], [False, True]) == (5, 1)
+    series_up = [at(0, {'size': 0, 'bytes': 0, 'replayed': 3,
+                        'drops': {'expired': 0}}),
+                 at(1, None, down=['scala2']),
+                 at(2, {'size': 1, 'bytes': 9, 'replayed': 5,
+                        'drops': {'expired': 1}})]
+    up = pending_store_summary(series_up, 'scala2')
+    assert up['counters']['replayed'] == {
+        'at_first_sample': 3, 'increase': 5, 'resets': 1}, up
+    assert up['counters']['drops.expired'] == {
+        'at_first_sample': 0, 'increase': 1, 'resets': 1}, up
+    # Another node's downtime is not this node's restart.
+    other = [dict(r, down=['scala3']) if r.get('down') else r
+             for r in series_up]
+    assert pending_store_summary(other, 'scala2')['counters']['replayed'] == {
+        'at_first_sample': 3, 'increase': 2, 'resets': 0}
     absent = pending_store_summary([at(0, None)], 'scala2')
     assert absent['samples_with_store'] == 0 and 'absent' in absent['store'], absent
     assert pending_store_summary(series, 'scala3')['samples'] == 0

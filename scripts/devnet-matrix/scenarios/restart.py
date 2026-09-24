@@ -41,6 +41,20 @@ from smoke import Unavailable, api, api_retry
 
 from . import common
 
+
+def _info_or_error(node):
+    """`/info` for failure evidence, never raising.
+
+    A victim that did not come back is exactly the node whose `/info`
+    fails; letting that raise would replace the "did not rejoin" failure
+    with an `Unavailable` and skip the checks after it.
+    """
+    try:
+        return api(node, '/info')
+    except Unavailable as error:
+        return {'unavailable': str(error)}
+
+
 NODES = ('scala', 'rust')
 # `--reference-follower` may add a Scala follower; it is seeded from the
 # miner's directory rather than started cold, for the reason
@@ -216,7 +230,7 @@ def run(ctx):
         ctx.fail(f'the follower did not rejoin the miner\'s tip on a NEW ordering '
                  f'block within {CONVERGENCE_ORDERING_BLOCKS} of a SIGKILL',
                  {'restart_height': restart_height,
-                  'scala': api('scala', '/info'), 'rust': api('rust', '/info'),
+                  'scala': _info_or_error('scala'), 'rust': _info_or_error('rust'),
                   'rust_log': smoke.rust_log_lines('input_blocks')})
     elif converged_at_height > target_height:
         ctx.fail(f'the follower converged only at height {converged_at_height}, '
@@ -393,7 +407,8 @@ def _run_scala_victims(ctx, campaign, lifecycle):
             ctx.fail(f'{node} did not rejoin the miner\'s tip on a NEW ordering '
                      f'block within {CONVERGENCE_ORDERING_BLOCKS} of a SIGKILL',
                      {'restart_height': restart_height,
-                      'scala': api('scala', '/info'), node: api(node, '/info')})
+                      'scala': _info_or_error('scala'),
+                      node: _info_or_error(node)})
         elif converged[node] > target_height:
             ctx.fail(f'{node} converged only at height {converged[node]}, past '
                      f'the {CONVERGENCE_ORDERING_BLOCKS}-block budget from '

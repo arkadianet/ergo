@@ -391,6 +391,34 @@ def nodes_for_roles(role_set):
     return roles.nodes_for_roles(role_set)
 
 
+def builds_in_use(names, reference_follower, build, base_build):
+    """The builds these scenarios' Scala roles would run, in role order. Pure.
+
+    `--build` reaches only the patched roles and `--base-build` every
+    other Scala role, so a build that no role runs is not checked: a run
+    with no patched role must not be refused over an unprovisioned
+    `--build`. An unknown scenario, or one that refuses its knobs during
+    role resolution, is skipped here; its own run refuses it with the
+    reason.
+    """
+    used = []
+    for name in names:
+        if name not in SCENARIO_ROLES:
+            continue
+        try:
+            role_set = resolve_roles(name, reference_follower)
+        except SystemExit:
+            continue
+        for role in role_set:
+            spec = lifecycle_roles()[role]
+            if spec.kind != 'scala':
+                continue
+            chosen = build if spec.patched else base_build
+            if chosen not in used:
+                used.append(chosen)
+    return used
+
+
 # Ports this harness must never bind, whatever the environment says:
 # the operator's production and devnet nodes. The band is overridable
 # (see `_band`), so the guard runs against the RESOLVED ports — a typo in
@@ -3732,7 +3760,7 @@ def _self_test_remeasure():
     _args = types.SimpleNamespace(
         timeout=60, build='F13', base_build='base', reference_follower='both',
         restart_victim='scala-followers', flood_mode='held', fresh=True,
-        force_attempt=False, post_ordering_blocks=10)
+        force_attempt=False, post_ordering_blocks=10, ordering_blocks=7)
     _restart = child_argv('restart', _args)
     assert _restart[_restart.index('--base-build') + 1] == 'base', _restart
     assert _restart[_restart.index('--build') + 1] == 'F13', _restart
@@ -3743,7 +3771,32 @@ def _self_test_remeasure():
     assert '--post-ordering-blocks' not in _flood, _flood
     _steady = child_argv('steady', _args)
     assert '--flood-mode' not in _steady and '--restart-victim' not in _steady
+    # The campaign-wide block count reaches every child.
+    for _child in (_restart, _flood, _steady):
+        assert _child[_child.index('--ordering-blocks') + 1] == '7', _child
+    # An explicit zero post-kill window is forwarded (and refused there),
+    # an absent one is not forwarded at all.
+    _args.post_ordering_blocks, _args.ordering_blocks = 0, None
+    _zero = child_argv('restart', _args)
+    assert _zero[_zero.index('--post-ordering-blocks') + 1] == '0', _zero
+    assert '--ordering-blocks' not in _zero, _zero
+    _args.post_ordering_blocks = None
+    assert '--post-ordering-blocks' not in child_argv('restart', _args)
     assert '--base-build' in _steady and '--fresh' in _steady, _steady
+
+    # ----- which builds a run checks before starting -----
+    # No patched role: `--build` is not checked, whatever it names.
+    assert builds_in_use(['steady'], None, 'soak', 'base') == ['base']
+    assert builds_in_use(['steady'], 'patched', 'soak', 'base') == \
+        ['base', 'soak']
+    # A patched miner needs `--build` even with no reference follower.
+    assert builds_in_use(['miner_self_reject'], None, 'soak', 'base') == \
+        ['soak']
+    # Refused during role resolution, or unknown: skipped, refused later.
+    assert builds_in_use(['flood'], 'both', 'soak', 'base') == []
+    assert builds_in_use(['nonesuch'], None, 'soak', 'base') == []
+    # `all` checks the union once, in first-use order.
+    assert builds_in_use(list(ORDER), None, 'soak', 'base') == ['base', 'soak']
 
     # ----- restart: who dies -----
     assert restart.victims_for('rust', ('scala', 'scala2', 'rust')) == ('rust',)
@@ -4472,10 +4525,15 @@ def child_argv(name, args):
             + ['--build', args.build, '--base-build', args.base_build]
             + (['--reference-follower', args.reference_follower]
                if args.reference_follower else [])
+            + (['--ordering-blocks', str(args.ordering_blocks)]
+               if args.ordering_blocks is not None else [])
             + (['--restart-victim', args.restart_victim]
                if name == 'restart' else [])
+            # `is not None`, not truthiness: an explicit 0 must reach the
+            # child, which refuses it.
             + (['--post-ordering-blocks', str(args.post_ordering_blocks)]
-               if name == 'restart' and args.post_ordering_blocks else [])
+               if name == 'restart' and args.post_ordering_blocks is not None
+               else [])
             + (['--flood-mode', args.flood_mode]
                if name == 'flood' else [])
             + (['--fresh'] if args.fresh else [])
@@ -4550,10 +4608,10 @@ def main():
     # A hand-set classpath would bypass `Build.verify()` for the node it
     # names, and the run would still record `--build` in its evidence.
     check_no_classpath_override(os.environ)
-    check_build(args.build)
-    if args.base_build != args.build:
-        check_build(args.base_build)
     names = list(ORDER) if args.scenario == 'all' else [args.scenario]
+    for used_build in builds_in_use(names, args.reference_follower,
+                                    args.build, args.base_build):
+        check_build(used_build)
     # The node set is fixed for the whole process: `lifecycle.REST` and
     # `smoke.URLS` are read at import time, so one process drives one
     # node set. `--scenario all` therefore re-execs itself per scenario.
