@@ -14,7 +14,7 @@
 import { api } from './api-client.js';
 import { num } from './format.js';
 import { getApiKey, subscribe } from './auth.js';
-import { sparkline } from './sparkline.js';
+
 
 let root = null;
 // Signature of the rows currently built (see `rowsKey`). The 4s poll only
@@ -26,6 +26,76 @@ let builtKey = null;
 let loadFailed = false;
 // Unsubscribe handle for the auth-state gating of the Save button.
 let votingAuthUnsub = null;
+let latestVotes = null;
+let epochLength = null;
+const displayName = (name) => ({ storageFeeFactor: 'Storage rent', minValuePerByte: 'Minimum value per byte', maxBlockSize: 'Maximum block size', maxBlockCost: 'Maximum block cost', tokenAccessCost: 'Token access cost', inputCost: 'Input cost', dataInputCost: 'Data input cost', outputCost: 'Output cost', blockVersion: 'Block version' })[name] || name;
+
+function refreshSummary() {
+  if (!root || !latestVotes) return;
+  const v = latestVotes;
+  root.querySelector('[data-epoch-start]').textContent = num(v.epochStartHeight);
+  root.querySelector('[data-saved-count]').textContent = num((v.configuredVotes || []).length);
+  root.querySelector('[data-param-count]').textContent = `${num((v.votableParameters || []).length)} available parameters`;
+  const elapsed = epochLength ? Math.max(0, Math.min(epochLength, v.blockHeight - v.epochStartHeight)) : null;
+  root.querySelector('[data-epoch-progress]').textContent = elapsed == null ? 'Loading epoch length…' : `${num(elapsed)} / ${num(epochLength)} blocks`;
+  root.querySelector('[data-epoch-fill]').style.width = `${elapsed == null ? 0 : elapsed / epochLength * 100}%`;
+  root.querySelector('[data-epoch-next]').textContent = epochLength ? `Next boundary at ${num(v.epochStartHeight + epochLength)}` : 'Epoch boundary unavailable';
+  root.querySelector('[data-threshold]').textContent = epochLength ? `${num(Math.floor(epochLength / 2) + 1)} blocks` : 'More than half';
+  refreshDraft();
+}
+
+function refreshDraft() {
+  if (!root) return;
+  const saved = new Map((latestVotes?.configuredVotes || []).map(v => [v.parameterId, String(v.target)]));
+  let changes = 0;
+  for (const input of root.querySelectorAll('.vt-input')) {
+    const changed = input.value.trim() !== (saved.get(Number(input.dataset.id)) ?? '');
+    input.closest('tr').classList.toggle('vt-row--edited', changed);
+    if (changed) changes++;
+    const parameter = latestVotes?.votableParameters?.find(p => p.id === Number(input.dataset.id));
+    const preview = input.closest('tr').querySelector('.vt-vote-preview');
+    if (preview) {
+      const result = desiredPolicy(parameter, input.value.trim());
+      preview.textContent = input.validity.badInput ? 'Enter a whole number or clear the field for no vote.' : result.text;
+      preview.dataset.tone = input.validity.badInput ? 'warn' : result.tone;
+    }
+    for (const button of input.closest('tr').querySelectorAll('[data-vote-step]')) {
+      const next = parameter ? parameter.current + Number(button.dataset.voteStep) * parameter.step : null;
+      button.disabled = next == null || next < parameter.min || next > parameter.max;
+    }
+  }
+  root.querySelector('[data-draft]').textContent = changes ? `${changes} unsaved change${changes === 1 ? '' : 's'}` : 'Draft matches saved targets';
+  root.querySelector('[data-reset]').disabled = !changes;
+}
+
+export function onFast({ status }) {
+  if (!root || !status) return;
+  root.querySelector('[data-chain-context]').textContent = status.sync_state === 'at_tip'
+    ? 'Parameters from your local chain tip.'
+    : 'Your node is catching up or disconnected. These parameters and epoch reflect its local chain, not necessarily the current network.';
+}
+
+// Predict only the next approved change from the live parameter descriptor.
+function desiredPolicy(p, raw) {
+  if (raw === '') return { tone: 'neutral', text: 'No vote requested. Saving a blank value removes this target.' };
+  const target = Number(raw);
+  if (!Number.isSafeInteger(target)) return { tone: 'warn', text: 'Enter a whole number.' };
+  if (!p) return { tone: 'neutral', text: 'This parameter is not currently votable. Its target is retained until changed or cleared.' };
+  if (target < p.min || target > p.max) return { tone: 'warn', text: `Choose a value from ${num(p.min)} to ${num(p.max)}.` };
+  if (target === p.current) return { tone: 'neutral', text: 'Desired value reached: no vote while the current value equals this target. Voting resumes if it moves away.' };
+  const next = p.current + (target > p.current ? p.step : -p.step);
+  let text = `Vote to ${target > p.current ? 'increase' : 'decrease'}. Next network-approved value: ${num(next)}. Mining and network approval are required.`;
+  let tone = 'direction';
+  if ([1, 2, 9].includes(p.id)) {
+    if (Math.abs(target - p.current) % p.step !== 0) {
+      text += ' This target falls between steps; the node may alternate increase and decrease votes around it.';
+      tone = 'warn';
+    }
+  } else {
+    text += ' Step size changes with the parameter; an exact target may be skipped, causing votes to reverse around it.';
+  }
+  return { tone, text };
+}
 
 function cell(text, cls, label) {
   const td = document.createElement('td');
@@ -93,7 +163,7 @@ function buildRows(params, configured) {
     nameTd.dataset.label = 'Parameter';
     const nameLine = document.createElement('div');
     nameLine.className = 'vt-name';
-    nameLine.textContent = r.name;
+    nameLine.textContent = displayName(r.name);
     if (!r.votable) {
       // Configured but not in the current votable set — keep it, but flag it.
       const hint = document.createElement('span');
@@ -102,6 +172,10 @@ function buildRows(params, configured) {
       nameLine.append(hint);
     }
     nameTd.append(nameLine);
+    const codeName = document.createElement('code');
+    codeName.className = 'vt-code';
+    codeName.textContent = r.name;
+    nameTd.append(codeName);
     // Operator-facing explanation of what the vote does (from the API). Always
     // visible (not a hover tooltip) so the implication is clear on any device.
     if (r.description) {
@@ -119,28 +193,59 @@ function buildRows(params, configured) {
     // configured (live) target cell
     const live = document.createElement('td');
     live.className = 'table__num vt-live';
-    live.dataset.label = 'Voting';
+    live.dataset.label = 'Saved target';
     paintLiveCell(live, hasConfiguredVote, cfg.get(r.id));
     tr.append(live);
     // editable target input
     const inputTd = document.createElement('td');
-    inputTd.dataset.label = 'Target';
+    inputTd.dataset.label = 'Desired value';
     const input = document.createElement('input');
     input.type = 'number';
     input.className = 'input vt-input';
     if (r.votable) {
       input.min = String(r.min);
       input.max = String(r.max);
-      input.step = String(r.step);
+      input.step = '1'; // Integer goal, not a multiple of today's step.
     }
     input.placeholder = 'no vote';
-    input.setAttribute('aria-label', `${r.name} vote target`);
+    input.setAttribute('aria-label', `${displayName(r.name)} desired value`);
+    input.setAttribute('aria-describedby', `vt-policy-${r.id}`);
     input.dataset.id = String(r.id);
     input.dataset.name = r.name;
+    input.addEventListener('input', refreshDraft);
     input.classList.toggle('vt-input--active', hasConfiguredVote);
     if (hasConfiguredVote) input.value = String(cfg.get(r.id));
     inputTd.append(input);
     tr.append(inputTd);
+    const controls = document.createElement('td');
+    controls.className = 'vt-target-tools';
+    controls.colSpan = 6;
+    const buttons = document.createElement('div');
+    buttons.className = 'vt-step-buttons';
+    for (const [direction, label] of [[-1, '− One step'], [1, '+ One step'], [0, 'No vote']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn--ghost';
+      button.textContent = label;
+      button.setAttribute('aria-label', direction === 0 ? `Clear ${displayName(r.name)} desired value` : `${direction > 0 ? 'Increase' : 'Decrease'} ${displayName(r.name)} by one step from current`);
+      if (direction) button.dataset.voteStep = String(direction);
+      button.addEventListener('click', () => {
+        const p = latestVotes?.votableParameters?.find(p => p.id === r.id);
+        if (!direction) input.value = '';
+        else if (p) {
+          const next = p.current + direction * p.step;
+          if (next < p.min || next > p.max) return;
+          input.value = String(next);
+        }
+        refreshDraft();
+      });
+      buttons.append(button);
+    }
+    const preview = document.createElement('p');
+    preview.id = `vt-policy-${r.id}`;
+    preview.className = 'vt-vote-preview';
+    controls.append(buttons, preview);
+    tr.append(controls);
     tbody.append(tr);
   }
   builtKey = rowsKey(params, configured);
@@ -178,6 +283,7 @@ async function save() {
   const votes = [];
   const invalid = [];
   for (const input of root.querySelectorAll('.vt-input')) {
+    if (input.validity.badInput) { invalid.push(`${input.dataset.name} must be a whole number`); continue; }
     const raw = input.value.trim();
     if (raw === '') continue;
     const label = input.dataset.name || `id ${input.dataset.id}`;
@@ -230,9 +336,22 @@ export function mount(el) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Voting</h1>
+        <p class="pg-description">Understand the rules. Shape what comes next.</p>
         <span class="pg-count micro-label" data-meta></span>
       </div>
     </div>
+    <div class="vt-overview">
+      <section class="vt-epoch" aria-label="Local voting epoch">
+        <div class="ov-eyebrow">LOCAL VOTING EPOCH</div>
+        <h2>Change takes consensus.</h2>
+        <p data-chain-context>Loading your local chain context…</p>
+        <div class="vt-epoch__numbers"><span>Epoch starts at <b data-epoch-start>—</b></span><strong data-epoch-progress>Loading…</strong></div>
+        <div class="gauge"><div class="gauge__fill" data-epoch-fill></div></div>
+        <span class="vt-epoch__next" data-epoch-next></span>
+      </section>
+      <section class="vt-saved" aria-label="Configured voting targets"><span>Saved targets</span><strong data-saved-count>—</strong><p>Targets configured on this node.<br>These are not network vote totals.</p><span class="pill" data-access>Read-only access</span></section>
+    </div>
+    <details class="vt-guide"><summary>How protocol voting works</summary>
     <div class="vt-rules" aria-label="Voting rules">
       <div class="vt-rule">
         <span class="micro-label">Targets</span>
@@ -241,7 +360,7 @@ export function mount(el) {
       </div>
       <div class="vt-rule">
         <span class="micro-label">Authority</span>
-        <b>api_key + mining</b>
+        <b>Authorized mining node</b>
         <span>Viewing is public; writes require an authorized mining node.</span>
       </div>
       <div class="vt-rule">
@@ -251,40 +370,52 @@ export function mount(el) {
       </div>
       <div class="vt-rule">
         <span class="micro-label">Per epoch</span>
-        <b>One step</b>
-        <span>Changes need more than half of epoch blocks carrying the vote.</span>
+        <b data-threshold>More than half</b>
+        <span>Blocks must carry the vote for approval. A parameter moves one step per epoch.</span>
       </div>
-    </div>
-    <table class="table">
+    </div></details>
+    <div class="vt-section-head"><div><h2>Protocol parameters</h2><p data-param-count>Loading parameters…</p></div><span>Desired value = your long-term goal</span></div>
+    <p class="vt-target-help">Set the value you want the protocol to reach. Your miner votes toward it; the network decides each change. One-step buttons choose a value relative to the current parameter. You can also enter a goal manually. Nothing changes until you save.</p>
+    <table class="table vt-parameters" aria-label="Protocol voting parameters">
       <thead><tr>
         <th>Parameter</th><th class="table__num">Current</th><th class="table__num">Range</th>
-        <th class="table__num">Step</th><th class="table__num">Voting</th><th>Target</th>
+        <th class="table__num">Step</th><th class="table__num">Saved target</th><th>Desired value</th>
       </tr></thead>
       <tbody data-rows></tbody>
     </table>
     <div class="vt-actions">
+      <div class="vt-draft"><strong data-draft>Loading targets…</strong><span>Saving replaces the entire target set.</span></div>
       <button class="btn btn--primary" data-save type="button">Save votes</button>
-      <button class="btn btn--danger" data-clear type="button">Clear all</button>
+      <button class="btn btn--ghost" data-reset type="button" disabled>Reset draft</button>
+      <button class="btn btn--ghost" data-clear type="button">Clear draft</button>
       <span class="vt-status" data-status aria-live="polite"></span>
+      <p class="vt-access-note" data-access-note>Authorize using the sidebar to save targets. You can explore and prepare a draft here.</p>
     </div>
     <div class="vt-history">
       <div class="pg-head">
         <div>
-          <h1 class="pg-title">Parameter history</h1>
+          <h2 class="pg-title">Parameter history</h2>
           <span class="pg-count micro-label" data-hist-meta></span>
         </div>
       </div>
       <p class="vt-note micro-label">
-        How each protocol parameter has moved over time, one row per parameter. A vote can
+        Select a parameter to explore its recorded changes on your local chain. A vote can
         shift a parameter by at most one step per epoch and only within its allowable range,
-        so most rows are slow ramps — open “details” for the per-epoch steps.
+        with exact transitions available in the change ledger below.
       </p>
       <div data-history></div>
     </div>`;
   el.querySelector('[data-save]').addEventListener('click', save);
+  el.querySelector('[data-reset]').addEventListener('click', () => {
+    const saved = new Map((latestVotes?.configuredVotes || []).map(v => [v.parameterId, v.target]));
+    for (const input of root.querySelectorAll('.vt-input')) input.value = saved.get(Number(input.dataset.id)) ?? '';
+    refreshDraft();
+    setStatus('Draft restored to the latest saved targets.', 'muted');
+  });
   el.querySelector('[data-clear]').addEventListener('click', () => {
     for (const input of root.querySelectorAll('.vt-input')) input.value = '';
     setStatus('Cleared inputs — press “Save votes” to apply.', 'muted');
+    refreshDraft();
   });
   // Preflight gate: disable Save while no api_key is set (instead of only
   // erroring on click). The server stays authoritative on key validity.
@@ -294,6 +425,8 @@ export function mount(el) {
     const noKey = s === 'none';
     saveBtn.disabled = noKey;
     saveBtn.title = noKey ? 'Set your api_key via the Authorize chip to set votes' : '';
+    root.querySelector('[data-access]').textContent = noKey ? 'Read-only access' : 'Operator key set';
+    root.querySelector('[data-access-note]').textContent = noKey ? 'Authorize using the sidebar to save targets. You can explore and prepare a draft here.' : 'Saving requires a valid operator key and mining enabled on this node.';
   });
   historyLoaded = false;
   historyLoading = false;
@@ -343,6 +476,8 @@ async function loadHistoryInner(host) {
     return;
   }
   historyLoaded = true;
+  epochLength = h.epochLength || null;
+  refreshSummary();
   const meta = root.querySelector('[data-hist-meta]');
   if (meta) meta.textContent = h.epochLength ? `epoch ${num(h.epochLength)} blocks` : '';
   const changes = h.changes || [];
@@ -369,81 +504,135 @@ async function loadHistoryInner(host) {
     }
   }
   const groups = [...byId.values()].sort((a, b) => a.id - b.id);
-  host.replaceChildren(...groups.map(renderParamGroup));
+  renderHistoryExplorer(host, groups);
 }
 
-// One parameter's trajectory: net from→to, a sparkline of value-over-time, the
-// step count + height span, and an expandable per-epoch step list.
-function renderParamGroup(g) {
-  const first = g.steps[0];
-  const last = g.steps[g.steps.length - 1];
-  const baseline = first.from; // null when the parameter activated here
-  const hasBaseline = baseline !== null && baseline !== undefined;
+// History uses block-height spacing and step interpolation: a parameter stays
+// constant between recorded changes. The slider offers the same exact readout
+// by keyboard or touch; the ledger exposes every recorded transition.
+function historyEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
 
-  const wrap = document.createElement('div');
-  wrap.className = 'vt-hist-group';
-
-  const row = document.createElement('div');
-  row.className = 'vt-hist-row';
-
-  const name = document.createElement('div');
-  name.className = 'vt-hist-pname';
-  name.textContent = g.name;
-  // Parity with the voting table: surface the parameter explanation on hover
-  // (blockVersion has no votable description — it only appears in history).
-  if (g.description) name.title = g.description;
-
-  const net = document.createElement('div');
-  net.className = 'vt-hist-net';
-  const arrow = !hasBaseline ? '•' : last.to > baseline ? '↑' : last.to < baseline ? '↓' : '→';
-  net.textContent = `${hasBaseline ? num(baseline) : '—'} → ${num(last.to)} ${arrow}`;
-
-  const spark = document.createElement('div');
-  spark.className = 'vt-hist-spark';
-  // Series = baseline (if numeric) then each post-step value. Needs ≥2 points.
-  const series = (hasBaseline ? [baseline] : []).concat(g.steps.map((s) => s.to));
-  if (series.length > 1) spark.append(sparkline(series, { color: 'var(--blue)', w: 120, h: 18 }));
-
-  const count = document.createElement('div');
-  count.className = 'vt-hist-count';
-  const span =
-    first.height === last.height
-      ? `h${num(first.height)}`
-      : `h${num(first.height)}→${num(last.height)}`;
-  count.textContent = `${g.steps.length} step${g.steps.length === 1 ? '' : 's'} · ${span}`;
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'vt-hist-toggle';
-  toggle.textContent = 'details';
-
-  row.append(name, net, spark, count, toggle);
-  wrap.append(row);
-
-  const steps = document.createElement('ul');
-  steps.className = 'vt-hist-steps';
-  steps.hidden = true;
-  for (const s of g.steps.slice().reverse()) {
-    // newest step first
-    const li = document.createElement('li');
-    const at = document.createElement('span');
-    at.className = 'vt-hist-at';
-    at.textContent = `h${num(s.height)}`;
-    const delta = document.createElement('span');
-    delta.className = 'vt-hist-delta';
-    const from = s.from === null || s.from === undefined ? '—' : num(s.from);
-    delta.textContent = `${from} → ${num(s.to)}`;
-    li.append(at, delta);
-    steps.append(li);
+function renderHistoryExplorer(host, groups) {
+  const shell = historyEl('section', 'vh-explorer');
+  const tools = historyEl('div', 'vh-toolbar');
+  const label = historyEl('label', '', 'Parameter');
+  const select = historyEl('select', 'select');
+  for (const g of groups) {
+    const option = historyEl('option', '', displayName(g.name));
+    option.value = String(g.id);
+    select.append(option);
   }
-  toggle.addEventListener('click', () => {
-    steps.hidden = !steps.hidden;
-    toggle.textContent = steps.hidden ? 'details' : 'hide';
+  label.append(select);
+  tools.append(label, historyEl('span', 'vh-scope', 'Recorded changes on your local chain'));
+  const content = historyEl('div', 'vh-content');
+  shell.append(tools, content);
+  host.replaceChildren(shell);
+  const render = () => {
+    const g = groups.find(g => String(g.id) === select.value);
+    if (!g) return;
+    content.replaceChildren();
+    const steps = g.steps.slice().sort((a,b) => a.height - b.height);
+    const first = steps[0], last = steps.at(-1);
+    const unit = g.name === 'maxBlockSize' ? 'bytes' : g.name === 'blockVersion' ? 'version' : g.name === 'maxBlockCost' ? 'cost units' : 'parameter units';
+    const stats = historyEl('div', 'vh-stats');
+    for (const [title, value, note] of [
+      ['Latest recorded value', num(last.to), unit],
+      ['Before first change', first.from == null ? 'Not active' : num(first.from), `at block ${num(first.height)}`],
+      ['Recorded changes', num(steps.length), `latest at block ${num(last.height)}`],
+    ]) {
+      const item = historyEl('div');
+      item.append(historyEl('span','',title),historyEl('strong','',value),historyEl('small','',note));
+      stats.append(item);
+    }
+    content.append(stats);
+    if (g.description) content.append(historyEl('p','vh-description',g.description));
+    if (steps.length > 1) content.append(historyPlot(g, steps, unit));
+    else content.append(historyEl('p','vh-single',`One recorded transition at block ${num(first.height)}: ${first.from == null ? 'not active' : num(first.from)} → ${num(first.to)}. There is no multi-epoch trend to plot.`));
+    const ledger = historyEl('details','vh-ledger');
+    ledger.append(historyEl('summary','',`Inspect all ${num(steps.length)} changes`));
+    const scroll = historyEl('div','vh-ledger-scroll');
+    const table = historyEl('table');
+    table.setAttribute('aria-label', `${displayName(g.name)} recorded changes`);
+    const head = document.createElement('thead');
+    const row = document.createElement('tr');
+    for (const text of ['Block height','Previous','New value','Change']) row.append(historyEl('th','',text));
+    head.append(row); table.append(head);
+    const body = document.createElement('tbody');
+    for (const s of steps.slice().reverse()) {
+      const row = document.createElement('tr');
+      const delta = s.from == null ? 'Activated' : `${s.to - s.from > 0 ? '+' : ''}${num(s.to - s.from)}`;
+      for (const text of [num(s.height),s.from == null ? '—' : num(s.from),num(s.to),delta]) row.append(historyEl('td','',text));
+      body.append(row);
+    }
+    table.append(body); scroll.append(table); ledger.append(scroll); content.append(ledger);
+  };
+  select.addEventListener('change', render);
+  render();
+}
+
+function historyPlot(g, steps, unit) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svgEl = (tag, attrs) => {
+    const el = document.createElementNS(NS,tag);
+    for (const [key,value] of Object.entries(attrs)) el.setAttribute(key,String(value));
+    return el;
+  };
+  const wrap = historyEl('div','vh-chart');
+  const heading = historyEl('div','vh-chart-heading');
+  heading.append(historyEl('span','',`Recorded value · ${unit}`),historyEl('span','','Block height →'));
+  const plot = historyEl('div','vh-plot');
+  const axis = historyEl('div','vh-yaxis');
+  const first = steps[0], last = steps.at(-1);
+  const values = steps.map(s=>s.to).concat(first.from == null ? [] : [first.from]);
+  const low = Math.min(...values), high = Math.max(...values);
+  const range = high - low || Math.max(1,Math.abs(high)*.01);
+  const min = low - range*.08, max = high + range*.08;
+  const x = h => (h-first.height)/Math.max(1,last.height-first.height)*800;
+  const y = v => 220-(v-min)/(max-min)*220;
+  const svg = svgEl('svg',{viewBox:'0 0 800 220',preserveAspectRatio:'none',role:'img','aria-label':`${displayName(g.name)} step chart from block ${num(first.height)} to ${num(last.height)}. Exact changes are available in the inspector and ledger.`});
+  for (const value of [high,(high+low)/2,low]) {
+    const tick = historyEl('span','',num(Math.round(value)));
+    tick.style.top=`${y(value)/220*100}%`;
+    axis.append(tick);
+    svg.append(svgEl('line',{x1:0,x2:800,y1:y(value),y2:y(value),class:'vh-grid'}));
+  }
+  let d=`M0 ${y(first.from ?? first.to)}`;
+  for (const s of steps) d+=` H${x(s.height)} V${y(s.to)}`;
+  svg.append(svgEl('path',{d:`${d} L800 220 L0 220 Z`,class:'vh-area'}));
+  svg.append(svgEl('path',{d,class:'vh-line'}));
+  const cross=svgEl('line',{x1:800,x2:800,y1:0,y2:220,class:'vh-cross'});
+  const dot=svgEl('circle',{cx:800,cy:y(last.to),r:4,class:'vh-dot'});
+  svg.append(cross,dot); plot.append(axis,svg);
+  const xaxis=historyEl('div','vh-xaxis');
+  for (const h of [first.height,Math.round((first.height+last.height)/2),last.height]) xaxis.append(historyEl('span','',num(h)));
+  const label=historyEl('label','vh-inspector-label','Inspect a recorded change');
+  const slider=historyEl('input','vh-slider'); slider.type='range';slider.min='0';slider.max=String(steps.length-1);slider.step='1';slider.value=slider.max;
+  label.append(slider);
+  const readout=historyEl('output','vh-readout');
+  function inspect(index) {
+    const s=steps[index];
+    const delta=s.from == null ? 'Activated' : `${s.to-s.from>0?'+':''}${num(s.to-s.from)} ${unit}`;
+    readout.textContent=`Block ${num(s.height)} · ${s.from == null ? 'not active' : num(s.from)} → ${num(s.to)} · ${delta}`;
+    slider.setAttribute('aria-valuetext',readout.textContent);
+    cross.setAttribute('x1',x(s.height));cross.setAttribute('x2',x(s.height));dot.setAttribute('cx',x(s.height));dot.setAttribute('cy',y(s.to));
+  }
+  slider.addEventListener('input',()=>inspect(Number(slider.value)));
+  svg.addEventListener('pointermove',event=>{
+    const rect=svg.getBoundingClientRect();
+    const height=first.height+Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width))*(last.height-first.height);
+    let nearest=0;
+    for(let i=1;i<steps.length;i++) if(Math.abs(steps[i].height-height)<Math.abs(steps[nearest].height-height)) nearest=i;
+    slider.value=String(nearest);inspect(nearest);
   });
-  wrap.append(steps);
+  inspect(steps.length-1);
+  wrap.append(heading,plot,xaxis,label,readout,historyEl('p','vh-chart-note','Horizontal distance represents block height. Values stay constant between recorded changes; the vertical scale is fitted to this parameter. Drag the slider or use arrow keys to inspect exact transitions.'));
   return wrap;
 }
-
 async function load() {
   const v = await api.votes();
   if (!v) {
@@ -462,11 +651,24 @@ async function load() {
     meta.textContent = `block ${num(v.blockHeight)} · v${v.blockVersion} · epoch start ${num(v.epochStartHeight)}`;
   }
   const params = v.votableParameters || [];
+  const previousSaved = new Map((latestVotes?.configuredVotes || []).map(c => [c.parameterId, String(c.target)]));
+  const drafts = new Map();
+  for (const input of root.querySelectorAll('.vt-input')) {
+    if (input.value.trim() !== (previousSaved.get(Number(input.dataset.id)) ?? '')) drafts.set(input.dataset.id, input.value);
+  }
+  latestVotes = v;
   const configured = v.configuredVotes || [];
   // Rebuild when the rendered id set (votable ∪ configured) changes; otherwise
   // a light cell refresh that leaves the operator's in-progress edits intact.
-  if (rowsKey(params, configured) !== builtKey) buildRows(params, configured);
+  if (rowsKey(params, configured) !== builtKey) {
+    buildRows(params, configured);
+  }
   else refreshCells(params, configured);
+  const currentSaved = new Map(configured.map(c => [c.parameterId, String(c.target)]));
+  for (const input of root.querySelectorAll('.vt-input')) {
+    input.value = drafts.has(input.dataset.id) ? drafts.get(input.dataset.id) : currentSaved.get(Number(input.dataset.id)) ?? '';
+  }
+  refreshSummary();
   // Retry the one-shot history fetch until it lands (first paint, or after a
   // transient failure); a new boundary mid-session is rare enough to ignore.
   if (!historyLoaded) loadHistory();

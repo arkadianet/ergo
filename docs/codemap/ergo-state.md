@@ -39,6 +39,8 @@ same state root from a block's ADProofs instead of a box arena.
   `reorg.rs` (`rollback_to` three-phase delta replay), `undo.rs` (`UndoEntry`
   reverse-delta codec), `snapshot.rs` (`CommittedSnapshot` single-txn off-loop
   view + mining-candidate dry-run), `dry_run.rs` (`apply_change_set_via_prover`),
+  `lazy_prover.rs` (scoped-worker AVL proof generation with on-demand node
+  expansion, backing `StateStore::regenerate_ad_proofs`),
   `votes.rs`, `popow_cache.rs` (NiPoPoW prover/interlinks), `meta.rs`
   (`StateMeta` row), `open.rs`, `rebuild.rs` (rebuild-from-committed recovery),
   `backfill.rs` (legacy index back-fill), `error.rs` (`StateError`).
@@ -80,6 +82,11 @@ same state root from a block's ADProofs instead of a box arena.
 - `StateStore::rollback_to` (fn) — delta-based reorg rollback to a target height — `src/store/reorg.rs:41`
 - `StateStore::persist_apply` (fn) — the atomic one-txn commit unit — `src/store/mod.rs:4271`
 - `StateStore::install_snapshot_state` (fn) — Mode 2 UTXO-snapshot install — `src/store/mod.rs:1091`
+- `StateStore::regenerate_ad_proofs` (fn) — regenerate a block's ADProofs from
+  the parent tree via on-demand AVL reads (Scala `UtxoState` proof generation);
+  self-checks the proof and never mutates the tree — `src/store/mod.rs:2822`
+- `AdProofsApplyPolicy` (enum) — `Regenerate` (default for UTXO stores) vs
+  `VerifyShipped` (digest/opt-in tests) — `src/store/mod.rs:752`
 - `compute_minimal_full_block_height` (fn) — Mode 3 prune low-water mark (Scala parity) — `src/store/apply.rs:53`
 - `AvlTree` (struct) — incremental authenticated AVL+ tree — `src/avl/tree.rs:61`
 - `AvlNode` (enum) — Leaf / Internal node, with cached labels — `src/avl/node.rs:18`
@@ -151,6 +158,6 @@ same state root from a block's ADProofs instead of a box arena.
 ## Doc accuracy notes
 - The crate's read-only handle is `reader::ChainStoreReader`
   (`src/reader.rs:31`), reached via `StateStore::reader_handle()`. There is no
-  type named `StateReader`. The stale `src/lib.rs` crate-doc reference is now
-  corrected to `ChainStoreReader`; `docs/architecture.md:30` still names a
-  nonexistent `StateReader` and should be fixed there too.
+  type named `StateReader`; the stale `src/lib.rs` crate-doc reference is
+  corrected to `ChainStoreReader`, and `docs/architecture.md` is now only a
+  redirect to `ARCHITECTURE.md`.

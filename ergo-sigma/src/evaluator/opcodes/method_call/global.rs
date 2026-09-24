@@ -503,7 +503,7 @@ fn visit_serialization_puts(
             charge(1)?; // flags; keyLength uses uncharged putUInt
             charge(1)?; // valueLength option tag; its body uses putUInt
         }
-        (T::SHeader, Sv::Header(h)) => {
+        (T::SHeader, Sv::Header(h, _)) => {
             charge(1)?;
             for n in [
                 h.parent_id.as_bytes().len(),

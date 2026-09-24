@@ -119,7 +119,7 @@ fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     // The receiver is dropped immediately: these tests assert on the
     // `Action`s the executor RETURNS, and never flush them to the wire.
-    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let (tx, _rx) = crate::peer_loop::outbound::channel(16);
     state.registry.peers.insert(
         addr,
         crate::node::state::PeerRuntime {
@@ -1277,10 +1277,7 @@ fn handshake_peer(
     port: u16,
     version: ergo_p2p::handshake::Version,
     now: Instant,
-) -> (
-    std::net::SocketAddr,
-    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
-) {
+) -> (std::net::SocketAddr, crate::peer_loop::outbound::Receiver) {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     state.peer_manager.register_outbound(addr, now).unwrap();
     state.peer_manager.mark_tcp_connected(&addr);
@@ -1296,7 +1293,7 @@ fn handshake_peer(
         .peer_manager
         .complete_handshake(&addr, spec, None, now)
         .unwrap();
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let (tx, rx) = crate::peer_loop::outbound::channel(64);
     state.registry.peers.insert(
         addr,
         crate::node::state::PeerRuntime {
@@ -2068,10 +2065,7 @@ fn handshake_peer_with_mode(
     version: ergo_p2p::handshake::Version,
     mode: Option<ergo_p2p::handshake::PeerFeature>,
     now: Instant,
-) -> (
-    std::net::SocketAddr,
-    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
-) {
+) -> (std::net::SocketAddr, crate::peer_loop::outbound::Receiver) {
     // One peer per IP: the peer manager enforces a per-IP connection
     // limit, and this fixture needs several peers at once.
     // One peer per /16: the peer manager enforces per-IP and per-subnet
@@ -2086,7 +2080,7 @@ fn handshake_peer_with_mode(
         .peer_manager
         .complete_handshake(&addr, spec, None, now)
         .unwrap();
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let (tx, rx) = crate::peer_loop::outbound::channel(64);
     state.registry.peers.insert(
         addr,
         crate::node::state::PeerRuntime {
@@ -2688,10 +2682,16 @@ fn code_106_acknowledges_the_tracked_ordering_request() {
         &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
     );
 
+    // The reply acknowledges the expectation: the id leaves `inflight`.
+    // It does not stay `Received`: the fixture header carries no valid
+    // PoW, so the reconstruction handoff's header validation fails and
+    // rolls the id's delivery state back to `Unknown`, as every failed
+    // header delivery does — a header that was not stored must stay
+    // requestable. A missing acknowledgement would leave it `Requested`.
     assert_eq!(
         state.coordinator.delivery().status(&oa_id),
-        ModifierStatus::Received,
-        "the reply clears the expectation it answered"
+        ModifierStatus::Unknown,
+        "the reply clears the expectation it answered, then the failed header validation rolls it back"
     );
     assert!(
         state.peer_manager.get(&peer).unwrap().last_progress > before,
@@ -3176,10 +3176,13 @@ fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
         ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
         &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
     );
+    // Acknowledged means out of `inflight`; the invalid fixture header
+    // then rolls `Received` back to `Unknown` (see
+    // `code_106_acknowledges_the_tracked_ordering_request`).
     assert_eq!(
         state.coordinator.delivery().status(&x),
-        ModifierStatus::Received,
-        "A's 106 acknowledges A's own outstanding request"
+        ModifierStatus::Unknown,
+        "A's 106 acknowledges A's own outstanding request, then the failed header validation rolls it back"
     );
     assert!(
         state.peer_manager.get(&peer_a).unwrap().last_progress > before,
@@ -3822,8 +3825,8 @@ fn reconstruct_persists_header_and_extension_through_normal_path_first() {
     assert!(
         matches!(
             &rec.actions[0],
-            Action::ValidateHeader { peer: p, header_bytes: b }
-                if *p == peer && *b == header_bytes
+            Action::ValidateHeader { peer: p, modifier_id: m, header_bytes: b }
+                if *p == peer && *m == header_id && *b == header_bytes
         ),
         "the announcement's header goes through the ordinary header path \
          first: {:?}",

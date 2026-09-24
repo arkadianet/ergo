@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use ergo_crypto::autolykos::common::blake2b256;
 use ergo_crypto::merkle::{extension_root, transactions_root};
+use ergo_primitives::cost::JitCost;
 use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::block_transactions::BlockTransactions;
@@ -32,6 +33,13 @@ struct EmptyUtxo;
 impl UtxoView for EmptyUtxo {
     fn get_box(&self, _: &Digest32) -> Option<ErgoBox> {
         None
+    }
+}
+
+struct SingleUtxo(ErgoBox);
+impl UtxoView for SingleUtxo {
+    fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+        (self.0.box_id().ok().as_ref() == Some(id)).then(|| self.0.clone())
     }
 }
 
@@ -262,6 +270,7 @@ fn block_validate_full_block_700k_v2_pipeline() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -324,6 +333,7 @@ fn run_validate_full_block_range(blocks_path: &str, headers_path: &str, label: &
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -417,6 +427,7 @@ fn validate_full_block_eip37_activation() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -483,6 +494,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -495,6 +507,7 @@ fn parallel_equivalent_to_sequential_on_mainnet_700k() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -597,6 +610,7 @@ fn checkpoint_mismatch_at_pinned_height_hard_fails() {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,
@@ -653,6 +667,7 @@ fn checkpoint_match_at_pinned_height_passes_through() {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,
@@ -722,6 +737,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,
@@ -734,6 +750,7 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
         parent: &checked_parent,
         utxo: &EmptyUtxo,
         params: &params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,
@@ -765,6 +782,104 @@ fn rule_306_rejection_parity_across_sequential_and_parallel_paths() {
             assert_eq!(m_par, lowered_cap, "par path reported wrong cap");
         }
         (s, p) => panic!("rule 306 cross-path symmetry broken: sequential={s:?}, parallel={p:?}",),
+    }
+}
+
+#[test]
+fn rule_306_uses_previous_cap_at_epoch_boundary() {
+    let blocks = load_blocks("../test-vectors/mainnet/blocks_1_5.json");
+    let headers = load_headers_map("../test-vectors/mainnet/headers_1_2000.json");
+    let block = blocks.iter().find(|b| b.height == 2).unwrap();
+    let (header, header_id) = &headers[&block.height];
+    let (parent, parent_id) = &headers[&(block.height - 1)];
+    let bt = build_block_transactions(block);
+    let ext = build_extension(block);
+    let parent_block = blocks.iter().find(|b| b.height == 1).unwrap();
+    let parent_bt = build_block_transactions(parent_block);
+    let parent_tx_id = ergo_ser::transaction::transaction_id(&parent_bt.transactions[0]).unwrap();
+    let input_box = ErgoBox {
+        candidate: parent_bt.transactions[0].output_candidates[0].clone(),
+        transaction_id: parent_tx_id,
+        index: 0,
+    };
+    assert_eq!(
+        input_box.box_id().unwrap(),
+        bt.transactions[0].inputs[0].box_id
+    );
+    let single_utxo = SingleUtxo(input_box);
+    let empty_utxo = EmptyUtxo;
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::block_transactions::write_block_transactions_with_version(
+        &mut w,
+        &bt,
+        header.version,
+    )
+    .unwrap();
+    let actual_size = w.result().len();
+    let cases = [
+        ((actual_size - 1) as u32, (actual_size + 1) as u32),
+        ((actual_size + 1) as u32, (actual_size - 1) as u32),
+    ];
+    let checked_parent = CheckedHeader::trust_me(parent.clone(), *parent_id);
+
+    for (previous_cap, target_cap) in cases {
+        let mut params = ProtocolParams::mainnet_default();
+        params.max_block_size = target_cap;
+        if previous_cap > target_cap {
+            params.max_block_cost = 16_384;
+            params.input_cost = 20_000;
+        }
+        let utxo: &dyn UtxoView = if previous_cap < target_cap {
+            &empty_utxo
+        } else {
+            &single_utxo
+        };
+        let ctx = BlockValidationContext {
+            parent: &checked_parent,
+            utxo,
+            params: &params,
+            rule_306_max_block_size: previous_cap,
+            voting_length: 2,
+            votes_unknown_rule_disabled: false,
+            parent_extension: None,
+            soft_fork_state: None,
+            last_headers: &[],
+            script_validation_checkpoint: None,
+            reemission: None,
+        };
+        let results = [
+            validate_full_block(
+                CheckedHeader::trust_me(header.clone(), *header_id),
+                &bt,
+                &ext,
+                &ctx,
+            ),
+            validate_full_block_parallel(
+                CheckedHeader::trust_me(header.clone(), *header_id),
+                &bt,
+                &ext,
+                &ctx,
+            ),
+        ];
+        for result in results {
+            if previous_cap < target_cap {
+                match result {
+                    Err(BlockValidationError::BlockTransactionsTooLarge { size, max }) => {
+                        assert_eq!(size, actual_size);
+                        assert_eq!(max, previous_cap);
+                    }
+                    other => panic!("expected rule 306 rejection, got {other:?}"),
+                }
+            } else {
+                match result {
+                    Err(BlockValidationError::Transaction {
+                        index: 0,
+                        error: ValidationError::CostExceeded { limit, .. },
+                    }) => assert_eq!(limit, JitCost::from_block_cost(16_384).unwrap().value()),
+                    other => panic!("expected target-cost rejection, got {other:?}"),
+                }
+            }
+        }
     }
 }
 
@@ -818,6 +933,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -830,6 +946,7 @@ fn parallel_equivalent_to_sequential_on_committed_multitx_blocks() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,
@@ -989,6 +1106,7 @@ fn rule_215_gated_at_full_block_call_sites() {
             parent: &checked_parent,
             utxo: &EmptyUtxo,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: disabled,
             parent_extension: None,

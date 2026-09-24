@@ -22,7 +22,7 @@ built · **[DEFERRED]** out of this session's scope, contract reserved.
 | Rust block-apply | `ergo_validation::block::validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx) -> Result<CheckedBlock,_>` then `ergo_state::StateStore::apply_block(&checked, voted_params, hook)`; root via `StateStore::root_digest() -> ADDigest` (33 bytes). test-helpers: `apply_block_checked_for_test(height, id, expected_digest, &[CheckedTransaction])`. |
 | Rust reduce | `ergo_sigma::…::reduce_expr_with_cost(&expr, &ctx, &constants, &mut cost)`. |
 | JSON decode | `ergo_rest_json::decode_scala_transaction_with_mode`, `DecodedFullBlock`, `ScalaFullBlock`. |
-| Hermetic harness | `ergo-difftest` (own PRNG `rng.rs`; **byte-mutation** `generate.rs` — the silent-failure risk); `--oracle` Phase 2; `tests/selftest.rs` proves the detector has teeth. |
+| Hermetic harness | `ergo-difftest` (own PRNG `rng.rs`; **byte-mutation** `generate.rs` — the silent-failure risk); `--oracle` Phase 2; `tests/it/selftest.rs` proves the detector has teeth. |
 | Toolchain | **stable 1.95.0 pinned, NO nightly** → cargo-fuzz/libFuzzer cannot run here or in CI. |
 | Bulk fixtures | `test-vectors/mainnet` = 101 MB; range extractions already `.gitignore`d; committed ranges consumed by ~10 CI-run tests. |
 

@@ -80,7 +80,11 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   work-message JSON projection, candidate longpoll.
 - `src/snapshot.rs` — `NodeSnapshot` DTO bundle, `SnapshotPublisher`,
   `SnapshotHandle` (`Arc<ArcSwap<NodeSnapshot>>`), recent-blocks tip cache.
-- `src/peer_loop.rs` — per-peer dial/accept + read/write tasks; `PeerEvent` enum.
+- `src/peer_loop.rs` (+ `peer_loop/outbound.rs`) — per-peer dial/accept +
+  read/write tasks; `PeerEvent` enum. The outbound channel is bounded
+  (`MAX_MESSAGES = 2048`, 16 MiB payload budget, 30 s write timeout); an
+  overflow, oversized payload, or stalled write stops the socket task rather
+  than buffering unboundedly.
 - `src/notifier.rs` — `MempoolNotifier`: polls committed tip identity
   `(height, header_id)`, emits `TxDiff` so the mempool reconciles off the
   consensus path; generic over `DiffSource`.
@@ -135,6 +139,15 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   validation settings differ from last-seen, every active mempool tx is demoted
   into the revalidation queue and re-admitted under the new rules
   (`src/node/action_loop.rs:370`).
+- **IP bans evict every connection.** After a penalty bans a peer, every
+  registered runtime from that IP — other ports and pending handshakes — is
+  torn down, not just the penalized connection (`cleanup_banned_ip`,
+  `src/node/peer_actions.rs:379`).
+- **Change-address updates are unlocked-only and ownership-checked.**
+  `WalletAdmin::update_change_address` requires an unlocked wallet and
+  re-derives the recorded path with the active master key before persisting, so
+  a change address can never point at a key this wallet cannot sign for
+  (`src/node/wallet_bridge/commands/admin.rs:419`).
 - **Anti-DoS recording survives a dropped reply.** A submission's mempool
   admission outcome is recorded even if the API handler already timed out and
   dropped its oneshot (`src/node/action_loop.rs:202`).

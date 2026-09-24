@@ -3,7 +3,7 @@
 `scala_avl_vectors.json` pins the AUTHORITATIVE Scala scrypto `BatchAVLVerifier`
 outcome for a set of `(startingDigest, proof, op)` triples: whether
 `performOneOperation` succeeds and the resulting `digest`. Consumed by
-`ergo-sigma/tests/avl_scala_oracle_parity.rs`, which asserts the Rust
+`ergo-sigma/tests/it/avl_scala_oracle_parity.rs`, which asserts the Rust
 `ergo_sigma::avl::AvlVerifier` agrees:
 
 - **Scala success** ⇒ Rust op `Ok` AND `digest()` equals Scala's digest

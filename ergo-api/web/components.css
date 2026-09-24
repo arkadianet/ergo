@@ -347,6 +347,15 @@ code {
   padding: var(--space-2) 0;
   transition: color var(--dur) var(--ease);
 }
+.dtable__heading { min-width: 0; }
+.dtable__heading .dtable__th { width: 100%; }
+.dtable__th { font-family: var(--sans); font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 500; color: var(--tx2); min-height: 30px; }
+.dtable__togglecell { flex: 0 0 26px; }
+.dtable__row { cursor: default; }
+.dtable__row--expandable { cursor: pointer; }
+.dtable__mobile-sort { display: none; }
+.dtable__drawer { background: var(--s2); }
+.dtable__empty { color: var(--tx2); line-height: 1.6; }
 .dtable__th:hover {
   color: var(--tx2);
 }
@@ -420,7 +429,7 @@ code {
 }
 
 .dtable__drawer {
-  background: color-mix(in srgb, var(--s2) 72%, black);
+  background: var(--s2);
   box-shadow: inset 3px 0 0 var(--accent);
   padding: var(--space-5) var(--space-6) var(--space-6);
 }
@@ -565,33 +574,6 @@ code {
 }
 
 @media (max-width: 760px) {
-  .dtable {
-    border-radius: var(--radius-md);
-  }
-  .dtable__head {
-    display: none;
-  }
-  .dtable__row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: var(--space-1);
-    padding: var(--space-5);
-  }
-  .dtable__c {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--space-5);
-    white-space: normal;
-    overflow: visible;
-    text-overflow: clip;
-  }
-  .dtable__c::before {
-    content: attr(data-label);
-    color: var(--tx3);
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-  }
   .table {
     display: block;
     border-radius: var(--radius-md);
@@ -629,4 +611,49 @@ code {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+.dtable__row { cursor: default; }
+.dtable__row--expandable { cursor: pointer; }
+
+.dtable-host { container-type: inline-size; }
+@container (max-width: 900px) {
+  .dtable__mobile-sort { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+  .dtable__mobile-sort label { display: grid; gap: 6px; flex: 1; min-width: 0; color: var(--tx2); font-size: 12px; }
+  .dtable__mobile-sort :is(button, select) { min-height: 40px; }
+  .dtable {
+    border-radius: var(--radius-md);
+  }
+  .dtable__head {
+    display: none;
+  }
+  .dtable__row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+    padding: var(--space-5);
+  }
+  .dtable__c {
+    flex: none !important; /* Desktop pixel widths must not become mobile row heights. */
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-5);
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    padding-block: 6px;
+    overflow-wrap: anywhere;
+  }
+  .dtable__c > * { min-width: 0; overflow-wrap: anywhere; }
+  .dtable__c::before { flex: none; }
+  .dtable__togglecell { flex: none; align-self: flex-end; }
+  .dtable__toggle { width: 40px; height: 36px; }
+  .dtable__c::before {
+    content: attr(data-label);
+    color: var(--tx3);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+  }
+
 }

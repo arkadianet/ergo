@@ -22,6 +22,47 @@ use tracing::info;
 
 use super::{send_to_peer, NodeState};
 
+/// Scala's `sendSync` waits for a proof while bootstrap is enabled and
+/// history has no best header (ErgoNodeViewSynchronizer.scala:343-347).
+/// Its reply path suppresses empty sync info too (:367-371). Reducer
+/// presence means bootstrap was enabled at boot; terminal abandonment
+/// releases this gate so ordinary sync can recover.
+pub(super) fn popow_blocks_sync_info(state: &NodeState) -> bool {
+    state.popow_bootstrap.as_ref().is_some_and(|popow| {
+        popow.is_active(state.store.chain_state_meta().best_header_height == 0)
+    })
+}
+
+/// Dispatch the handshake's initial sync without consuming the peer's sync
+/// cadence while fresh NiPoPoW bootstrap is waiting for proofs.
+pub(super) fn send_initial_sync_info(
+    state: &mut NodeState,
+    peer: &PeerId,
+    sync_version: ergo_p2p::peer::SyncVersion,
+    now: Instant,
+) {
+    if popow_blocks_sync_info(state) {
+        return;
+    }
+    if !try_send_anchor_sync_info(state, peer, now) {
+        match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
+            Ok(payload) => {
+                if !send_to_peer(state, peer, message::CODE_SYNC_INFO, payload) {
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer, error = %e, "failed to serialize SyncInfo; skipping send");
+                return;
+            }
+        }
+    }
+    state
+        .coordinator
+        .sync_state_mut()
+        .mark_sync_sent(*peer, now);
+}
+
 /// Step C+D — try to send a crafted single-anchor SyncInfo to `peer`,
 /// returning `true` if the anchor path was used. Falls through to
 /// `false` (caller sends the standard `build_sync_info_payload`)
@@ -54,7 +95,7 @@ pub(super) fn try_send_anchor_sync_info(
     peer: &PeerId,
     now: Instant,
 ) -> bool {
-    if !state.enable_anchor_scheduler {
+    if popow_blocks_sync_info(state) || !state.enable_anchor_scheduler {
         return false;
     }
     // **Bridge reservation**: a deterministic subset of the connected

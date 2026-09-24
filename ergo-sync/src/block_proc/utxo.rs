@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use tracing::debug;
 
-use ergo_primitives::digest::blake2b256;
+use ergo_primitives::digest::{blake2b256, ModifierId};
 use ergo_primitives::reader::VlqReader;
-use ergo_ser::ad_proofs::read_ad_proofs;
+use ergo_primitives::writer::VlqWriter;
+use ergo_ser::ad_proofs::{read_ad_proofs, write_ad_proofs, ADProofs};
 use ergo_ser::block_transactions::read_block_transactions_with_group_elements;
 use ergo_ser::extension::read_extension;
 use ergo_ser::header::read_header;
-use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_EXTENSION};
+use ergo_ser::modifier_id::{compute_section_id, ExpectedSections, TYPE_AD_PROOFS, TYPE_EXTENSION};
 use ergo_state::store::StateStore;
 use ergo_validation::block::{
     validate_full_block_parallel_with_group_elements, BlockValidationContext,
@@ -27,6 +28,9 @@ use ergo_validation::{ChainHeaderReader, ChainHeaderReaderError, HeaderView};
 use crate::perf::BlockPerfCounters;
 
 use super::{BlockProcessError, ProcessedBlock};
+
+/// Scala's default `adProofsSuffixLength`, measured from the best known header.
+const AD_PROOFS_SUFFIX_LENGTH: u32 = 114_688;
 
 /// Bridge `StateStore` → `ChainHeaderReader` so the voting recompute
 /// pipeline can read `header.votes` for the previous voting epoch
@@ -190,30 +194,7 @@ pub(super) fn process_block_utxo(
     // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
     //
-    // Policy VerifyShipped (production boot): the block's ADProofs
-    // section is verified directly at O(block size) cost —
-    //   a) blake2b256(shipped bytes) == header.ad_proofs_root;
-    //   b) replaying the block's net box changes through those bytes
-    //      must carry the parent state root exactly to
-    //      `header.state_root` (digest-mode verifier seam, bound to
-    //      this header's section id).
-    // A missing section is DATA AVAILABILITY (`AdProofsUnavailable`),
-    // never invalidity: coordinator `requires_proofs` gating means the
-    // section is requested alongside txs+extension and apply retries
-    // when it lands. This mirrors Scala, where a UTXO node cannot
-    // apply a block whose ADProofs have not arrived.
-    //
-    // A block that ships garbage proofs or a self-consistent-but-false
-    // root/proof pair is rejected. Live mainnet divergence at h1,853,301
-    // (block 437601cd…, applied here for 697s) was the no-binding
-    // version of this hole; both checks bind the shipped bytes.
-    //
-    // Issue #264: Regenerate (the legacy default) REGENERATES proofs by
-    // hydrating the ENTIRE AVL arena into a prover graph per applied
-    // block — O(tree size) time and heap — wedging archival catch-up
-    // near tip. Kept only as an explicit opt-out for deployments that
-    // cannot download ADProofs sections.
-    match store.ad_proofs_apply_policy() {
+    let retained_proof = match store.ad_proofs_apply_policy() {
         ergo_state::store::AdProofsApplyPolicy::VerifyShipped => {
             let section_bytes = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
                 BlockProcessError::AdProofsUnavailable {
@@ -255,6 +236,7 @@ pub(super) fn process_block_utxo(
                 &header,
                 &block_txs.transactions,
             )?;
+            None
         }
         ergo_state::store::AdProofsApplyPolicy::Regenerate => {
             let regenerated = store.regenerate_ad_proofs(&block_txs.transactions)?;
@@ -266,8 +248,14 @@ pub(super) fn process_block_utxo(
                     computed_root: regenerated_root,
                 });
             }
+            (height
+                >= store
+                    .chain_state()
+                    .best_header_height
+                    .saturating_sub(AD_PROOFS_SUFFIX_LENGTH))
+            .then_some(regenerated.1)
         }
-    }
+    };
 
     // Voted parameters: at epoch starts, run the full
     // epoch-extension validation before constructing CheckedHeader.
@@ -468,6 +456,7 @@ pub(super) fn process_block_utxo(
     )
     .map_err(ergo_validation::block::BlockValidationError::Header)?;
     // The target epoch extension is validated before its parameters price transactions.
+    let rule_306_max_block_size = ProtocolParams::from_active(store.active_params()).max_block_size;
     let active_for_this_block =
         ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
     let params = &active_for_this_block;
@@ -475,6 +464,7 @@ pub(super) fn process_block_utxo(
         parent: &parent_checked,
         utxo: store,
         params,
+        rule_306_max_block_size,
         voting_length,
         votes_unknown_rule_disabled,
         parent_extension: parent_extension.as_ref(),
@@ -495,6 +485,22 @@ pub(super) fn process_block_utxo(
     )?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
+
+    if let Some(proof_bytes) = retained_proof {
+        let mut writer = VlqWriter::new();
+        write_ad_proofs(
+            &mut writer,
+            &ADProofs {
+                header_id: ModifierId::from_bytes(header_id_computed),
+                proof_bytes,
+            },
+        );
+        store.store_block_section_typed(
+            &expected.ad_proofs_id,
+            &writer.result(),
+            TYPE_AD_PROOFS,
+        )?;
+    }
 
     // 9. Apply to UTXO state. apply_block now derives height/header_id/
     // expected_state_root from the embedded CheckedHeader, so we don't
@@ -562,7 +568,7 @@ pub(super) fn process_block_utxo(
 }
 
 #[cfg(test)]
-mod ad_proofs_regeneration_tests {
+mod tests {
     use super::*;
     use ergo_primitives::digest::{Digest32, ModifierId};
     use ergo_primitives::reader::VlqReader;
@@ -573,6 +579,8 @@ mod ad_proofs_regeneration_tests {
     use ergo_ser::sigma_value::read_constant;
     use ergo_state::store::StateStore;
     use std::collections::BTreeMap;
+
+    // ----- helpers -----
 
     const VEC_DIR: &str = "../test-vectors/mainnet";
 
@@ -736,6 +744,130 @@ mod ad_proofs_regeneration_tests {
         read_transaction_from_hex(hex_str)
     }
 
+    fn assert_missing_io_invalidates_header(no_inputs: bool) {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+        use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+        use ergo_ser::transaction::transaction_id;
+        use ergo_state::ChainStateRead;
+        use ergo_validation::block::BlockValidationError;
+        use ergo_validation::ValidationError;
+
+        let mut store = store_at_height_1();
+        let mut tx = tx_at(2);
+        if no_inputs {
+            tx.inputs.clear();
+        } else {
+            tx.output_candidates.clear();
+        }
+        let tx_id = transaction_id(&tx).unwrap();
+        let mut header = header_at(2);
+        header.transactions_root = Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+            &[tx_id.as_bytes().as_slice()],
+            None,
+        ));
+        let (_, proofs) = store
+            .regenerate_ad_proofs(std::slice::from_ref(&tx))
+            .unwrap();
+        header.ad_proofs_root = blake2b256(&proofs);
+        let (header_bytes, header_id) = ergo_ser::header::serialize_header(&header).unwrap();
+        let header_id = *header_id.as_bytes();
+        // Seed the PoW-checked stage: changing the transaction commitment changes
+        // the header hash. This test exercises receive/apply after header validation.
+        for h in [header_at(1), header.clone()] {
+            let (bytes, id) = ergo_ser::header::serialize_header(&h).unwrap();
+            store
+                .store_validated_header(
+                    id.as_bytes(),
+                    &bytes,
+                    &ergo_state::chain::HeaderMeta {
+                        parent_id: *h.parent_id.as_bytes(),
+                        height: h.height,
+                        cumulative_score: vec![h.height as u8],
+                        pow_validity: 1,
+                        timestamp: h.timestamp,
+                    },
+                    Some((h.height, vec![h.height as u8])),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.get_header(&header_id).unwrap().unwrap(), header_bytes);
+        let expected = ExpectedSections::from_header(
+            &header_id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes(header_id),
+                transactions: vec![tx],
+            },
+        )
+        .unwrap();
+        let bytes = writer.result();
+        crate::coordinator::verify_section_modifier_id(102, &expected.transactions_id, &bytes)
+            .expect("committed bytes must pass receive verification without a relay penalty");
+        store
+            .store_block_section(&expected.transactions_id, &bytes)
+            .unwrap();
+        let mut value = vec![1];
+        value.extend_from_slice(header.parent_id.as_bytes());
+        let mut writer = VlqWriter::new();
+        write_extension(
+            &mut writer,
+            &Extension {
+                header_id: ModifierId::from_bytes(header_id),
+                fields: vec![ExtensionField { key: [1, 0], value }],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section(&expected.extension_id, &writer.result())
+            .unwrap();
+        let params = ProtocolParams::mainnet_default();
+        let err = process_block_utxo(
+            &mut store, &header_id, &params, None, None, None, None, None,
+        )
+        .unwrap_err();
+        // ErgoTransaction.scala:93-94 and ValidationRules.scala:31-35:
+        // rules 100/101 are fatal validation verdicts, not parse failures.
+        assert!(
+            matches!(&err, BlockProcessError::Validation(BlockValidationError::Transaction {
+            index: 0, error,
+        }) if matches!((no_inputs, error),
+            (true, ValidationError::NoInputs) | (false, ValidationError::NoOutputs))),
+            "{err:?}"
+        );
+
+        let mut backend = ergo_state::StateBackendKind::Utxo(store);
+        let mut coordinator = crate::coordinator::SyncCoordinator::new(1);
+        let mut executor = crate::executor::SyncExecutor::new(
+            params,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        );
+        executor.load_header_index(&backend).unwrap();
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        assert!(backend
+            .as_utxo_mut()
+            .unwrap()
+            .is_durably_invalid(&header_id)
+            .unwrap());
+        assert_eq!(backend.chain_state_meta().best_full_block_height, 1);
+        assert_eq!(backend.chain_state_meta().best_header_height, 1);
+        assert_eq!(executor.block_apply_error_count(), 1);
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        assert_eq!(
+            executor.block_apply_error_count(),
+            1,
+            "invalid header is not retried"
+        );
+    }
+
+    // ----- happy path -----
+
     #[test]
     fn regenerated_proof_hash_matches_mainnet_declared_root() {
         // The full-parity oracle: replaying block 2's txs against the real
@@ -770,5 +902,83 @@ mod ad_proofs_regeneration_tests {
         assert_ne!(computed, *h2.ad_proofs_root.as_bytes());
         let _ = NetworkPrefix::Mainnet; // keep import honest if unused above
         let _ = Digest32::from_bytes([0u8; 32]);
+    }
+
+    #[test]
+    fn local_proof_validation_rejects_wrong_header_commitment() {
+        use ergo_primitives::writer::VlqWriter;
+        use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+        use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+
+        let mut store = store_at_height_1();
+        let parent_root = store.root_digest();
+        let mut header = header_at(2);
+        header.ad_proofs_root = Digest32::from_bytes([0xAA; 32]);
+        let (header_bytes, header_id) = ergo_ser::header::serialize_header(&header).unwrap();
+        let header_id = *header_id.as_bytes();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        let expected = ExpectedSections::from_header(
+            &header_id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes(header_id),
+                transactions: vec![tx_at(2)],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section(&expected.transactions_id, &writer.result())
+            .unwrap();
+        let mut value = vec![1];
+        value.extend_from_slice(header.parent_id.as_bytes());
+        let mut writer = VlqWriter::new();
+        write_extension(
+            &mut writer,
+            &Extension {
+                header_id: ModifierId::from_bytes(header_id),
+                fields: vec![ExtensionField { key: [1, 0], value }],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section(&expected.extension_id, &writer.result())
+            .unwrap();
+        let result = process_block_utxo(
+            &mut store,
+            &header_id,
+            &ProtocolParams::mainnet_default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(BlockProcessError::AdProofsHashMismatch { .. })),
+            "{result:?}"
+        );
+        assert_eq!(store.height(), 1);
+        assert_eq!(store.root_digest(), parent_root);
+        assert!(store
+            .get_block_section(&expected.ad_proofs_id)
+            .unwrap()
+            .is_none());
+    }
+    // ----- error paths -----
+
+    #[test]
+    fn block_no_inputs_validation_marks_header_invalid() {
+        assert_missing_io_invalidates_header(true);
+    }
+
+    #[test]
+    fn block_no_outputs_validation_marks_header_invalid() {
+        assert_missing_io_invalidates_header(false);
     }
 }

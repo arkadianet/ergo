@@ -9,6 +9,7 @@ use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::{SigmaBoolean, SigmaValue};
 
 use super::*;
+use crate::evaluator::opcodes::box_context::box_canonical_bytes;
 use crate::evaluator::types::*;
 
 /// Truncated `Debug` projection used by trace entries. Keeps the first
@@ -196,7 +197,7 @@ pub(crate) fn value_to_typed_sigma(
         // and `serialize_put_cost(SHeader)` charges the matching put costs.
         Value::Header(h) => Ok((
             SigmaType::SHeader,
-            SigmaValue::Header(Box::new(h.to_header())),
+            SigmaValue::Header(Box::new(h.to_header()), h.id),
         )),
         // Native `Coll[Header]` carrier (e.g. CONTEXT.headers) — the standard
         // runtime source of header collections. Convert each element to the
@@ -207,27 +208,28 @@ pub(crate) fn value_to_typed_sigma(
         Value::CollHeader(headers) => {
             let vals = headers
                 .iter()
-                .map(|h| SigmaValue::Header(Box::new(h.to_header())))
+                .map(|h| SigmaValue::Header(Box::new(h.to_header()), h.id))
                 .collect();
             Ok((
                 SigmaType::SColl(Box::new(SigmaType::SHeader)),
                 SigmaValue::Coll(CollValue::Values(vals)),
             ))
         }
-        // SBox: the InlineBox carrier holds the verbatim serialized box bytes
-        // (`raw_bytes` == Scala serialize(box), byte-identical — the parser
-        // preserves the tree and register bytes verbatim). DataSerializer
-        // routes SBox to `ErgoBox.sigmaSerializer`; hand the cached bytes to
-        // `write_value(SBox, OpaqueBoxBytes)` (-> put_bytes), and
+        // SBox: `DataSerializer.serialize(SBox)` routes to
+        // `ErgoBox.sigmaSerializer`, which re-serializes the candidate from its
+        // PARSED structure and appends txId + index (`ErgoBox.scala:204-211`).
+        // It never emits the retained `_bytes`, so use the canonical rebuild —
+        // NOT `raw_bytes`, which is the retained wire slice for a
+        // data-deserialized box and may carry a non-canonical register
+        // encoding. `write_value(SBox, OpaqueBoxBytes)` emits the bytes and
         // `serialize_put_cost(SBox)` re-parses them for the put-cost sum.
         Value::InlineBox(eb) => Ok((
             SigmaType::SBox,
-            SigmaValue::OpaqueBoxBytes(eb.raw_bytes.clone()),
+            SigmaValue::OpaqueBoxBytes(box_canonical_bytes(eb)?),
         )),
         // Context-backed single box (SELF / INPUTS(i) / OUTPUTS(i) / …):
-        // resolve to the concrete box and emit its canonical `raw_bytes` — the
-        // SAME bytes ExtractBytes (0xC3) and the InlineBox arm above use, which
-        // is exactly what Scala `DataSerializer` / `ErgoBox.sigmaSerializer`
+        // resolve to the concrete box and emit its canonical serialization —
+        // exactly what Scala `DataSerializer` / `ErgoBox.sigmaSerializer`
         // writes. Only reachable with a context (SGlobal.serialize); without
         // one it falls through to the SubstConstants reject.
         Value::SelfBox | Value::BoxRef { .. } => {
@@ -238,7 +240,7 @@ pub(crate) fn value_to_typed_sigma(
             let b = crate::evaluator::helpers::equality::resolve_box(val, ctx)?;
             Ok((
                 SigmaType::SBox,
-                SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()),
+                SigmaValue::OpaqueBoxBytes(box_canonical_bytes(b)?),
             ))
         }
         // A context box COLLECTION (INPUTS / OUTPUTS / DATAINPUTS) → Coll[SBox].
@@ -255,7 +257,10 @@ pub(crate) fn value_to_typed_sigma(
             };
             let vals: Vec<SigmaValue> = boxes
                 .iter()
-                .map(|b| SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()))
+                .map(box_canonical_bytes)
+                .collect::<Result<Vec<Vec<u8>>, EvalError>>()?
+                .into_iter()
+                .map(SigmaValue::OpaqueBoxBytes)
                 .collect();
             Ok((
                 SigmaType::SColl(Box::new(SigmaType::SBox)),
@@ -272,7 +277,7 @@ pub(crate) fn value_to_typed_sigma(
                 .iter()
                 .map(|e| {
                     let b = crate::evaluator::helpers::equality::resolve_box(e, ctx)?;
-                    Ok(SigmaValue::OpaqueBoxBytes(b.raw_bytes.clone()))
+                    Ok(SigmaValue::OpaqueBoxBytes(box_canonical_bytes(b)?))
                 })
                 .collect::<Result<Vec<SigmaValue>, EvalError>>()?;
             Ok((
@@ -589,10 +594,25 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                     expected: "valid SBox constant",
                     got: format!("box deser error: {e}"),
                 })?;
-            let box_id = ergo_box.box_id().map_err(|e| EvalError::TypeError {
-                expected: "box_id computation",
-                got: format!("{e}"),
-            })?;
+            if !r.is_empty() {
+                return Err(EvalError::TypeError {
+                    expected: "valid SBox constant",
+                    got: format!("box has {} trailing byte(s)", r.remaining()),
+                });
+            }
+            // Scala `ErgoBox.sigmaSerializer.parse` retains the exact input
+            // slice as `_bytes`, and `bytes`/`id` derive from it
+            // (`ErgoBox.scala:73,87-91,214-227`) — NOT from a re-serialization.
+            // `read_group_element` canonicalizes the parsed *value* (correct),
+            // so the retained slice is the only place a `0x00`-lead identity
+            // GroupElement's original trailing bytes survive. The reference's
+            // `.bytes`, `.id` and box equality are all keyed on that slice
+            // (`CBox.bytes`/`id`, `CBox.equals` id-based), so carry it here:
+            // `raw_bytes` is the retained slice and `id` hashes it. The
+            // canonical bytes `Global.serialize(SBox)` must emit are rebuilt
+            // from structure by `box_canonical_bytes`, which deliberately does
+            // NOT read `raw_bytes`.
+            let id = ergo_primitives::digest::blake2b256(bytes);
             let registers = [
                 ergo_box
                     .candidate
@@ -631,16 +651,11 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 .iter()
                 .map(|t| (*t.token_id.as_bytes(), t.amount))
                 .collect();
-            let raw_bytes = {
-                let mut w = ergo_primitives::writer::VlqWriter::new();
-                ergo_ser::ergo_box::write_ergo_box(&mut w, &ergo_box).unwrap_or_default();
-                w.result()
-            };
             Ok(Value::InlineBox(Box::new(EvalBox {
                 creation_height: ergo_box.candidate.creation_height,
                 script_bytes: ergo_box.candidate.ergo_tree_bytes().to_vec(),
                 value: ergo_box.candidate.value as i64,
-                id: *box_id.as_bytes(),
+                id: *id.as_bytes(),
                 // read_ergo_box parses the real transaction id and output
                 // index from the box tail; carry them through so
                 // ExtractCreationInfo (R3 ref = txId ++ 2-byte big-endian
@@ -650,28 +665,26 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
                 output_index: ergo_box.index,
                 registers,
                 tokens,
-                raw_bytes,
+                // Retained wire slice (Scala `ErgoBox.bytes`): the parse-time
+                // encoding survives, including a non-canonical identity
+                // GroupElement (`00 aa..aa`).
+                raw_bytes: bytes.clone(),
                 register_bytes: ergo_box.candidate.register_bytes().to_vec(),
             })))
         }
         (SigmaType::SAvlTree, SigmaValue::AvlTree(data)) => Ok(Value::AvlTree(data.clone())),
         (SigmaType::SString, SigmaValue::Str(s)) => Ok(Value::Str(s.clone())),
-        // SHeader value -> Value::Header. The header id is Blake2b256 over the
-        // serialized header (the block-header path computes it the same way).
-        // Version-agnostic: the v3+ (isV3OrLaterErgoTreeVersion) gate is
-        // enforced by the evaluator callers that materialize an SHeader value
-        // (getVar / constant eval / deserializeTo), which carry the ErgoTree
-        // version; this converter does not.
-        (SigmaType::SHeader, SigmaValue::Header(h)) => {
-            let (_bytes, hid) =
-                ergo_ser::header::serialize_header(h).map_err(|e| EvalError::TypeError {
-                    expected: "re-serializable SHeader value",
-                    got: format!("{e:?}"),
-                })?;
-            Ok(Value::Header(Box::new(
-                crate::evaluator::types::EvalHeader::from_header(h, *hid.as_bytes()),
-            )))
-        }
+        // SHeader value -> Value::Header. The id carried by the parsed
+        // `SigmaValue::Header` is Blake2b256 over the RETAINED input slice
+        // (Scala `ErgoHeader.serializedId`), so carry it through rather than
+        // re-hashing a canonical re-serialization. Version-agnostic: the v3+
+        // (isV3OrLaterErgoTreeVersion) gate is enforced by the evaluator
+        // callers that materialize an SHeader value (getVar / constant eval /
+        // deserializeTo), which carry the ErgoTree version; this converter
+        // does not.
+        (SigmaType::SHeader, SigmaValue::Header(h, id)) => Ok(Value::Header(Box::new(
+            crate::evaluator::types::EvalHeader::from_header(h, *id),
+        ))),
         _ => Err(EvalError::UnsupportedConstant(tpe.clone())),
     }
 }

@@ -482,6 +482,7 @@ mod backfill;
 mod dry_run;
 #[cfg(test)]
 mod dry_run_bench;
+mod lazy_prover;
 /// Test-only re-export of the canonical proof producer, used by
 /// the digest-mode apply seam's producer/consumer interop test and
 /// the `test-helpers` ADProofs-derivation seam. Production code never
@@ -743,33 +744,24 @@ pub struct StateStore {
     /// prune seams, the `rollback_to` depth guard, and the tx-diff LCA
     /// walk caps.
     rollback_window: u32,
-    /// UTXO-mode `adProofsRoot` validation strategy (issue #264).
-    /// Defaults to [`AdProofsApplyPolicy::Regenerate`] (legacy);
-    /// production boot wires [`AdProofsApplyPolicy::VerifyShipped`]
-    /// alongside coordinator `requires_proofs` so catch-up verifies
-    /// shipped sections at O(block size) instead of hydrating the
-    /// entire arena per block.
+    /// UTXO proof validation defaults to local generation with on-demand
+    /// node reads, independent of historical proof availability on peers.
     ad_proofs_apply_policy: AdProofsApplyPolicy,
 }
 
-/// How UTXO-mode block application validates a block's declared
-/// `adProofsRoot` (issue #264). Boot selects per deployment shape;
-/// the default preserves legacy behavior.
+/// How UTXO-mode block application validates the declared proof commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdProofsApplyPolicy {
-    /// Regenerate proof bytes from the block's transactions against a
-    /// fully hydrated copy of the parent AVL tree, then compare hashes.
-    /// Correct but O(tree size) time and heap PER BLOCK — prohibitive
-    /// on archival-scale trees during catch-up (multi-GB anon RSS,
-    /// minutes-to-hours per block near tip).
+    /// Generate proofs locally, expanding only the affected AVL paths,
+    /// then compare the proof hash with the header commitment.
     Regenerate,
     /// Verify the SHIPPED ADProofs section at O(block size): the bytes
     /// must hash to `adProofsRoot`, and replaying the block's net box
     /// changes through them must carry the parent state root exactly to
     /// `stateRoot`. A missing section surfaces as data availability
-    /// (`BlockProcessError::AdProofsUnavailable`), never regeneration —
-    /// matching Scala, where a UTXO node cannot apply a block whose
-    /// ADProofs have not arrived.
+    /// (`BlockProcessError::AdProofsUnavailable`). This opt-in policy
+    /// requires peers that retain the relevant proofs; production UTXO
+    /// sync uses local generation instead, matching Scala UtxoState.
     VerifyShipped,
 }
 
@@ -1170,11 +1162,11 @@ impl StateStore {
     ///    `apply_popow_proof` writes; `HEADER_CHAIN_INDEX` would
     ///    miss the sparse prefix that real Mode 4 anchors fall
     ///    in).
-    /// 5. The reconstructed tree's root_label must equal the
-    ///    first 32 bytes of `expected_state_root` (defense-in-
+    /// 5. The reconstructed tree's full 33-byte ADDigest (root label
+    ///    plus height) must equal `expected_state_root` (defense-in-
     ///    depth — the 2g trust check already enforced this against
-    ///    the header chain, but a fresh check here protects
-    ///    against a state-machine bug between 2g and 2i).
+    ///    the header chain, but a fresh check here protects against a
+    ///    state-machine bug between 2g and 2i).
     ///
     /// Caller invariant NOT runtime-enforced (deferred to Phase 5
     /// boot-consistency check): `snapshot_height` must be aligned
@@ -1287,13 +1279,12 @@ impl StateStore {
         }
 
         // 2. Defense-in-depth root check.
-        let expected_root_prefix: [u8; 32] = expected_state_root.as_bytes()[..32]
-            .try_into()
-            .expect("ADDigest prefix is always 32 bytes");
-        if reconstructed.root_label.as_bytes() != &expected_root_prefix {
+        let reconstructed_state_root =
+            crate::avl::digest::root_digest(&reconstructed.root_label, reconstructed.tree_height);
+        if reconstructed_state_root != *expected_state_root {
             return Err(StateError::InstallSnapshotRootMismatch {
-                computed: hex::encode(reconstructed.root_label.as_bytes()),
-                expected: hex::encode(expected_root_prefix),
+                computed: hex::encode(reconstructed_state_root.as_bytes()),
+                expected: hex::encode(expected_state_root.as_bytes()),
             });
         }
 
@@ -2735,11 +2726,12 @@ impl StateStore {
     /// security argument lives one layer up.
     ///
     /// Precondition: the store is in `HeaderAvailability::Dense` mode
-    /// with `best_header_height == 0` (fresh node). Calling this on
-    /// a node that already has chain state returns
-    /// `StateError::ApplyPopowProofWrongMode` rather than
-    /// overwriting; the re-bootstrap case is operator-driven (wipe
-    /// data_dir).
+    /// with `best_header_height == 0` (fresh node). A Dense store with
+    /// an existing header tip returns `StateError::ApplyPopowProofNotFresh`;
+    /// a non-Dense store returns `StateError::ApplyPopowProofWrongMode`,
+    /// and a store with full-block state returns
+    /// `StateError::ApplyPopowProofRefused`. The re-bootstrap case is
+    /// operator-driven (wipe data_dir).
     ///
     /// Does NOT touch `CHAIN_INDEX` (full-block index) or
     /// `best_full_block_*`. The Mode 2 snapshot bootstrap remains
@@ -2846,9 +2838,8 @@ impl StateStore {
     /// Regenerate the ADProofs bytes for `transactions` applied at the
     /// current tip — the validator-side twin of [`Self::candidate_dry_run`].
     ///
-    /// Same canonical op stream (data-input lookups in transaction order,
-    /// then removes, then inserts — see `store/dry_run.rs`), same prover
-    /// hydration, same self-check: the generated proof must verifier-replay
+    /// Uses the canonical operation stream with on-demand node reads.
+    /// The generated proof must verifier-replay
     /// from the parent root to the claimed post-root. Returns
     /// `(post_state_root, raw_proof_bytes)`; the caller hashes the proof
     /// bytes and compares against the header's declared `adProofsRoot`
@@ -2867,7 +2858,7 @@ impl StateStore {
             .collect();
         let parent_root = self.tree.root_digest();
         let (new_root, proof_bytes) =
-            dry_run::apply_change_set_via_prover(&self.tree, &to_lookup, &to_remove, &to_insert)?;
+            lazy_prover::prove(&self.tree, &to_lookup, &to_remove, &to_insert)?;
         dry_run::self_check_candidate_proof(
             &parent_root,
             &to_lookup,
@@ -2886,10 +2877,9 @@ impl StateStore {
     /// the shipped proof payload must hash to `header.ad_proofs_root`
     /// and the block's net box changes, replayed through it, must carry
     /// the parent state root exactly to `header.state_root`.
-    /// Unlike [`Self::regenerate_ad_proofs`] this never materializes the
-    /// AVL arena into the prover graph, so it is safe to run per applied
-    /// block during catch-up (issue #264: regeneration is O(tree size)
-    /// time + heap per block).
+    /// This explicit policy avoids arena reads but depends on a downloaded
+    /// proof. Production UTXO sync instead uses local generation, which
+    /// expands only the affected paths and works without historical proofs.
     ///
     /// `proof_bytes` is the PARSED AVL batch-proof payload (no section
     /// framing — the caller strips `header_id ‖ len` via

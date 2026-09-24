@@ -34,9 +34,9 @@ These are the standing constraints the codebase is built around:
 
 ## Crate layering
 
-The node's runtime is 17 crates forming a strict, acyclic dependency DAG
+The node's runtime is 18 crates forming a strict, acyclic dependency DAG
 enforced by `cargo`. Each crate adds one capability to the layer below it. A
-separate 18th workspace crate, `ergo-difftest`, is a dev/test-only
+separate 19th workspace crate, `ergo-difftest`, is a dev/test-only
 differential-fuzz harness (`publish = false`): it depends on the consensus
 crates but nothing depends on it, so it sits outside this runtime DAG. The table
 below is a summary; the [codebase map](docs/codemap.md) has the full per-crate
@@ -46,7 +46,7 @@ detail and the dependency graph.
 |---|---|---|
 | **L0** foundation | `ergo-primitives` | byte codecs (VLQ/zigzag), `Digest32`/`ModifierId`/`ADDigest`, `blake2b256`, JIT cost model |
 | **L1** wire format | `ergo-ser` | byte-exact round-trippable codecs for every consensus structure |
-| **L2** capability | `ergo-chain-spec`, `ergo-crypto`, `ergo-sigma`, `ergo-p2p`, `ergo-rest-json`, `ergo-indexer-types` | network params; PoW + difficulty + Merkle; the ErgoTree interpreter; the P2P transport; JSON DTOs; the indexer read surface |
+| **L2** capability | `ergo-chain-spec`, `ergo-crypto`, `ergo-sigma`, `ergo-compiler`, `ergo-p2p`, `ergo-rest-json`, `ergo-indexer-types` | network params; PoW + difficulty + Merkle; the ErgoTree interpreter; the ErgoScript source → ErgoTree compiler; the P2P transport; JSON DTOs; the indexer read surface |
 | **L3** validation | `ergo-validation` | header/block/tx acceptance rules; voted-param epochs; NiPoPoW verify |
 | **L4** state | `ergo-state` | redb-backed authenticated UTXO state, AVL+ tree, atomic apply/rollback |
 | **L5** services | `ergo-mempool`, `ergo-sync`, `ergo-mining`, `ergo-indexer`, `ergo-wallet` | mempool, chain sync, block production, extra-index, HD wallet |

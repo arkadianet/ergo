@@ -73,6 +73,12 @@ pub enum SigmaBoolean {
     },
 }
 
+pub const MAX_CTHRESHOLD_CHILDREN: usize = 255;
+
+pub fn is_valid_cthreshold_shape(k: u16, n: usize) -> bool {
+    usize::from(k) <= n && n <= MAX_CTHRESHOLD_CHILDREN
+}
+
 /// On-chain AVL+ tree handle: the authenticated digest plus the tree's
 /// mutability flags and key/value shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,13 +190,17 @@ pub enum SigmaValue {
     /// Preserved verbatim for roundtrip; full structural parsing happens
     /// at the ergo_box layer.
     OpaqueBoxBytes(Vec<u8>),
-    /// Block header (`SHeader`) value — the full parsed header. Carries the
-    /// same data as the block-header wire format; (de)serialized via
-    /// `read_header`/`write_header`. Only reachable on v6 (ErgoTree v3+) trees:
-    /// Scala gates `DataSerializer.{de,}serialize(SHeader)` on
-    /// `isV3OrLaterErgoTreeVersion`, enforced by the evaluator at the
-    /// value-materialization boundary.
-    Header(Box<crate::header::Header>),
+    /// Block header (`SHeader`) value — the full parsed header plus the
+    /// Blake2b256 id of the RETAINED wire slice it was read from (Scala
+    /// `ErgoHeader.serializedId`, `ErgoHeader.scala:132-140,167-180`). The id is
+    /// over the input bytes, not a re-serialization, so a header whose
+    /// non-canonical field encoding canonicalizes on re-serialize still keeps
+    /// the reference's identity basis (`CHeader.equals`/`hashCode` are
+    /// id-based). (De)serialized via `read_header`/`write_header`. Only
+    /// reachable on v6 (ErgoTree v3+) trees: Scala gates
+    /// `DataSerializer.{de,}serialize(SHeader)` on `isV3OrLaterErgoTreeVersion`,
+    /// enforced by the evaluator at the value-materialization boundary.
+    Header(Box<crate::header::Header>, [u8; 32]),
 }
 
 impl SigmaValue {
@@ -201,7 +211,7 @@ impl SigmaValue {
     /// is NOT gated. Callers gate on this, not on the type containing SHeader.
     pub fn contains_header(&self) -> bool {
         match self {
-            SigmaValue::Header(_) => true,
+            SigmaValue::Header(..) => true,
             SigmaValue::Coll(CollValue::Values(vs)) | SigmaValue::Tuple(vs) => {
                 vs.iter().any(SigmaValue::contains_header)
             }
@@ -290,7 +300,7 @@ pub fn write_value(w: &mut VlqWriter, tpe: &SigmaType, val: &SigmaValue) -> Resu
         // SHeader: full block-header data format (Scala DataSerializer ->
         // ErgoHeader.sigmaSerializer). The v3+ gate is enforced by the
         // evaluator before this point.
-        (SigmaType::SHeader, SigmaValue::Header(h)) => {
+        (SigmaType::SHeader, SigmaValue::Header(h, _)) => {
             crate::header::write_header(w, h)?;
         }
         (SigmaType::SString, SigmaValue::Str(s)) => {
@@ -472,9 +482,21 @@ pub(crate) fn read_value_at_depth(
         // `ErgoTree.sheader_constant_v3_malformed_pk_reject`: the JVM rejects
         // a v3 SHeader constant whose pk carries an invalid SEC1 prefix; we
         // accepted while this surfaced as a wrap-able InvalidData.
-        SigmaType::SHeader => crate::header::read_header(r)
-            .map(|h| SigmaValue::Header(Box::new(h)))
-            .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}"))),
+        SigmaType::SHeader => {
+            let start = r.position();
+            let h = crate::header::read_header(r)
+                .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}")))?;
+            let end = r.position();
+            // Scala `ErgoHeader.sigmaSerializer.parse` captures the exact input
+            // slice as `_bytes` and derives `serializedId = Blake2b256(bytes)`
+            // (`ErgoHeader.scala:132-140,167-180`); `CHeader.equals`/`hashCode`
+            // are id-based. Hash the retained slice, not a re-serialization —
+            // the two differ whenever a non-canonical field encoding
+            // canonicalizes on write (e.g. a `0x00`-lead identity pk with
+            // garbage trailing bytes).
+            let id = *ergo_primitives::digest::blake2b256(r.data_slice(start, end)).as_bytes();
+            Ok(SigmaValue::Header(Box::new(h), id))
+        }
         SigmaType::SFunc { .. } => Err(ReadError::SigmaValidation {
             rule_id: 1009,
             args: vec![112],

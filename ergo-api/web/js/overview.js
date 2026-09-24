@@ -1,8 +1,6 @@
-// Overview cockpit: a no-scroll KPI band over a 2x2 quadrant + system
-// strip, with a Cockpit/Charts toggle. KPI band updates at 1 Hz from the
-// cheap status/info; the quadrant + sysbar rebuild on the 4 s slow tick.
+// Overview: sync first, then operational metrics and detailed activity.
+// The summary is patched in place; detailed panels use the slow tick.
 import { api } from './api-client.js';
-import { sparkline } from './sparkline.js';
 import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
@@ -10,7 +8,6 @@ import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
 import { createChannelSub } from './ws-client.js';
 
 const HISTORY_LEN = 60;
-const HTTP_TIP_FALLBACK_MS = 30_000;
 const WS_STALE_MS = 35_000;
 const hist = { blockTimes: [], mempool: [], height: [], difficulty: [] };
 const state = {
@@ -25,10 +22,30 @@ const state = {
   peerDist: null,
   lastBlockMs: null,
   lastHeight: null,
+  reachable: null,
 };
 let root = null;
 let viewMode = localStorage.getItem('ergo.ovview') || 'cockpit';
 let derivedTick = null;
+let progressSamples = [];
+
+function recordProgress(height, now = Date.now()) {
+  if (!Number.isFinite(height) || state.reachable === false) return;
+  const last = progressSamples.at(-1);
+  // A reorg, restart, or long pause must not manufacture a throughput spike.
+  if (last && (height < last.height || now - last.time > 15000)) progressSamples = [];
+  if (!progressSamples.length || now - progressSamples.at(-1).time >= 1000) {
+    progressSamples.push({ height, time: now });
+    progressSamples = progressSamples.filter((p) => now - p.time <= 60000);
+  }
+}
+
+function recentPace(now = Date.now()) {
+  const first = progressSamples[0];
+  const last = progressSamples.at(-1);
+  if (!first || !last || now - last.time > 15000 || last.time - first.time < 10000) return null;
+  return { rate: (last.height - first.height) / ((last.time - first.time) / 1000), seconds: Math.round((last.time - first.time) / 1000) };
+}
 
 function handleBlocksFrame(frame) {
   if (frame.type !== 'event' || frame.channel !== 'blocks') return;
@@ -52,11 +69,21 @@ function paintDerived() {
   if (!root) return;
   const tipMs = state.tip?.best_full_block?.timestamp_unix_ms ?? state.lastBlockMs;
   const ageS = tipMs ? Math.max(0, Math.floor((Date.now() - tipMs) / 1000)) : null;
-  setText('[data-k="lastblk"]', ageS != null ? dur(ageS) : '—');
+  const historical = state.status?.sync_state !== 'at_tip' && ageS > 86400;
+  setText('[data-label="lastblk"]', historical ? 'Local block date' : 'Local block age');
+  setText('[data-k="lastblk"]', tipMs && historical
+    ? new Date(tipMs).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+    : ageS != null ? dur(ageS) : '—');
+  setText('[data-s="lastblk"]', historical ? 'Historical chain data' : 'Since this block was mined');
   const started = state.info?.started_at_unix_ms;
   if (started) {
     setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - started) / 1000))));
   }
+  const pace = state.reachable === false ? null : recentPace();
+  setText('[data-sync-pace]', pace ? `${pace.rate.toFixed(1)} blocks/s` : 'Measuring…');
+  setText('[data-sync-pace-note]', state.reachable === false ? 'Unavailable while disconnected' : pace ? `Observed over ${pace.seconds}s · not an ETA` : 'Requires 10 seconds of continuous data');
+  const duration = state.status?.last_apply_duration_ms;
+  setText('[data-apply-duration]', state.status?.last_applied_height > 0 && duration != null ? `${num(duration)} ms` : '—');
 }
 
 function startDerivedTick() {
@@ -99,18 +126,15 @@ function push(buf, v) {
 }
 
 const KPI = [
-  ['height', 'HEIGHT'],
-  ['lastblk', 'LAST BLOCK'],
-  ['diff', 'DIFFICULTY'],
-  ['hr', 'HASHRATE est'],
-  ['peers', 'PEERS'],
-  ['mp', 'MEMPOOL'],
-  ['up', 'UPTIME'],
+  ['peers', 'Connected peers', '#peers'],
+  ['mp', 'Pending transactions', '#mempool'],
+  ['lastblk', 'Local block age'],
+  ['up', 'Node uptime'],
 ];
 
 function setText(sel, t) {
   const e = root && root.querySelector(sel);
-  if (e) e.textContent = t;
+  if (e && e.textContent !== String(t)) e.textContent = t;
 }
 
 function wsHeightFresh(now = Date.now()) {
@@ -122,10 +146,8 @@ function noteHttpHeight(status) {
   const h = status?.best_full_block_height;
   if (h == null) return;
   const now = Date.now();
-  if (state.httpHeight == null || now - state.httpHeightAt >= HTTP_TIP_FALLBACK_MS) {
-    state.httpHeight = h;
-    state.httpHeightAt = now;
-  }
+  state.httpHeight = h;
+  state.httpHeightAt = now;
 }
 
 function displayHeight() {
@@ -138,36 +160,66 @@ export function mount(el) {
   // recent-blocks mini-list can badge self-mined rows from first paint.
   fetchOwnPk();
   el.innerHTML = `
-    <div class="ov-prompt banner banner--info" data-auth-prompt hidden></div>
     <div class="pg-head pg-head--flush ov-top">
       <div>
-        <h1 class="pg-title">Node overview</h1>
+        <div class="ov-eyebrow">THE ERGO NETWORK / YOUR NODE</div>
+        <h1 class="pg-title">Your node. In focus.</h1>
+        <p class="ov-intro">An independent view of the chain. Every block, verified by you.</p>
         <div class="ov-ident" data-ident hidden>
           <span class="ov-ident__mode" data-ident-mode>—</span>
           <span class="ov-ident__chips" data-ident-chips></span>
         </div>
       </div>
-      <div class="tabs ov-toggle" aria-label="overview view">
-        <button class="tab" type="button" data-view="cockpit">Cockpit</button>
-        <button class="tab" type="button" data-view="charts">Charts</button>
+      <div class="tabs ov-toggle" role="group" aria-label="overview view">
+        <button class="tab" type="button" data-view="cockpit">Overview</button>
+        <button class="tab" type="button" data-view="charts">Chain analytics</button>
       </div>
     </div>
+    <section class="ov-sync" aria-label="Synchronization status" data-sync-tone="loading">
+      <div class="ov-sync__top">
+        <div>
+          <div class="ov-sync__status" role="status" data-sync-label>Connecting to your node</div>
+          <h2 data-sync-title>Waiting for sync status</h2>
+          <p data-sync-copy>Progress will appear when the node responds.</p>
+        </div>
+        <div class="ov-sync__percent">
+          <svg class="ov-orbit" viewBox="0 0 220 220" aria-hidden="true">
+            <circle class="ov-orbit__ticks" cx="110" cy="110" r="105" pathLength="100"/>
+            <circle class="ov-orbit__base" cx="110" cy="110" r="91"/>
+            <circle class="ov-orbit__value" data-sync-ring cx="110" cy="110" r="91" pathLength="100" stroke-dasharray="0 100"/>
+          </svg>
+          <div class="ov-orbit__label"><span class="ov-orbit__caption">CHAIN SYNC</span><strong data-sync-percent>—</strong><span>of known headers</span></div>
+        </div>
+      </div>
+      <div class="gauge ov-sync__track" role="progressbar" aria-label="Blocks applied against known headers" aria-valuemin="0" aria-valuemax="100" data-sync-progress><div class="gauge__fill" data-sync-fill></div></div>
+      <div class="ov-sync__bottom">
+        <span><b data-k="height">—</b> <span class="muted">blocks applied /</span> <b data-sync-target>—</b></span>
+        <span data-sync-remaining>Waiting for data</span>
+      </div>
+      <div class="ov-sync__insights">
+        <div><span class="ov-insight-label">Processing pace</span><strong data-sync-pace>Measuring…</strong><span data-sync-pace-note>Requires 10 seconds of continuous data</span></div>
+        <div><span class="ov-insight-label">Last block processing</span><strong data-apply-duration>—</strong><span>Time spent applying one block</span></div>
+        <div><span class="ov-insight-label">Search index</span><strong data-index-state>Checking…</strong><span data-index-note>Address, box and token lookup availability</span></div>
+      </div>
+    </section>
+    <div class="ov-alerts" data-node-alerts role="status" hidden></div>
     <div class="kpi">
       ${KPI.map(
-        ([k, l]) =>
-          `<div class="kpi__t"><div class="micro-label">${l}</div>` +
+        ([k, l, href]) =>
+          `<${href ? `a href="${href}"` : 'div'} class="kpi__t"><div class="micro-label"><span data-label="${k}">${l}</span>${href ? '<span aria-hidden="true">↗</span>' : ''}</div>` +
           `<div class="kpi__v" data-k="${k}">—</div>` +
-          `<div class="kpi__s" data-s="${k}"></div></div>`,
+          `<div class="kpi__s" data-s="${k}"></div></${href ? 'a' : 'div'}>`,
       ).join('')}
     </div>
-    <div class="ov-body"></div>`;
+    <div class="ov-body"></div>
+    <div class="ov-prompt" data-auth-prompt hidden></div>`;
   el.querySelectorAll('.ov-toggle .tab').forEach((b) => {
-    b.setAttribute('aria-selected', String(b.dataset.view === viewMode));
+    b.setAttribute('aria-pressed', String(b.dataset.view === viewMode));
     b.onclick = () => {
       viewMode = b.dataset.view;
       localStorage.setItem('ergo.ovview', viewMode);
       el.querySelectorAll('.ov-toggle .tab').forEach((x) =>
-        x.setAttribute('aria-selected', String(x.dataset.view === viewMode)),
+        x.setAttribute('aria-pressed', String(x.dataset.view === viewMode)),
       );
       renderBody();
     };
@@ -177,9 +229,9 @@ export function mount(el) {
   const prompt = root.querySelector('[data-auth-prompt]');
   if (prompt) {
     const txt = document.createElement('span');
-    txt.textContent = 'Authorize to unlock operator controls (voting, wallet).';
+    txt.textContent = 'Read-only access · Authorize to manage voting and your wallet.';
     const btn = document.createElement('button');
-    btn.className = 'btn btn--primary btn--sm';
+    btn.className = 'btn btn--ghost btn--sm';
     btn.type = 'button';
     btn.textContent = 'Authorize';
     btn.addEventListener('click', promptAuthorize);
@@ -262,42 +314,35 @@ function renderIdentity() {
 }
 
 // ---- KPI band (1 Hz) ----
-export function onFast({ status, info }) {
+export function onFast({ status, info, reachable }) {
+  if (reachable !== undefined) state.reachable = reachable;
+  if (info?.started_at_unix_ms && state.info?.started_at_unix_ms && info.started_at_unix_ms !== state.info.started_at_unix_ms) {
+    progressSamples = [];
+    state.wsHeight = null;
+    state.httpHeight = null;
+  }
   if (status) state.status = status;
   if (info) state.info = info;
   const s = state.status;
   const i = state.info;
-  const tip = state.tip;
   if (!root) return;
 
   noteHttpHeight(s);
   const blkH = displayHeight();
   const rawHdrH = s?.best_header_height ?? null;
-  const hdrH = rawHdrH != null || blkH != null ? Math.max(rawHdrH ?? blkH, blkH ?? rawHdrH) : null;
+  const hdrH = rawHdrH != null ? Math.max(rawHdrH, blkH ?? 0) : null;
   setText('[data-k="height"]', num(blkH));
-  setText(
-    '[data-s="height"]',
-    blkH != null && hdrH != null && blkH === hdrH ? 'at tip' : hdrH != null ? `gap ${num(hdrH - blkH)}` : '',
-  );
+  recordProgress(blkH);
+  paintSyncSummary(blkH, hdrH);
+  paintAlerts();
+  paintDerived();
 
-  const tipMs = tip?.best_full_block?.timestamp_unix_ms ?? state.lastBlockMs;
-  const ageS = tipMs ? Math.max(0, Math.floor((Date.now() - tipMs) / 1000)) : null;
-  setText('[data-k="lastblk"]', ageS != null ? dur(ageS) : '—');
-  if (hist.blockTimes.length >= 3) {
-    const avg = hist.blockTimes.reduce((a, b) => a + b, 0) / hist.blockTimes.length;
-    setText('[data-s="lastblk"]', `avg ${avg.toFixed(0)}s`);
-  }
-
-  const diff = parseDiff(tip?.best_header?.difficulty);
-  setText('[data-k="diff"]', fmtDiff(diff));
-  setText('[data-s="diff"]', diff != null ? diff.toExponential(2) : '');
-  const hr = diff != null ? deriveHr(diff, i) : null;
-  setText('[data-k="hr"]', hr != null ? fmtHr(hr) : '—');
-
-  setText('[data-k="peers"]', num(s?.peer_count ?? 0));
+  setText('[data-k="peers"]', num(s?.peer_count));
   if (state.peerDist) setText('[data-s="peers"]', `${state.peerDist.out} out · ${state.peerDist.in} in`);
 
-  setText('[data-k="mp"]', num(s?.mempool_size ?? 0));
+  setText('[data-k="mp"]', num(s?.mempool_size));
+  const mp = state._slow?.mempool;
+  setText('[data-s="mp"]', mp ? `${bytes(mp.total_bytes)} / ${bytes(mp.capacity_bytes)} capacity` : 'Awaiting mempool data');
 
   // Prefer boot timestamp so uptime advances between rare /info refreshes.
   if (i?.started_at_unix_ms) {
@@ -305,7 +350,64 @@ export function onFast({ status, info }) {
   } else {
     setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
   }
-  setText('[data-s="up"]', 'since restart');
+  setText('[data-s="up"]', 'Since last restart');
+  const idx = state._slow?.indexer;
+  const idxState = state.reachable === false ? 'Last known data' : idx?.status === 'caughtUp' ? 'Available' : idx?.status === 'halted' ? 'Needs attention' : idx ? 'Catching up' : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
+  setText('[data-index-state]', idxState);
+  setText('[data-index-note]', idx ? `Indexed ${num(idx.indexedHeight)} of ${num(idx.fullHeight ?? blkH)} applied blocks` : 'Address, box and token lookups need the index');
+}
+
+function paintAlerts() {
+  const host = root.querySelector('[data-node-alerts]');
+  if (!host) return;
+  const s = state.status;
+  const alerts = [];
+  if (s?.sync_wedged) alerts.push('Chain sync is blocked by a deep fork. Review the node logs and recovery procedure before taking action.');
+  if (s?.apply_wedged) alerts.push('A block is taking longer than the node’s processing threshold. Inspect the node logs.');
+  if (s?.last_storage_error) alerts.push(`Storage error reported: ${s.last_storage_error}`);
+  if (s?.last_block_apply_error) alerts.push(`Last reported block validation error${s.last_block_apply_error.height != null ? ` at height ${num(s.last_block_apply_error.height)}` : ''}. Check the node logs for details and recovery status.`);
+  if (s?.shadow?.diverged) alerts.push('Shadow validation reports a chain divergence from the reference node. Review the validation logs.');
+  const text = alerts.join('\n');
+  if (host.textContent !== text) host.textContent = text;
+  host.hidden = !alerts.length;
+}
+
+function paintSyncSummary(blkH, hdrH) {
+  const s = state.status;
+  const kind = state.reachable === false ? 'unreachable' : s?.sync_wedged || s?.apply_wedged || s?.last_storage_error || s?.last_block_apply_error || s?.shadow?.diverged ? 'alarm' : s?.bootstrap ? 'bootstrap' : s?.sync_state || 'loading';
+  const messages = {
+    loading: ['Connecting', 'Waiting for sync status', 'Progress will appear when the node responds.'],
+    unreachable: ['Connection lost', 'Your node is unreachable', 'Showing the last received data. Check that the node is running.'],
+    disconnected: ['No peers', 'Waiting for network peers', 'The API is reachable, but the node is not connected to peers.'],
+    syncing: ['Sync in progress', 'Catching up with the chain', 'Your node is applying historical blocks. Progress is measured against known headers.'],
+    at_tip: ['At chain tip', 'Your node is up to date', 'The node reports that its block chain is within sync tolerance.'],
+    stalled: ['Needs attention', 'Sync has stopped progressing', 'The node reports a stall. Check peer connectivity and node logs.'],
+    bootstrap: ['Snapshot bootstrap', 'Preparing your chain state', 'The node is bootstrapping from a snapshot before normal block sync.'],
+    alarm: ['Needs attention', 'Your node reports an issue', 'Review the diagnostic message below. API connectivity does not mean the node is healthy.'],
+  };
+  const [label, title, copy] = (Object.hasOwn(messages, kind) ? messages[kind] : null) || ['Status', 'Checking chain progress', 'Waiting for a recognized sync state from the node.'];
+  root.querySelector('.ov-sync').dataset.syncTone = kind;
+  setText('[data-sync-label]', label);
+  setText('[data-sync-title]', title);
+  const popow = s?.bootstrap?.popow_phase;
+  if (state.reachable !== false && kind === 'bootstrap' && popow === 'abandoned') {
+    setText('[data-sync-label]', 'NiPoPoW abandoned');
+    setText('[data-sync-title]', 'Continuing with ordinary header sync');
+    setText('[data-sync-copy]', s.bootstrap.popow_abandon_reason || 'The bootstrap proof could not be applied.');
+  } else {
+    setText('[data-sync-copy]', copy);
+  }
+  const pct = blkH != null && hdrH > 0 ? Math.max(0, Math.min(100, blkH / hdrH * 100)) : null;
+  // Never round an incomplete chain up to 100%.
+  const displayPct = pct == null ? null : Math.floor(pct * 100) / 100;
+  setText('[data-sync-percent]', displayPct == null ? '—' : `${displayPct.toFixed(2)}%`);
+  setText('[data-sync-target]', num(hdrH));
+  setText('[data-sync-remaining]', blkH != null && hdrH != null ? `${num(Math.max(0, hdrH - blkH))} blocks remaining` : 'Waiting for data');
+  const progress = root.querySelector('[data-sync-progress]');
+  if (displayPct == null) progress.removeAttribute('aria-valuenow');
+  else progress.setAttribute('aria-valuenow', String(displayPct));
+  root.querySelector('[data-sync-fill]').style.width = `${pct ?? 0}%`;
+  root.querySelector('[data-sync-ring]')?.setAttribute('stroke-dasharray', `${pct ?? 0} 100`);
 }
 
 // ---- data + quadrant (4 s) ----
@@ -407,7 +509,7 @@ function panel(title, openHash) {
   p.className = 'panel ov-panel';
   const head = document.createElement('div');
   head.className = 'panel__head';
-  const t = document.createElement('span');
+  const t = document.createElement('h2');
   t.className = 'panel__title';
   t.textContent = title;
   head.append(t);
@@ -415,26 +517,13 @@ function panel(title, openHash) {
     const a = document.createElement('a');
     a.className = 'ov-open';
     a.href = openHash;
-    a.textContent = '↗ open';
+    a.textContent = 'View all ↗';
     head.append(a);
   }
   const body = document.createElement('div');
   body.className = 'panel__body ov-panel__body';
   p.append(head, body);
   return { panel: p, body };
-}
-
-function bar(segments) {
-  // segments: [{frac, color}]
-  const wrap = document.createElement('div');
-  wrap.className = 'distbar';
-  for (const s of segments) {
-    const d = document.createElement('div');
-    d.style.width = `${Math.max(0, s.frac * 100)}%`;
-    d.style.background = s.color;
-    wrap.append(d);
-  }
-  return wrap;
 }
 
 function pipeRow(label, valTxt, frac, color) {
@@ -502,20 +591,29 @@ function renderBody() {
     return;
   }
   const slow = state._slow || {};
+  const heading = document.createElement('div');
+  heading.className = 'ov-section-heading';
+  const headingTitle = document.createElement('h2');
+  headingTitle.textContent = 'Behind the blocks';
+  const headingNote = document.createElement('span');
+  headingNote.textContent = 'Local verification & chain activity';
+  heading.append(headingTitle, headingNote);
+  host.append(heading);
   const grid = document.createElement('div');
   grid.className = 'quad';
 
   // Sync
   {
     const { panel: p, body } = panel('Sync pipeline');
+    p.classList.add('ov-pipeline');
     const sync = slow.sync;
     const idx = slow.indexer;
     const hdrH = sync?.best_header_height ?? 0;
     const blkH = sync?.best_full_block_height ?? 0;
     body.append(
-      pipeRow('headers', num(hdrH), sync?.headers_chain_synced ? 1 : 0, 'var(--green)'),
-      pipeRow('blocks', num(blkH), hdrH > 0 ? blkH / hdrH : 0, 'var(--green)'),
-      pipeRow('indexer', idx ? num(idx.indexedHeight) : 'off', idx && hdrH > 0 ? idx.indexedHeight / hdrH : 0, 'var(--blue)'),
+      pipeRow('Headers', sync ? num(hdrH) : '—', sync?.headers_chain_synced ? 1 : 0, 'var(--green)'),
+      pipeRow('Blocks applied', sync ? num(blkH) : '—', hdrH > 0 ? blkH / hdrH : 0, 'var(--green)'),
+      pipeRow('Search index', idx ? num(idx.indexedHeight) : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable', idx && hdrH > 0 ? idx.indexedHeight / hdrH : 0, 'var(--blue)'),
     );
     // Extra-index health (self-repair markers from /api/v1/indexer/status).
     // Silent when healthy: rows appear only when there is something an
@@ -541,76 +639,18 @@ function renderBody() {
     const foot = document.createElement('div');
     foot.className = 'ov-foot';
     foot.textContent = sync
-      ? `gap ${num(sync.gap)} · window ${num(sync.download_window)} · pending ${num(sync.pending_blocks)}`
+      ? `Download window ${num(sync.download_window)} · ${num(sync.pending_blocks)} pending blocks`
       : '—';
-    if (hist.blockTimes.length > 1) foot.append(sparkline(hist.blockTimes, { color: 'var(--orange)' }));
     body.append(foot);
-    grid.append(p);
-  }
-  // Network
-  {
-    const { panel: p, body } = panel('Network / Peers', '#peers');
-    const d = state.peerDist;
-    const big = document.createElement('div');
-    big.className = 'ov-big';
-    big.textContent = d ? String(d.total) : '—';
-    body.append(big);
-    if (d && d.total > 0) {
-      body.append(
-        bar([
-          { frac: d.out / d.total, color: 'var(--blue)' },
-          { frac: d.in / d.total, color: 'var(--purple)' },
-        ]),
-      );
-      const sub = document.createElement('div');
-      sub.className = 'ov-foot';
-      sub.textContent = `out ${d.out} · in ${d.in}${d.handshaking ? ` · handshaking ${d.handshaking}` : ''}`;
-      body.append(sub);
-    }
-    grid.append(p);
-  }
-  // Mempool
-  {
-    const { panel: p, body } = panel('Mempool', '#mempool');
-    const mp = slow.mempool;
-    if (mp) {
-      const pct = mp.capacity_count > 0 ? mp.size / mp.capacity_count : 0;
-      body.append(
-        kv(`slots ${num(mp.size)} / ${num(mp.capacity_count)}`, `${(pct * 100).toFixed(0)}%`, 'var(--tx2)'),
-      );
-      const g = document.createElement('div');
-      g.className = 'gauge';
-      g.setAttribute('role', 'progressbar');
-      g.setAttribute('aria-valuemin', '0');
-      g.setAttribute('aria-valuemax', '100');
-      g.setAttribute('aria-valuenow', String(Math.round(Math.min(100, pct * 100))));
-      g.setAttribute('aria-label', 'mempool capacity');
-      const f = document.createElement('div');
-      f.className = 'gauge__fill';
-      f.style.width = `${Math.min(100, pct * 100)}%`;
-      g.append(f);
-      body.append(g);
-      const byteFoot = document.createElement('div');
-      byteFoot.className = 'ov-foot';
-      byteFoot.textContent = `bytes ${bytes(mp.total_bytes)} / ${bytes(mp.capacity_bytes)} (local budget)`;
-      body.append(byteFoot);
-    }
-    if (hist.mempool.length > 1) {
-      const sp = document.createElement('div');
-      sp.className = 'ov-foot';
-      sp.append(sparkline(hist.mempool, { color: 'var(--blue)' }));
-      body.append(sp);
-    }
     grid.append(p);
   }
   // Chain
   {
-    const { panel: p, body } = panel('Chain tip · recent');
+    const { panel: p, body } = panel('Recently applied blocks', '#explorer');
     const tip = state.tip;
     if (tip?.best_full_block) {
-      body.append(
-        kv(`tip ${num(tip.best_full_block.height)}`, dur(Math.max(0, Math.floor((Date.now() - tip.best_full_block.timestamp_unix_ms) / 1000))) + ' ago', 'var(--tx2)'),
-      );
+      const date = new Date(tip.best_full_block.timestamp_unix_ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+      body.append(kv('Local chain date', date, 'var(--tx2)'));
     }
     const list = document.createElement('div');
     list.className = 'ov-recent';
@@ -627,7 +667,7 @@ function renderBody() {
         a.textContent = num(b.height);
         h.append(a);
         const m = document.createElement('span');
-        m.textContent = `${b.txs} tx · ${bytes(b.size_bytes)} · ${dur(Math.floor((Date.now() - b.ts_unix_ms) / 1000))}`;
+        m.textContent = `${b.txs} tx · ${bytes(b.size_bytes)}`;
         if (b.miner_address) {
           m.append(document.createTextNode(' · '), minerNode(b.miner_address, b.miner_pk, { head: 4, tail: 4 }));
         }
@@ -636,6 +676,14 @@ function renderBody() {
       }
     }
     body.append(list);
+    const context = document.createElement('div');
+    context.className = 'ov-chain-context';
+    const diff = parseDiff(state.tip?.best_header?.difficulty);
+    context.append(
+      kv('Header difficulty', fmtDiff(diff)),
+      kv('Network hashrate · estimated', diff != null ? fmtHr(deriveHr(diff, state.info)) : '—'),
+    );
+    body.append(context);
     grid.append(p);
   }
 
@@ -666,7 +714,7 @@ function renderBody() {
     } else {
       // Candidate 503s while the node has no work to hand out (syncing /
       // candidate generation race) — say so instead of showing stale work.
-      body.append(kv('work', 'no candidate available (node syncing?)', 'var(--yellow)'));
+      body.append(kv('Work status', state.status?.sync_state === 'syncing' ? 'Waiting for chain sync' : 'No candidate available', 'var(--yellow)'));
     }
     if (state.miningReward) {
       const r = document.createElement('div');
@@ -685,7 +733,7 @@ function renderBody() {
     if (state.emission) {
       const base = Number(state.emission.minerReward) / 1e9;
       const re = Number(state.emission.reemitted || 0) / 1e9;
-      body.append(kv('block reward', re ? `${base} + ${re} ERG` : `${base} ERG`, 'var(--tx2)'));
+      body.append(kv('Reward at local height', re ? `${base} + ${re} ERG` : `${base} ERG`, 'var(--tx2)'));
     }
     if (state.minerStats && ownPkHex()) {
       const mine = state.minerStats.miners.find((mm) => mm.pk === ownPkHex());
@@ -711,10 +759,10 @@ function renderBody() {
   {
     const feed = slow.events;
     if (feed && Array.isArray(feed.events) && feed.events.length) {
-      const { panel: p, body } = panel('Events');
+      const { panel: p, body } = panel('Node activity');
       const list = document.createElement('div');
       list.className = 'ov-events';
-      for (const e of feed.events.slice(-10).reverse()) {
+      for (const e of feed.events.slice(-5).reverse()) {
         const row = document.createElement('div');
         row.className = 'ov-events__r';
         const pill = document.createElement('span');
@@ -777,10 +825,10 @@ function renderBody() {
     return s;
   };
   sb.append(
-    item('RSS', bytes(h?.rss_bytes)),
+    item('Memory · RSS', bytes(h?.rss_bytes)),
     item('disk free', bytes(h?.disk_free_bytes)),
-    item('state.db', bytes(h?.state_db_bytes)),
-    item('index.db', bytes(h?.index_db_bytes)),
+    item('Chain database', bytes(h?.state_db_bytes)),
+    item('Index database', bytes(h?.index_db_bytes)),
   );
   host.append(sb);
 }
@@ -803,7 +851,7 @@ function chartCard(title, chart) {
   card.className = 'panel';
   const head = document.createElement('div');
   head.className = 'panel__head';
-  const t = document.createElement('span');
+  const t = document.createElement('h2');
   t.className = 'panel__title';
   t.textContent = title;
   head.append(t);

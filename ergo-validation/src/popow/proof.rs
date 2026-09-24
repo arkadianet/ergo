@@ -14,7 +14,7 @@ use ergo_primitives::digest::ModifierId;
 use ergo_ser::header::{serialize_header, Header};
 use ergo_ser::popow_proof::NipopowProof;
 
-use super::algos::{best_arg, lowest_common_ancestor};
+use super::algos::{best_arg, is_genesis, lowest_common_ancestor};
 
 /// Verification predicates and chain-utility methods on
 /// [`NipopowProof`]. Implemented as an extension trait so the struct
@@ -56,8 +56,8 @@ pub trait NipopowProofExt {
     /// scrypto `BatchMerkleProof.valid` semantics via
     /// `popow::merkle::verify_batch_merkle_proof`.
     ///
-    /// Empty-interlinks + empty-proof case (e.g. genesis) is
-    /// vacuously valid (PoPowHeader.scala:58-60 parity).
+    /// The empty-interlinks exception is limited to the height-1 genesis
+    /// case and requires the canonical serialized empty proof.
     fn has_valid_proofs(&self) -> bool;
 
     /// Defense-in-depth: verify each header in `headers_chain` carries
@@ -67,8 +67,8 @@ pub trait NipopowProofExt {
     /// would still pass [`Self::is_valid`] via level-0 admittance.
     /// This sub-check rejects such proofs at the verifier boundary.
     ///
-    /// Genesis (`parent_id == zeros`) is skipped — its PoW solution
-    /// is degenerate (Scala matches this via `Header.isGenesis`).
+    /// The height-1 genesis header is skipped — its PoW solution is
+    /// degenerate (Scala matches this via `Header.isGenesis`).
     ///
     /// `true` iff every non-genesis header's
     /// `ergo_crypto::pow::verify_pow_solution` returns `Ok`.
@@ -222,7 +222,11 @@ impl NipopowProofExt for NipopowProof {
             return true;
         }
         let suffix_head_height = self.suffix_head.header.height;
-        let epoch_length = epoch_length_for_height(suffix_head_height, chain_config);
+        // Scala NipopowProof.scala:85-89 selects the configured EIP-37
+        // epoch length even for proofs preceding activation.
+        let epoch_length = chain_config
+            .eip37_epoch_length
+            .unwrap_or(chain_config.epoch_length);
         let chain = self.headers_chain();
 
         // Scala: linear scan with a `lastIndex` cursor for amortized
@@ -260,9 +264,9 @@ impl NipopowProofExt for NipopowProof {
     fn has_valid_per_header_pow(&self) -> bool {
         use ergo_crypto::pow::verify_pow_solution;
         self.headers_chain().iter().all(|h| {
-            // Skip genesis: parent_id zeros, no meaningful PoW
+            // Skip the height-1 genesis header: no meaningful PoW
             // solution to verify. Matches Scala `Header.isGenesis`.
-            if *h.parent_id.as_bytes() == [0u8; 32] {
+            if is_genesis(h) {
                 return true;
             }
             verify_pow_solution(h).is_ok()
@@ -362,8 +366,9 @@ fn header_id_of(h: &Header) -> Result<[u8; 32], ergo_ser::error::WriteError> {
 /// the tree root.
 ///
 /// Scala parity: `PoPowHeader.checkInterlinksProof`
-/// (`PoPowHeader.scala:57-65`). The empty-everything case (no
-/// interlinks AND empty proof) returns `true`.
+/// (`PoPowHeader.scala:57-65`). The height-1 genesis case accepts
+/// only the canonical serialized empty proof; every other empty
+/// interlinks shape is rejected.
 ///
 /// Exposed publicly so integration tests (in
 /// `ergo-validation/tests/`) can validate proofs without
@@ -371,16 +376,10 @@ fn header_id_of(h: &Header) -> Result<[u8; 32], ergo_ser::error::WriteError> {
 /// `has_valid_proofs` → `check_popow_header_interlinks_proof` on
 /// every prefix entry + suffix_head.
 pub fn check_popow_header_interlinks_proof(p: &ergo_ser::popow_header::PoPowHeader) -> bool {
-    use super::algos::{kv_to_leaf, pack_interlinks};
+    use super::algos::{is_genesis, kv_to_leaf, pack_interlinks};
     use super::merkle::verify_batch_merkle_proof;
     use ergo_crypto::merkle::merkle_tree_root;
     use ergo_ser::batch_merkle_proof::deserialize_batch_merkle_proof;
-
-    // Edge case: empty interlinks AND empty proof bytes → vacuously
-    // valid (Scala PoPowHeader.scala:58-60).
-    if p.interlinks.is_empty() && p.interlinks_proof.is_empty() {
-        return true;
-    }
 
     // Decode the proof from the opaque blob held in the codec.
     let proof = match deserialize_batch_merkle_proof(&p.interlinks_proof) {
@@ -391,12 +390,10 @@ pub fn check_popow_header_interlinks_proof(p: &ergo_ser::popow_header::PoPowHead
         }
     };
 
-    // If interlinks is empty but proof is not (or vice versa), the
-    // Scala check returns false implicitly because the merkle tree
-    // of zero leaves has a special root and the proof won't validate.
-    // Our merkle_tree_root([]) returns Blake2b256([0x00]) (the
-    // `Algos.emptyMerkleTreeRoot` constant from
-    // ergo-crypto::merkle::merkle_tree_root). Pass through.
+    if p.interlinks.is_empty() {
+        return is_genesis(&p.header) && proof.indices.is_empty() && proof.proofs.is_empty();
+    }
+
     let fields = pack_interlinks(&p.interlinks);
     let leaves: Vec<Vec<u8>> = fields.iter().map(|(k, v)| kv_to_leaf(k, v)).collect();
     let leaf_refs: Vec<&[u8]> = leaves.iter().map(|l| l.as_slice()).collect();
@@ -410,16 +407,6 @@ fn use_last_epochs_for_config(chain_config: &DifficultyParams) -> u32 {
     // Wired through `DifficultyParams` so a custom chain with a
     // non-default value validates with the right window.
     chain_config.use_last_epochs
-}
-
-fn epoch_length_for_height(height: u32, chain_config: &DifficultyParams) -> u32 {
-    match (
-        chain_config.eip37_activation_height,
-        chain_config.eip37_epoch_length,
-    ) {
-        (Some(activation), Some(epoch_len)) if height >= activation => epoch_len,
-        _ => chain_config.epoch_length,
-    }
 }
 
 /// Scala parity: `DifficultyAdjustment.nextRecalculationHeight`
@@ -464,9 +451,12 @@ fn previous_heights_required_for_recalculation(
     }
 }
 
+/// Heights needed for the next difficulty recalculation after `height`.
+///
+/// `epoch_length` must be nonzero.
 /// Scala parity: `DifficultyAdjustment.heightsForNextRecalculation`
 /// (`DifficultyAdjustment.scala:53-55`).
-fn heights_for_next_recalculation(
+pub fn heights_for_next_recalculation(
     height: u32,
     epoch_length: u32,
     use_last_epochs: u32,
@@ -500,8 +490,14 @@ mod tests {
         PoPowHeader {
             header: h,
             interlinks: links,
-            interlinks_proof: vec![],
+            interlinks_proof: vec![0u8; 8],
         }
+    }
+
+    fn valid_non_genesis_popow(h: Header) -> PoPowHeader {
+        let links = vec![ModifierId::from_bytes([0x11; 32])];
+        let fields = super::super::algos::pack_interlinks(&links);
+        super::super::algos::build_popow_header(h, links, &fields).unwrap()
     }
 
     fn proof(
@@ -587,13 +583,54 @@ mod tests {
     }
 
     #[test]
-    fn has_valid_proofs_empty_interlinks_and_empty_proof_is_vacuously_true() {
-        // Edge case from PoPowHeader.scala:58-60: when interlinks and
-        // proof are both empty, the check returns true (no claim to
-        // verify). Confirm our impl preserves that parity.
+    fn has_valid_proofs_empty_interlinks_canonical_proof_passes() {
+        // Edge case from PoPowHeader.scala:58-60: the height-1
+        // genesis case accepts the canonical empty proof bytes.
         let g = header(GENESIS_HEX);
         let p = proof(vec![], popow_hdr(g, vec![]), vec![]);
         assert!(p.has_valid_proofs());
+    }
+
+    #[test]
+    fn has_valid_proofs_height_two_zero_parent_empty_interlinks_rejected() {
+        let mut h2 = header(HEIGHT_2_HEX);
+        h2.parent_id = ModifierId::from_bytes([0u8; 32]);
+        let p = proof(vec![], popow_hdr(h2, vec![]), vec![]);
+        assert!(!p.has_valid_proofs());
+    }
+
+    #[test]
+    fn has_valid_proofs_raw_zero_length_genesis_proof_rejected() {
+        let g = header(GENESIS_HEX);
+        let mut genesis = popow_hdr(g, vec![]);
+        genesis.interlinks_proof.clear();
+        let p = proof(vec![], genesis, vec![]);
+        assert!(!p.has_valid_proofs());
+    }
+
+    #[test]
+    fn height_one_uses_genesis_semantics_even_with_nonzero_parent() {
+        let mut g = header(GENESIS_HEX);
+        g.parent_id = ModifierId::from_bytes([0xAA; 32]);
+        match &mut g.solution {
+            ergo_ser::autolykos::AutolykosSolution::V1 { nonce, .. }
+            | ergo_ser::autolykos::AutolykosSolution::V2 { nonce, .. } => nonce[0] ^= 0xFF,
+        }
+        let p = proof(vec![], popow_hdr(g, vec![]), vec![]);
+        assert!(p.has_valid_proofs());
+        assert!(p.has_valid_per_header_pow());
+    }
+
+    #[test]
+    fn height_two_zero_parent_does_not_skip_pow() {
+        let mut h2 = header(HEIGHT_2_HEX);
+        h2.parent_id = ModifierId::from_bytes([0u8; 32]);
+        match &mut h2.solution {
+            ergo_ser::autolykos::AutolykosSolution::V1 { nonce, .. }
+            | ergo_ser::autolykos::AutolykosSolution::V2 { nonce, .. } => nonce[0] ^= 0xFF,
+        }
+        let p = proof(vec![], popow_hdr(h2, vec![]), vec![]);
+        assert!(!p.has_valid_per_header_pow());
     }
 
     #[test]
@@ -773,7 +810,11 @@ mod tests {
     fn is_valid_passes_for_legitimate_two_block_chain() {
         let g = header(GENESIS_HEX);
         let h2 = header(HEIGHT_2_HEX);
-        let mut p = proof(vec![popow_hdr(g, vec![])], popow_hdr(h2, vec![]), vec![]);
+        let mut p = proof(
+            vec![popow_hdr(g, vec![])],
+            valid_non_genesis_popow(h2),
+            vec![],
+        );
         // continuous=true means difficulty headers are checked.
         // For a 2-header chain at heights 1 and 2 with no further
         // recalculation in scope, this still passes (heights_for_next_
@@ -823,14 +864,14 @@ mod tests {
         let h2 = header(HEIGHT_2_HEX);
         let mut a = proof(
             vec![popow_hdr(g.clone(), vec![])],
-            popow_hdr(h2.clone(), vec![]),
+            valid_non_genesis_popow(h2.clone()),
             vec![],
         );
         let mut b_broken = header(HEIGHT_2_HEX);
         b_broken.parent_id = ModifierId::from_bytes([0xFF; 32]);
         let mut b = proof(
             vec![popow_hdr(g, vec![])],
-            popow_hdr(b_broken, vec![]),
+            valid_non_genesis_popow(b_broken),
             vec![],
         );
         a.continuous = false;
@@ -898,7 +939,7 @@ mod tests {
             m: 6,
             k: 10,
             prefix: vec![],
-            suffix_head: popow_hdr(h2, vec![]),
+            suffix_head: valid_non_genesis_popow(h2),
             suffix_tail: vec![],
             continuous: false,
         };
@@ -908,5 +949,29 @@ mod tests {
         assert!(p.has_valid_difficulty_headers(&mainnet()));
         assert!(p.has_valid_per_header_pow());
         assert!(p.is_valid(&mainnet()));
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn difficulty_headers_pre_activation_uses_scala_proof_epoch() {
+        // NipopowProof.scala:85-100 uses eip37EpochLength regardless of
+        // activation. At H=2049 the required heights are 1152..=2176,
+        // filtered to heights below H, so 1024 is not required.
+        let mut head = header(HEIGHT_2_HEX);
+        head.height = 2049;
+        let prefix = [1, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+            .into_iter()
+            .map(|height| {
+                let mut h = header(GENESIS_HEX);
+                h.height = height;
+                popow_hdr(h, vec![])
+            })
+            .collect();
+        let mut p = proof(prefix, popow_hdr(head, vec![]), vec![]);
+        p.continuous = true;
+        assert!(p.has_valid_difficulty_headers(&mainnet()));
+        p.prefix.retain(|entry| entry.header.height != 1280);
+        assert!(!p.has_valid_difficulty_headers(&mainnet()));
     }
 }

@@ -203,6 +203,7 @@ fn context<'a>(
         parent: &parent.header,
         utxo: state,
         params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 128,
         votes_unknown_rule_disabled:
             ergo_validation::voting::validation_settings::parse_validation_settings_update(

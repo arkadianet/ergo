@@ -17,6 +17,7 @@ const HTTP_FALLBACK_MS = 30_000;
 let lastFullAt = 0;
 let refreshTimer = null;
 let refreshing = false;
+let syncState = null;
 
 const mempoolWs = createChannelSub({
   id: 'mempool-panel',
@@ -145,22 +146,25 @@ export function mount(el) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Mempool</h1>
+        <p class="pg-description">Unconfirmed transactions waiting to be included in a block.</p>
         <span class="pg-count micro-label" data-count></span>
       </div>
+      <button class="btn btn--ghost" type="button" data-refresh>Refresh mempool</button>
     </div>
+    <div class="banner banner--info" data-load-status role="status">Loading mempool data…</div>
     <div class="mp-cap">
       <div class="mp-cell">
-        <div class="micro-label">Slots · capacity (Scala parity)</div>
+        <div class="micro-label">Transaction capacity</div>
         <div class="mp-slot" data-slot>—</div>
         <div class="gauge" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="mempool slots used"><div class="gauge__fill" data-slotfill style="width:0%"></div></div>
       </div>
       <div class="mp-cell">
-        <div class="micro-label">Bytes · local budget</div>
+        <div class="micro-label">Memory budget</div>
         <div class="mp-byte" data-byte>—</div>
         <div class="gauge gauge--sub" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="mempool bytes used"><div class="gauge__fill" data-bytefill style="width:0%"></div></div>
       </div>
       <div class="mp-cell">
-        <div class="micro-label">Weight policy</div>
+        <div class="micro-label">Admission policy</div>
         <div data-weight>—</div>
       </div>
       <div class="mp-cell">
@@ -169,25 +173,41 @@ export function mount(el) {
         <div class="micro-label">pending</div>
       </div>
     </div>
-    <div class="mp-fee">
+    <div class="mp-fee" data-fee-panel hidden>
       <div class="mp-fee__row">
-        <span class="micro-label">Fee/B dist · nERG (log)</span>
+        <span class="micro-label">Fee per byte · nanoERG · logarithmic scale</span>
         <span class="micro-label" data-feestats></span>
       </div>
       <div class="mp-fee__curve" data-curve></div>
       <div class="mp-fee__axis"><span data-min></span><span data-max></span></div>
     </div>
-    <div data-table></div>`;
+    <div class="empty-state" data-empty hidden>
+      <span class="empty-state__symbol" aria-hidden="true">0</span>
+      <h2>No pending transactions</h2>
+      <p data-empty-copy>Your node's mempool is empty. New transactions will appear here as they arrive.</p>
+      <a class="btn btn--ghost" href="#explorer">Explore applied blocks →</a>
+    </div>
+    <div data-table hidden></div>`;
   table = makeTable(el.querySelector('[data-table]'), COLS, {
     rowKey: (r) => r.tx_id,
     renderDetail,
     initialSort: { key: 'feeb', dir: -1 },
+    label: 'Pending transactions',
   });
+  el.querySelector('[data-refresh]').addEventListener('click', fullRefresh);
+}
+
+export function onFast({ status }) {
+  if (status) syncState = status.sync_state;
+  const copy = root?.querySelector('[data-empty-copy]');
+  if (copy) copy.textContent = syncState === 'syncing'
+    ? 'Your node is still syncing historical blocks. An empty local mempool does not mean the network has no transactions.'
+    : "Your node's mempool is empty. New transactions will appear here as they arrive.";
 }
 
 function weightLabel(wf) {
   if (wf == null) return '—';
-  if (typeof wf === 'string') return wf;
+  if (typeof wf === 'string') return wf === 'cost' ? 'Execution cost' : wf;
   return wf.kind || JSON.stringify(wf);
 }
 
@@ -202,9 +222,24 @@ function scheduleRefresh(delayMs) {
 async function fullRefresh() {
   if (!root || refreshing) return;
   refreshing = true;
+  const refresh = root.querySelector('[data-refresh]');
+  refresh.disabled = true;
+  refresh.textContent = 'Refreshing…';
   try {
     const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
+    const loadStatus = root.querySelector('[data-load-status]');
+    if (!summary || !Array.isArray(txWrap?.items)) {
+      loadStatus.className = 'banner banner--warn';
+      loadStatus.textContent = 'Could not refresh mempool data. Any visible values are from the last successful read. Try Refresh mempool.';
+      loadStatus.hidden = false;
+      return;
+    }
+    loadStatus.hidden = true;
     const txs = (txWrap && txWrap.items) || []; // v1: mempool/transactions now returns {items,page}
+    const empty = summary.size === 0 && txs.length === 0;
+    root.querySelector('[data-empty]').hidden = !empty;
+    root.querySelector('[data-table]').hidden = empty;
+    root.querySelector('[data-fee-panel]').hidden = !txs.length;
     const set = (sel, t) => {
       const e = root.querySelector(sel);
       if (e) e.textContent = t;
@@ -252,6 +287,8 @@ async function fullRefresh() {
     lastFullAt = Date.now();
   } finally {
     refreshing = false;
+    refresh.disabled = false;
+    refresh.textContent = 'Refresh mempool';
   }
 }
 

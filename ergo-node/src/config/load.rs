@@ -138,6 +138,17 @@ impl NodeConfig {
             spec.monetary.miner_reward_delay = delay;
             spec.genesis = genesis;
         }
+        if let Some(magic) = toml_cfg.chain.devnet_magic {
+            if network != Network::Devnet {
+                return Err("[chain] devnet_magic requires devnet".into());
+            }
+            if magic == ergo_chain_spec::NetworkParams::MAINNET.magic
+                || magic == ergo_chain_spec::NetworkParams::TESTNET.magic
+            {
+                return Err("[chain] devnet_magic must not be a public network's magic".into());
+            }
+            spec.network_params.magic = magic;
+        }
         let chain_spec = Arc::new(spec);
         validate_supported(&chain_spec)?;
 
@@ -1279,6 +1290,66 @@ mod tests {
         assert_eq!(config.chain_spec.difficulty.epoch_length, 33_554_432);
         assert!(config.chain_spec.bootstrap.seed_peers.is_empty());
     }
+    #[test]
+    fn devnet_magic_private_network_replaces_wire_magic() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [102, 111, 114, 107]\n").unwrap();
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        assert_eq!(
+            NodeConfig::load(cli)
+                .unwrap()
+                .chain_spec
+                .network_params
+                .magic,
+            [102, 111, 114, 107]
+        );
+    }
+
+    #[test]
+    fn devnet_magic_absent_keeps_the_built_in_devnet_magic() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n").unwrap();
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        assert_eq!(
+            NodeConfig::load(cli)
+                .unwrap()
+                .chain_spec
+                .network_params
+                .magic,
+            [7, 7, 7, 7]
+        );
+    }
+
+    #[test]
+    fn devnet_magic_rejected_on_public_networks() {
+        for net in ["mainnet", "testnet"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), format!("network = \"{net}\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [7, 7, 7, 7]\n")).unwrap();
+            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
+                .unwrap();
+            let err = NodeConfig::load(cli).expect_err("public network must reject devnet_magic");
+            // the named rejection, not the unknown-key error a build without the key would raise
+            assert!(
+                err.to_string().contains("devnet_magic requires devnet"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn devnet_magic_rejects_public_network_magics() {
+        for magic in ["[1, 0, 2, 4]", "[2, 3, 2, 3]"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), format!("network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = {magic}\n")).unwrap();
+            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
+                .unwrap();
+            let err = NodeConfig::load(cli).expect_err("a public network's magic must be rejected");
+            assert!(err.to_string().contains("public network"), "{err}");
+        }
+    }
+
     #[test]
     fn devnet_cost_cap_private_network_preserves_override() {
         let file = tempfile::NamedTempFile::new().unwrap();

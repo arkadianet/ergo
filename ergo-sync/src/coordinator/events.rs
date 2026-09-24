@@ -185,7 +185,12 @@ impl SyncCoordinator {
                 if !peer_headers.is_empty() {
                     let continuation = find_continuation_header(&peer_headers, chain);
                     if let Some(header_bytes) = continuation {
-                        actions.push(Action::ValidateHeader { peer, header_bytes });
+                        let modifier_id = *blake2b256(&header_bytes).as_bytes();
+                        actions.push(Action::ValidateHeader {
+                            peer,
+                            modifier_id,
+                            header_bytes,
+                        });
                     }
                 }
             }
@@ -439,6 +444,15 @@ impl SyncCoordinator {
                 // side and so the class can't be spoofed. The delivering peer
                 // is reset (on a late/hedge win it may differ from the
                 // original owner — correct attribution).
+                if type_id == ModifierTypeId::Header.as_byte()
+                    && blake2b256(&data).as_bytes() != &modifier_id
+                {
+                    actions.push(Action::Penalize {
+                        peer,
+                        penalty: Penalty::Misbehavior,
+                    });
+                    return actions;
+                }
                 let delivered_body = self
                     .delivery
                     .modifier_type(&modifier_id)
@@ -473,6 +487,7 @@ impl SyncCoordinator {
             // Header received — validate it
             actions.push(Action::ValidateHeader {
                 peer,
+                modifier_id,
                 header_bytes: data,
             });
         } else if ModifierTypeId::is_block_section(type_id) {

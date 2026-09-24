@@ -8,6 +8,7 @@
 //! honestly `null`, and the O1 `submit/check` aliases behaving identically to
 //! the canonical `transactions/{submit,check}` routes.
 
+use ergo_api::compat::types::ScalaUnconfirmedTransaction;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -224,14 +225,14 @@ impl NodeChainQuery for StubChain {
     fn modifier_by_id(&self, _id: &str) -> Option<ScalaBlockSection> {
         None
     }
-    fn pool_txs_by_ergo_tree(&self, _tree: &[u8]) -> Vec<ScalaTransaction> {
-        vec![scala_tx(id_a()), scala_tx(id_c())]
+    fn pool_txs_by_ergo_tree(&self, _tree: &[u8]) -> Vec<ScalaUnconfirmedTransaction> {
+        vec![scala_tx(id_a()).into(), scala_tx(id_c()).into()]
     }
-    fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaTransaction> {
-        vec![scala_tx(id_b())]
+    fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
+        vec![scala_tx(id_b()).into()]
     }
-    fn pool_txs_by_token_id(&self, _token_id: &[u8; 32]) -> Vec<ScalaTransaction> {
-        vec![scala_tx(id_a())]
+    fn pool_txs_by_token_id(&self, _token_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
+        vec![scala_tx(id_a()).into()]
     }
     fn pool_fee_histogram(&self, _bins: u32, _maxtime_ms: u64) -> Vec<ScalaFeeHistogramBin> {
         vec![

@@ -1,5 +1,7 @@
 //! Per-peer async tasks: dial / accept + read/write loop.
 
+pub mod outbound;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,7 +9,7 @@ use std::time::Duration;
 
 use ergo_api::SubmitError;
 use ergo_p2p::connection::{Connection, ConnectionError, ReadBudget, MAX_PAYLOAD_SIZE};
-use ergo_p2p::framing::{wire_len, MessageFrame};
+use ergo_p2p::framing::wire_len;
 use ergo_p2p::handshake::{
     deserialize_handshake_with_consumed, serialize_handshake, Handshake, PeerSpec,
 };
@@ -131,6 +133,19 @@ pub struct MeteredPayload {
 }
 
 impl MeteredPayload {
+    #[cfg(test)]
+    pub(crate) fn for_test(inner: Vec<u8>, budget: &EventByteBudget) -> Self {
+        let permit = budget
+            .bytes()
+            .clone()
+            .try_acquire_many_owned(charge_for(inner.len(), budget.capacity()))
+            .expect("test payload exceeds event byte budget");
+        Self {
+            inner,
+            _permit: permit,
+        }
+    }
+
     /// Settle the permits taken while READING the frame against the
     /// payload the frame turned out to carry, and wrap it.
     ///
@@ -445,12 +460,18 @@ pub async fn peer_task(
     mut conn: Connection,
     event_tx: mpsc::Sender<PeerEvent>,
     event_byte_budget: EventByteBudget,
-    mut outbound_rx: mpsc::Receiver<MessageFrame>,
+    mut outbound_rx: outbound::Receiver,
     bytes_in: Arc<AtomicU64>,
     bytes_out: Arc<AtomicU64>,
 ) {
+    let mut stopped = outbound_rx.stop.clone();
+    let mut disconnect_penalty = None;
     loop {
+        if *stopped.borrow() {
+            break;
+        }
         tokio::select! {
+            _ = stopped.changed() => break,
             result = read_metered_frame(&mut conn, &event_byte_budget) => {
                 match result {
                     Ok((code, payload)) => {
@@ -459,12 +480,11 @@ pub async fn peer_task(
                         // handshake round-trip preceded this task owning
                         // the conn.
                         bytes_in.fetch_add(wire_len(payload.len()) as u64, Ordering::Relaxed);
-                        if event_tx.send(PeerEvent::Message {
-                            peer: peer_id,
-                            code,
-                            payload,
-                        }).await.is_err() {
-                            return;
+                        tokio::select! {
+                            _ = stopped.changed() => break,
+                            result = event_tx.send(PeerEvent::Message { peer: peer_id, code, payload }) => {
+                                if result.is_err() { return; }
+                            }
                         }
                     }
                     Err(e) => {
@@ -488,42 +508,51 @@ pub async fn peer_task(
                                 None
                             }
                         };
-                        let _ = event_tx.send(PeerEvent::Disconnected { peer: peer_id, penalty }).await;
-                        return;
+                        disconnect_penalty = penalty;
+                        break;
                     }
                 }
             }
             msg = outbound_rx.recv() => {
                 match msg {
                     Some(frame) => {
-                        match conn.write_message(&frame).await {
+                        let result = tokio::select! {
+                            biased;
+                            _ = stopped.changed() => break,
+                            result = tokio::time::timeout(Duration::from_secs(30), conn.write_message(&frame)) => result,
+                        };
+                        match result {
                             // Count a frame once it is fully flushed. On a
                             // write error a prefix may have reached the
                             // kernel, but we never count partial frames.
-                            Ok(()) => {
+                            Ok(Ok(())) => {
                                 bytes_out.fetch_add(wire_len(frame.payload.len()) as u64, Ordering::Relaxed);
                             }
-                            Err(_) => {
-                                let _ = event_tx.send(PeerEvent::Disconnected { peer: peer_id, penalty: None }).await;
-                                return;
+                            _ => {
+                                break;
                             }
                         }
                     }
-                    None => {
-                        // Outbound channel closed — action loop disconnected us
-                        return;
-                    }
+                    None => break,
                 }
             }
         }
     }
+    drop(outbound_rx);
+    drop(conn);
+    let _ = event_tx
+        .send(PeerEvent::Disconnected {
+            peer: peer_id,
+            penalty: disconnect_penalty,
+        })
+        .await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ergo_p2p::connection::{PER_READER_MAX, READ_BUF_SIZE};
-    use ergo_p2p::framing::{HEADER_LENGTH, MAINNET_MAGIC};
+    use ergo_p2p::framing::{MessageFrame, HEADER_LENGTH, MAINNET_MAGIC};
     use tokio::io::AsyncWriteExt;
 
     // ----- helpers -----
@@ -634,6 +663,156 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn outbound_overflow_interrupts_a_blocked_socket_write() {
+        use tokio::io::AsyncReadExt;
+        let server_socket = tokio::net::TcpSocket::new_v4().unwrap();
+        server_socket.set_send_buffer_size(1024).unwrap();
+        server_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = server_socket.listen(1).unwrap();
+        // Bound the receive window before connecting: Windows can otherwise
+        // buffer the whole frame, leaving no blocked write to exercise.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        let mut client = socket
+            .connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, addr) = listener.accept().await.unwrap();
+        let (tx, rx) = outbound::channel(1);
+        let (events, mut observed) = mpsc::channel(8);
+        let written = Arc::new(AtomicU64::new(0));
+        tx.try_send(MessageFrame {
+            code: 1,
+            payload: vec![0; MAX_PAYLOAD_SIZE],
+        })
+        .unwrap();
+        let task = tokio::spawn(peer_task(
+            addr,
+            Connection::new(server, MAINNET_MAGIC),
+            events,
+            new_event_byte_budget(),
+            rx,
+            Arc::new(AtomicU64::new(0)),
+            written,
+        ));
+        // Wait until the write has actually started, then stop reading.
+        let mut byte = [0];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        tx.try_send(MessageFrame {
+            code: 2,
+            payload: Vec::new(),
+        })
+        .unwrap();
+        assert!(tx
+            .try_send(MessageFrame {
+                code: 3,
+                payload: Vec::new()
+            })
+            .is_err());
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            observed.recv().await,
+            Some(PeerEvent::Disconnected { penalty: None, .. })
+        ));
+        assert!(tx
+            .try_send(MessageFrame {
+                code: 4,
+                payload: Vec::new()
+            })
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn outbound_write_deadline_disconnects_a_peer_that_never_reads() {
+        use tokio::io::AsyncReadExt;
+        let server_socket = tokio::net::TcpSocket::new_v4().unwrap();
+        server_socket.set_send_buffer_size(1024).unwrap();
+        server_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = server_socket.listen(1).unwrap();
+        // Bound the receive window before connecting: Windows can otherwise
+        // buffer the whole frame, leaving no blocked write to exercise.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        let mut client = socket
+            .connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, addr) = listener.accept().await.unwrap();
+        let (tx, rx) = outbound::channel(8);
+        let (events, mut observed) = mpsc::channel(8);
+        let written = Arc::new(AtomicU64::new(0));
+        tx.try_send(MessageFrame {
+            code: 1,
+            payload: vec![0; MAX_PAYLOAD_SIZE],
+        })
+        .unwrap();
+        let mut task = tokio::spawn(peer_task(
+            addr,
+            Connection::new(server, MAINNET_MAGIC),
+            events,
+            new_event_byte_budget(),
+            rx,
+            Arc::new(AtomicU64::new(0)),
+            written.clone(),
+        ));
+        let mut byte = [0];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        // A kernel may accept an entire frame before backpressure is visible.
+        // Feed one frame at a time until a write stays pending; this cannot
+        // trip the queue limit or confuse an overflow with a write timeout.
+        let mut completed = 0;
+        let mut blocked = false;
+        for _ in 0..32 {
+            let next = completed + wire_len(MAX_PAYLOAD_SIZE) as u64;
+            let delivered = tokio::time::timeout(Duration::from_secs(1), async {
+                while written.load(Ordering::Relaxed) < next {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if delivered.is_err() {
+                blocked = true;
+                break;
+            }
+            completed = next;
+            tx.try_send(MessageFrame {
+                code: 1,
+                payload: vec![0; MAX_PAYLOAD_SIZE],
+            })
+            .unwrap();
+        }
+        assert!(blocked, "test socket must reach write backpressure");
+        tokio::time::timeout(Duration::from_secs(35), &mut task)
+            .await
+            .expect("write deadline must close the connection")
+            .unwrap();
+        assert_eq!(
+            written.load(Ordering::Relaxed),
+            completed,
+            "partial writes must not count as delivered frames"
+        );
+        assert!(matches!(
+            observed.recv().await,
+            Some(PeerEvent::Disconnected { penalty: None, .. })
+        ));
+        assert!(tx
+            .try_send(MessageFrame {
+                code: 2,
+                payload: Vec::new()
+            })
+            .is_err());
+    }
+
     // ----- happy path -----
 
     /// Spawn `peer_task` on one end of a TCP pair and confirm it counts the
@@ -651,7 +830,7 @@ mod tests {
 
         let peer_id: SocketAddr = "127.0.0.1:9030".parse().unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (outbound_tx, outbound_rx) = mpsc::channel(16);
+        let (outbound_tx, outbound_rx) = outbound::channel(16);
         let bytes_in = Arc::new(AtomicU64::new(0));
         let bytes_out = Arc::new(AtomicU64::new(0));
 
@@ -678,11 +857,10 @@ mod tests {
         // just after write_message returns Ok, which can lag the client's
         // read slightly — poll briefly.
         outbound_tx
-            .send(MessageFrame {
+            .try_send(MessageFrame {
                 code: 3,
                 payload: vec![0xBB; 10],
             })
-            .await
             .unwrap();
         let got = client_conn.read_message().await.unwrap();
         assert_eq!(got.code, 3);
@@ -989,7 +1167,7 @@ mod tests {
 
         let peer_id: SocketAddr = "127.0.0.1:9031".parse().unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_outbound_tx, outbound_rx) = mpsc::channel::<MessageFrame>(16);
+        let (_outbound_tx, outbound_rx) = outbound::channel(16);
         let task = tokio::spawn(peer_task(
             peer_id,
             server_conn,
@@ -1121,7 +1299,7 @@ mod tests {
 
         let peer_id: SocketAddr = "127.0.0.1:9032".parse().unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (outbound_tx, outbound_rx) = mpsc::channel::<MessageFrame>(16);
+        let (outbound_tx, outbound_rx) = outbound::channel(16);
         let task = tokio::spawn(peer_task(
             peer_id,
             server_conn,
@@ -1136,11 +1314,10 @@ mod tests {
         let chatter = tokio::spawn(async move {
             loop {
                 if outbound_tx
-                    .send(MessageFrame {
+                    .try_send(MessageFrame {
                         code: 1,
                         payload: Vec::new(),
                     })
-                    .await
                     .is_err()
                 {
                     return;

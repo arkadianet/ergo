@@ -1108,6 +1108,8 @@ impl PeerManager {
 
     /// Record a ban in the ban list (separate from peer table).
     fn record_ban(&mut self, ip: IpAddr, now: Instant, permanent: bool) {
+        // Bans are IP-wide, including other ports and pending handshakes.
+        self.peers.retain(|addr, _| addr.ip() != ip);
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);
         let duration = if permanent {
             Duration::from_secs(365 * 24 * 60 * 60)

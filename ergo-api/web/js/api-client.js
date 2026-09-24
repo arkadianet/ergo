@@ -13,7 +13,7 @@ async function getJson(path) {
     const headers = {};
     const key = getApiKey();
     if (key) headers['api_key'] = key;
-    const r = await fetch(path, { cache: 'no-store', headers });
+    const r = await fetch(path, { cache: 'no-store', headers, signal: AbortSignal.timeout(12000) });
     if (key) report(r.status, false, key); // reads are public: only a 403 is meaningful here
     if (!r.ok) return null;
     return await r.json();

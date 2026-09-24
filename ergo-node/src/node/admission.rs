@@ -316,6 +316,7 @@ pub(super) fn reject_to_submit_error(reason: RejectReason) -> SubmitError {
             ValidationErr::ScriptFailed => ("script_failed", None),
             ValidationErr::MonetaryFailed => ("monetary_failed", None),
             ValidationErr::CostExceeded => ("cost_exceeded", None),
+            ValidationErr::ReemissionPolicy => ("reemission_policy", None),
             ValidationErr::Other(s) => {
                 return SubmitError {
                     reason: "validation_failed".to_string(),
