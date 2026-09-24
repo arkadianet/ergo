@@ -888,6 +888,7 @@ dependencies = [
  "ergo-chain-spec",
  "ergo-crypto",
  "ergo-indexer",
+ "ergo-inputblocks",
  "ergo-mempool",
  "ergo-mining",
  "ergo-p2p",

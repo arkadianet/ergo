@@ -1898,6 +1898,46 @@ impl Mempool {
     pub fn weight_fn(&self) -> &dyn WeightFunction {
         &*self.weight_fn
     }
+
+    // ── Provisional input-block chain (Matrix / weak-blocks, spec §8) ──
+    // Thin delegates onto `crate::input_blocks`; see that module for the
+    // Scala-parity notes (`removeWithDoubleSpends` / `put`) and the D1
+    // divergence.
+
+    /// All pool entries whose weak id (`tx_id[0..3] ++ witness_id[0..3]`)
+    /// equals `weak`. Never a single-value map — see
+    /// [`crate::input_blocks::find_by_weak_id`].
+    pub fn find_by_weak_id(&self, weak: &ergo_ser::weak_id::WeakId) -> Vec<&Entry> {
+        crate::input_blocks::find_by_weak_id(&self.pool, weak)
+    }
+
+    /// Scala `removeWithDoubleSpends(txs)`: remove `txs` (where pooled) and
+    /// every pool tx conflicting with them on inputs. NOT `on_tip_change` —
+    /// leaves the tip pointer, revalidation queue, and budgets untouched.
+    pub fn apply_input_block_txs(
+        &mut self,
+        txs: &[ergo_ser::transaction::Transaction],
+    ) -> Result<(Vec<crate::input_blocks::RemovedEntry>, Vec<MempoolAction>), ergo_ser::WriteError>
+    {
+        crate::input_blocks::apply_input_block_txs(&mut self.pool, &self.config, txs)
+    }
+
+    /// Scala `put`: re-insert rolled-back cached bodies without validation.
+    /// See [`crate::input_blocks::restore_input_block_txs`] for the D1
+    /// divergence (input-conflicting bodies are dropped, not admitted).
+    pub fn restore_input_block_txs(
+        &mut self,
+        bodies: &[crate::input_blocks::RestoreBody],
+        now: std::time::Instant,
+    ) -> Vec<crate::input_blocks::RestoreOutcome> {
+        crate::input_blocks::restore_input_block_txs(
+            &mut self.pool,
+            &self.config,
+            self.weight_fn.as_ref(),
+            bodies,
+            now,
+        )
+    }
 }
 
 #[cfg(test)]

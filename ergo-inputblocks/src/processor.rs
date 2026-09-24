@@ -25,6 +25,36 @@ use ergo_ser::input_block::{InputBlockAnnouncement, OrderingBlockAnnouncement};
 use ergo_ser::transaction::Transaction;
 use ergo_ser::weak_id::WeakId;
 
+/// One announcement held for an ordering block we have not applied yet
+/// (see [`Processor::ahead`]).
+#[derive(Debug, Clone)]
+struct AheadAnnouncement {
+    ann: InputBlockAnnouncement,
+    from: PeerTag,
+    /// The ordering block it sits under — the replay key.
+    ordering_id: OrderingId,
+    /// Its header height, so an entry that can never be `+1` again is
+    /// discarded rather than held forever.
+    height: u32,
+}
+
+/// Hex view of a 32-byte id for `tracing` fields.
+///
+/// The crate deliberately takes no `hex` dependency — its public types
+/// are byte arrays and the node does the encoding — so the diagnostic
+/// logs here carry their own two-line formatter rather than pulling a
+/// crate in for them.
+struct HexId<'a>(&'a InputBlockId);
+
+impl std::fmt::Display for HexId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 use crate::announcement::AnnouncementPolicy;
 use crate::bounds::Bounds;
 use crate::ordering::{OrderingStore, ReconstructionPlan};
@@ -47,6 +77,23 @@ pub struct Body {
     pub bytes: Arc<[u8]>,
     /// The parsed transaction.
     pub tx: Transaction,
+}
+
+/// What a node's [`Effect::Validate`] run concluded.
+///
+/// The third arm is the reason this is not a `Result`: "this block is
+/// invalid" and "this node cannot check it right now" have opposite
+/// consequences. A verdict retires the combination and charges the
+/// block's retry budget; a node-local condition must do neither, or one
+/// transient miss permanently blacklists the block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationOutcome {
+    /// The transactions validated; carries their summed cost.
+    Valid(u64),
+    /// A consensus verdict on this combination of bodies.
+    Invalid(String),
+    /// The node could not run the job at all. Transient and node-local.
+    Unavailable(String),
 }
 
 /// Events the node feeds the processor (spec 7.1).
@@ -92,8 +139,8 @@ pub enum Event {
         job: JobId,
         /// The generation the job was issued in.
         generation: u64,
-        /// Total cost on success, a reason string on failure.
-        outcome: Result<u64, String>,
+        /// What the node's validator concluded.
+        outcome: ValidationOutcome,
     },
     /// An ordering-block announcement (message 106).
     OrderingAnnouncementAccepted {
@@ -213,6 +260,10 @@ pub enum Effect {
     OrderingReconstruct {
         /// The plan.
         plan: ReconstructionPlan,
+        /// The peer that announced the ordering block — the one to ask
+        /// for the full `BlockTransactions` section when the plan does
+        /// not reproduce the header's transactions root.
+        from: PeerTag,
     },
     /// Telemetry: something was dropped, and why.
     Dropped {
@@ -278,11 +329,28 @@ pub enum DropReason {
     TxDigestMismatch,
     /// Validation failed and the block had no alternative variants.
     ValidationFailed,
+    /// The announcement's extension proof reduces to the header's root
+    /// (so it is valid to the Scala reference) but its leaves do not
+    /// match the announced fields, and `strict_field_binding` is on.
+    /// A policy drop, never a peer penalty — see
+    /// [`AnnouncementError::is_policy_only`](crate::announcement::AnnouncementError::is_policy_only).
+    FieldsUnbound,
+    /// The node could not run the validation job at all — no applied full
+    /// block to build a context from, or no UTXO set. Node-local and
+    /// transient, NOT a verdict on the block: the combination is left
+    /// untried and the attempt is refunded, so a later event re-offers it.
+    ValidationUnavailable,
     /// `subblocks_per_block` is unavailable: input blocks are not active,
     /// so the announcement is dropped **without** penalising the peer.
     MultiplierUnavailable,
     /// The ordering-announcement store is full; the oldest was dropped.
     OrderingAnnouncementsFull,
+    /// An ordering announcement for a header the node already holds
+    /// (spec 9.3 / Scala `processOrderingBlockAnnouncement`). Discarded
+    /// before PoW, storage and relay: a peer replaying known
+    /// announcements would otherwise buy repeated PoW verification, an
+    /// `Inv` broadcast and an eviction from the announcement store.
+    OrderingHeaderKnown,
     /// Bodies were delivered for a block the processor has no record of.
     /// Not in the spec's list: Scala logs and ignores this case
     /// (`applyInputBlockTransactions`'s `case None`), and the node needs
@@ -299,6 +367,70 @@ pub enum DropReason {
     /// The node is running in digest (stateless) mode, where input
     /// blocks cannot be validated at all (Scala `processInputBlock`).
     DigestMode,
+}
+
+impl DropReason {
+    /// The variant's name, stable across payload changes, for keying
+    /// telemetry counters. Payload-carrying variants (`StaleValidation`,
+    /// `VariantCapExceeded`, `SelectionSettled`) collapse to the variant
+    /// name: a counter keyed by generation or position would be unbounded.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AlreadyKnown => "AlreadyKnown",
+            Self::OutsideHeightWindow => "OutsideHeightWindow",
+            Self::StaleValidation { .. } => "StaleValidation",
+            Self::CacheEvicted => "CacheEvicted",
+            Self::WaitlistFull => "WaitlistFull",
+            Self::ForksFull => "ForksFull",
+            Self::RecordsFull => "RecordsFull",
+            Self::StagingFull => "StagingFull",
+            Self::RequestsFull => "RequestsFull",
+            Self::WitnessCombinationsExhausted => "WitnessCombinationsExhausted",
+            Self::VariantCapExceeded { .. } => "VariantCapExceeded",
+            Self::DigestBudgetExhausted => "DigestBudgetExhausted",
+            Self::ValidationBudgetExhausted => "ValidationBudgetExhausted",
+            Self::DigestMismatch => "DigestMismatch",
+            Self::TxDigestMismatch => "TxDigestMismatch",
+            Self::ValidationFailed => "ValidationFailed",
+            Self::FieldsUnbound => "FieldsUnbound",
+            Self::ValidationUnavailable => "ValidationUnavailable",
+            Self::MultiplierUnavailable => "MultiplierUnavailable",
+            Self::OrderingAnnouncementsFull => "OrderingAnnouncementsFull",
+            Self::OrderingHeaderKnown => "OrderingHeaderKnown",
+            Self::UnknownBlock => "UnknownBlock",
+            Self::SelectionSettled { .. } => "SelectionSettled",
+            Self::DigestMode => "DigestMode",
+        }
+    }
+
+    /// Every variant name [`Self::name`] can return, so a telemetry
+    /// surface can publish a zero for reasons that have not fired.
+    pub const ALL_NAMES: &'static [&'static str] = &[
+        "AlreadyKnown",
+        "OutsideHeightWindow",
+        "StaleValidation",
+        "CacheEvicted",
+        "WaitlistFull",
+        "ForksFull",
+        "RecordsFull",
+        "StagingFull",
+        "RequestsFull",
+        "WitnessCombinationsExhausted",
+        "VariantCapExceeded",
+        "DigestBudgetExhausted",
+        "ValidationBudgetExhausted",
+        "DigestMismatch",
+        "TxDigestMismatch",
+        "ValidationFailed",
+        "FieldsUnbound",
+        "ValidationUnavailable",
+        "MultiplierUnavailable",
+        "OrderingAnnouncementsFull",
+        "OrderingHeaderKnown",
+        "UnknownBlock",
+        "SelectionSettled",
+        "DigestMode",
+    ];
 }
 
 /// The state a block's transaction selection is in when a delivery tries
@@ -338,6 +470,11 @@ pub struct ProcessorCtx<'a> {
     /// Whether the node already has an ordering block's transaction
     /// section (Scala `historyReader.contains(header.transactionsId)`).
     pub block_transactions_known: &'a dyn Fn(&OrderingId) -> bool,
+    /// Whether the node already holds an ordering block's HEADER (Scala
+    /// `processOrderingBlockAnnouncement`'s "skip if the header is
+    /// known", spec 9.3). Distinct from `block_transactions_known`: the
+    /// header can be stored long before its transactions are.
+    pub header_known: &'a dyn Fn(&OrderingId) -> bool,
 }
 
 /// One announcement record (Scala `inputBlockRecords`).
@@ -435,6 +572,32 @@ impl RequestKey {
     }
 }
 
+/// One outstanding request: what was asked, when the answer is due, the
+/// effect that would ask again, and how many times it has been issued.
+///
+/// The effect is kept so the deadline sweep can REISSUE it (spec 9.2's
+/// retry contract). Before that, a lost reply was terminal: the sweep
+/// only freed the slot, the coordinator deliberately forgets
+/// input-block timeouts without re-requesting, and every later
+/// announcement of the same block hits `AlreadyKnown` — so a block whose
+/// parent announcement or transaction-id reply went missing never
+/// progressed again.
+#[derive(Debug, Clone)]
+struct Pending {
+    key: RequestKey,
+    /// When the answer stops being expected and the sweep acts.
+    deadline: Tick,
+    /// The request to reissue, addressed to the same peer.
+    effect: Effect,
+    /// Issues so far; `1` for a request that has never been retried.
+    attempts: u32,
+}
+
+/// Ceiling on the exponential backoff between reissues, in doublings of
+/// `Bounds::request_timeout_ms`. Keeps the retry deadline bounded while
+/// still backing off from a peer that is merely slow.
+const REQUEST_BACKOFF_SHIFT_CAP: u32 = 3;
+
 /// A transaction selection a delivery proposed while the block's own
 /// selection was still outstanding (residual fix round 2, items B and
 /// C/D). Refusing the swap is what keeps the outstanding job valid;
@@ -464,12 +627,45 @@ pub struct Processor {
     cache: TxCache,
     staging: indexmap::IndexMap<InputBlockId, Staging>,
     waitlist: VecDeque<(InputBlockId, Option<InputBlockId>)>,
+    /// Announcements for the ordering block ONE AHEAD of our best full
+    /// block, held until that ordering block is applied (task 8b).
+    ///
+    /// Spec 2.7 step 4 says an announcement at `best_full_height + 2`
+    /// makes the node download the ordering block instead of recording
+    /// the input block; the Scala reference does exactly that and marks
+    /// the gap with its own `// todo: save input block?`. The
+    /// consequence, measured on the mixed devnet, is that the FIRST
+    /// input block under every ordering block — the only one whose
+    /// `prev_input_block_id` is `None`, and therefore the only one that
+    /// can root the new tree — is thrown away, because it is always
+    /// published before the follower has applied the ordering block it
+    /// sits under. Every later announcement then has an unknown parent,
+    /// goes to `waitlist`, and the chain is rebuilt backwards one
+    /// request round trip at a time while the miner publishes roughly
+    /// one input block a second. The follower never catches up: the
+    /// measured lag was p95 234 input blocks with the tree at zero
+    /// forks.
+    ///
+    /// Holding the announcement costs nothing the node was not already
+    /// willing to hold — it is the same announcement it will be sent
+    /// again — and replaying it the moment the ordering block lands
+    /// hands the tree its root in arrival order, so the chain connects
+    /// linearly instead of backwards. Keyed by id, insertion-ordered,
+    /// capped by `bounds.waitlist_entries` (the same operator meaning:
+    /// announcements held because they cannot be placed yet) with
+    /// overflow reported as [`DropReason::WaitlistFull`].
+    ahead: indexmap::IndexMap<InputBlockId, AheadAnnouncement>,
     ordering: OrderingStore,
     /// Requests issued to a peer and not yet answered, each with the tick
     /// it expires at. Replaces a tick-halving counter: the cap now bounds
     /// *genuinely outstanding* requests, released by the matching
     /// delivery or by their deadline (residual fix round, D).
-    outstanding: HashMap<PeerTag, Vec<(RequestKey, Tick)>>,
+    outstanding: HashMap<PeerTag, Vec<Pending>>,
+    /// Requests reissued by the deadline sweep since start, for the
+    /// operator surface (`RequestRetried`). A rising count with no
+    /// deliveries is what distinguishes a peer that is dropping replies
+    /// from one that was never asked.
+    requests_retried: u64,
     /// The clock of the event being handled, so [`Self::request`] can
     /// stamp a deadline without every call site threading it.
     now: Tick,
@@ -555,6 +751,19 @@ pub struct Processor {
         (OrderingId, InputBlockId),
         std::collections::HashSet<InputBlockId>,
     )>,
+    /// Monotonic counter, bumped once per [`Self::handle`] call — i.e.
+    /// once per processor event, regardless of whether it produced any
+    /// [`Effect`]s (fix-round-1, finding 4). A superset of "every state
+    /// mutation": some events genuinely change nothing (e.g. a `Tick`
+    /// with nothing to expire), but the read side this exists for (the
+    /// node's REST snapshot refresh) needs to catch mutations that
+    /// produce NO effect at all — most notably TTL-driven body-cache
+    /// expiry inside [`Self::on_tick`], which silently drops cached
+    /// bodies without emitting anything. Comparing this across calls is
+    /// cheap and never under-reports a change; it can over-report (a
+    /// quiet tick still bumps it), which the caller accepts as the safe
+    /// direction to be wrong in.
+    revision: u64,
 }
 
 #[derive(Debug, Default)]
@@ -918,6 +1127,7 @@ impl Processor {
             waitlist_entries: bounds.waitlist_entries.max(1),
             pending_triggers: bounds.pending_triggers.max(1),
             retired_jobs: bounds.retired_jobs.max(1),
+            ordering_announcements: bounds.ordering_announcements.max(1),
             ..bounds
         };
         Self {
@@ -933,8 +1143,10 @@ impl Processor {
             cache: TxCache::default(),
             staging: indexmap::IndexMap::new(),
             waitlist: VecDeque::new(),
+            ahead: indexmap::IndexMap::new(),
             ordering: OrderingStore::default(),
             outstanding: HashMap::new(),
+            requests_retried: 0,
             now: Tick(0),
             issued: indexmap::IndexMap::new(),
             in_flight: None,
@@ -951,6 +1163,7 @@ impl Processor {
             validation_attempts: HashMap::new(),
             failed_trigger: HashMap::new(),
             continuation: None,
+            revision: 0,
         }
     }
 
@@ -971,6 +1184,7 @@ impl Processor {
 
     /// Feed one event; returns the effects the node must act on.
     pub fn handle(&mut self, event: Event, ctx: &ProcessorCtx<'_>) -> Vec<Effect> {
+        self.revision = self.revision.wrapping_add(1);
         let mut out = Vec::new();
         // The processor owns no clock: every event but a validation
         // result carries the node's, and request deadlines are stamped
@@ -1071,8 +1285,19 @@ impl Processor {
             });
             return;
         }
-        // Step 4 of 2.7: `+2` downloads the ordering header instead.
+        // Step 4 of 2.7: `+2` downloads the ordering header. It also
+        // HOLDS the announcement (see the `ahead` field): discarding it
+        // costs the follower the root of the next ordering block's tree
+        // and, with it, the whole ordering-block interval.
         if height == full.saturating_add(2) {
+            tracing::debug!(
+                block = %HexId(&id),
+                ordering = %HexId(&ordering_id),
+                height,
+                full,
+                prev = ?ann.fields.prev_input_block_id.as_ref().map(HexId).map(|h| h.to_string()),
+                "input_blocks: announcement one ordering block ahead, held"
+            );
             self.request(
                 out,
                 Effect::RequestOrderingHeader {
@@ -1082,6 +1307,7 @@ impl Processor {
                 from,
                 id,
             );
+            self.hold_ahead(id, ordering_id, height, ann, from, out);
             return;
         }
         // Only `+1` is applied; the rest of the window is ignored (parity).
@@ -1106,6 +1332,21 @@ impl Processor {
                 out.push(Effect::Dropped {
                     id,
                     reason: DropReason::MultiplierUnavailable,
+                });
+                return;
+            }
+            Err(e) if e.is_policy_only() => {
+                // Valid by the Scala reference's own check; rejected only
+                // because this node runs `strict_field_binding`. Dropping
+                // it is the operator's choice; banning the peer for it is
+                // not — the pinned Scala miner produces these itself.
+                tracing::debug!(
+                    error = %e,
+                    "input-block announcement rejected by strict field binding"
+                );
+                out.push(Effect::Dropped {
+                    id,
+                    reason: DropReason::FieldsUnbound,
                 });
                 return;
             }
@@ -1185,6 +1426,14 @@ impl Processor {
                         });
                     }
                 }
+                tracing::debug!(
+                    block = %HexId(&id),
+                    ordering = %HexId(&ordering_id),
+                    prev = ?prev.as_ref().map(HexId).map(|h| h.to_string()),
+                    forks = tree.forks.len(),
+                    waitlist = self.waitlist.len(),
+                    "input_blocks: announcement disconnected, waitlisted"
+                );
                 self.waitlist.push_back((id, prev));
                 if let Some(p) = prev {
                     self.request(out, Effect::RequestInputBlock { id: p, from }, from, id);
@@ -1950,10 +2199,14 @@ impl Processor {
     }
 
     /// Whether `peer` has room for another request right now.
+    ///
+    /// In-flight slots only, matching [`Self::request`]'s own gate: a
+    /// retry-pending slot is a question waiting to be re-asked, not one
+    /// occupying the wire.
     fn has_request_capacity(&self, peer: PeerTag) -> bool {
         let now = self.now;
         let held = self.outstanding.get(&peer).map_or(0, |slots| {
-            slots.iter().filter(|(_, at)| at.0 > now.0).count()
+            slots.iter().filter(|p| p.deadline.0 > now.0).count()
         });
         held < self.bounds.requests_per_peer
     }
@@ -2664,7 +2917,7 @@ impl Processor {
         &mut self,
         job: JobId,
         generation: u64,
-        outcome: Result<u64, String>,
+        outcome: ValidationOutcome,
         out: &mut Vec<Effect>,
     ) {
         let Some(inf) = self.in_flight.clone() else {
@@ -2690,12 +2943,35 @@ impl Processor {
         }
         self.in_flight = None;
         match outcome {
-            Ok(cost) => self.on_validation_ok(inf, cost, out),
-            Err(reason) => {
+            ValidationOutcome::Valid(cost) => self.on_validation_ok(inf, cost, out),
+            ValidationOutcome::Invalid(reason) => {
                 tracing::debug!(%reason, "input block validation failed");
                 self.on_validation_failed(inf, out)
             }
+            ValidationOutcome::Unavailable(reason) => {
+                tracing::debug!(%reason, "input block validation unavailable");
+                self.on_validation_unavailable(inf, out)
+            }
         }
+    }
+
+    /// The node could not run the job. The block is untouched: the
+    /// combination stays untried (recording it would blacklist a
+    /// perfectly valid chain head for good — a node that receives input
+    /// blocks before it has applied its first full block would never
+    /// validate that ordering block's chain again), and the attempt the
+    /// dispatch charged is refunded. No retry is armed here: re-selection
+    /// reaches this block on the next event, by which time the node may
+    /// be able to run the job. Arming one would spin inside a single
+    /// effect batch while the condition holds.
+    fn on_validation_unavailable(&mut self, inf: InFlight, out: &mut Vec<Effect>) {
+        if let Some(n) = self.validation_attempts.get_mut(&inf.id) {
+            *n = n.saturating_sub(1);
+        }
+        out.push(Effect::Dropped {
+            id: inf.id,
+            reason: DropReason::ValidationUnavailable,
+        });
     }
 
     fn on_validation_ok(&mut self, inf: InFlight, cost: u64, out: &mut Vec<Effect>) {
@@ -2888,6 +3164,29 @@ impl Processor {
             return;
         };
         let header_id: OrderingId = *mid.as_bytes();
+        // Spec 9.3 / Scala `processOrderingBlockAnnouncement`: the ±2
+        // height window and the known-header skip come FIRST, before any
+        // PoW verification, before the store and before the relay.
+        // Without them a peer can replay valid historical announcements
+        // and buy, per frame, a PoW verification, an `Inv` broadcast to
+        // every eligible peer, and the eviction of a useful entry from
+        // the bounded announcement store.
+        let height = ann.header.height;
+        let full = ctx.full_block_height;
+        if height > full.saturating_add(2) || height.saturating_add(2) < full {
+            out.push(Effect::Dropped {
+                id: header_id,
+                reason: DropReason::OutsideHeightWindow,
+            });
+            return;
+        }
+        if (ctx.header_known)(&header_id) || self.ordering.get(&header_id).is_some() {
+            out.push(Effect::Dropped {
+                id: header_id,
+                reason: DropReason::OrderingHeaderKnown,
+            });
+            return;
+        }
         let expected = (ctx.expected_n_bits)(ann.header.parent_id.as_bytes());
         if let Err(e) = crate::announcement::validate_ordering_announcement(&ann, expected) {
             tracing::debug!(error = %e, "invalid ordering-block announcement");
@@ -2905,6 +3204,7 @@ impl Processor {
             .and_then(|(_, v)| <[u8; 32]>::try_from(v.as_slice()).ok());
         let non_broadcasted = ann.non_broadcasted_transactions.clone();
         let broadcasted_ids = ann.broadcasted_transaction_ids.clone();
+        let parent_id: OrderingId = *ann.header.parent_id.as_bytes();
 
         if let Some(evicted) =
             self.ordering
@@ -2917,18 +3217,37 @@ impl Processor {
         }
         out.push(Effect::RelayOrderingInv { header_id });
 
+        let (chain_txs, chain_key) = self.collected_input_txs_for_announced(&header_id, &parent_id);
         match prev {
             Some(p) if self.tx_refs.contains_key(&p) => {
                 out.push(Effect::OrderingReconstruct {
+                    from,
                     plan: ReconstructionPlan {
                         header_id,
                         non_broadcasted,
                         broadcasted_ids,
-                        // Finding F5, preserved: Scala keys the collected
-                        // input-chain transactions by the *announced*
-                        // header's own id, not by the ordering block the
-                        // input chain extends.
-                        input_chain_txs: self.collected_input_txs(&header_id),
+                        // Divergence D5, upstream finding F5. Scala's
+                        // follower keys the collected input-chain
+                        // transactions by the *announced* header's own id
+                        // (`getCollectedInputBlocksTransactions(headerId)`)
+                        // while its miner seats the chain collected under
+                        // the PARENT
+                        // (`getBestOrderingCollectedInputBlocksTransactions`,
+                        // which reads `bestOrderingBlock().id`). The trees
+                        // are keyed by the block the input chain sits ON,
+                        // so the follower's key names a block that has no
+                        // tree yet and the lookup returns nothing — which
+                        // is what the devnet smoke measured: every
+                        // reconstruction ran with an EMPTY input chain and
+                        // could not reproduce the root of any block whose
+                        // transactions came from input blocks.
+                        //
+                        // Scala's key is tried first; the parent's is the
+                        // fallback, so a chain genuinely recorded under
+                        // the announced id still wins. Delete the fallback
+                        // when upstream settles F5.
+                        input_chain_txs: chain_txs,
+                        reconstruction_key: chain_key,
                         prev_input_block_id: Some(p),
                     },
                 });
@@ -2969,7 +3288,88 @@ impl Processor {
             applied: Vec::new(),
             rolled_back: Vec::new(),
         });
+        // Before `resume`: the held announcements are what give the new
+        // tree its root, and selection has nothing to resume without
+        // them.
+        self.replay_ahead(header_id, self.now, ctx, out);
         self.resume(header_id, out);
+    }
+
+    /// Hold an announcement for the ordering block one ahead of us, so
+    /// [`Self::replay_ahead`] can offer it again the moment that block
+    /// is applied. Bounded; the oldest entry is dropped on overflow.
+    fn hold_ahead(
+        &mut self,
+        id: InputBlockId,
+        ordering_id: OrderingId,
+        height: u32,
+        ann: InputBlockAnnouncement,
+        from: PeerTag,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.ahead.contains_key(&id) {
+            return;
+        }
+        while self.ahead.len() >= self.bounds.waitlist_entries {
+            let Some((old, _)) = self.ahead.shift_remove_index(0) else {
+                break;
+            };
+            out.push(Effect::Dropped {
+                id: old,
+                reason: DropReason::WaitlistFull,
+            });
+        }
+        self.ahead.insert(
+            id,
+            AheadAnnouncement {
+                ann,
+                from,
+                ordering_id,
+                height,
+            },
+        );
+    }
+
+    /// Offer every held announcement for `header_id` again, in arrival
+    /// order, now that the ordering block it belongs to is the tip.
+    ///
+    /// Arrival order matters: the miner publishes the chain forwards, so
+    /// replaying it forwards roots the tree with the `prev = None` block
+    /// and then extends it linearly. Anything at or below the new best
+    /// height can never be `+1` again and is discarded here rather than
+    /// left to age out.
+    fn replay_ahead(
+        &mut self,
+        header_id: OrderingId,
+        now: Tick,
+        ctx: &ProcessorCtx<'_>,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.ahead.is_empty() {
+            return;
+        }
+        let best_height = self.best.ordering_height;
+        let mut due = Vec::new();
+        let mut keep = indexmap::IndexMap::with_capacity(self.ahead.len());
+        for (id, entry) in std::mem::take(&mut self.ahead) {
+            if entry.ordering_id == header_id {
+                due.push(entry);
+            } else if entry.height > best_height {
+                keep.insert(id, entry);
+            }
+        }
+        self.ahead = keep;
+        if due.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            ordering = %HexId(&header_id),
+            held = due.len(),
+            "input_blocks: replaying announcements held for the new ordering block"
+        );
+        for entry in due {
+            self.on_announcement(entry.ann, entry.from, now, ctx, out);
+        }
     }
 
     /// Scala `prune()` (spec 2.5): trees behind the best height, records
@@ -3033,14 +3433,56 @@ impl Processor {
         for id in expired {
             self.staging.shift_remove(&id);
         }
-        // Outstanding requests expire at an explicit deadline: a peer
-        // that never answers recovers that slot once the request has
-        // timed out, and one that answers is credited immediately by the
-        // matching delivery (residual fix round, D).
+        // Outstanding requests expire at an explicit deadline. A request
+        // that timed out is REISSUED to the same peer, with the deadline
+        // doubled per attempt, until `Bounds::request_retries` is spent;
+        // only then is the slot released. One that answers is credited
+        // immediately by the matching delivery (residual fix round, D).
+        //
+        // This is spec 9.2's retry contract and it has to live here: the
+        // coordinator forgets timed-out input-block requests without
+        // re-requesting (parity — Scala's `checkDelivery` applies no
+        // NonDelivery penalty), so without a reissue a lost reply was
+        // terminal. Repeated announcements of the recorded block hit
+        // `AlreadyKnown` and never asked again.
+        //
+        // A reissue is a request like any other, so it obeys
+        // `requests_per_peer`: expired slots are offered oldest first
+        // and only while that peer has room on the wire. One that does
+        // not fit stays queued exactly as it is — same attempts, same
+        // past deadline — and the next tick offers it again. Reissuing
+        // unconditionally would put more requests in flight than the
+        // operator allowed (with a cap of one: A expires, B takes the
+        // slot, and the tick then adds A back on top of it).
+        let timeout = self.bounds.request_timeout_ms;
+        let retries = self.bounds.request_retries;
+        let cap = self.bounds.requests_per_peer;
+        let mut reissued = Vec::new();
         self.outstanding.retain(|_, slots| {
-            slots.retain(|(_, at)| at.0 > now.0);
+            // A slot whose retry budget is spent is finished whatever
+            // the capacity: nothing will ask for it again.
+            slots.retain(|p| p.deadline.0 > now.0 || p.attempts <= retries);
+            let mut live = slots.iter().filter(|p| p.deadline.0 > now.0).count();
+            for p in slots.iter_mut() {
+                if live >= cap {
+                    break;
+                }
+                if p.deadline.0 > now.0 {
+                    continue;
+                }
+                let shift = (p.attempts - 1).min(REQUEST_BACKOFF_SHIFT_CAP);
+                p.deadline = Tick(now.0.saturating_add(timeout.saturating_mul(1u64 << shift)));
+                // Only an ACTUAL reissue costs an attempt and counts as
+                // a retry; a request held back for capacity has not
+                // been asked again.
+                p.attempts += 1;
+                live += 1;
+                reissued.push(p.effect.clone());
+            }
             !slots.is_empty()
         });
+        self.requests_retried = self.requests_retried.saturating_add(reissued.len() as u64);
+        out.extend(reissued);
         // Slots the sweep freed may be what a deferred invitation needs.
         self.retry_invitations(None, out);
     }
@@ -3048,10 +3490,25 @@ impl Processor {
     /// Issue `effect` to `peer` unless that peer is already at the
     /// outstanding-request cap (spec 7.4).
     ///
-    /// The cap counts requests that are genuinely outstanding: a slot is
-    /// released by the delivery that answers it
-    /// ([`Self::request_answered`]) or, if the peer never answers, when
-    /// its deadline passes on a [`Event::Tick`].
+    /// A slot is a question this node is still pursuing. It is released
+    /// by the delivery that answers it ([`Self::request_answered`]) or,
+    /// if the peer never answers, by the [`Event::Tick`] sweep once the
+    /// request's retry budget is spent — NOT merely by its deadline
+    /// passing. A slot past its deadline is awaiting reissue, and this
+    /// function must leave it alone: pruning expired slots here meant
+    /// any request to the same peer between a deadline and the next tick
+    /// deleted the timed-out request outright, so it was never reissued
+    /// and later announcements of its recorded child hit `AlreadyKnown`.
+    ///
+    /// `requests_per_peer` still bounds the requests genuinely IN
+    /// FLIGHT, so a retry-pending slot does not hold a live one. It must
+    /// not: a retry ladder keeps a slot for minutes, and counting those
+    /// against the in-flight cap starved a follower of body requests
+    /// under a miner publishing an input block a second (measured on the
+    /// devnet smoke: 128 `RequestsFull` drops, the input chain unable to
+    /// keep up). `retry_pending_per_peer` bounds the queue separately,
+    /// so nothing grows without limit if ticks stall; at that ceiling a
+    /// new request is REFUSED, never an old one deleted.
     ///
     /// A request that is already outstanding is **not** re-emitted: spec
     /// 7.6's re-selection reaches the same unresolved block on every
@@ -3071,23 +3528,30 @@ impl Processor {
         let key = RequestKey::of(&effect);
         let now = self.now;
         let cap = self.bounds.requests_per_peer;
+        let ceiling = cap.saturating_add(self.bounds.retry_pending_per_peer);
         let slots = self.outstanding.entry(peer).or_default();
-        slots.retain(|(_, at)| at.0 > now.0);
         if let Some(k) = key {
-            if slots.iter().any(|(existing, _)| *existing == k) {
+            if slots.iter().any(|p| p.key == k) {
                 return false;
             }
         }
-        if slots.len() >= cap {
+        let live = slots.iter().filter(|p| p.deadline.0 > now.0).count();
+        if live >= cap || slots.len() >= ceiling {
             out.push(Effect::Dropped {
                 id: subject,
                 reason: DropReason::RequestsFull,
             });
             return false;
         }
-        // An effect that is not a request holds no slot; nothing to track.
+        // An effect that is not a request holds no slot; nothing to
+        // track — and nothing to reissue either.
         if let Some(k) = key {
-            slots.push((k, deadline));
+            slots.push(Pending {
+                key: k,
+                deadline,
+                effect: effect.clone(),
+                attempts: 1,
+            });
         }
         out.push(effect);
         true
@@ -3112,7 +3576,7 @@ impl Processor {
             return false;
         };
         let before = slots.len();
-        slots.retain(|(k, _)| *k != answered_key);
+        slots.retain(|p| p.key != answered_key);
         let answered = slots.len() < before;
         if slots.is_empty() {
             self.outstanding.remove(&peer);
@@ -3129,7 +3593,7 @@ impl Processor {
         self.outstanding.get(&peer).is_some_and(|slots| {
             slots
                 .iter()
-                .any(|(k, _)| matches!(k, RequestKey::Transactions(b, _) if *b == id))
+                .any(|p| matches!(p.key, RequestKey::Transactions(b, _) if b == id))
         })
     }
 
@@ -3138,7 +3602,7 @@ impl Processor {
             return false;
         };
         let before = slots.len();
-        slots.retain(|(k, _)| *k != key);
+        slots.retain(|p| p.key != key);
         let answered = slots.len() < before;
         if slots.is_empty() {
             self.outstanding.remove(&peer);
@@ -3147,6 +3611,21 @@ impl Processor {
     }
 
     // ----- read side (API and p2p serving, Plan 2) -----
+
+    /// The ordering block [`Self::best_input_chain`] and
+    /// [`Self::best_input_block`] are read against.
+    ///
+    /// The REST routes need this to publish a COHERENT pair. Reading the
+    /// ordering id from the chain store instead — which is what
+    /// `/blocks/bestInputChain` did, and what Scala's own route does —
+    /// pairs a freshly-applied ordering block with a chain the processor
+    /// has not yet moved to, so for a second after every ordering block
+    /// the endpoint reports the PREVIOUS block's input chain under the
+    /// NEW block's id. Nothing downstream can tell that apart from a
+    /// history disagreement.
+    pub fn best_ordering_id(&self) -> Option<OrderingId> {
+        self.best.ordering_id
+    }
 
     /// Scala `bestInputBlock()`.
     pub fn best_input_block(&self) -> Option<&InputBlockAnnouncement> {
@@ -3168,6 +3647,33 @@ impl Processor {
             }
             None => Vec::new(),
         }
+    }
+
+    /// Every input-block id the processor currently holds a RECORD for —
+    /// not merely the ones on [`Self::best_input_chain`]. A losing fork's
+    /// block is retained (subject to spec 7.4's `records_per_ordering`
+    /// bound) until it is superseded or TTL'd, and Scala can still answer
+    /// `getInputBlockTransactions`/`Ids` for it over that window; this is
+    /// the accessor a node-side REST bridge uses to serve the same query
+    /// (fix-round-1, finding 2). Bounded by the same cap `records`
+    /// itself is bounded by — no unbounded enumeration surface.
+    pub fn known_input_block_ids(&self) -> Vec<InputBlockId> {
+        self.records.keys().copied().collect()
+    }
+
+    /// Requests the deadline sweep reissued since start (spec 9.2's
+    /// retry contract). Published on the operator status breakdown as
+    /// `RequestRetried`.
+    pub fn requests_retried(&self) -> u64 {
+        self.requests_retried
+    }
+
+    /// Monotonic revision counter, bumped once per [`Self::handle`] call.
+    /// See the field doc on [`Processor::revision`] for what it does and
+    /// does not guarantee. Consumers compare this across calls to detect
+    /// a state change even when the call produced no [`Effect`] at all.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The parent input block an announcement claims, as recorded
@@ -3199,6 +3705,20 @@ impl Processor {
     /// second copy of the cache. `None` once the body has been evicted.
     pub fn body(&self, tx_ref: &TxRef) -> Option<&Body> {
         self.cache.get(tx_ref)
+    }
+
+    /// Put `bodies` straight into the transaction cache, bypassing the
+    /// announce/deliver/validate path.
+    ///
+    /// Test support only: it exists so a reconstruction test can name
+    /// input-chain transactions in a `ReconstructionPlan` without
+    /// driving a whole input chain through the processor first. Nothing
+    /// in production reaches the cache this way.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seat_bodies_for_test(&mut self, bodies: Vec<Body>) {
+        for body in bodies {
+            self.cache.insert(body, Tick(0), &self.bounds);
+        }
     }
 
     /// Scala `getInputBlockTransactions` — silently skips bodies the
@@ -3237,6 +3757,29 @@ impl Processor {
             .filter_map(|id| self.tx_refs.get(id))
             .flat_map(|v| v.iter().copied())
             .collect()
+    }
+
+    /// The collected input-chain transactions an ANNOUNCED ordering
+    /// block should be reconstructed from: Scala's key (the announced
+    /// header's own id) if it has a tree, else the parent's — the block
+    /// the input chain actually sits on, and what the miner seated.
+    /// Divergence D5 / upstream finding F5.
+    pub fn collected_input_txs_for_announced(
+        &self,
+        header_id: &OrderingId,
+        parent_id: &OrderingId,
+    ) -> (Vec<TxRef>, crate::ordering::ReconstructionKey) {
+        use crate::ordering::ReconstructionKey;
+        if self.trees.contains_key(header_id) {
+            return (
+                self.collected_input_txs(header_id),
+                ReconstructionKey::SelfId,
+            );
+        }
+        (
+            self.collected_input_txs(parent_id),
+            ReconstructionKey::Parent,
+        )
     }
 
     /// Number of competing forks retained for `ordering_id`.
@@ -3529,6 +4072,143 @@ mod tests {
         assert_eq!(p.best_input_chain(), vec![id]);
     }
 
+    /// Task 8b, the follower-throughput root cause.
+    ///
+    /// The first input block under an ordering block is the only one
+    /// whose `prev_input_block_id` is `None`, so it is the only one that
+    /// can root that ordering block's tree — and the miner publishes it
+    /// before any follower has applied the ordering block it sits under,
+    /// i.e. always at `best_full_height + 2`. Discarding it (spec 2.7
+    /// step 4, and what the Scala reference does) leaves the new tree
+    /// permanently rootless: every later announcement has an unknown
+    /// parent and the chain has to be rebuilt backwards, one request
+    /// round trip per block, against a miner publishing one a second.
+    ///
+    /// Red first: with the `+2` announcement discarded, `b2` below is
+    /// waitlisted, the tree has no forks, and nothing is ever validated.
+    #[test]
+    fn an_announcement_one_ordering_block_ahead_roots_the_tree_when_that_block_lands() {
+        const ORD2: OrderingId = [0xCC; 32];
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+
+        // Both arrive while we are still one ordering block behind: the
+        // root of ORD2's chain and its first child.
+        let b1 = ts::body(1, 1);
+        let b2 = ts::body(2, 1);
+        ctx.mempool.add(&b1);
+        ctx.mempool.add(&b2);
+        let root = ts::announcement_for(ORD2, FULL + 2, 1, None, std::slice::from_ref(&b1));
+        let root_id = ts::ann_id(&root);
+        let child =
+            ts::announcement_for(ORD2, FULL + 2, 2, Some(root_id), std::slice::from_ref(&b2));
+        let child_id = ts::ann_id(&child);
+        let eff = announce(&mut p, &ctx, &root, ts::PEER);
+        assert!(
+            eff.iter()
+                .any(|e| matches!(e, Effect::RequestOrderingHeader { .. })),
+            "the ordering header is still requested: {eff:?}"
+        );
+        announce(&mut p, &ctx, &child, ts::PEER);
+        assert!(
+            p.best_input_chain().is_empty(),
+            "nothing is applied while the ordering block is unknown"
+        );
+
+        // ORD2 lands. The held announcements are replayed in arrival
+        // order, so the tree is rooted and the child extends it.
+        ctx.full_block_height = FULL + 1;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD2,
+                height: FULL + 1,
+                now: Tick(1),
+            },
+        );
+        let (_, _, target, _, _) = ts::one_validate(&out);
+        assert_eq!(
+            target, root_id,
+            "the replayed root is what the node validates first"
+        );
+        let out = ts::validate_ok(&mut p, &ctx, &out, 1);
+        assert_eq!(p.best_input_chain(), vec![root_id]);
+
+        // And the child is already in the tree, so it follows without
+        // another round trip to the peer.
+        let (_, _, next, _, _) = ts::one_validate(&out);
+        assert_eq!(next, child_id, "the child extends the rooted tree");
+        ts::validate_ok(&mut p, &ctx, &out, 1);
+        assert_eq!(p.best_input_chain(), vec![child_id, root_id]);
+    }
+
+    /// The hold is bounded and does not outlive its usefulness: an
+    /// entry for an ordering block the chain has moved past is dropped
+    /// rather than replayed or kept.
+    #[test]
+    fn held_announcements_are_discarded_once_their_height_is_behind_us() {
+        const ORD2: OrderingId = [0xCC; 32];
+        const ORD3: OrderingId = [0xDD; 32];
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+        let stale = ts::announcement(ORD2, FULL + 2, 1, None);
+        announce(&mut p, &ctx, &stale, ts::PEER);
+
+        // Two ordering blocks land at once: ORD2's held announcement is
+        // now at or below the best height and can never be `+1` again.
+        ctx.full_block_height = FULL + 2;
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingBlockApplied {
+                header_id: ORD3,
+                height: FULL + 2,
+                now: Tick(1),
+            },
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, Effect::Validate { .. })),
+            "a stale held announcement is not replayed: {out:?}"
+        );
+        assert!(p.ahead.is_empty(), "and it is not kept either");
+    }
+
+    /// The hold is capped: a peer cannot make the node retain an
+    /// unbounded number of announcements for an ordering block it never
+    /// applies.
+    #[test]
+    fn held_announcements_are_capped_and_report_the_overflow() {
+        const ORD2: OrderingId = [0xCC; 32];
+        let bounds = Bounds {
+            waitlist_entries: 2,
+            ..Bounds::default()
+        };
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+        let first = ts::announcement(ORD2, FULL + 2, 1, None);
+        let first_id = ts::ann_id(&first);
+        announce(&mut p, &ctx, &first, ts::PEER);
+        announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD2, FULL + 2, 2, None),
+            ts::PEER,
+        );
+        let out = announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD2, FULL + 2, 3, None),
+            ts::PEER,
+        );
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: first_id,
+                reason: DropReason::WaitlistFull,
+            }),
+            "the oldest hold is dropped, and reported: {out:?}"
+        );
+        assert_eq!(p.ahead.len(), 2);
+    }
+
     #[test]
     fn local_relay_only_for_locally_generated() {
         let ctx = ts::TestCtx::at(FULL);
@@ -3691,18 +4371,73 @@ mod tests {
         let plan = out
             .iter()
             .find_map(|e| match e {
-                Effect::OrderingReconstruct { plan } => Some(plan.clone()),
+                Effect::OrderingReconstruct { plan, .. } => Some(plan.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no OrderingReconstruct in {out:?}"));
         assert_eq!(plan.prev_input_block_id, Some(ib_id));
-        // Finding F5, preserved: Scala keys the collected input-chain
-        // transactions by the *announced* header's own id, not by the
-        // ordering block the input chain actually extends, so the plan
-        // carries nothing even though the chain has a transaction.
-        assert_eq!(plan.input_chain_txs, p.collected_input_txs(&oa_id));
-        assert!(plan.input_chain_txs.is_empty());
+        // Divergence D5 / upstream finding F5. Scala's follower looks the
+        // chain up under the ANNOUNCED header's own id, which has no tree
+        // — the trees are keyed by the ordering block the input chain
+        // sits ON, and that is the parent, which is what the miner seated
+        // in front of its ordering transactions. Keying it Scala's way
+        // hands the planner an EMPTY chain, so reconstruction can never
+        // reproduce the root of a block whose transactions came from
+        // input blocks; the devnet smoke measured exactly that.
+        assert!(
+            p.collected_input_txs(&oa_id).is_empty(),
+            "Scala's key still names a block with no tree"
+        );
+        assert_eq!(
+            p.collected_input_txs(&ORD),
+            vec![b1.tx_ref],
+            "the chain is recorded under the block it extends"
+        );
+        assert_eq!(
+            plan.input_chain_txs,
+            vec![b1.tx_ref],
+            "so the plan falls back to the parent's chain"
+        );
+        assert_eq!(
+            plan.reconstruction_key,
+            crate::ordering::ReconstructionKey::Parent,
+            "and the telemetry records which key answered (D5)"
+        );
+    }
+
+    /// The fallback is a FALLBACK: a chain genuinely recorded under the
+    /// announced id still wins, so the day upstream settles F5 the
+    /// behaviour is already Scala's.
+    #[test]
+    fn announced_ordering_id_with_its_own_tree_is_preferred_over_the_parent() {
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ib = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let eff = announce(&mut p, &ctx, &ib, ts::PEER);
+        ts::validate_ok(&mut p, &ctx, &eff, 1);
         assert_eq!(p.collected_input_txs(&ORD), vec![b1.tx_ref]);
+
+        let no_tree: OrderingId = [0x4f; 32];
+        assert!(p.collected_input_txs(&no_tree).is_empty());
+        use crate::ordering::ReconstructionKey;
+        // Announced id HAS a tree: Scala's key answers, the parent is
+        // never consulted, and the telemetry says so.
+        assert_eq!(
+            p.collected_input_txs_for_announced(&ORD, &no_tree),
+            (vec![b1.tx_ref], ReconstructionKey::SelfId)
+        );
+        // Announced id has none: the parent's chain answers.
+        assert_eq!(
+            p.collected_input_txs_for_announced(&no_tree, &ORD),
+            (vec![b1.tx_ref], ReconstructionKey::Parent)
+        );
+        // Neither has one: nothing, never a panic.
+        assert_eq!(
+            p.collected_input_txs_for_announced(&no_tree, &[0x50; 32]),
+            (Vec::new(), ReconstructionKey::Parent)
+        );
     }
 
     #[test]
@@ -3806,6 +4541,37 @@ mod tests {
         assert!(!eff.iter().any(|e| matches!(e, Effect::Penalize { .. })));
     }
 
+    /// A binding failure is a policy verdict, not a peer fault: the
+    /// pinned Scala miner publishes announcements whose extension carries
+    /// the NEW transactions digest in the `prevTransactionsDigest` slot
+    /// while the announcement carries the PREVIOUS one (finding
+    /// 2026-09-22-2). The announcement is dropped; the peer is not
+    /// penalised, or a strict node would ban every honest miner the
+    /// moment an input block carried a transaction.
+    #[test]
+    fn strict_binding_failure_drops_without_penalty() {
+        let mut p = Processor::new(
+            Bounds::default(),
+            AnnouncementPolicy {
+                strict_field_binding: true,
+            },
+        );
+        p.set_best_ordering(Some(ORD), FULL);
+        let ctx = ts::TestCtx::at(FULL);
+        let mut ann = ts::announcement(ORD, FULL + 1, 1, None);
+        // Keep the proof reducing to the header's root (the Scala-parity
+        // check still passes) but make one announced field disagree with
+        // the leaf the proof commits to.
+        ann.fields.prev_transactions_digest = [0x5a; 32];
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        assert_eq!(drops(&eff), vec![DropReason::FieldsUnbound]);
+        assert!(
+            !eff.iter().any(|e| matches!(e, Effect::Penalize { .. })),
+            "a strict-policy drop must not penalise the peer: {eff:?}"
+        );
+        assert!(p.announcement(&ts::ann_id(&ann)).is_none());
+    }
+
     #[test]
     fn stale_validation_result_dropped() {
         let mut p = processor();
@@ -3829,7 +4595,7 @@ mod tests {
             Event::ValidationResult {
                 job,
                 generation,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -4295,7 +5061,7 @@ mod tests {
             Event::ValidationResult {
                 job: old_job,
                 generation: old_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -4675,6 +5441,47 @@ mod tests {
         assert_eq!(p.variants_per_position(&id), vec![cap]);
         assert!(rejected > 0, "over-cap witnesses must be reported");
         assert_eq!(p.staged_bytes(), 0, "resolved slots hold no bytes");
+    }
+
+    #[test]
+    fn unavailable_validation_leaves_the_combination_untried() {
+        // A node that receives input blocks before it has applied a full
+        // block cannot build a validation context. That is node-local and
+        // transient — recording the combination as failed would blacklist
+        // a perfectly valid chain head for the life of the ordering
+        // block, which is exactly what stalled the mixed devnet smoke.
+        let mut p = processor();
+        let b1 = ts::body(1, 1);
+        let mut ctx = ts::TestCtx::at(FULL);
+        ctx.mempool.add(&b1);
+        let ann = ts::announcement_for(ORD, FULL + 1, 1, None, std::slice::from_ref(&b1));
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let out = ts::validate_unavailable(&mut p, &ctx, &eff);
+        assert_eq!(drops(&out), vec![DropReason::ValidationUnavailable]);
+        assert!(
+            !p.has_failed_combination(&id, &[b1.tx_ref]),
+            "a node-local miss must not retire the combination"
+        );
+
+        // The attempt is refunded too, so a node that is briefly unable
+        // to validate does not burn the block's retry budget: the very
+        // next delivery re-offers the same bodies.
+        let again = ctx.handle(
+            &mut p,
+            Event::TransactionsDelivered {
+                input_block_id: id,
+                bodies: vec![b1.clone()],
+                from: Some(ts::PEER),
+                now: Tick(9),
+            },
+        );
+        assert!(has_validate(&again), "{again:?}");
+        let ok = ts::validate_ok(&mut p, &ctx, &again, 1);
+        assert!(
+            drops(&ok).is_empty(),
+            "the retry must apply cleanly: {ok:?}"
+        );
     }
 
     #[test]
@@ -5264,7 +6071,7 @@ mod tests {
             Event::ValidationResult {
                 job: stale_job,
                 generation: stale_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert_eq!(
@@ -5285,7 +6092,7 @@ mod tests {
             Event::ValidationResult {
                 job: current_job,
                 generation: current_gen,
-                outcome: Ok(1),
+                outcome: ValidationOutcome::Valid(1),
             },
         );
         assert!(applied.iter().any(
@@ -5390,25 +6197,48 @@ mod tests {
             "a tick must not refund an outstanding request: {eff:?}"
         );
 
-        ctx.handle(
+        // At the deadline the request is REISSUED to the same peer
+        // (finding 4 / spec 9.2), so the slot stays held: the question
+        // has not been answered and the node is still asking it.
+        let ticked = ctx.handle(
             &mut p,
             Event::Tick {
                 now: Tick(timeout + 1),
             },
         );
+        assert!(
+            ticked
+                .iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the deadline reissues the request: {ticked:?}"
+        );
+        assert_eq!(p.requests_retried(), 1);
+
+        // Only once the retry budget is spent is the slot released.
+        // Each tick is well past the doubled deadline of the last.
+        let mut at = timeout + 1;
+        for _ in 0..=Bounds::default().request_retries {
+            at += timeout * 16;
+            ctx.handle(&mut p, Event::Tick { now: Tick(at) });
+        }
         let a3 = ts::announcement(ORD, FULL + 1, 3, Some(ts::ann_id(&a1)));
         let eff = ctx.handle(
             &mut p,
             Event::AnnouncementAccepted {
                 ann: a3,
                 from: ts::PEER,
-                now: Tick(timeout + 1),
+                now: Tick(at),
             },
         );
         assert!(
             eff.iter()
                 .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
-            "a timed-out request must release its slot: {eff:?}"
+            "a request that exhausted its retries releases its slot: {eff:?}"
+        );
+        assert_eq!(
+            p.requests_retried(),
+            u64::from(Bounds::default().request_retries),
+            "the retry count is capped by the budget"
         );
     }
 
@@ -5859,15 +6689,23 @@ mod tests {
             "{emitted} requests emitted to one peer, cap is {cap}"
         );
 
-        // The suppression is not permanent: once the request times out,
-        // the announcer is asked again.
+        // The suppression is not permanent: once the request times out
+        // the announcer is asked again — by the deadline sweep itself
+        // (finding 4 / spec 9.2), not by whatever event happens next.
         let timeout = Bounds::default().request_timeout_ms;
-        ctx.handle(
+        let ticked = ctx.handle(
             &mut p,
             Event::Tick {
                 now: Tick(timeout + 1),
             },
         );
+        assert_eq!(
+            body_requests_to(&ticked, ts::PEER),
+            1,
+            "the deadline reissues the body request: {ticked:?}"
+        );
+        // And the reissue holds the slot, so the stranger's pokes still
+        // cannot make the node ask again on top of it.
         let after = ctx.handle(
             &mut p,
             Event::TransactionsDelivered {
@@ -5879,8 +6717,8 @@ mod tests {
         );
         assert_eq!(
             body_requests_to(&after, ts::PEER),
-            1,
-            "a timed-out request must be asked again: {after:?}"
+            0,
+            "the reissued request is still outstanding: {after:?}"
         );
     }
 
@@ -6370,6 +7208,33 @@ mod tests {
         assert_eq!(drops(&eff), vec![DropReason::RecordsFull], "{eff:?}");
     }
 
+    #[test]
+    fn zero_ordering_announcement_cap_still_stores_one_section() {
+        // `ordering_announcements` is a capacity like the bounds clamped
+        // above: `OrderingStore` inserts first and only then evicts down
+        // to the cap, so at zero the entry evicted is the one just
+        // inserted. Left unclamped, a configured 0 makes both the
+        // announcement map and the section map silently forget every
+        // write instead of retaining one.
+        let mut p = processor_with(Bounds {
+            ordering_announcements: 0,
+            ..Bounds::default()
+        });
+        let header_id: OrderingId = [0xab; 32];
+        let tx = TxRef {
+            tx_id: [0xcd; 32],
+            witness_id: [0xef; 31],
+        };
+
+        let evicted = p.save_ordering_block_transactions(header_id, vec![tx]);
+        assert_eq!(evicted, None, "the only section must not evict itself");
+        assert_eq!(
+            p.ordering_block_transactions(&header_id),
+            Some(&[tx][..]),
+            "a clamped cap still retains one section"
+        );
+    }
+
     // ----- oracle parity -----
 
     #[test]
@@ -6463,5 +7328,585 @@ mod tests {
             "the height jump's resetState() prunes the stale record"
         );
         assert!(p.announcement(&ts::ann_id(&jump)).is_some());
+    }
+
+    // ----- fix round 1 (Plan 2 M2 codex review, finding 2) -----
+
+    #[test]
+    fn revision_starts_at_zero() {
+        let p = processor();
+        assert_eq!(p.revision(), 0);
+    }
+
+    #[test]
+    fn revision_bumps_on_every_handle_call_including_a_no_op_tick() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let before = p.revision();
+        // A tick with nothing to expire and nothing outstanding — no
+        // effects, yet the revision must still move (fix-round-1,
+        // finding 4: the caller can't tell "nothing happened" from "a
+        // silent mutation happened" any other way).
+        let eff = ctx.handle(&mut p, Event::Tick { now: Tick(0) });
+        assert!(eff.is_empty(), "a bare tick with nothing to sweep is quiet");
+        assert_eq!(p.revision(), before + 1);
+
+        announce(
+            &mut p,
+            &ctx,
+            &ts::announcement(ORD, FULL + 1, 1, None),
+            ts::PEER,
+        );
+        assert_eq!(
+            p.revision(),
+            before + 2,
+            "a second handle() call bumps it again"
+        );
+    }
+
+    #[test]
+    fn known_input_block_ids_empty_on_a_fresh_processor() {
+        let p = processor();
+        assert!(p.known_input_block_ids().is_empty());
+    }
+
+    #[test]
+    fn known_input_block_ids_includes_records_outside_the_best_chain() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        // Two sibling, fully-applied (zero-tx) blocks, same height, no
+        // shared parent: two competing forks, only one of which
+        // `best_input_chain()` picks as the tree's tip.
+        let a1 = ts::announcement(ORD, FULL + 1, 1, None);
+        let a2 = ts::announcement(ORD, FULL + 1, 2, None);
+        let id1 = ts::ann_id(&a1);
+        let id2 = ts::ann_id(&a2);
+        ts::announce_and_apply(&mut p, &ctx, &a1, 0);
+        ts::announce_and_apply(&mut p, &ctx, &a2, 0);
+
+        let best_chain = p.best_input_chain();
+        assert_eq!(
+            best_chain.len(),
+            1,
+            "only one of the two competing blocks is best"
+        );
+
+        let known = p.known_input_block_ids();
+        assert_eq!(known.len(), 2, "both records are retained");
+        assert!(known.contains(&id1));
+        assert!(known.contains(&id2));
+        assert!(
+            known.iter().any(|id| !best_chain.contains(id)),
+            "the losing fork's id must be reachable even though it's not best"
+        );
+    }
+
+    // ----- fix round 2 (Plan 2 M2 final whole-branch review) -----
+
+    /// Finding 7: an ordering announcement was validated, stored and
+    /// relayed before anything asked whether it was worth looking at. A
+    /// peer replaying valid HISTORICAL announcements therefore bought,
+    /// per frame, a PoW verification, an `Inv` broadcast to every
+    /// eligible peer, and the eviction of a live entry from the bounded
+    /// 64-slot announcement store.
+    ///
+    /// Spec 9.3 (and Scala `processOrderingBlockAnnouncement`) applies
+    /// the ±2 height window first.
+    #[test]
+    fn ordering_announcement_outside_the_height_window_is_dropped_before_any_work() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        // Three ordering blocks back: valid, and long since useless.
+        let oa = ts::ordering_announcement(ORD, FULL - 3, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OutsideHeightWindow,
+            }),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "a replay must not be rebroadcast: {out:?}"
+        );
+        assert!(
+            p.ordering_announcement(&oa_id).is_none(),
+            "and must not take a slot in the announcement store"
+        );
+    }
+
+    /// The same guard's other half: an announcement for a header the
+    /// node already holds is dead weight, and spec 9.3 skips it before
+    /// PoW, storage and relay.
+    #[test]
+    fn ordering_announcement_for_a_known_header_is_dropped_before_any_work() {
+        let mut p = processor();
+        let mut ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(ORD, FULL + 1, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+        ctx.known_headers.insert(oa_id);
+
+        let out = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+
+        assert!(
+            out.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OrderingHeaderKnown,
+            }),
+            "{out:?}"
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "{out:?}"
+        );
+        assert!(p.ordering_announcement(&oa_id).is_none());
+    }
+
+    /// A re-announcement of one the processor has already stored is the
+    /// same replay by another route: the store is the node's own record
+    /// of "known", and re-inserting would re-relay and re-evict.
+    #[test]
+    fn a_replayed_ordering_announcement_is_dropped_without_relaying_again() {
+        let mut p = processor();
+        let ctx = ts::TestCtx::at(FULL);
+        let oa = ts::ordering_announcement(ORD, FULL + 1, 9, Vec::new());
+        let oa_id = ts::header_id(&oa.header);
+
+        let first = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa.clone(),
+                from: ts::PEER,
+                now: Tick(6),
+            },
+        );
+        assert!(
+            first.contains(&Effect::RelayOrderingInv { header_id: oa_id }),
+            "the first sighting is relayed: {first:?}"
+        );
+        assert!(p.ordering_announcement(&oa_id).is_some());
+
+        let again = ctx.handle(
+            &mut p,
+            Event::OrderingAnnouncementAccepted {
+                ann: oa,
+                from: ts::PEER,
+                now: Tick(7),
+            },
+        );
+        assert!(
+            again.contains(&Effect::Dropped {
+                id: oa_id,
+                reason: DropReason::OrderingHeaderKnown,
+            }),
+            "{again:?}"
+        );
+        assert!(
+            !again
+                .iter()
+                .any(|e| matches!(e, Effect::RelayOrderingInv { .. })),
+            "the second sighting buys the peer nothing: {again:?}"
+        );
+    }
+
+    /// Finding 4: neither delivery layer reissued a timed-out
+    /// input-block request. The coordinator forgets them without
+    /// re-requesting (parity: Scala's `checkDelivery` applies no
+    /// NonDelivery penalty for the three new type ids) on the
+    /// assumption that the processor retries; the processor only expired
+    /// the slot. A lost parent announcement or transaction-id reply was
+    /// therefore terminal — later announcements of the recorded child
+    /// hit `AlreadyKnown`, so the question was never asked again.
+    ///
+    /// Here the announcer never answers the `-122` request. Every
+    /// deadline must reissue it to the same peer, with the wait doubling
+    /// per attempt, until `Bounds::request_retries` is spent.
+    #[test]
+    fn a_timed_out_request_is_reissued_with_backoff_until_the_cap() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let retries = bounds.request_retries;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let ann = ts::announcement(ORD, FULL + 1, 1, None);
+        let id = ts::ann_id(&ann);
+        let eff = announce(&mut p, &ctx, &ann, ts::PEER);
+        let asked = |eff: &[Effect]| {
+            eff.iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::RequestTransactionIds {
+                            input_block_id,
+                            from,
+                        } if *input_block_id == id && *from == ts::PEER
+                    )
+                })
+                .count()
+        };
+        assert_eq!(asked(&eff), 1, "the first request goes out");
+        assert_eq!(p.requests_retried(), 0);
+
+        // A tick before the deadline changes nothing.
+        let early = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout - 1),
+            },
+        );
+        assert_eq!(asked(&early), 0, "not due yet: {early:?}");
+
+        // Each deadline reissues once, and the next one is twice as far
+        // out — so a tick one plain timeout later is NOT yet due.
+        let mut now = timeout + 1;
+        for attempt in 1..=retries {
+            let out = ctx.handle(&mut p, Event::Tick { now: Tick(now) });
+            assert_eq!(asked(&out), 1, "attempt {attempt} reissues: {out:?}");
+            assert_eq!(p.requests_retried(), u64::from(attempt));
+            let shift = (attempt - 1).min(REQUEST_BACKOFF_SHIFT_CAP);
+            let wait = timeout << shift;
+            let too_early = ctx.handle(
+                &mut p,
+                Event::Tick {
+                    now: Tick(now + wait - 1),
+                },
+            );
+            assert_eq!(
+                asked(&too_early),
+                0,
+                "attempt {attempt} backs off to {wait} ms: {too_early:?}"
+            );
+            now += wait + 1;
+        }
+
+        // The budget is spent: the deadline now releases the slot
+        // instead of asking again, and the count stops rising.
+        let done = ctx.handle(&mut p, Event::Tick { now: Tick(now) });
+        assert_eq!(asked(&done), 0, "the cap is respected: {done:?}");
+        assert_eq!(p.requests_retried(), u64::from(retries));
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(now + timeout * 16),
+            },
+        );
+        assert_eq!(asked(&after), 0, "and stays spent: {after:?}");
+        assert_eq!(p.requests_retried(), u64::from(retries));
+    }
+
+    /// The retry is not a penalty engine: an answered request is
+    /// released by its delivery and never reissued, however long the
+    /// node runs afterwards.
+    #[test]
+    fn an_answered_request_is_never_reissued() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let b1 = ts::body(1, 1);
+        let ann = ts::announcement(ORD, FULL + 1, 1, None);
+        let id = ts::ann_id(&ann);
+        announce(&mut p, &ctx, &ann, ts::PEER);
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: id,
+                weak_ids: vec![b1.weak_id],
+                from: ts::PEER,
+                now: Tick(1),
+            },
+        );
+
+        let out = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout * 64),
+            },
+        );
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, Effect::RequestTransactionIds { .. })),
+            "the answered id request is gone, not retried: {out:?}"
+        );
+    }
+
+    // ----- fix round 3 (M2 final re-review r2) -----
+
+    /// Round-2 finding 1: the retry sweep was not the only thing that
+    /// touched an expired slot. `request` pruned expired slots of the
+    /// peer it was about to ask, so ANY intervening request to that peer
+    /// between a deadline and the next tick deleted the timed-out
+    /// request outright — it was never reissued, and later announcements
+    /// of its recorded child hit `AlreadyKnown`. The retry contract has
+    /// to hold regardless of intervening traffic.
+    #[test]
+    fn an_expired_request_survives_another_request_to_the_same_peer_and_is_reissued() {
+        let bounds = Bounds::default();
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        // Block A: announced, its weak-id list requested from PEER.
+        let a = ts::announcement(ORD, FULL + 1, 1, None);
+        let a_id = ts::ann_id(&a);
+        let asked_for = |eff: &[Effect], want: InputBlockId| {
+            eff.iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        Effect::RequestTransactionIds {
+                            input_block_id,
+                            from,
+                        } if *input_block_id == want && *from == ts::PEER
+                    )
+                })
+                .count()
+        };
+        let first = announce(&mut p, &ctx, &a, ts::PEER);
+        assert_eq!(asked_for(&first, a_id), 1, "A's id request goes out");
+
+        // A's deadline passes. Before the tick can sweep it, a SECOND
+        // block is announced by the same peer, which issues its own
+        // request to that peer.
+        let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let b_id = ts::ann_id(&b);
+        let between = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: b,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        assert_eq!(asked_for(&between, b_id), 1, "B's id request goes out too");
+        assert_eq!(
+            asked_for(&between, a_id),
+            0,
+            "and it is not A's request: {between:?}"
+        );
+
+        // The tick must still reissue A. Before the fix A's slot had
+        // been deleted by B's request and nothing asked for it again.
+        let ticked = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 2),
+            },
+        );
+        assert_eq!(
+            asked_for(&ticked, a_id),
+            1,
+            "the expired request is reissued despite the traffic in between: {ticked:?}"
+        );
+        assert_eq!(p.requests_retried(), 1, "and it is accounted as a retry");
+    }
+
+    /// The other half of the same invariant, and the correction the
+    /// devnet smoke forced: a retry-pending slot survives, but it must
+    /// NOT hold an in-flight slot — and the reissue that eventually
+    /// serves it must still respect the in-flight cap.
+    ///
+    /// The first cut of this fix counted retry-pending slots against
+    /// `requests_per_peer`. A retry ladder keeps a slot for minutes, so
+    /// against a miner publishing an input block a second the follower's
+    /// 32 slots filled with questions awaiting reissue and every new
+    /// body request was dropped `RequestsFull` — 128 of them on the
+    /// smoke, with the input chain unable to keep up. The cap bounds
+    /// what is on the wire; the retry queue is bounded separately.
+    ///
+    /// The second cut then let the TICK exceed the cap from the other
+    /// side: it reissued every expired request unconditionally, so with
+    /// a cap of one, A expiring and B taking the slot left both in
+    /// flight the moment the tick ran. A queued request waits for
+    /// capacity, and only an actual reissue costs an attempt.
+    #[test]
+    fn a_retry_pending_slot_does_not_consume_in_flight_capacity() {
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            ..Bounds::default()
+        };
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let a = ts::announcement(ORD, FULL + 1, 1, None);
+        let a_id = ts::ann_id(&a);
+        announce(&mut p, &ctx, &a, ts::PEER);
+
+        // Past A's deadline: its slot is awaiting reissue, not on the
+        // wire, so B may be asked for even at a cap of one.
+        let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let b_id = ts::ann_id(&b);
+        let between = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: b,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        assert!(
+            !drops(&between).contains(&DropReason::RequestsFull),
+            "a retry-pending slot must not block a live request: {between:?}"
+        );
+        assert!(
+            between.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == b_id
+            )),
+            "B's request goes out: {between:?}"
+        );
+
+        // B now holds the one in-flight slot, so the tick must NOT
+        // reissue A on top of it: that would put two requests on a wire
+        // the operator capped at one. A stays queued, unspent.
+        let ticked = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 2),
+            },
+        );
+        assert!(
+            !ticked.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "the cap holds A back while B is in flight: {ticked:?}"
+        );
+        assert_eq!(
+            p.requests_retried(),
+            0,
+            "a request that was not reissued did not spend an attempt"
+        );
+
+        // B is answered, freeing the slot; now A gets its reissue.
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: b_id,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(timeout + 3),
+            },
+        );
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 4),
+            },
+        );
+        assert!(
+            after.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "once capacity frees, the queued request is reissued: {after:?}"
+        );
+        assert_eq!(p.requests_retried(), 1, "and only then is it counted");
+    }
+
+    /// The retry queue is bounded: at `requests_per_peer +
+    /// retry_pending_per_peer` a NEW request is refused, rather than an
+    /// old one being deleted to make room.
+    #[test]
+    fn the_retry_queue_is_bounded_by_refusing_new_requests_not_dropping_old_ones() {
+        let bounds = Bounds {
+            requests_per_peer: 1,
+            retry_pending_per_peer: 1,
+            ..Bounds::default()
+        };
+        let timeout = bounds.request_timeout_ms;
+        let mut p = processor_with(bounds);
+        let ctx = ts::TestCtx::at(FULL);
+
+        let a = ts::announcement(ORD, FULL + 1, 1, None);
+        let a_id = ts::ann_id(&a);
+        announce(&mut p, &ctx, &a, ts::PEER);
+        // A expires; B takes the one in-flight slot (total 2 = ceiling).
+        let b = ts::announcement(ORD, FULL + 1, 2, None);
+        let b_id = ts::ann_id(&b);
+        ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: b,
+                from: ts::PEER,
+                now: Tick(timeout + 1),
+            },
+        );
+        // C finds the ceiling and is refused.
+        let c = ts::announcement(ORD, FULL + 1, 3, None);
+        let third = ctx.handle(
+            &mut p,
+            Event::AnnouncementAccepted {
+                ann: c,
+                from: ts::PEER,
+                now: Tick(timeout + 2),
+            },
+        );
+        assert!(
+            drops(&third).contains(&DropReason::RequestsFull),
+            "the ceiling refuses the new request: {third:?}"
+        );
+        // A — the oldest, retry-pending one — was not sacrificed for
+        // it. The tick cannot reissue it yet (B holds the single
+        // in-flight slot), but it is still there: once B is answered,
+        // A goes back out.
+        let ticked = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 3),
+            },
+        );
+        assert!(
+            !ticked.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "still no capacity for A: {ticked:?}"
+        );
+        ctx.handle(
+            &mut p,
+            Event::TransactionIdsDelivered {
+                input_block_id: b_id,
+                weak_ids: Vec::new(),
+                from: ts::PEER,
+                now: Tick(timeout + 4),
+            },
+        );
+        let after = ctx.handle(
+            &mut p,
+            Event::Tick {
+                now: Tick(timeout + 5),
+            },
+        );
+        assert!(
+            after.iter().any(|e| matches!(
+                e,
+                Effect::RequestTransactionIds { input_block_id, .. } if *input_block_id == a_id
+            )),
+            "the queued request survived the ceiling and is reissued: {after:?}"
+        );
     }
 }

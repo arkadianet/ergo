@@ -71,6 +71,25 @@ pub enum AnnouncementError {
     FieldsUnbound(String),
 }
 
+impl AnnouncementError {
+    /// Whether this verdict comes from the port's STRICT policy alone —
+    /// i.e. the announcement is valid by the Scala reference's own
+    /// `BatchMerkleProof.valid` check and is rejected only because
+    /// `strict_field_binding` is on.
+    ///
+    /// The distinction decides whether a peer is penalised. The pinned
+    /// `weak-blocks` miner itself publishes announcements that fail the
+    /// binding check (`CandidateGenerator` writes the extension with the
+    /// NEW transactions digest in the `prevTransactionsDigest` slot while
+    /// announcing the PREVIOUS one — finding 2026-09-22-2), so a node
+    /// that banned peers for it would ban every honest Scala miner the
+    /// moment an input block carried a transaction. The announcement is
+    /// still dropped; only the penalty is withheld.
+    pub fn is_policy_only(&self) -> bool {
+        matches!(self, Self::ProofEmpty | Self::FieldsUnbound(_))
+    }
+}
+
 /// nBits agreement with chain context, shared by [`validate_announcement_parity`]
 /// and [`validate_ordering_announcement`] (spec 6.1/2.4's identical nBits
 /// clause for both announcement kinds).
@@ -126,6 +145,13 @@ pub fn validate_announcement_parity(
     check_expected_n_bits(ann.header.n_bits, expected_n_bits)
 }
 
+/// Lowercase hex, for the diagnostic messages below. A local two-liner
+/// rather than a runtime `hex` dependency: this crate needs hex nowhere
+/// else, and a findings artifact is written by reading these strings.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The binding check alone (spec 6.3 item 2): the proof's leaves must be
 /// exactly the announced fields' extension-leaf digests (in any order),
 /// and the proof must not be empty.
@@ -140,8 +166,8 @@ pub fn verify_field_binding(fields: &InputBlockFields) -> Result<(), Announcemen
     // SHORTEN `want`, and a proof that omits the very same leaf would
     // then compare equal — laxer, not stricter. If the key type ever
     // becomes variable-length this stays fail-closed without revisiting.
-    let Some(mut want) = fields
-        .extension_fields()
+    let announced = fields.extension_fields();
+    let Some(mut want) = announced
         .iter()
         .map(|(k, v)| extension_leaf_digest(k, v))
         .collect::<Option<Vec<[u8; 32]>>>()
@@ -154,8 +180,25 @@ pub fn verify_field_binding(fields: &InputBlockFields) -> Result<(), Announcemen
     want.sort_unstable();
     proved.sort_unstable();
     if proved != want {
+        // The message is the diagnostic: a count-only report ("3 vs 3")
+        // says nothing when the counts match and the digests do not,
+        // which is the case that actually occurs against the pinned
+        // Scala miner. Fields and leaves are printed so a findings
+        // artifact can be written straight from the log line.
+        let fields_hex = announced
+            .iter()
+            .map(|(k, v)| format!("{}={}", hex_of(k), hex_of(v)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let leaves_hex = proved
+            .iter()
+            .map(|d| hex_of(d))
+            .collect::<Vec<_>>()
+            .join(",");
+        let want_hex = want.iter().map(|d| hex_of(d)).collect::<Vec<_>>().join(",");
         return Err(AnnouncementError::FieldsUnbound(format!(
-            "{} proved leaves vs {} announced fields",
+            "{} proved leaves vs {} announced fields; announced=[{fields_hex}] \
+             announced_leaves=[{want_hex}] proved_leaves=[{leaves_hex}]",
             proved.len(),
             want.len()
         )));
@@ -345,5 +388,49 @@ mod tests {
             validate_ordering_announcement(&ann, None),
             Err(AnnouncementError::ProofInvalid)
         );
+    }
+
+    // ----- error paths -----
+
+    /// A binding failure is the STRICT policy's verdict, not a consensus
+    /// one: the pinned Scala miner publishes announcements that fail it
+    /// (finding 2026-09-22-2), so a node that banned peers for it would
+    /// ban every honest miner the moment an input block carried a
+    /// transaction.
+    #[test]
+    fn strict_binding_failures_are_policy_only_not_peer_faults() {
+        let unbound = AnnouncementError::FieldsUnbound("x".into());
+        assert!(unbound.is_policy_only());
+        assert!(AnnouncementError::ProofEmpty.is_policy_only());
+        for consensus in [
+            AnnouncementError::ProofInvalid,
+            AnnouncementError::Pow("bad".into()),
+            AnnouncementError::NBitsMismatch {
+                got: 1,
+                expected: 2,
+            },
+            AnnouncementError::MultiplierUnavailable,
+        ] {
+            assert!(!consensus.is_policy_only(), "{consensus:?}");
+        }
+    }
+
+    /// The message has to name the digests: against the pinned Scala
+    /// build the counts MATCH and only the leaf contents differ, so a
+    /// count-only report says nothing.
+    #[test]
+    fn field_binding_error_names_the_announced_and_proved_leaves() {
+        let mut fields = fields_with_proof(BatchMerkleProof {
+            indices: vec![(0, [0xAB; 32])],
+            proofs: Vec::new(),
+        });
+        fields.prev_input_block_id = None;
+        let err = verify_field_binding(&fields).expect_err("leaves do not match");
+        let AnnouncementError::FieldsUnbound(message) = err else {
+            panic!("expected FieldsUnbound");
+        };
+        assert!(message.contains("announced="), "{message}");
+        assert!(message.contains("proved_leaves=["), "{message}");
+        assert!(message.contains(&"ab".repeat(32)), "{message}");
     }
 }

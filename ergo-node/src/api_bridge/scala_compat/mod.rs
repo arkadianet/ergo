@@ -165,6 +165,17 @@ impl NodeChainQuery for ScalaCompatBridge {
             headers_score: score_to_u128(&snap.best_header_score),
             parameters,
             is_mining: snap.mining_enabled,
+            // Fix-round-1: outer None = subsystem off (key omitted,
+            // keeps the pinned mainnet /info fixture untouched);
+            // Some(None) = on but nothing leads (null); Some(Some(id))
+            // = leads. Reuses the same per-tick projection Task 6
+            // publishes onto `ApiStatus.input_blocks` — no separate
+            // live read.
+            best_input_block: snap
+                .status
+                .input_blocks
+                .as_ref()
+                .map(|ib| ib.best_input_block.clone()),
         }
     }
 

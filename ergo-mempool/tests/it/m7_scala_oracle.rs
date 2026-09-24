@@ -467,6 +467,7 @@ fn scala_pending_tx_oracle() {
             params: &params,
             last_headers: &[],
             reemission: None,
+            input_block_txs: &[],
         };
 
         // ── Admit with BySize ──
@@ -578,6 +579,7 @@ fn scala_pending_tx_oracle() {
                 params: &params,
                 last_headers: &[],
                 reemission: None,
+                input_block_txs: &[],
             };
             pool.process(
                 &tx_bytes,
@@ -650,6 +652,7 @@ fn scala_pending_tx_oracle() {
                 params: &params,
                 last_headers: &[],
                 reemission: None,
+                input_block_txs: &[],
             };
             pool.process(
                 &tx_bytes,

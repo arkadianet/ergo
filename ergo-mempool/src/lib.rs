@@ -24,11 +24,16 @@
 //!   tx bodies driven by `tick_revalidation`.
 //! * [`validator`] — `ErgoValidator` adapter that wires the pool's
 //!   admission steps onto `ergo_validation::tx::validate_transaction`.
+//! * [`input_blocks`] — provisional input-block chain APIs (Matrix
+//!   / weak-blocks): `InputBlockOverlay`, `apply_input_block_txs`
+//!   (Scala `removeWithDoubleSpends`), `restore_input_block_txs`
+//!   (Scala `put`), and weak-id pool lookup.
 //! * [`types`] — shared types: `MempoolConfig`, `MempoolAction`,
 //!   `TxId`, `TipPointer`, `TxDiff`, `TxSource`, etc.
 
 pub mod admission;
 pub mod budget;
+pub mod input_blocks;
 pub mod invalidation;
 mod mempool;
 pub mod overlay;
@@ -49,6 +54,7 @@ pub use admission::{
 #[cfg(any(test, feature = "test-support"))]
 pub use admission::{MockPlan, MockStructure, MockValidator};
 pub use budget::{BudgetSource, BudgetVerdict, CostBudgets};
+pub use input_blocks::{InputBlockOverlay, RemovedEntry, RestoreBody, RestoreOutcome, FAKE_COST};
 pub use invalidation::{InvalidationCache, InvalidationReason, LookupResult};
 pub use mempool::Mempool;
 pub use overlay::{CommittedOnly, PoolUtxoOverlay};

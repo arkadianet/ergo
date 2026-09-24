@@ -61,6 +61,7 @@ impl Ctx {
             params: &self.params,
             last_headers: &[],
             reemission: None,
+            input_block_txs: &[],
         }
     }
 }

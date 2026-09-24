@@ -24,7 +24,7 @@ use ergo_state::store::StateError;
 /// retain access to the original variant without parsing the
 /// `Display` message.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum BridgeError {
+pub(crate) enum BridgeError {
     /// Failed to deserialize a canonical wire structure (header,
     /// block transactions, extension, ad-proofs, ergo-box).
     #[error("parse {what}: {source}")]

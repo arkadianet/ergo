@@ -1,0 +1,5281 @@
+//! Unit tests for the node-side input-block runtime (Plan 2, task 3).
+
+use std::time::Instant;
+
+use ergo_crypto::difficulty::{
+    epoch_length_for_height, next_n_bits, previous_heights_for_recalculation, DifficultyParams,
+};
+use ergo_inputblocks::processor::{DropReason, Effect};
+use ergo_inputblocks::test_support as ts;
+use ergo_inputblocks::types::{PeerTag, TxRef};
+use ergo_mempool::input_blocks::RemovedEntry;
+use ergo_p2p::peer::Penalty;
+use ergo_ser::header::{read_header, serialize_header, Header};
+use ergo_state::chain::HeaderMeta;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
+use ergo_sync::coordinator::Action;
+
+use super::ctx::{block_transactions_known, build_ctx_data, expected_n_bits_after};
+use super::effects::{apply_chain_change, encode_block_bodies, execute_effects, relay_peers};
+use super::hooks::{
+    advertised_version, classify_tip_change, on_ordering_block_applied, on_ordering_reorg, on_tick,
+    seed_best_ordering, TipChange, MAX_LINEAR_CATCHUP,
+};
+use super::runtime::InputBlocksRuntime;
+use super::validate::{build_input_block_context, run_validation, ValidateJob};
+use crate::node::state::NodeState;
+use crate::node::tests::make_state;
+
+// ----- helpers -----
+
+/// Count for one drop reason; `0` for a reason that never fired. Lives
+/// here rather than on `DropCounters` because only tests ask about one
+/// reason at a time — production reports the whole breakdown.
+fn drops(rt: &InputBlocksRuntime, reason: &str) -> u64 {
+    rt.counters
+        .iter()
+        .find(|(name, _)| *name == reason)
+        .map(|(_, n)| n)
+        .unwrap_or(0)
+}
+
+fn cfg() -> crate::config::InputBlocksConfig {
+    crate::config::InputBlocksConfig {
+        enabled: true,
+        strict_field_binding: true,
+        relay_remote: false,
+        bounds: ergo_inputblocks::bounds::Bounds::default(),
+    }
+}
+
+fn runtime() -> InputBlocksRuntime {
+    InputBlocksRuntime::new(&cfg(), Instant::now())
+}
+
+/// Seed `count` synthetic, chain-linked headers at heights `1..=count`
+/// into the store's header tables and advance `best_header`. Returns the
+/// stored headers, oldest first.
+fn seed_header_chain(state: &mut NodeState, count: u32) -> Vec<Header> {
+    seed_header_chain_with_nonces(state, count, 0)
+}
+
+/// [`seed_header_chain`] with a nonce offset, so a second call produces
+/// a DIFFERENT chain over the same heights. The later call rewrites the
+/// best-header index at every height it covers, leaving the first
+/// chain's headers stored and linked but off the index — the shape a
+/// header-chain switch leaves behind while the committed full blocks
+/// stay where they were.
+fn seed_header_chain_with_nonces(
+    state: &mut NodeState,
+    count: u32,
+    nonce_offset: u64,
+) -> Vec<Header> {
+    let store = state.store.as_utxo_mut().expect("utxo backend");
+    let mut parent = [0u8; 32];
+    let mut out = Vec::new();
+    for height in 1..=count {
+        let header = ts::header(parent, height, u64::from(height) + nonce_offset, [0u8; 32]);
+        let (bytes, id) = serialize_header(&header).expect("serialize");
+        let id = *id.as_bytes();
+        let meta = HeaderMeta {
+            parent_id: parent,
+            height,
+            cumulative_score: u64::from(height).to_be_bytes().to_vec(),
+            pow_validity: 1,
+            timestamp: header.timestamp,
+        };
+        store
+            .store_validated_header(
+                &id,
+                &bytes,
+                &meta,
+                Some((height, meta.cumulative_score.clone())),
+            )
+            .expect("store header");
+        parent = id;
+        out.push(header);
+    }
+    out
+}
+
+fn header_id_of(h: &Header) -> [u8; 32] {
+    *serialize_header(h).expect("serialize").1.as_bytes()
+}
+
+/// Install `subblocks_per_block` in the STORE's active parameters —
+/// the source the announcement path reads (spec 6.5). Not
+/// `last_seen_active_params`, which is only the action loop's mirror.
+fn set_store_multiplier(state: &mut NodeState, multiplier: Option<i32>) {
+    let mut params = state.store.active_params().clone();
+    params.subblocks_per_block = multiplier;
+    state
+        .store
+        .as_utxo_mut()
+        .expect("utxo backend")
+        .set_active_params_for_test(params);
+}
+
+fn connect_peer(state: &mut NodeState, port: u16) -> std::net::SocketAddr {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    // The receiver is dropped immediately: these tests assert on the
+    // `Action`s the executor RETURNS, and never flush them to the wire.
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    state.registry.peers.insert(
+        addr,
+        crate::node::state::PeerRuntime {
+            sync_version: ergo_p2p::peer::SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    addr
+}
+
+// ----- happy path -----
+
+/// SUPPLEMENTAL loader-consistency check, NOT an oracle: the expected
+/// value here is produced by the same `next_n_bits` the code under test
+/// calls, so it proves the header LOADER (genesis skip, parent
+/// substitution, epoch-window selection) feeds the difficulty function
+/// the window it intends — and nothing about the difficulty function.
+///
+/// The consensus oracle is
+/// `expected_n_bits_after_matches_mainnet_headers_across_an_epoch_boundary`,
+/// whose expected values are real mainnet `nBits`.
+#[test]
+fn expected_n_bits_after_known_parent_matches_the_loaded_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let headers = seed_header_chain(&mut state, 3);
+    let parent = headers.last().unwrap();
+    let parent_id = header_id_of(parent);
+
+    let params = DifficultyParams::mainnet();
+    let child_height = parent.height + 1;
+    let epoch = epoch_length_for_height(child_height, &params);
+    let needed = previous_heights_for_recalculation(child_height, epoch);
+    let mut epoch_headers = Vec::new();
+    for h in needed {
+        if h == 0 {
+            continue;
+        }
+        epoch_headers.push(
+            headers
+                .iter()
+                .find(|x| x.height == h)
+                .expect("seeded height")
+                .clone(),
+        );
+    }
+    let expected = next_n_bits(child_height, &epoch_headers, &params).expect("next_n_bits");
+
+    assert_eq!(expected_n_bits_after(&state, &parent_id), Some(expected));
+}
+
+#[test]
+fn expected_n_bits_after_unknown_parent_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_state(&dir.path().join("state.redb"));
+    assert_eq!(expected_n_bits_after(&state, &[0x9a; 32]), None);
+}
+
+#[test]
+fn ctx_multiplier_comes_from_active_params_subblocks_per_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+
+    let data = build_ctx_data(&state, &[]);
+    assert_eq!(data.with(|c| c.multiplier), None, "no id 9 => None");
+
+    set_store_multiplier(&mut state, Some(30));
+    let data = build_ctx_data(&state, &[]);
+    assert_eq!(data.with(|c| c.multiplier), Some(30));
+
+    // The action loop's mirror is NOT the source: a mirror that has not
+    // caught up with the committed epoch must not change the verdict.
+    state.last_seen_active_params.subblocks_per_block = Some(1);
+    let data = build_ctx_data(&state, &[]);
+    assert_eq!(data.with(|c| c.multiplier), Some(30));
+}
+
+#[test]
+fn validation_context_uses_best_full_block_not_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let headers = seed_header_chain(&mut state, 11);
+    let best = headers.last().unwrap().clone();
+    let best_id = header_id_of(&best);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(best_id, best.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+
+    let ctx = build_input_block_context(&state).expect("context");
+    assert_eq!(ctx.tx_context.height, best.height, "height is B, not B+1");
+    assert_eq!(ctx.tx_context.pre_header_timestamp, best.timestamp);
+    assert_eq!(
+        ctx.tx_context.pre_header_parent_id,
+        *best.parent_id.as_bytes()
+    );
+    assert_eq!(ctx.tx_context.pre_header_n_bits, u64::from(best.n_bits));
+    assert_eq!(
+        ctx.last_headers.len(),
+        9,
+        "lastHeaders.drop(1), capped at 9"
+    );
+    assert_eq!(
+        ctx.last_headers[0].height,
+        best.height - 1,
+        "last_headers[0] == B-1"
+    );
+}
+
+#[test]
+fn effect_request_transactions_becomes_send_to_peer_code_105() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let peer = connect_peer(&mut state, 19001);
+    let mut rt = runtime();
+    let tag = rt.tag(peer);
+    state.input_blocks = Some(rt);
+
+    let weak_ids = vec![[1u8; 6], [2u8; 6]];
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestTransactions {
+            input_block_id: [7u8; 32],
+            weak_ids: weak_ids.clone(),
+            from: tag,
+        }],
+        Instant::now(),
+    );
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::SendToPeer {
+            peer: p,
+            code,
+            payload,
+        } => {
+            assert_eq!(*p, peer);
+            assert_eq!(*code, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST);
+            let req = ergo_p2p::message::deserialize_input_block_txs_request(payload).unwrap();
+            assert_eq!(req.input_block_id, [7u8; 32]);
+            assert_eq!(req.weak_ids, weak_ids);
+        }
+        other => panic!("unexpected action {other:?}"),
+    }
+}
+
+#[test]
+fn effect_chain_changed_applies_then_restores_in_mempool() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let mut rt = runtime();
+
+    // `both` is rolled back AND applied: restore-then-apply must leave it out.
+    let both = ts::body(0xa1, 1);
+    let only_rolled_back = ts::body(0xb2, 1);
+    let rolled_back_id = [0x11u8; 32];
+
+    rt.retained.insert(
+        rolled_back_id,
+        vec![
+            RemovedEntry {
+                tx_id: ergo_primitives::digest::Digest32::from_bytes(both.tx_ref.tx_id),
+                bytes: both.bytes.clone(),
+                fee: 0,
+                size_bytes: both.bytes.len() as u32,
+                cost: 1000,
+            },
+            RemovedEntry {
+                tx_id: ergo_primitives::digest::Digest32::from_bytes(only_rolled_back.tx_ref.tx_id),
+                bytes: only_rolled_back.bytes.clone(),
+                fee: 0,
+                size_bytes: only_rolled_back.bytes.len() as u32,
+                cost: 1000,
+            },
+        ],
+    );
+
+    // The rolled-back block's own cached bodies are the restore set;
+    // the retained entries above only supply their costs.
+    let _actions = apply_chain_change(
+        &mut state,
+        &mut rt,
+        &[([0x22u8; 32], vec![both.clone()])],
+        &[(rolled_back_id, vec![both.clone(), only_rolled_back.clone()])],
+        Instant::now(),
+    );
+
+    let both_id = ergo_primitives::digest::Digest32::from_bytes(both.tx_ref.tx_id);
+    let other_id = ergo_primitives::digest::Digest32::from_bytes(only_rolled_back.tx_ref.tx_id);
+    assert!(
+        !state.mempool.contains(&both_id),
+        "a tx in both lists ends up removed (spec 7.6)"
+    );
+    assert!(
+        state.mempool.contains(&other_id),
+        "a rolled-back-only tx stays restored"
+    );
+    assert!(
+        !rt.retained.contains_key(&rolled_back_id),
+        "restored entries are released"
+    );
+    assert!(
+        rt.retained.contains_key(&[0x22u8; 32]),
+        "applied block's removals are retained for a later restore"
+    );
+}
+
+#[test]
+fn peer_tag_roundtrip_and_local_reserved() {
+    let mut rt = runtime();
+    let a: std::net::SocketAddr = "127.0.0.1:19101".parse().unwrap();
+    let b: std::net::SocketAddr = "127.0.0.1:19102".parse().unwrap();
+    let ta = rt.tag(a);
+    let tb = rt.tag(b);
+    assert_ne!(ta, tb);
+    assert_ne!(ta, PeerTag::LOCAL);
+    assert_ne!(tb, PeerTag::LOCAL);
+    assert_eq!(rt.tag(a), ta, "tagging is stable");
+    assert_eq!(rt.peer(ta), Some(a));
+    assert_eq!(rt.peer(tb), Some(b));
+    assert_eq!(rt.peer(PeerTag::LOCAL), None, "LOCAL maps to no peer");
+}
+
+// ----- error paths -----
+
+#[test]
+fn effect_penalize_maps_to_action_penalize_misbehavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let peer = connect_peer(&mut state, 19003);
+    let mut rt = runtime();
+    let tag = rt.tag(peer);
+    state.input_blocks = Some(rt);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::Penalize {
+            from: tag,
+            reason: "bad_pow",
+        }],
+        Instant::now(),
+    );
+    assert_eq!(actions.len(), 1);
+    match &actions[0] {
+        Action::Penalize { peer: p, penalty } => {
+            assert_eq!(*p, peer);
+            assert_eq!(*penalty, Penalty::Misbehavior);
+        }
+        other => panic!("unexpected action {other:?}"),
+    }
+}
+
+#[test]
+fn dropped_effects_increment_counters_without_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+
+    let actions = execute_effects(
+        &mut state,
+        vec![
+            Effect::Dropped {
+                id: [1u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [2u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [3u8; 32],
+                reason: DropReason::WaitlistFull,
+            },
+        ],
+        Instant::now(),
+    );
+    assert!(actions.is_empty());
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(drops(rt, "AlreadyKnown"), 2);
+    assert_eq!(drops(rt, "WaitlistFull"), 1);
+    assert_eq!(drops(rt, "ForksFull"), 0);
+}
+
+/// Task 6: the per-`DropReason` counters reach `ApiStatus.input_blocks`
+/// through `InputBlocksRuntime::api_status()` — the exact DTO
+/// `snapshot_emit::publish_snapshot` reads at publish time (see
+/// `snapshot::build_snapshot_carries_input_blocks_status` for the
+/// `SnapshotParts` -> `ApiStatus` leg of the same wire). Keyed by
+/// `DropReason::name()`, name-ordered, only reasons that fired at least
+/// once.
+#[test]
+fn drop_counters_exposed_in_api_v1_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+
+    execute_effects(
+        &mut state,
+        vec![
+            Effect::Dropped {
+                id: [1u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [2u8; 32],
+                reason: DropReason::AlreadyKnown,
+            },
+            Effect::Dropped {
+                id: [3u8; 32],
+                reason: DropReason::WaitlistFull,
+            },
+        ],
+        Instant::now(),
+    );
+
+    let status = state.input_blocks.as_ref().unwrap().api_status();
+    assert_eq!(
+        status.drops,
+        vec![
+            ergo_api::types::ApiDropCount {
+                reason: "AlreadyKnown".to_string(),
+                count: 2,
+            },
+            ergo_api::types::ApiDropCount {
+                reason: "WaitlistFull".to_string(),
+                count: 1,
+            },
+        ],
+        "name-ordered, only fired reasons"
+    );
+}
+
+/// Task 7 / fix-round-1 finding 4: a real `handle()` call — driven the
+/// same way `hooks::drive` does, `handle()` then `execute_effects` with
+/// whatever it returned — republishes
+/// `NodeState::input_blocks_read_slot`, because `handle()` always bumps
+/// `Processor::revision()` even when it returns zero effects (a bare
+/// `Tick` with nothing outstanding). This is the seam
+/// `input_blocks::effects::refresh_read_slot` writes and
+/// `SnapshotReadState::input_blocks()` reads (see
+/// `ergo-api/tests/it/input_block_routes.rs` for the read side against a
+/// stub). Detected by ARC IDENTITY: the slot always holds *a* value
+/// (default at construction), so content equality can't tell "still the
+/// boot default" from "refreshed to the same values" — only a changed
+/// pointer proves `.store()` ran.
+#[test]
+fn read_slot_republishes_after_a_handle_call_even_with_zero_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+    let before = slot.load_full();
+
+    let mut rt = state.input_blocks.take().expect("runtime");
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(0),
+                },
+                ctx,
+            )
+        })
+    };
+    assert!(
+        effects.is_empty(),
+        "a bare tick on a fresh runtime is quiet"
+    );
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
+
+    let after = slot.load_full();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "handle() bumped the revision even though it returned no effects"
+    );
+    assert!(after.best_chain.is_empty(), "no ordering block seeded yet");
+    assert!(after.best_input_block_id.is_none());
+}
+
+/// The read slot publishes the ordering block the PROCESSOR is keyed
+/// by, not the chain store's tip.
+///
+/// The two move independently, and the REST routes report them as a
+/// pair: for about a second after every ordering block the store
+/// already names the new block while the processor's chain is still the
+/// previous one's, so `/blocks/bestInputChain` served the previous
+/// block's chain under the new block's id. Downstream that is
+/// indistinguishable from the follower holding a different history, and
+/// it is what the mixed-devnet smoke's assertion 3 kept reporting once
+/// the follower stopped lagging.
+#[test]
+fn the_read_slot_carries_the_processors_own_ordering_block_id() {
+    const ORDERING: [u8; 32] = [0x5a; 32];
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    // The store's tip is whatever `make_state` seeded; the processor is
+    // pointed somewhere else on purpose.
+    let mut rt = state.input_blocks.take().expect("runtime");
+    rt.processor_mut().set_best_ordering(Some(ORDERING), 1);
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(0),
+                },
+                ctx,
+            )
+        })
+    };
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
+
+    let published = slot.load_full();
+    assert_eq!(
+        published.best_ordering_id.as_deref(),
+        Some(hex::encode(ORDERING).as_str()),
+        "the slot names the processor's ordering block, not the store's tip"
+    );
+    assert_ne!(
+        published.best_ordering_id.as_deref(),
+        Some(hex::encode(state.store.chain_state_meta().best_full_block_id).as_str()),
+        "the fixture's two ids must differ, or this proves nothing"
+    );
+}
+
+/// A `Tick` that produces no effects (the overwhelmingly common case —
+/// 1 Hz, most seconds nothing happened) must NOT touch the slot: a
+/// no-op republish every second would mean the API bridge's read-side
+/// `Arc` churns constantly for no observable change.
+#[test]
+fn read_slot_is_untouched_by_an_empty_effect_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+    let before = slot.load_full();
+
+    execute_effects(&mut state, Vec::new(), Instant::now());
+
+    let after = slot.load_full();
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "an empty effect batch must not republish the read slot"
+    );
+}
+
+/// A node with no applied full block cannot build a validation context.
+/// That must reach the processor as `Unavailable`, not as a verdict —
+/// `Invalid` would retire the combination, and since every input block
+/// under an ordering block chains through the first one, one transient
+/// miss would blacklist the whole chain for good. Observed on the mixed
+/// devnet smoke: the Rust node joined at genesis, dropped the first
+/// input block with `TipUnready`, and then never linked another.
+#[test]
+fn run_validation_without_an_applied_block_is_unavailable_not_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    assert!(
+        build_input_block_context(&state).is_none(),
+        "fixture must have no applied full block"
+    );
+    let rt = state.input_blocks.take().expect("runtime");
+    let job = ValidateJob {
+        job: 1,
+        generation: 0,
+        input_block_id: [3u8; 32],
+        txs: Vec::new(),
+        previous: Vec::new(),
+    };
+    match run_validation(&state, &rt, &job).0 {
+        ergo_inputblocks::processor::ValidationOutcome::Unavailable(reason) => {
+            assert!(reason.contains("TipUnready"), "{reason}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// Fix-round-1, finding 2: a losing fork's input block is still
+/// retrievable over the REST read slot after another fork wins — the
+/// snapshot must be built from every RECORDED id
+/// (`Processor::known_input_block_ids`), not merely the best chain.
+///
+/// The two competing blocks are built directly on the processor via
+/// `ergo_inputblocks::test_support::announce_and_apply` — the crate's own
+/// harness for exactly this — rather than through the node's
+/// `execute_effects` `Validate` arm, which requires a real applied full
+/// block (`TipUnready`) this bare `make_state()` fixture doesn't have.
+/// The refresh itself IS driven through the node's `execute_effects`
+/// (any non-empty effect batch), so the read-slot content-building logic
+/// under test is the real production path.
+#[test]
+fn read_slot_serves_a_losing_forks_block_after_a_fork_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    // Two sibling, zero-tx blocks at the same height, no shared parent:
+    // two competing forks under the same ordering id.
+    let ts_ctx = ts::TestCtx::at(0);
+    let a1 = ts::announcement([0u8; 32], 1, 7, None);
+    let a2 = ts::announcement([0u8; 32], 1, 9, None);
+    let id1 = ts::ann_id(&a1);
+    let id2 = ts::ann_id(&a2);
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        ts::announce_and_apply(rt.processor_mut(), &ts_ctx, &a1, 0);
+        ts::announce_and_apply(rt.processor_mut(), &ts_ctx, &a2, 0);
+        state.input_blocks = Some(rt);
+    }
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let best_chain = rt.processor().best_input_chain();
+    assert_eq!(
+        best_chain.len(),
+        1,
+        "only one of the two competing blocks is best"
+    );
+    let losing_id = if best_chain.contains(&id1) { id2 } else { id1 };
+
+    execute_effects(
+        &mut state,
+        vec![Effect::Dropped {
+            id: [0u8; 32],
+            reason: DropReason::AlreadyKnown,
+        }],
+        Instant::now(),
+    );
+
+    let snapshot = slot.load_full();
+    assert!(
+        snapshot.blocks.contains_key(&hex::encode(losing_id)),
+        "the losing fork's block must still resolve over the read slot"
+    );
+}
+
+/// Fix-round-1, finding 3: `transaction_ids` survive body-cache eviction
+/// (`Processor::transaction_refs`), while `transactions` honestly shrinks
+/// (`Processor::bodies` skips evicted entries, mirroring Scala's
+/// `getIfPresent` loop) — the ids route must not depend on the bodies
+/// still being cached.
+#[test]
+fn read_slot_keeps_transaction_ids_after_body_cache_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let bounds = ergo_inputblocks::bounds::Bounds {
+        tx_cache_entries: 1,
+        ..ergo_inputblocks::bounds::Bounds::default()
+    };
+    let ib_cfg = crate::config::InputBlocksConfig {
+        enabled: true,
+        strict_field_binding: true,
+        relay_remote: false,
+        bounds,
+    };
+    state.input_blocks = Some(InputBlocksRuntime::new(&ib_cfg, Instant::now()));
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    let mut ts_ctx = ts::TestCtx::at(0);
+    let b1 = ts::body(1, 1);
+    let b2 = ts::body(2, 1);
+    ts_ctx.mempool.add(&b1);
+    ts_ctx.mempool.add(&b2);
+    let a1 = ts::announcement_for([0u8; 32], 1, 1, None, std::slice::from_ref(&b1));
+    let id1 = ts::ann_id(&a1);
+    let a2 = ts::announcement_for([0u8; 32], 1, 2, Some(id1), std::slice::from_ref(&b2));
+
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        let eff = ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a1.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        ts::validate_ok(rt.processor_mut(), &ts_ctx, &eff, 1);
+        assert!(
+            rt.processor().bodies(&id1).is_some_and(|b| b.len() == 1),
+            "b1's body is cached before b2 arrives"
+        );
+
+        // b2 shares the single tx-cache slot: caching it evicts b1's body.
+        ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a2.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        assert!(
+            rt.processor().bodies(&id1).is_some_and(|b| b.is_empty()),
+            "b1's body must be evicted (not merely absent as an id)"
+        );
+        state.input_blocks = Some(rt);
+    }
+
+    execute_effects(
+        &mut state,
+        vec![Effect::Dropped {
+            id: [0u8; 32],
+            reason: DropReason::AlreadyKnown,
+        }],
+        Instant::now(),
+    );
+
+    let snapshot = slot.load_full();
+    let entry = snapshot
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is still retained");
+    assert_eq!(
+        entry.transaction_ids.len(),
+        1,
+        "the tx id survives body eviction"
+    );
+    assert!(
+        entry.transactions.is_empty(),
+        "the body itself is honestly reported as gone, not fabricated"
+    );
+}
+
+/// Fix-round-1, finding 4: a `Tick` that silently expires a cached body
+/// via TTL (`Processor::on_tick` — no `Effect` emitted at all, unlike the
+/// overflow-eviction case above) still republishes the read slot, because
+/// the refresh gate is `Processor::revision()` changing, not the effect
+/// batch being non-empty.
+#[test]
+fn read_slot_refreshes_stale_bodies_after_silent_ttl_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let bounds = ergo_inputblocks::bounds::Bounds {
+        tx_cache_ttl_ms: 10,
+        ..ergo_inputblocks::bounds::Bounds::default()
+    };
+    let ib_cfg = crate::config::InputBlocksConfig {
+        enabled: true,
+        strict_field_binding: true,
+        relay_remote: false,
+        bounds,
+    };
+    state.input_blocks = Some(InputBlocksRuntime::new(&ib_cfg, Instant::now()));
+    let slot: crate::api_bridge::InputBlocksSlot = std::sync::Arc::new(
+        arc_swap::ArcSwap::from_pointee(ergo_api::compat::ApiInputBlocks::default()),
+    );
+    state.input_blocks_read_slot = Some(slot.clone());
+
+    let mut ts_ctx = ts::TestCtx::at(0);
+    let b1 = ts::body(1, 1);
+    ts_ctx.mempool.add(&b1);
+    let a1 = ts::announcement_for([0u8; 32], 1, 1, None, std::slice::from_ref(&b1));
+    let id1 = ts::ann_id(&a1);
+
+    {
+        let mut rt = state.input_blocks.take().expect("runtime");
+        rt.processor_mut().set_best_ordering(Some([0u8; 32]), 1);
+        let eff = ts_ctx.handle(
+            rt.processor_mut(),
+            ergo_inputblocks::processor::Event::AnnouncementAccepted {
+                ann: a1.clone(),
+                from: ts::PEER,
+                now: ergo_inputblocks::types::Tick(0),
+            },
+        );
+        ts::validate_ok(rt.processor_mut(), &ts_ctx, &eff, 1);
+        state.input_blocks = Some(rt);
+    }
+    // The announce+validate loop above already drove `handle()` directly
+    // on the processor (bypassing the node's `execute_effects`), so this
+    // first refresh is the baseline: body present.
+    execute_effects(&mut state, Vec::new(), Instant::now());
+    let baseline = slot.load_full();
+    let entry = baseline
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is retained");
+    assert_eq!(entry.transactions.len(), 1, "body present before expiry");
+
+    // A bare Tick well past the 10ms TTL: `on_tick` expires the cached
+    // body and emits nothing.
+    let mut rt = state.input_blocks.take().expect("runtime");
+    let effects = {
+        let data = build_ctx_data(&state, &[]);
+        data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::Tick {
+                    now: ergo_inputblocks::types::Tick(11),
+                },
+                ctx,
+            )
+        })
+    };
+    assert!(effects.is_empty(), "TTL expiry emits no effect");
+    state.input_blocks = Some(rt);
+    execute_effects(&mut state, effects, Instant::now());
+
+    let snapshot = slot.load_full();
+    let entry = snapshot
+        .blocks
+        .get(&hex::encode(id1))
+        .expect("id1's record is still retained");
+    assert_eq!(
+        entry.transaction_ids.len(),
+        1,
+        "the tx id survives TTL expiry (finding 3)"
+    );
+    assert!(
+        entry.transactions.is_empty(),
+        "the expired body must not still be served stale (finding 4)"
+    );
+}
+
+/// A runtime that has never dropped anything reports an empty (not
+/// absent) breakdown — `ApiStatus.input_blocks` itself is what goes
+/// `None` when the subsystem is off (see
+/// `hooks_are_no_ops_when_the_subsystem_is_off`); a wired-but-quiet
+/// subsystem still reports `Some(_)` with all-zero/empty fields.
+#[test]
+fn drop_counters_empty_when_nothing_has_dropped() {
+    let rt = runtime();
+    let status = rt.api_status();
+    assert!(status.drops.is_empty());
+    assert_eq!(status.forks, 0);
+    assert_eq!(status.staged_bytes, 0);
+    assert_eq!(status.waitlist, 0);
+    assert_eq!(status.deferred_triggers, 0);
+    assert!(status.best_input_block.is_none());
+}
+
+/// Fix-round-1, finding 5: `encode_block_bodies` refuses to publish a
+/// partial list — one failing body anywhere in the block discards
+/// everything for that refresh, never a silently-truncated `Ok(_)`.
+#[test]
+fn encode_block_bodies_all_succeed_returns_every_transaction() {
+    let bodies = [ts::body(1, 1), ts::body(2, 1), ts::body(3, 1)];
+    let mut calls = 0usize;
+    let out = encode_block_bodies(bodies.iter(), |_tx| {
+        calls += 1;
+        Ok::<u8, ()>(calls as u8)
+    });
+    assert_eq!(out, Ok(vec![1, 2, 3]));
+}
+
+#[test]
+fn encode_block_bodies_any_failure_discards_the_whole_list() {
+    let bodies = [ts::body(1, 1), ts::body(2, 1), ts::body(3, 1)];
+    let mut calls = 0usize;
+    let out = encode_block_bodies(bodies.iter(), |_tx| {
+        calls += 1;
+        if calls == 2 {
+            Err(())
+        } else {
+            Ok::<u8, ()>(calls as u8)
+        }
+    });
+    assert_eq!(
+        out,
+        Err(()),
+        "a failure anywhere must not leak the successfully-encoded prefix"
+    );
+}
+
+/// Fix-round-1, finding 5: `snapshot_encode_failures` surfaces on
+/// `ApiStatus.input_blocks.drops` under the synthetic reason
+/// `SnapshotEncodeFailed`, merged (name-ordered) alongside the
+/// processor's own `DropReason` counters.
+#[test]
+fn api_status_exposes_snapshot_encode_failed_name_ordered_with_real_drops() {
+    let mut rt = runtime();
+    // A real DropReason drop, alphabetically AFTER "SnapshotEncodeFailed".
+    rt.counters.bump(&DropReason::WaitlistFull);
+    rt.snapshot_encode_failures = 3;
+
+    let status = rt.api_status();
+    assert_eq!(
+        status.drops,
+        vec![
+            ergo_api::types::ApiDropCount {
+                reason: "SnapshotEncodeFailed".to_string(),
+                count: 3,
+            },
+            ergo_api::types::ApiDropCount {
+                reason: "WaitlistFull".to_string(),
+                count: 1,
+            },
+        ]
+    );
+}
+
+#[test]
+fn api_status_omits_snapshot_encode_failed_when_zero() {
+    let rt = runtime();
+    assert!(rt.api_status().drops.is_empty());
+}
+
+// ----- round-trips -----
+
+#[test]
+fn stored_header_round_trips_through_expected_n_bits_lookup() {
+    // Guards the header-decode path `expected_n_bits_after` depends on:
+    // a header stored by `store_validated_header` must read back byte-identical.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let headers = seed_header_chain(&mut state, 2);
+    let want = headers.last().unwrap();
+    let bytes = state
+        .store
+        .get_header(&header_id_of(want))
+        .unwrap()
+        .expect("stored");
+    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+    let got = read_header(&mut r).unwrap();
+    assert_eq!(&got, want);
+}
+
+// ----- regressions (fix round 1) -----
+
+/// A real mainnet block from the committed fixtures: its header bytes
+/// (`headers_1_10.json`) and its transactions (`blocks_1_5.json`),
+/// serialized into the canonical `BlockTransactions` section. Returns
+/// `(header, header_id, section_bytes)`.
+///
+/// Anchored to mainnet independently of any id arithmetic: the header is
+/// verified to be a real header (`id == blake2b256(bytes)`) and the
+/// transactions are verified to reproduce that header's own
+/// `transactions_root`, so the pair really is block `height`'s body.
+fn real_block_with_transactions(height: u32) -> (Header, [u8; 32], Vec<u8>) {
+    #[derive(serde::Deserialize)]
+    struct BlockVector {
+        #[serde(rename = "headerId")]
+        header_id: String,
+        height: u32,
+        transactions: Vec<TxVector>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TxVector {
+        bytes: String,
+    }
+
+    let (_, header_id, _, header) =
+        load_mainnet_headers("../test-vectors/mainnet/headers_1_10.json")
+            .into_iter()
+            .find(|(h, ..)| *h == height)
+            .expect("header fixture covers this height");
+
+    let raw = std::fs::read_to_string("../test-vectors/mainnet/blocks_1_5.json").unwrap();
+    let blocks: Vec<BlockVector> = serde_json::from_str(&raw).unwrap();
+    let block = blocks
+        .into_iter()
+        .find(|b| b.height == height)
+        .expect("block fixture covers this height");
+    assert_eq!(
+        block.header_id,
+        hex::encode(header_id),
+        "the block fixture and the header fixture must name the same block"
+    );
+
+    let txs: Vec<ergo_ser::transaction::Transaction> = block
+        .transactions
+        .iter()
+        .map(|t| {
+            let bytes = hex::decode(&t.bytes).unwrap();
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            ergo_ser::transaction::read_transaction(&mut r).unwrap()
+        })
+        .collect();
+
+    // Mainnet anchor: these transactions must reproduce the real
+    // header's transactionsRoot, or the fixture is not this block's body.
+    let tx_ids: Vec<[u8; 32]> = txs
+        .iter()
+        .map(|t| *ergo_ser::transaction::transaction_id(t).unwrap().as_bytes())
+        .collect();
+    let id_refs: Vec<&[u8]> = tx_ids.iter().map(|i| &i[..]).collect();
+    assert_eq!(
+        ergo_crypto::merkle::transactions_root(&id_refs, None),
+        *header.transactions_root.as_bytes(),
+        "fixture transactions do not reproduce the real header's transactionsRoot"
+    );
+
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::block_transactions::write_block_transactions(
+        &mut w,
+        &ergo_ser::block_transactions::BlockTransactions {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+            transactions: txs,
+        },
+    )
+    .unwrap();
+    (header, header_id, w.result())
+}
+
+/// Finding 1 (round 1 + round 2): a block section's modifier id is
+/// `blake2b256(type ‖ header_id ‖ root)`, NOT the header's bare
+/// `transactions_root`. Using the root made `RequestBlockTransactions`
+/// name a modifier nobody has, and made every stored section look
+/// absent.
+///
+/// Driven through the real effect executor against a real mainnet block
+/// applied into the store: the id the `SendToPeer` payload actually
+/// carries must be the id the store holds that block's
+/// `BlockTransactions` section under.
+#[test]
+fn request_block_transactions_names_the_stored_section_id_of_a_real_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19650,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let (header, header_id, section_bytes) = real_block_with_transactions(1);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            header.height,
+            header_id,
+            {
+                let (bytes, _) = serialize_header(&header).unwrap();
+                bytes
+            },
+            header.clone(),
+        )],
+        true,
+    );
+
+    // Persist the section the way the block pipeline does: under the id
+    // `ExpectedSections` derives for this header. That id — not the test
+    // — is the authority the assertions below compare against.
+    let stored_section_id = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &header_id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    )
+    .transactions_id;
+    assert_ne!(
+        stored_section_id,
+        *header.transactions_root.as_bytes(),
+        "the fixture would not discriminate if the two coincided"
+    );
+
+    // Before the section exists the probe must say so, and the request
+    // must still name the right id.
+    assert!(
+        !block_transactions_known(&state, &header_id),
+        "nothing stored yet"
+    );
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestBlockTransactions {
+            header_id,
+            from: tag,
+        }],
+        now,
+    );
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "the section request goes out");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte()
+    );
+    assert_eq!(
+        inv.ids,
+        vec![stored_section_id],
+        "the requested modifier id must be the section id, not the bare root"
+    );
+
+    state
+        .store
+        .store_block_section_typed(&stored_section_id, &section_bytes, 102)
+        .unwrap();
+    assert_eq!(
+        state
+            .store
+            .get_block_section(&inv.ids[0])
+            .unwrap()
+            .as_deref(),
+        Some(&section_bytes[..]),
+        "the id the request named is exactly the id the store holds the \
+         real block's BlockTransactions section under"
+    );
+    assert!(
+        block_transactions_known(&state, &header_id),
+        "a stored section must not look absent"
+    );
+}
+
+/// Finding 6(a): the processor has no clock and no chain view of its
+/// own, so `Event::Tick` and the ordering-chain events must be driven by
+/// the node. Without the tick a peer that stops answering holds its
+/// `requests_per_peer` slots forever; without the applied hook the
+/// generation never bumps and `/info.bestInputBlock` never clears.
+#[test]
+fn ordering_applied_hook_bumps_generation_and_clears_best_input_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    let actions = on_ordering_block_applied(&mut state, [0x5a; 32], 7, Instant::now());
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().generation() > before,
+        "an applied ordering block invalidates in-flight jobs"
+    );
+    assert!(rt.processor().best_input_block().is_none());
+    assert!(
+        actions.is_empty(),
+        "nothing to relay or request on a bare apply"
+    );
+}
+
+#[test]
+fn hooks_are_no_ops_when_the_subsystem_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    assert!(state.input_blocks.is_none());
+    assert!(on_tick(&mut state, Instant::now()).is_empty());
+    assert!(on_ordering_block_applied(&mut state, [1; 32], 1, Instant::now()).is_empty());
+    assert!(on_ordering_reorg(&mut state, [1; 32], 1, Instant::now()).is_empty());
+    seed_best_ordering(&mut state);
+    assert!(state.input_blocks.is_none());
+}
+
+#[test]
+fn tick_releases_an_expired_request_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let start = Instant::now();
+    let mut rt = InputBlocksRuntime::new(&cfg(), start);
+    // One slot, so the second request is refused until the first expires.
+    let tag = rt.tag("127.0.0.1:19501".parse().unwrap());
+    state.input_blocks = Some(rt);
+
+    // Drive the tick far past `request_timeout_ms`; the sweep must run
+    // without the processor ever having consulted a clock of its own.
+    let later = start
+        + std::time::Duration::from_millis(
+            cfg().bounds.request_timeout_ms + cfg().bounds.staging_ttl_ms + 1,
+        );
+    let actions = on_tick(&mut state, later);
+    assert!(actions.is_empty(), "an idle tick asks for nothing");
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().tick(later).0,
+        cfg().bounds.request_timeout_ms + cfg().bounds.staging_ttl_ms + 1,
+        "the runtime's clock is milliseconds since construction"
+    );
+    let _ = tag;
+}
+
+// ----- task 4: dispatch, serving, advertisement -----
+
+/// A processor-friendly config: `test_support`'s announcements carry real
+/// batch-merkle proofs over exactly the three extension entries, so both
+/// the parity and the strict-binding checks pass.
+fn live_cfg() -> crate::config::InputBlocksConfig {
+    cfg()
+}
+
+/// A state with the subsystem live and a multiplier present, so
+/// announcements are inside the actionable window and pass PoW (the
+/// `test_support` module documents why `i32::MAX` is the right
+/// permissive multiplier for unmined test headers).
+fn live_state(dir: &std::path::Path) -> NodeState {
+    let mut state = make_state(&dir.join("state.redb"));
+    set_store_multiplier(&mut state, Some(i32::MAX));
+    state.input_blocks = Some(InputBlocksRuntime::new(&live_cfg(), Instant::now()));
+    state
+}
+
+/// Register + handshake a peer at `version`, keeping the outbound
+/// receiver alive for the caller to inspect.
+fn handshake_peer(
+    state: &mut NodeState,
+    port: u16,
+    version: ergo_p2p::handshake::Version,
+    now: Instant,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
+) {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    state.peer_manager.register_outbound(addr, now).unwrap();
+    state.peer_manager.mark_tcp_connected(&addr);
+    let mut spec = state.our_handshake.peer_spec.clone();
+    spec.version = version;
+    spec.features = vec![ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 0,
+        verify_tx: true,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }];
+    state
+        .peer_manager
+        .complete_handshake(&addr, spec, None, now)
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    state.registry.peers.insert(
+        addr,
+        crate::node::state::PeerRuntime {
+            sync_version: ergo_p2p::peer::SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    (addr, rx)
+}
+
+fn send_to(
+    state: &mut NodeState,
+    peer: std::net::SocketAddr,
+    code: u8,
+    payload: &[u8],
+) -> Vec<Action> {
+    crate::node::handle_message(state, peer, code, payload, Instant::now())
+}
+
+fn sent_frames(actions: &[Action], code: u8) -> Vec<Vec<u8>> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer {
+                code: c, payload, ..
+            } if *c == code => Some(payload.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn handshake_advertises_6_5_0_only_when_enabled() {
+    use ergo_p2p::handshake::Version;
+    assert_eq!(advertised_version(true), Version::SUBBLOCKS);
+    assert_eq!(advertised_version(false), Version::CURRENT);
+    assert!(
+        Version::CURRENT < Version::SUBBLOCKS,
+        "a disabled node must advertise BELOW the subblocks floor"
+    );
+}
+
+#[test]
+fn code_100_with_runtime_absent_is_ignored_like_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19601,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    assert!(state.input_blocks.is_none());
+
+    let ann = ts::announcement([0u8; 32], 1, 1, None);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+    assert!(actions.is_empty(), "no reply, no penalty — just ignored");
+    assert_eq!(
+        state.peer_manager.get(&peer).unwrap().last_progress,
+        before,
+        "an ignored opcode is not progress"
+    );
+}
+
+#[test]
+fn code_100_announcement_feeds_processor_and_requests_missing_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19602,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(1, 1), ts::body(2, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 7, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .announcement(&ann_id)
+            .is_some(),
+        "the announcement reached the processor"
+    );
+    // The mempool is empty, so every announced weak id is unresolved and
+    // must be asked for from the announcer.
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST);
+    assert_eq!(reqs.len(), 1, "one body request to the announcer");
+    let req = ergo_p2p::message::deserialize_input_block_txs_request(&reqs[0]).unwrap();
+    assert_eq!(req.input_block_id, ann_id);
+    let mut got = req.weak_ids.clone();
+    let mut want: Vec<_> = bodies.iter().map(|b| b.weak_id).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "asks for exactly the unresolved weak ids");
+}
+
+#[test]
+fn code_104_bodies_reach_processor_from_announcer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19603,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(3, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 8, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+
+    let txs = ergo_p2p::message::InputBlockTxs {
+        input_block_id: ann_id,
+        transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+    };
+    let payload = ergo_p2p::message::serialize_input_block_txs(&txs).unwrap();
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &payload,
+    );
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().body(&bodies[0].tx_ref).is_some(),
+        "the delivered body is cached"
+    );
+    assert_eq!(
+        rt.processor().transaction_refs(&ann_id),
+        Some(&bodies.iter().map(|b| b.tx_ref).collect::<Vec<_>>()[..]),
+        "and is seated in the announced order"
+    );
+}
+
+#[test]
+fn code_102_ids_reach_processor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19604,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // An announcement that omits the weak-id list: the processor asks
+    // for it (−122) and this is the answer.
+    let ann = ts::announcement([0u8; 32], 1, 9, None);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+
+    let payload =
+        ergo_p2p::message::serialize_input_block_tx_ids(&ergo_p2p::message::InputBlockTxIds {
+            input_block_id: ann_id,
+            weak_ids: Vec::new(),
+        });
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS,
+        &payload,
+    );
+
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .weak_ids(&ann_id),
+        Some(Vec::new()),
+        "the id list is recorded (empty is a real answer, not a miss)"
+    );
+}
+
+#[test]
+fn code_105_request_is_served_from_processor_bodies_by_weak_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19605,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(4, 1), ts::body(5, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 10, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: ann_id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    // Ask for ONE of the two.
+    let req = ergo_p2p::message::InputBlockTxsRequest {
+        input_block_id: ann_id,
+        weak_ids: vec![bodies[1].weak_id],
+    };
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(&req),
+    );
+    let replies = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS);
+    assert_eq!(replies.len(), 1);
+    let got = ergo_p2p::message::deserialize_input_block_txs(&replies[0]).unwrap();
+    assert_eq!(got.input_block_id, ann_id);
+    assert_eq!(
+        got.transactions,
+        vec![bodies[1].tx.clone()],
+        "serves only the requested weak ids"
+    );
+}
+
+/// Seed `state` with an announcement (plus bodies) from `peer`.
+fn seed_announcement(
+    state: &mut NodeState,
+    peer: std::net::SocketAddr,
+    nonce: u64,
+    bodies: &[ergo_inputblocks::processor::Body],
+) -> [u8; 32] {
+    let ann = ts::announcement_for([0u8; 32], 1, nonce, None, bodies);
+    let id = ts::ann_id(&ann);
+    let _ = send_to(
+        state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    id
+}
+
+fn request_modifier_payload(type_id: u8, ids: &[[u8; 32]]) -> Vec<u8> {
+    ergo_p2p::message::serialize_inv(&ergo_p2p::types::InvData {
+        type_id,
+        ids: ids.to_vec(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn request_modifier_minus_123_serves_announcement_code_100() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19606,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let id = seed_announcement(&mut state, peer, 11, &[ts::body(6, 1)]);
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(ergo_p2p::types::ModifierTypeId::InputBlock.as_byte(), &[id]),
+    );
+    let served = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK);
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        ts::ann_id(&ergo_p2p::message::deserialize_input_block(&served[0]).unwrap()),
+        id
+    );
+
+    // An id we do not hold is ignored, with no penalty (spec 9.4).
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::InputBlock.as_byte(),
+            &[[0xee; 32]],
+        ),
+    );
+    assert!(actions.is_empty(), "unknown id: no reply and no penalty");
+}
+
+#[test]
+fn request_modifier_minus_122_serves_weak_ids_code_102() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19607,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let bodies = [ts::body(7, 1)];
+    let id = seed_announcement(&mut state, peer, 12, &bodies);
+    // Scala's `getInputBlockTransactionWeakIds` reads the block's
+    // RESOLVED transaction references, so the ids become servable once
+    // the bodies land — not on the announcement alone.
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::InputBlockTransactionIds.as_byte(),
+            &[id],
+        ),
+    );
+    let served = sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS);
+    assert_eq!(served.len(), 1);
+    let got = ergo_p2p::message::deserialize_input_block_tx_ids(&served[0]).unwrap();
+    assert_eq!(got.input_block_id, id);
+    assert_eq!(got.weak_ids, vec![bodies[0].weak_id]);
+}
+
+#[test]
+fn request_modifier_minus_121_serves_ordering_announcement_code_106() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19608,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 13, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .ordering_announcement(&oa_id)
+            .is_some(),
+        "the ordering announcement was stored"
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_REQUEST_MODIFIER,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[oa_id],
+        ),
+    );
+    let served = sent_frames(
+        &actions,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+    );
+    assert_eq!(served.len(), 1);
+    assert_eq!(
+        ts::header_id(
+            &ergo_p2p::message::deserialize_ordering_block_announcement_msg(&served[0])
+                .unwrap()
+                .header
+        ),
+        oa_id
+    );
+}
+
+#[test]
+fn inv_minus_121_from_eligible_peer_requests_announcement() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19609,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let unknown = [0x7c; 32];
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[unknown],
+        ),
+    );
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "we ask the advertiser for it");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte()
+    );
+    assert_eq!(inv.ids, vec![unknown]);
+    assert_eq!(
+        state.coordinator.delivery().status(&unknown),
+        ergo_p2p::delivery::ModifierStatus::Requested,
+        "the request is registered with the delivery tracker"
+    );
+}
+
+#[test]
+fn inv_minus_121_from_a_peer_below_6_5_0_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19610,
+        ergo_p2p::handshake::Version::CURRENT,
+        now,
+    );
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[[0x7d; 32]],
+        ),
+    );
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn progress_classification_counts_100_and_106_only_and_102_104_105_when_answering() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19611,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let progress_of = |state: &NodeState| state.peer_manager.get(&peer).unwrap().last_progress;
+
+    // 100 is always progress.
+    let before = progress_of(&state);
+    let bodies = [ts::body(8, 1)];
+    let id = seed_announcement(&mut state, peer, 14, &bodies);
+    assert!(progress_of(&state) > before, "100 counts");
+
+    // A 104 for a block we DID ask this peer for counts: the
+    // announcement above left an outstanding message-105 expectation.
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert!(progress_of(&state) > before, "a solicited 104 is progress");
+
+    // An unsolicited 104 — a block this peer was never asked for — is
+    // not. Spraying bodies must not hold a slot.
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: [0xbb; 32],
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "104 that answers no registered request is not progress"
+    );
+
+    // A 105 we cannot serve is not progress; one we can serve is.
+    let before = progress_of(&state);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(
+            &ergo_p2p::message::InputBlockTxsRequest {
+                input_block_id: [0xaa; 32],
+                weak_ids: vec![[9u8; 6]],
+            },
+        ),
+    );
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "an unservable 105 is not progress"
+    );
+
+    // Serving a 105 is NOT progress on its own (round 2, finding 6):
+    // spec 9.1 credits 105 only when it answers a request of OURS that
+    // is still outstanding. A peer asking us for data tells us nothing
+    // about whether that peer is useful to us.
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &ergo_p2p::message::serialize_input_block_txs_request(
+            &ergo_p2p::message::InputBlockTxsRequest {
+                input_block_id: id,
+                weak_ids: vec![bodies[0].weak_id],
+            },
+        ),
+    );
+    assert_eq!(
+        progress_of(&state),
+        before,
+        "serving a 105 with nothing outstanding is not progress"
+    );
+
+    // 106 is always progress.
+    let before = progress_of(&state);
+    let oa = ts::ordering_announcement([0u8; 32], 1, 15, Vec::new());
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert!(progress_of(&state) > before, "106 counts");
+}
+
+#[test]
+fn malformed_input_block_frames_penalize_the_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19612,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    for code in [
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TX_IDS,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+    ] {
+        let actions = send_to(&mut state, peer, code, &[0xff, 0xff, 0xff]);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Penalize { penalty, .. } if *penalty == Penalty::Misbehavior)),
+            "code {code} with a garbage payload must penalize"
+        );
+    }
+}
+
+/// Finding 2: input-block requests must go through the node's delivery
+/// tracker, not a bare serializer. Without a registered expectation the
+/// answering frame is unsolicited — it loses the byte-cap exemption, the
+/// progress credit, and the timeout sweep — and a duplicate request is
+/// not suppressed.
+#[test]
+fn input_block_requests_register_with_the_delivery_tracker() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19620,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x31u8; 32];
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        now,
+    );
+    assert_eq!(actions.len(), 1, "the request is emitted");
+    assert_eq!(
+        state.coordinator.delivery().status(&block),
+        ModifierStatus::Requested,
+        "-123 registers an expectation"
+    );
+
+    // A repeat while it is still in flight must not go out twice.
+    let again = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        now,
+    );
+    assert!(
+        again.is_empty(),
+        "duplicate request suppressed by the tracker"
+    );
+}
+
+#[test]
+fn body_request_registers_so_the_reply_counts_as_solicited() {
+    use ergo_p2p::delivery::{DeliveryAction, ModifierStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19621,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x32u8; 32];
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::RequestTransactions {
+            input_block_id: block,
+            weak_ids: vec![[1u8; 6]],
+            from: tag,
+        }],
+        now,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).len(),
+        1
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&block),
+        ModifierStatus::Requested,
+        "message 105 registers an expectation keyed by the input block"
+    );
+    assert_eq!(
+        state.coordinator.delivery().on_received(&block, &peer),
+        DeliveryAction::Accept,
+        "so the code-104 reply is recognised as solicited"
+    );
+}
+
+#[test]
+fn input_block_timeouts_are_forgotten_not_redistributed() {
+    // The processor owns input-block retry policy (its own per-peer
+    // slots + request_timeout_ms sweep). The coordinator's generic
+    // timeout path must not run a second retry engine over the same
+    // ids, nor NonDelivery-penalize a peer for a request the processor
+    // has already abandoned.
+    use ergo_p2p::types::ModifierTypeId;
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::InputBlock.as_byte()
+    ));
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::InputBlockTransactionIds.as_byte()
+    ));
+    assert!(ModifierTypeId::is_input_block_family(
+        ModifierTypeId::OrderingBlockAnnouncement.as_byte()
+    ));
+    assert!(!ModifierTypeId::is_input_block_family(
+        ModifierTypeId::BlockTransactions.as_byte()
+    ));
+    assert!(!ModifierTypeId::is_input_block_family(
+        ModifierTypeId::Header.as_byte()
+    ));
+}
+
+// ----- relay eligibility (finding 3) -----
+
+/// Teach the coordinator this peer's height by delivering a V2 SyncInfo
+/// carrying one real header at that height — the same path a live peer
+/// takes.
+fn set_peer_height(state: &mut NodeState, peer: std::net::SocketAddr, height: u32) {
+    let header = ts::header([0u8; 32], height, u64::from(height) + 900_000, [0u8; 32]);
+    let (bytes, _) = serialize_header(&header).unwrap();
+    let payload = ergo_p2p::message::serialize_sync_info(&ergo_p2p::message::SyncInfo::V2 {
+        headers: vec![bytes],
+    })
+    .unwrap();
+    let _ = send_to(state, peer, ergo_p2p::message::CODE_SYNC_INFO, &payload);
+    assert_eq!(
+        state
+            .coordinator
+            .peer_sync_snapshots()
+            .get(&peer)
+            .and_then(|s| s.peer_height),
+        Some(height),
+        "fixture must actually record a height"
+    );
+}
+
+/// Register a peer with an explicit `Mode` feature (or none at all).
+fn handshake_peer_with_mode(
+    state: &mut NodeState,
+    port: u16,
+    version: ergo_p2p::handshake::Version,
+    mode: Option<ergo_p2p::handshake::PeerFeature>,
+    now: Instant,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<ergo_p2p::framing::MessageFrame>,
+) {
+    // One peer per IP: the peer manager enforces a per-IP connection
+    // limit, and this fixture needs several peers at once.
+    // One peer per /16: the peer manager enforces per-IP and per-subnet
+    // connection limits, and this fixture needs several peers at once.
+    let addr: std::net::SocketAddr = format!("10.{}.0.1:9030", port % 256).parse().unwrap();
+    state.peer_manager.register_outbound(addr, now).unwrap();
+    state.peer_manager.mark_tcp_connected(&addr);
+    let mut spec = state.our_handshake.peer_spec.clone();
+    spec.version = version;
+    spec.features = mode.into_iter().collect();
+    state
+        .peer_manager
+        .complete_handshake(&addr, spec, None, now)
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    state.registry.peers.insert(
+        addr,
+        crate::node::state::PeerRuntime {
+            sync_version: ergo_p2p::peer::SyncVersion::V2,
+            outbound_tx: tx,
+        },
+    );
+    (addr, rx)
+}
+
+fn utxo_mode() -> ergo_p2p::handshake::PeerFeature {
+    ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 0,
+        verify_tx: true,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }
+}
+
+fn digest_mode() -> ergo_p2p::handshake::PeerFeature {
+    ergo_p2p::handshake::PeerFeature::Mode {
+        state_type: 1,
+        verify_tx: false,
+        nipopow: None,
+        blocks_to_keep: -1,
+    }
+}
+
+/// Finding 3: relay eligibility must be AFFIRMATIVE. Degrading open
+/// ("no Mode feature? probably fine") relays input blocks to nodes that
+/// cannot use them and to peers whose chain position we do not know.
+#[test]
+fn relay_requires_affirmative_utxo_mode_version_and_in_window_height() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let our_height = state.store.chain_state_meta().best_full_block_height;
+
+    let (good, _g) = handshake_peer_with_mode(
+        &mut state,
+        19630,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, good, our_height + 1);
+
+    let (no_mode, _a) = handshake_peer_with_mode(
+        &mut state,
+        19631,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        None,
+        now,
+    );
+    set_peer_height(&mut state, no_mode, our_height);
+
+    let (digest, _b) = handshake_peer_with_mode(
+        &mut state,
+        19632,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(digest_mode()),
+        now,
+    );
+    set_peer_height(&mut state, digest, our_height);
+
+    let (old, _c) = handshake_peer_with_mode(
+        &mut state,
+        19633,
+        ergo_p2p::handshake::Version::CURRENT,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, old, our_height);
+
+    // Height known but far away.
+    let (far, _d) = handshake_peer_with_mode(
+        &mut state,
+        19634,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    set_peer_height(&mut state, far, our_height + 50);
+
+    // Eligible in every respect except that we have never learned a height.
+    let (unknown_height, _e) = handshake_peer_with_mode(
+        &mut state,
+        19635,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+
+    assert_eq!(
+        relay_peers(&state),
+        vec![good],
+        "only the affirmatively eligible peer is relayed to"
+    );
+    let _ = (no_mode, digest, old, far, unknown_height);
+}
+
+/// Finding 4: `retained` is released only by an explicit rollback, but
+/// spec 7.6 says an applied ordering block emits an EMPTY ChainChanged —
+/// the abandoned input chain's transactions are deliberately not restored
+/// (F6 parity). Without a prune those entries, and the transaction bytes
+/// they pin, live until the process restarts.
+#[test]
+fn ordering_turnover_releases_retained_entries_without_restoring_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let stranded = ts::body(0xc3, 1);
+    let tx_id = ergo_primitives::digest::Digest32::from_bytes(stranded.tx_ref.tx_id);
+
+    state.input_blocks.as_mut().unwrap().retained.insert(
+        [0x41u8; 32],
+        vec![RemovedEntry {
+            tx_id,
+            bytes: stranded.bytes.clone(),
+            fee: 0,
+            size_bytes: stranded.bytes.len() as u32,
+            cost: 1000,
+        }],
+    );
+
+    let _ = on_ordering_block_applied(&mut state, [0x42; 32], 1, Instant::now());
+
+    assert!(
+        state.input_blocks.as_ref().unwrap().retained.is_empty(),
+        "entries for blocks no longer on the best input chain are released"
+    );
+    assert!(
+        !state.mempool.contains(&tx_id),
+        "released is NOT restored: an applied ordering block drops the \
+         abandoned input chain's transactions (spec 7.6 / F6)"
+    );
+}
+
+// ----- successful inline validation (finding 5) -----
+
+/// `sigmaProp(true)` — `BoolToSigmaProp(Const(SBoolean, true))`.
+///
+/// A bare `Const(SBoolean, true)` root is NOT usable: rule 1001
+/// (`CheckDeserializedScriptIsSigmaProp`) rejects a sizeless tree whose
+/// root is not `SigmaProp`, and under `has_size` the same failure is
+/// wrapped as an unparsed soft-fork tree that cannot be evaluated at all.
+fn true_tree() -> ergo_ser::ergo_tree::ErgoTree {
+    use ergo_ser::opcode::{Expr, IrNode, Payload};
+    ergo_ser::ergo_tree::ErgoTree {
+        version: 0,
+        has_size: false,
+        constant_segregation: false,
+        constants: vec![],
+        body: Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(Expr::Const {
+                tpe: ergo_ser::sigma_type::SigmaType::SBoolean,
+                val: ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            })),
+        }),
+    }
+}
+
+/// Seed one spendable box paying to a trivially-true script, and return
+/// its id. `creation_height` must not exceed the context height or the
+/// spending transaction is rejected on the output-height rule.
+fn seed_spendable_box(
+    state: &mut NodeState,
+    seed: u8,
+    value: u64,
+    creation_height: u32,
+) -> ergo_primitives::digest::Digest32 {
+    use ergo_ser::ergo_box::{write_ergo_box, ErgoBox, ErgoBoxCandidate};
+    use ergo_ser::register::AdditionalRegisters;
+    let candidate = ErgoBoxCandidate::new(
+        value,
+        true_tree(),
+        creation_height,
+        vec![],
+        AdditionalRegisters::empty(),
+    )
+    .unwrap();
+    let ergo_box = ErgoBox {
+        candidate,
+        transaction_id: ergo_primitives::digest::ModifierId::from_bytes([seed; 32]),
+        index: 0,
+    };
+    let id = ergo_box.box_id().unwrap();
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    write_ergo_box(&mut w, &ergo_box).unwrap();
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .tree_insert_for_test(*id.as_bytes(), w.result());
+    id
+}
+
+/// A state with 11 chain-linked headers applied, the best full block
+/// hydrated into the executor's context window, and the input-block
+/// subsystem live. Returns `(state, best_header_id, best_height)`.
+fn live_state_with_applied_tip(dir: &std::path::Path) -> (NodeState, [u8; 32], u32) {
+    let mut state = live_state(dir);
+    let headers = seed_header_chain(&mut state, 11);
+    let best = headers.last().unwrap().clone();
+    let best_id = header_id_of(&best);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(best_id, best.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+    (state, best_id, best.height)
+}
+
+/// Finding 5: the inline-validation path needs a test that actually
+/// VALIDATES. This drives a processor-issued job with real cached bodies
+/// spending a real box, and asserts the whole chain: validation passes,
+/// the generation is unchanged (nothing invalidated the job), the block
+/// is applied to the input chain, and the mempool half ran.
+#[test]
+fn inline_validation_success_applies_the_block_and_updates_the_mempool() {
+    use ergo_ser::ergo_box::ErgoBoxCandidate;
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::register::AdditionalRegisters;
+    use ergo_ser::transaction::Transaction;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, best_id, best_height) = live_state_with_applied_tip(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19640,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // One box in, one box out, value conserved.
+    let funded = seed_spendable_box(&mut state, 0xd1, 1_000_000, best_height);
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: funded,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            1_000_000,
+            true_tree(),
+            best_height,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let body = ts::body_of(tx);
+    let pooled_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    // Seat the same transaction in the mempool, so the apply half of
+    // ChainChanged has something to evict and the effect is observable.
+    state
+        .mempool
+        .restore_input_block_txs(&[(pooled_id, body.bytes.clone(), None)], Instant::now());
+    assert!(state.mempool.contains(&pooled_id), "fixture seats the tx");
+
+    // Announce at best_height + 1 (the only actionable slot) under the
+    // applied tip, so the block lands in that ordering block's tree.
+    let ann = ts::announcement_for(
+        best_id,
+        best_height + 1,
+        21,
+        None,
+        std::slice::from_ref(&body),
+    );
+    let ann_id = ts::ann_id(&ann);
+    let generation_before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    // The body is already pooled, so spec 7.5 step 1 resolves every
+    // announced weak id from the mempool: the block completes on the
+    // announcement alone, the processor emits Validate, and the effect
+    // executor answers it inline against the committed UTXO set.
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "a valid announcement is not misbehaviour"
+    );
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).is_empty(),
+        "nothing to request: every weak id resolved from the pool"
+    );
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(
+        drops(rt, "ValidationFailed"),
+        0,
+        "validation must not have been rejected"
+    );
+    assert_eq!(
+        drops(rt, "CacheEvicted"),
+        0,
+        "the bodies were cached for the job"
+    );
+    assert_eq!(
+        drops(rt, "StaleValidation"),
+        0,
+        "the job was not superseded: its result was APPLIED, not dropped"
+    );
+    // The generation bumps exactly once, and only because the chain
+    // changed — spec 7.6 makes every ChainChanged a generation bump. A
+    // second bump would mean something else invalidated the view while
+    // the job was in flight.
+    assert_eq!(
+        rt.processor().generation(),
+        generation_before + 1,
+        "exactly one generation bump, from the successful application"
+    );
+    assert_eq!(
+        rt.processor().best_input_chain(),
+        vec![ann_id],
+        "the validated block is the best input chain (drops: {:?})",
+        rt.counters.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        rt.processor()
+            .best_input_block()
+            .is_some_and(|a| ts::ann_id(a) == ann_id),
+        "and is the best input block"
+    );
+    assert_eq!(
+        rt.retained.get(&ann_id).map(|v| v.len()),
+        Some(1),
+        "the mempool half ran: the applied block's eviction is retained \
+         so a later fork switch can put it back"
+    );
+    assert!(
+        !state.mempool.contains(&pooled_id),
+        "an applied input-block transaction leaves the pool"
+    );
+}
+
+/// The error-path counterpart, retained from the first round: a job the
+/// processor never issued is answered and dropped as stale, proving the
+/// ValidationResult really is fed back through `Processor::handle`.
+#[test]
+fn inline_validation_of_an_unissued_job_is_dropped_as_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let rt = runtime();
+    let generation = rt.processor().generation();
+    state.input_blocks = Some(rt);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::Validate {
+            job: 4242,
+            generation,
+            input_block_id: [0x33u8; 32],
+            txs: vec![TxRef {
+                tx_id: [1u8; 32],
+                witness_id: [2u8; 31],
+            }],
+            previous: Vec::new(),
+        }],
+        Instant::now(),
+    );
+    assert!(actions.is_empty());
+    assert_eq!(
+        drops(
+            state.input_blocks.as_ref().unwrap(),
+            DropReason::StaleValidation { generation: 0 }.name()
+        ),
+        1
+    );
+}
+
+// ----- oracle parity (finding 7) -----
+
+/// A mainnet header corpus row (`test-vectors/mainnet/headers_*.json`).
+#[derive(serde::Deserialize)]
+struct MainnetHeaderVector {
+    height: u32,
+    id: String,
+    bytes: String,
+}
+
+/// Load a mainnet header corpus, verifying each row really is a mainnet
+/// header (`id == blake2b256(bytes)`) so the oracle cannot be substituted.
+fn load_mainnet_headers(path: &str) -> Vec<(u32, [u8; 32], Vec<u8>, Header)> {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let rows: Vec<MainnetHeaderVector> =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    rows.into_iter()
+        .map(|v| {
+            let bytes = hex::decode(&v.bytes).unwrap();
+            let id = *ergo_primitives::digest::blake2b256(&bytes).as_bytes();
+            assert_eq!(
+                hex::encode(id),
+                v.id,
+                "corpus row at height {} is not a real mainnet header",
+                v.height
+            );
+            let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+            let header = read_header(&mut r).unwrap();
+            assert_eq!(header.height, v.height);
+            (v.height, id, bytes, header)
+        })
+        .collect()
+}
+
+/// Seed real mainnet headers into the store at their real heights.
+fn seed_mainnet_headers(
+    state: &mut NodeState,
+    rows: &[(u32, [u8; 32], Vec<u8>, Header)],
+    index_best_chain: bool,
+) {
+    let store = state.store.as_utxo_mut().expect("utxo backend");
+    store.begin_header_batch();
+    for (height, id, bytes, header) in rows {
+        let meta = HeaderMeta {
+            parent_id: *header.parent_id.as_bytes(),
+            height: *height,
+            cumulative_score: u64::from(*height).to_be_bytes().to_vec(),
+            pow_validity: 1,
+            timestamp: header.timestamp,
+        };
+        store
+            .store_validated_header(
+                id,
+                bytes,
+                &meta,
+                index_best_chain.then(|| (*height, meta.cumulative_score.clone())),
+            )
+            .unwrap_or_else(|e| panic!("store mainnet header h={height}: {e:?}"));
+    }
+    store.flush_header_batch().unwrap();
+}
+
+/// Finding 7: the difficulty surface is consensus, so the expected value
+/// must come from Scala, not from re-running our own `next_n_bits`.
+///
+/// The oracle here is the mainnet chain itself: for a real header `C`,
+/// the Scala node's answer to "what nBits must follow `C.parent`" is
+/// exactly `C.n_bits` — that is what the network accepted. Loading a
+/// contiguous mainnet run into a header store and asserting
+/// `expected_n_bits_after(parent) == child.n_bits` therefore checks the
+/// whole node-side path (header lookup, genesis skip, parent
+/// substitution, epoch-window selection) against Scala-produced values.
+///
+/// `headers_1_2000.json` spans the epoch boundary at child height 1025
+/// (`1024 % 1024 == 0`), so both the flat and the retarget path run.
+#[test]
+fn expected_n_bits_after_matches_mainnet_headers_across_an_epoch_boundary() {
+    const TOP: u32 = 1100;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+
+    let mut rows = load_mainnet_headers("../test-vectors/mainnet/headers_1_2000.json");
+    rows.retain(|(h, ..)| *h <= TOP);
+    assert_eq!(rows.len() as u32, TOP, "corpus must be contiguous 1..=TOP");
+    seed_mainnet_headers(&mut state, &rows, true);
+
+    // The retarget boundary must be inside the window, or this test
+    // only exercises the flat path.
+    let boundary = 1025u32;
+    assert!(
+        ergo_crypto::difficulty::is_recalculation_height(boundary, &DifficultyParams::mainnet()),
+        "1025 must be a mainnet recalculation height"
+    );
+
+    let mut checked = 0usize;
+    let mut retargets = 0usize;
+    for w in rows.windows(2) {
+        let (parent_height, parent_id, ..) = &w[0];
+        let (child_height, _, _, child) = &w[1];
+        assert_eq!(*child_height, parent_height + 1);
+        assert_eq!(
+            expected_n_bits_after(&state, parent_id),
+            Some(child.n_bits),
+            "expected nBits after mainnet height {parent_height} must be the \
+             nBits mainnet actually used at {child_height}"
+        );
+        checked += 1;
+        if ergo_crypto::difficulty::is_recalculation_height(
+            *child_height,
+            &DifficultyParams::mainnet(),
+        ) {
+            retargets += 1;
+        }
+    }
+    assert_eq!(checked, (TOP - 1) as usize, "every transition was checked");
+    assert!(
+        retargets >= 1,
+        "at least one real retarget must be covered, got {retargets}"
+    );
+}
+
+/// The EIP-37 boundary corpus is SPARSE: its 8-epoch lookback window is
+/// nine heights 128 apart, and the store's best-chain height index is
+/// built by walking parent pointers, so those heights cannot be indexed
+/// without the ~1000 intervening headers. That makes this the right
+/// place to pin the other half of the contract — the node-side lookup
+/// FAILS CLOSED.
+///
+/// `expected_n_bits_after` must return `None` when it cannot assemble
+/// the full window, never a value computed from the part of the window
+/// it could find: a partial window yields a plausible-looking wrong
+/// difficulty, and the announcement check would then reject valid input
+/// blocks (or accept invalid ones). The retarget arithmetic itself is
+/// pinned against mainnet at the EIP-37 boundary by
+/// `ergo-crypto/tests/it/difficulty_mainnet.rs`.
+#[test]
+fn expected_n_bits_after_fails_closed_when_the_lookback_window_is_unindexed() {
+    const BOUNDARY: u32 = 844_673;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+
+    let rows = load_mainnet_headers("../test-vectors/mainnet/headers_eip37_curated.json");
+    let heights: Vec<u32> = rows.iter().map(|(h, ..)| *h).collect();
+    assert!(
+        heights.contains(&BOUNDARY) && heights.contains(&(BOUNDARY - 1)),
+        "corpus must carry the boundary and its parent, got {heights:?}"
+    );
+    // The lookback really is the sparse 8-epoch window, so the height
+    // index genuinely cannot serve it.
+    let needed = previous_heights_for_recalculation(
+        BOUNDARY,
+        epoch_length_for_height(BOUNDARY, &DifficultyParams::mainnet()),
+    );
+    assert_eq!(
+        needed.len(),
+        9,
+        "EIP-37 looks back 8 epochs, got {needed:?}"
+    );
+
+    seed_mainnet_headers(&mut state, &rows, false);
+    let (_, parent_id, ..) = rows
+        .iter()
+        .find(|(h, ..)| *h == BOUNDARY - 1)
+        .expect("parent row");
+    assert!(
+        state.store.get_header(parent_id).unwrap().is_some(),
+        "the parent header itself IS stored — only the window is missing"
+    );
+    assert_eq!(
+        expected_n_bits_after(&state, parent_id),
+        None,
+        "an unassemblable window must yield no expectation, not a guess"
+    );
+}
+
+/// Round 2, finding 3: a code-106 reply must acknowledge the tracked
+/// −121 expectation it answers. Without it the request stays outstanding
+/// forever, the peer gets no progress credit for serving us, and the
+/// duplicate-suppression in `register_expectation` refuses to ask anyone
+/// else for the same announcement.
+#[test]
+fn code_106_acknowledges_the_tracked_ordering_request() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19660,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 31, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+
+    // Ask for it the way an Inv −121 does.
+    let inv = ergo_p2p::message::serialize_inv(&ergo_p2p::types::InvData {
+        type_id: ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+        ids: vec![oa_id],
+    })
+    .unwrap();
+    let _ = send_to(&mut state, peer, ergo_p2p::message::CODE_INV, &inv);
+    assert_eq!(
+        state.coordinator.delivery().status(&oa_id),
+        ModifierStatus::Requested,
+        "fixture leaves a −121 expectation outstanding"
+    );
+
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+
+    assert_eq!(
+        state.coordinator.delivery().status(&oa_id),
+        ModifierStatus::Received,
+        "the reply clears the expectation it answered"
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "106 is progress"
+    );
+}
+
+/// Round 2, finding 3 (second half): the byte-cap exemption must cover
+/// every solicited input-block reply, 106 included. A solicited reply
+/// dropped on the byte axis would time out our own request and
+/// NonDelivery-penalize the peer that was serving us — the exact
+/// self-inflicted starvation the `CODE_MODIFIER` exemption exists to
+/// prevent.
+#[test]
+fn solicited_input_block_replies_are_exempt_from_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19661,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 32, Vec::new());
+    let oa_id = ts::header_id(&oa.header);
+    let oa_payload = ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap();
+
+    // Unsolicited: no exemption.
+    assert!(
+        !crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+            &oa_payload,
+        ),
+        "an unsolicited 106 keeps the ordinary byte cap"
+    );
+
+    // Register the expectation the Inv −121 path would.
+    crate::node::register_expectation(
+        &mut state,
+        peer,
+        ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+        &[oa_id],
+        now,
+    );
+    assert!(
+        crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+            &oa_payload,
+        ),
+        "a solicited 106 is exempt"
+    );
+
+    // 105 is a request FROM the peer: serving it is our choice, so it
+    // never earns the exemption.
+    let req = ergo_p2p::message::serialize_input_block_txs_request(
+        &ergo_p2p::message::InputBlockTxsRequest {
+            input_block_id: oa_id,
+            weak_ids: vec![[1u8; 6]],
+        },
+    );
+    assert!(
+        !crate::node::messaging::input_block_frame_answers_our_request(
+            &state,
+            &peer,
+            ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+            &req,
+        ),
+        "an inbound 105 is never exempt"
+    );
+}
+
+/// Round 2, finding 4: acknowledgement must match the PHASE that was
+/// requested, not just the block id and peer.
+///
+/// A block walks announcement → weak-id list → bodies, and every phase
+/// re-registers the SAME id. Acknowledging on id alone lets a replayed
+/// code 100 clear an outstanding body expectation: the real code-104
+/// reply then looks unsolicited, loses its byte-cap exemption and its
+/// progress credit, and the peer serving us is charged for a request it
+/// did answer.
+#[test]
+fn replayed_announcement_does_not_clear_an_outstanding_body_expectation() {
+    use ergo_p2p::delivery::{DeliveryAction, ModifierStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19670,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // Announce a block whose bodies we do not have: the node asks for
+    // them with message 105, leaving a BODY expectation outstanding.
+    let bodies = [ts::body(0x51, 1)];
+    let ann = ts::announcement_for([0u8; 32], 1, 41, None, &bodies);
+    let ann_id = ts::ann_id(&ann);
+    let ann_payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ann_payload,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST).len(),
+        1,
+        "fixture leaves a body request outstanding"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Requested
+    );
+
+    // The peer replays the announcement. That answers nothing we are
+    // waiting for — we are waiting for BODIES.
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ann_payload,
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Requested,
+        "a replayed announcement must not clear the body expectation"
+    );
+
+    // So the real body delivery still counts as solicited.
+    assert_eq!(
+        state.coordinator.delivery().on_received(&ann_id, &peer),
+        DeliveryAction::Accept,
+        "the code-104 reply keeps its solicited status"
+    );
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: ann_id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "the solicited 104 is progress"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&ann_id),
+        ModifierStatus::Received,
+        "and it is the frame that clears the expectation"
+    );
+}
+
+/// The phase map must not outlive the requests it describes: the
+/// delivery tracker's own timeout sweep releases ids we never got an
+/// answer for, and the tick prunes the records that went with them.
+#[test]
+fn expectation_records_are_pruned_when_their_request_leaves_the_tracker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let start = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19671,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        start,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let block = [0x61u8; 32];
+    let _ = execute_effects(
+        &mut state,
+        vec![Effect::RequestInputBlock {
+            id: block,
+            from: tag,
+        }],
+        start,
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .expected_ids()
+            .collect::<Vec<_>>(),
+        vec![block],
+        "the request records its phase"
+    );
+
+    // Past the tracker's delivery timeout: the sweep releases the id,
+    // and the tick must drop the record with it.
+    let later = start + ergo_p2p::delivery::DELIVERY_TIMEOUT + std::time::Duration::from_secs(1);
+    let _ = state.coordinator.check_timeouts(later, &[]);
+    let _ = on_tick(&mut state, later);
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .expected_ids()
+            .next()
+            .is_none(),
+        "a request the tracker no longer holds leaves no record behind"
+    );
+}
+
+/// Round 2, finding 5: the ordering hook used to ride the mempool's
+/// tip-change diff, which sits behind `handle_mempool_tick`'s
+/// mempool-disabled early return — so a node with input blocks on and
+/// the mempool off would let the processor's ordering tip go stale while
+/// committed blocks advanced.
+///
+/// The pairing is now refused at config load, and the hook is driven
+/// from the committed state on the heartbeat tick regardless, which is
+/// what this pins: no mempool tick is involved anywhere.
+#[test]
+fn ordering_tip_reaches_the_processor_from_the_tick_not_the_mempool() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 3);
+    seed_best_ordering(&mut state);
+    let before = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+
+    // Commit a block. Nothing touches the mempool notifier.
+    let tip = &headers[1];
+    let tip_id = header_id_of(tip);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(tip_id, tip.height)
+        .unwrap();
+
+    let _ = on_tick(&mut state, Instant::now());
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert!(
+        rt.processor().generation() > before,
+        "the committed tip reached the processor"
+    );
+    assert_eq!(rt.last_ordering_tip, Some(tip_id));
+
+    // A second tick at the same tip is not a new event.
+    let generation = rt.processor().generation();
+    let _ = on_tick(&mut state, Instant::now());
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .generation(),
+        generation,
+        "an unchanged tip is not re-announced"
+    );
+}
+
+/// Reorg-vs-linear is classified on the exact rule — does the new tip's
+/// parent pointer name the tip we last reported? — rather than on the
+/// mempool-level proxy "were any pooled transactions demoted", which
+/// would call a reorg with an empty pool a linear apply.
+#[test]
+fn ordering_tip_classifies_a_fork_switch_as_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 3);
+    seed_best_ordering(&mut state);
+
+    let advance = |state: &mut NodeState, h: &Header| {
+        let id = header_id_of(h);
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .advance_best_full_block(id, h.height)
+            .unwrap();
+        let _ = on_tick(state, Instant::now());
+        id
+    };
+
+    // h1 then h2: h2's parent IS h1, so this is a linear apply.
+    advance(&mut state, &headers[0]);
+    let h2 = advance(&mut state, &headers[1]);
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().last_ordering_tip,
+        Some(h2)
+    );
+
+    // Now jump to h3's SIBLING position by going back to h1: h1's parent
+    // is not h2, so this is a switch, not an apply.
+    let generation = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+    let h1 = advance(&mut state, &headers[0]);
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(rt.last_ordering_tip, Some(h1));
+    assert!(
+        rt.processor().generation() > generation,
+        "a switch is an event too"
+    );
+}
+
+/// Round 2, finding 6: spec 9.1 credits 102 / 104 / 105 only when the
+/// frame answers a request of ours that is still outstanding. The
+/// dispatcher credited 105 whenever serving happened to succeed, which
+/// let a peer hold its slot by asking us for data we have — the exact
+/// trickle the progress rule exists to refuse.
+#[test]
+fn serving_a_105_is_progress_only_while_a_request_of_ours_is_outstanding() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19680,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // Seat an announcement plus its bodies so the 105 below is servable.
+    let bodies = [ts::body(0x71, 1)];
+    let id = seed_announcement(&mut state, peer, 51, &bodies);
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS,
+        &ergo_p2p::message::serialize_input_block_txs(&ergo_p2p::message::InputBlockTxs {
+            input_block_id: id,
+            transactions: bodies.iter().map(|b| b.tx.clone()).collect(),
+        })
+        .unwrap(),
+    );
+
+    let req = ergo_p2p::message::serialize_input_block_txs_request(
+        &ergo_p2p::message::InputBlockTxsRequest {
+            input_block_id: id,
+            weak_ids: vec![bodies[0].weak_id],
+        },
+    );
+
+    // Nothing of ours is outstanding for this block any more.
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &req,
+    );
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_INPUT_BLOCK_TXS).len(),
+        1,
+        "we do serve it"
+    );
+    assert_eq!(
+        state.peer_manager.get(&peer).unwrap().last_progress,
+        before,
+        "but serving alone is not progress"
+    );
+
+    // With a request of ours outstanding for the same block, the frame
+    // coincides with something we are waiting on and does count.
+    crate::node::register_expectation(
+        &mut state,
+        peer,
+        ergo_p2p::types::ModifierTypeId::InputBlockTransactionIds.as_byte(),
+        &[id],
+        now,
+    );
+    let before = state.peer_manager.get(&peer).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK_TXS_REQUEST,
+        &req,
+    );
+    assert!(
+        state.peer_manager.get(&peer).unwrap().last_progress > before,
+        "a 105 that coincides with an outstanding request of ours counts"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Requested,
+        "and it does NOT consume that expectation — the peer asking us \
+         for bodies is not the peer answering us"
+    );
+}
+
+// ----- fix round 3 -----
+
+/// Round 3, finding 1: `tracked_request_modifier` asks only for the ids
+/// the delivery tracker actually registered, but the Inv path recorded a
+/// phase for every id it *wanted*. So a second peer advertising a set
+/// that overlaps an outstanding request stole the record for the
+/// overlapping id — and the first peer's legitimate reply could then
+/// acknowledge nothing.
+#[test]
+fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
+    use ergo_p2p::delivery::ModifierStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer_a, _ra) = handshake_peer_with_mode(
+        &mut state,
+        19690,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+    let (peer_b, _rb) = handshake_peer_with_mode(
+        &mut state,
+        19691,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        Some(utxo_mode()),
+        now,
+    );
+
+    let oa = ts::ordering_announcement([0u8; 32], 1, 61, Vec::new());
+    let x = ts::header_id(&oa.header);
+    let y = [0x7fu8; 32];
+
+    // A asks for X first, and owns the outstanding request.
+    let a_actions = send_to(
+        &mut state,
+        peer_a,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[x],
+        ),
+    );
+    assert_eq!(
+        sent_frames(&a_actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).len(),
+        1,
+        "A's request goes out"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&x),
+        ModifierStatus::Requested
+    );
+
+    // B advertises [X, Y]. X is already in flight from A, so the tracker
+    // registers only Y — and only Y may take a phase record.
+    let b_actions = send_to(
+        &mut state,
+        peer_b,
+        ergo_p2p::message::CODE_INV,
+        &request_modifier_payload(
+            ergo_p2p::types::ModifierTypeId::OrderingBlockAnnouncement.as_byte(),
+            &[x, y],
+        ),
+    );
+    let b_reqs = sent_frames(&b_actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(b_reqs.len(), 1);
+    assert_eq!(
+        ergo_p2p::message::deserialize_inv(&b_reqs[0]).unwrap().ids,
+        vec![y],
+        "B is only asked for the id the tracker registered to it"
+    );
+
+    // A's reply must still be recognised as the answer to A's request.
+    let before = state.peer_manager.get(&peer_a).unwrap().last_progress;
+    let _ = send_to(
+        &mut state,
+        peer_a,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&x),
+        ModifierStatus::Received,
+        "A's 106 acknowledges A's own outstanding request"
+    );
+    assert!(
+        state.peer_manager.get(&peer_a).unwrap().last_progress > before,
+        "and A is credited for serving us"
+    );
+}
+
+/// Round 3, finding 2: the tip classifier only recognised the previous
+/// tip's IMMEDIATE child as a linear apply, so two committed blocks
+/// between heartbeat ticks — a one-second window, entirely ordinary on a
+/// fast chain — were reported as `OrderingReorg`. That is the wrong
+/// event, and its handler destructively retains only the new tip's tree.
+///
+/// Classification is by ancestry: walk parent pointers back from the new
+/// tip, bounded by the height delta.
+#[test]
+fn a_multi_block_linear_advance_is_an_apply_not_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 6);
+
+    // Start at h1, then commit h2 AND h3 before the next tick fires.
+    let h1 = header_id_of(&headers[0]);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(h1, headers[0].height)
+        .unwrap();
+    seed_best_ordering(&mut state);
+
+    for h in &headers[1..3] {
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .advance_best_full_block(header_id_of(h), h.height)
+            .unwrap();
+    }
+
+    assert_eq!(
+        classify_tip_change(&state, h1, header_id_of(&headers[2]), headers[2].height),
+        TipChange::Applied,
+        "h3 descends from h1 through h2 — a linear advance, not a switch"
+    );
+
+    let _ = on_tick(&mut state, Instant::now());
+    assert_eq!(
+        state.input_blocks.as_ref().unwrap().last_ordering_tip,
+        Some(header_id_of(&headers[2]))
+    );
+}
+
+/// The classifier's truth table WITHIN the walk cap, against a real
+/// forked header store: descendants at several distances are applies; a
+/// sibling, an ancestor (rollback) and an unrelated id are switches.
+/// Beyond the cap is covered by
+/// `a_linear_advance_beyond_the_walk_cap_is_still_an_apply` and
+/// `a_far_advance_that_abandons_the_previous_tip_is_a_reorg`.
+#[test]
+fn tip_change_classification_truth_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let main = seed_header_chain(&mut state, 5);
+
+    // A sibling of h3: same height, different parent-chain position.
+    let fork = ts::header(header_id_of(&main[0]), 3, 9_999, [0u8; 32]);
+    let fork_id = header_id_of(&fork);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            fork.height,
+            fork_id,
+            {
+                let (bytes, _) = serialize_header(&fork).unwrap();
+                bytes
+            },
+            fork.clone(),
+        )],
+        false,
+    );
+
+    let id = |i: usize| header_id_of(&main[i]);
+
+    // Descendants, at one and at three removes.
+    assert_eq!(
+        classify_tip_change(&state, id(0), id(1), main[1].height),
+        TipChange::Applied,
+        "immediate child"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(0), id(3), main[3].height),
+        TipChange::Applied,
+        "three blocks on"
+    );
+
+    // Not descendants.
+    assert_eq!(
+        classify_tip_change(&state, id(1), fork_id, fork.height),
+        TipChange::Reorg,
+        "a sibling branch is a switch"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(3), id(1), main[1].height),
+        TipChange::Reorg,
+        "moving BACK to an ancestor is a switch, not an apply"
+    );
+    assert_eq!(
+        classify_tip_change(&state, id(3), id(3), main[3].height),
+        TipChange::Reorg,
+        "equal height, and the same id is filtered by the caller"
+    );
+    assert_eq!(
+        classify_tip_change(&state, [0xcc; 32], id(3), main[3].height),
+        TipChange::Reorg,
+        "an unknown previous tip cannot be shown to be an ancestor"
+    );
+}
+
+/// A real fork switch still reaches the processor as a reorg, and a
+/// reorg still discards the trees a linear apply would keep.
+#[test]
+fn a_fork_switch_still_reaches_the_processor_as_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let main = seed_header_chain(&mut state, 3);
+
+    let h2 = header_id_of(&main[1]);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(h2, main[1].height)
+        .unwrap();
+    seed_best_ordering(&mut state);
+
+    // Switch to a sibling of h2 at the same height.
+    let fork = ts::header(header_id_of(&main[0]), 2, 8_888, [0u8; 32]);
+    let fork_id = header_id_of(&fork);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            fork.height,
+            fork_id,
+            {
+                let (bytes, _) = serialize_header(&fork).unwrap();
+                bytes
+            },
+            fork.clone(),
+        )],
+        false,
+    );
+    assert_eq!(
+        classify_tip_change(&state, h2, fork_id, fork.height),
+        TipChange::Reorg
+    );
+
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(fork_id, fork.height)
+        .unwrap();
+    let generation = state
+        .input_blocks
+        .as_ref()
+        .unwrap()
+        .processor()
+        .generation();
+    let _ = on_tick(&mut state, Instant::now());
+    let rt = state.input_blocks.as_ref().unwrap();
+    assert_eq!(rt.last_ordering_tip, Some(fork_id));
+    assert!(
+        rt.processor().generation() > generation,
+        "the switch reached the processor"
+    );
+}
+
+/// Round 4: an advance beyond the walk cap was classified as a reorg
+/// unconditionally, so a node that fell behind and caught up over a
+/// fully stored LINEAR chain reported `OrderingReorg` — the wrong event,
+/// and one whose handler discards trees.
+///
+/// Beyond the cap the question is answered without walking: is the tip
+/// we last reported still on the best chain? If it is, the chain moved
+/// forward over it.
+#[test]
+fn a_linear_advance_beyond_the_walk_cap_is_still_an_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let chain = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    let prev = header_id_of(&chain[0]);
+    let far = &chain[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert_eq!(
+        far.height - chain[0].height,
+        MAX_LINEAR_CATCHUP + 1,
+        "the fixture must exceed the walk cap"
+    );
+
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Applied,
+        "a fully stored linear catch-up is an apply, however far it ran"
+    );
+}
+
+/// The counterpart: beyond the cap, a tip that ABANDONED the previous
+/// tip is still a reorg. `is_on_best_chain` is what separates them.
+#[test]
+fn a_far_advance_that_abandons_the_previous_tip_is_a_reorg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let chain = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    // A sibling of height 1, stored but never on the best chain.
+    let orphan = ts::header([0u8; 32], 1, 77_777, [0u8; 32]);
+    let orphan_id = header_id_of(&orphan);
+    seed_mainnet_headers(
+        &mut state,
+        &[(
+            orphan.height,
+            orphan_id,
+            {
+                let (bytes, _) = serialize_header(&orphan).unwrap();
+                bytes
+            },
+            orphan.clone(),
+        )],
+        false,
+    );
+
+    let far = &chain[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert!(
+        far.height - orphan.height > MAX_LINEAR_CATCHUP,
+        "beyond the walk cap"
+    );
+    assert_eq!(
+        classify_tip_change(&state, orphan_id, header_id_of(far), far.height),
+        TipChange::Reorg,
+        "the previous tip is not on the best chain, so it was abandoned"
+    );
+
+    // And a previous tip we no longer hold at all stays a reorg.
+    assert_eq!(
+        classify_tip_change(&state, [0xde; 32], header_id_of(far), far.height),
+        TipChange::Reorg,
+        "an unknown previous tip cannot be shown to be an ancestor"
+    );
+}
+
+// ----- ordering-block reconstruction (spec 9.3, task 5) -----
+
+/// An ordering-block announcement for an unknown parent carrying
+/// `non_broadcasted` in full, `broadcasted` by id, and `fields` in its
+/// extension, with `transactions_root` forced to `root`.
+///
+/// `nBits` is difficulty 1 and the parent is unknown, so the announcement
+/// passes `validate_ordering_announcement` whatever we put in the header.
+fn reconstructable_announcement(
+    non_broadcasted: Vec<ergo_ser::transaction::Transaction>,
+    broadcasted: &[ergo_ser::transaction::Transaction],
+    root: [u8; 32],
+    fields: Vec<([u8; 2], Vec<u8>)>,
+) -> ergo_ser::input_block::OrderingBlockAnnouncement {
+    // Height `full + 1` for a fresh `live_state` (best full block 0):
+    // spec 9.3's receipt window is +-2, so a fixture outside it would be
+    // discarded before it ever reached the reconstruction under test.
+    let mut ann = ts::ordering_announcement([0x77; 32], 1, 9, fields);
+    ann.non_broadcasted_transactions = non_broadcasted;
+    ann.broadcasted_transaction_ids = broadcasted
+        .iter()
+        .map(|t| {
+            *ergo_ser::transaction::transaction_id(t)
+                .expect("test transaction id")
+                .as_bytes()
+        })
+        .collect();
+    ann.header.transactions_root = ergo_primitives::digest::Digest32::from_bytes(root);
+    ann
+}
+
+/// Put `ann` in the processor's ordering store the way a received
+/// announcement does. Its `03 02` field names an input block we do not
+/// hold, so the processor stores it and asks for the section — the
+/// reconstruct effect itself is driven explicitly by each test.
+fn store_ordering_announcement(
+    state: &mut NodeState,
+    ann: ergo_ser::input_block::OrderingBlockAnnouncement,
+    from: PeerTag,
+) {
+    let mut rt = state.input_blocks.take().expect("runtime");
+    {
+        let data = build_ctx_data(state, &[]);
+        let _ = data.with(|ctx| {
+            rt.processor_mut().handle(
+                ergo_inputblocks::processor::Event::OrderingAnnouncementAccepted {
+                    ann,
+                    from,
+                    now: ergo_inputblocks::types::Tick(1),
+                },
+                ctx,
+            )
+        });
+    }
+    state.input_blocks = Some(rt);
+}
+
+/// Store `header` as a validated header, off the best chain.
+fn store_header(state: &mut NodeState, header: &Header) -> [u8; 32] {
+    let (bytes, id) = serialize_header(header).expect("serialize");
+    let id = *id.as_bytes();
+    seed_mainnet_headers(state, &[(header.height, id, bytes, header.clone())], false);
+    id
+}
+
+/// The header's `transactions_root` over `txs` at header version 2.
+fn transactions_root_of(txs: &[ergo_ser::transaction::Transaction]) -> [u8; 32] {
+    let tx_ids: Vec<Vec<u8>> = txs
+        .iter()
+        .map(|tx| {
+            let bts = ergo_ser::transaction::bytes_to_sign(tx).expect("bytes_to_sign");
+            ergo_crypto::autolykos::common::blake2b256(&bts).to_vec()
+        })
+        .collect();
+    let witness: Vec<Vec<u8>> = txs
+        .iter()
+        .map(|tx| ergo_ser::weak_id::witness_id(tx).to_vec())
+        .collect();
+    let id_refs: Vec<&[u8]> = tx_ids.iter().map(|v| v.as_slice()).collect();
+    let witness_refs: Vec<&[u8]> = witness.iter().map(|v| v.as_slice()).collect();
+    ergo_crypto::merkle::transactions_root(&id_refs, Some(&witness_refs))
+}
+
+/// The feed events this test run produced, newest last.
+fn feed_kinds(state: &NodeState) -> Vec<crate::node::event_feed::FeedEventKind> {
+    state
+        .event_feed
+        .latest(crate::node::event_feed::EventFeedRing::CAP)
+        .into_iter()
+        .map(|e| e.kind)
+        .collect()
+}
+
+/// Seat `tx` in the mempool as a restored input-block body.
+fn seat_in_mempool(state: &mut NodeState, tx: &ergo_ser::transaction::Transaction) {
+    let body = ts::body_of(tx.clone());
+    let id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(id, body.bytes.clone(), None)], Instant::now());
+    assert!(state.mempool.contains(&id), "fixture seats the transaction");
+}
+
+/// SUPPLEMENTAL wiring check, NOT an oracle: the fixture's root and
+/// section come from the same Rust primitives the code under test uses,
+/// so this proves only that a transaction resolved FROM THE MEMPOOL
+/// reaches the rebuilt section — the half mainnet blocks 1-5 cannot
+/// exercise, since each carries a single non-broadcasted transaction.
+///
+/// The consensus oracle is
+/// `reconstruct_of_a_mainnet_block_matches_the_scala_section_and_advances_the_committed_tip`,
+/// whose expected bytes, section id and applied tip are the reference
+/// node's.
+#[test]
+fn reconstruct_with_all_broadcasted_in_mempool_persists_block_transactions_and_assembles() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19701,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let pooled = ts::tx(0xb2, 1);
+    seat_in_mempool(&mut state, &pooled);
+    let root = transactions_root_of(&[carried.clone(), pooled.clone()]);
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        std::slice::from_ref(&pooled),
+        root,
+        Vec::new(),
+    );
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
+    store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried.clone()],
+                broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&pooled)
+                    .unwrap()
+                    .as_bytes()],
+                input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    // The section the ordinary pipeline would have downloaded is now in
+    // the store, under the id that pipeline names it by.
+    let section_id = ergo_ser::modifier_id::compute_section_id(102, &header_id, &root);
+    let stored = state
+        .store
+        .get_block_section(&section_id)
+        .unwrap()
+        .expect("the rebuilt BlockTransactions section is persisted");
+    // Both transactions are in it, in plan order — asserted by re-reading
+    // the section, never by re-serializing it with the writer under test.
+    let mut r = ergo_primitives::reader::VlqReader::new(&stored);
+    let parsed = ergo_ser::block_transactions::read_block_transactions(&mut r).unwrap();
+    assert_eq!(
+        parsed.transactions,
+        vec![carried, pooled],
+        "non-broadcasted first, then the body resolved from the mempool"
+    );
+
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).is_empty(),
+        "a reconstructed block downloads nothing"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructed { txs: 2, .. })
+        ),
+        "the feed records the reconstruction: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_with_root_mismatch_requests_block_transactions_from_announcer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19702,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    // A root that does not belong to `carried`.
+    let ann = reconstructable_announcement(vec![carried.clone()], &[], [0x44; 32], Vec::new());
+    let announced_root = *ann.header.transactions_root.as_bytes();
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
+    store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried],
+                broadcasted_ids: Vec::new(),
+                input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    let reqs = sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    assert_eq!(reqs.len(), 1, "the full section is requested instead");
+    let inv = ergo_p2p::message::deserialize_inv(&reqs[0]).unwrap();
+    assert_eq!(
+        inv.type_id,
+        ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte()
+    );
+    assert_eq!(
+        inv.ids,
+        vec![ergo_ser::modifier_id::compute_section_id(
+            102,
+            &header_id,
+            &announced_root
+        )],
+        "the announcing peer is asked for the header's own section id"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructFallback {
+                reason,
+                ..
+            }) if reason == "root_mismatch"
+        ),
+        "the feed records the fallback reason: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_with_missing_broadcasted_tx_requests_block_transactions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19703,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let never_pooled = ts::tx(0xb2, 1);
+    // The root is the RIGHT one: only the missing body forces the
+    // fallback, so this cannot pass for a root mismatch.
+    let root = transactions_root_of(&[carried.clone(), never_pooled.clone()]);
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        std::slice::from_ref(&never_pooled),
+        root,
+        Vec::new(),
+    );
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
+    store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id,
+                non_broadcasted: vec![carried],
+                broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&never_pooled)
+                    .unwrap()
+                    .as_bytes()],
+                input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    assert_eq!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).len(),
+        1,
+        "an unpooled broadcasted transaction falls back to a full download"
+    );
+    assert!(
+        state
+            .store
+            .get_block_section(&ergo_ser::modifier_id::compute_section_id(
+                102, &header_id, &root
+            ))
+            .unwrap()
+            .is_none(),
+        "nothing is persisted from an incomplete reconstruction"
+    );
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(crate::node::event_feed::FeedEventKind::OrderingReconstructFallback {
+                reason,
+                ..
+            }) if reason == "missing_broadcasted_tx"
+        ),
+        "the feed names the missing-transaction reason: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+#[test]
+fn reconstruct_persists_header_and_extension_through_normal_path_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19704,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let carried = ts::tx(0xa1, 1);
+    let fields = vec![(
+        ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY,
+        [0x5c; 32].to_vec(),
+    )];
+    let ann = reconstructable_announcement(
+        vec![carried.clone()],
+        &[],
+        transactions_root_of(std::slice::from_ref(&carried)),
+        fields.clone(),
+    );
+    // The header is deliberately NOT stored: the handoff must offer it.
+    let (header_bytes, header_id) = serialize_header(&ann.header).unwrap();
+    let header_id = *header_id.as_bytes();
+    let extension_root = *ann.header.extension_root.as_bytes();
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let plan = ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: vec![carried],
+        broadcasted_ids: Vec::new(),
+        input_chain_txs: Vec::new(),
+        reconstruction_key: Default::default(),
+        prev_input_block_id: None,
+    };
+    let rec = super::reconstruct::plan_reconstruction(
+        &state.store,
+        &state.mempool,
+        rt,
+        &plan,
+        Some(peer),
+    )
+    .expect("the store reads succeed")
+    .expect("a stored announcement plans");
+
+    assert!(
+        matches!(
+            &rec.actions[0],
+            Action::ValidateHeader { peer: p, header_bytes: b }
+                if *p == peer && *b == header_bytes
+        ),
+        "the announcement's header goes through the ordinary header path \
+         first: {:?}",
+        rec.actions[0]
+    );
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::extension::write_extension(
+        &mut w,
+        &ergo_ser::extension::Extension {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+            fields: fields
+                .iter()
+                .map(|(key, value)| ergo_ser::extension::ExtensionField {
+                    key: *key,
+                    value: value.clone(),
+                })
+                .collect(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &rec.actions[1],
+            Action::PersistSection { modifier_id, section_bytes, section_type: 108 }
+                if *modifier_id
+                    == ergo_ser::modifier_id::compute_section_id(108, &header_id, &extension_root)
+                    && *section_bytes == w.result()
+        ),
+        "then the extension built from the announcement's fields: {:?}",
+        rec.actions[1]
+    );
+    assert!(
+        matches!(
+            rec.actions[2],
+            Action::PersistSection {
+                section_type: 102,
+                ..
+            }
+        ),
+        "and only then the rebuilt transaction section: {:?}",
+        rec.actions[2]
+    );
+    assert!(matches!(rec.actions[3], Action::AssembleBlock { .. }));
+    let _ = now;
+}
+
+/// A chain store whose every read fails, so the abort path is reachable
+/// at all: there is no way to make a real `redb` read error on demand,
+/// and "a read error is silently treated as missing data" is precisely
+/// the bug this seam keeps fixed.
+struct FailingStore;
+
+impl super::reconstruct::ReconstructStore for FailingStore {
+    fn header_known(&self, _: &[u8; 32]) -> Result<bool, ergo_state::store::StateError> {
+        Err(ergo_state::store::StateError::InternalInvariant {
+            what: "injected read failure",
+        })
+    }
+
+    fn section_known(&self, _: &[u8; 32]) -> Result<bool, ergo_state::store::StateError> {
+        Err(ergo_state::store::StateError::InternalInvariant {
+            what: "injected read failure",
+        })
+    }
+}
+
+/// Round 1, finding 3: a failing chain-store read must NOT be classified
+/// as missing data. The plan below names a broadcasted transaction that
+/// is genuinely absent from the mempool — the exact input that would make
+/// a swallowed error come back as `missing_broadcasted_tx` — so the
+/// assertion distinguishes the two classifications rather than merely
+/// observing one.
+#[test]
+fn reconstruct_with_a_failing_store_read_aborts_as_storage_error_not_missing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19705,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let never_pooled = ts::tx(0xb2, 1);
+    let ann = reconstructable_announcement(
+        Vec::new(),
+        std::slice::from_ref(&never_pooled),
+        [0x44; 32],
+        Vec::new(),
+    );
+    let height = ann.header.height;
+    let header_id = ts::header_id(&ann.header);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let rt = state.input_blocks.as_ref().unwrap();
+    let plan = ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: Vec::new(),
+        broadcasted_ids: vec![*ergo_ser::transaction::transaction_id(&never_pooled)
+            .unwrap()
+            .as_bytes()],
+        input_chain_txs: Vec::new(),
+        reconstruction_key: Default::default(),
+        prev_input_block_id: None,
+    };
+    let failure = super::reconstruct::plan_reconstruction(
+        &FailingStore,
+        &state.mempool,
+        rt,
+        &plan,
+        Some(peer),
+    )
+    .expect_err("a failing store read aborts the plan");
+
+    assert_eq!(failure.operation, "get_header");
+    assert_eq!(failure.height, height, "the feed entry keeps the height");
+    assert!(
+        matches!(
+            failure.as_fallback().outcome,
+            super::reconstruct::Outcome::Fallback { reason }
+                if reason == super::reconstruct::STORAGE_ERROR
+        ),
+        "a storage failure falls back under its own reason, never as \
+         missing data: {:?}",
+        failure.as_fallback().outcome
+    );
+    assert!(
+        failure.as_fallback().actions.is_empty(),
+        "nothing planned from a failed read is executed"
+    );
+}
+
+// ----- D4: which assembly order reproduces the root -----
+
+/// Seat `tx` in the processor's body cache under `input_block` so a
+/// plan's `input_chain_txs` can reference it.
+fn seat_in_input_chain(
+    state: &mut NodeState,
+    txs: &[ergo_ser::transaction::Transaction],
+) -> Vec<ergo_inputblocks::types::TxRef> {
+    let bodies: Vec<ergo_inputblocks::processor::Body> =
+        txs.iter().cloned().map(ts::body_of).collect();
+    let refs = bodies.iter().map(|b| b.tx_ref).collect();
+    let mut rt = state.input_blocks.take().expect("runtime");
+    rt.processor_mut().seat_bodies_for_test(bodies);
+    state.input_blocks = Some(rt);
+    refs
+}
+
+/// Divergence D4 / upstream finding F12. Scala's follower assembles
+/// `orderingBlockTransactions ++ inputBlocksTransactions`
+/// (`ErgoNodeViewHolder.processOrderingBlock`, which carries its own
+/// `todo: check if ordering block transactions should come first`) while
+/// Scala's miner builds `previousOrderingBlockTransactions ++
+/// orderingTxs` (`CandidateGenerator`). Real mined blocks therefore hash
+/// to the CANDIDATE order, and a follower that only tries the Scala one
+/// falls back on every ordering block carrying a transaction — which is
+/// exactly what the devnet smoke measured (100% `root_mismatch` under a
+/// transaction workload, 0% when blocks held only their coinbase).
+///
+/// The planner tries both and reports which matched.
+#[test]
+fn reconstruction_tries_both_orders_and_reports_the_one_that_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19731,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let ordering_tx = ts::tx(0xc1, 1);
+    let chain_tx = ts::tx(0xc2, 1);
+    let input_block = [0x9e; 32];
+    let chain_refs = seat_in_input_chain(&mut state, std::slice::from_ref(&chain_tx));
+
+    // A real mined block: the input chain comes FIRST.
+    let candidate_root = transactions_root_of(&[chain_tx.clone(), ordering_tx.clone()]);
+    let scala_root = transactions_root_of(&[ordering_tx.clone(), chain_tx.clone()]);
+    assert_ne!(
+        candidate_root, scala_root,
+        "the fixture must actually distinguish the two orders"
+    );
+
+    let plan_for = |header_id| ergo_inputblocks::ordering::ReconstructionPlan {
+        header_id,
+        non_broadcasted: vec![ordering_tx.clone()],
+        broadcasted_ids: Vec::new(),
+        input_chain_txs: chain_refs.clone(),
+        reconstruction_key: Default::default(),
+        prev_input_block_id: Some(input_block),
+    };
+
+    for (root, expected) in [
+        (candidate_root, super::reconstruct::TxOrder::Candidate),
+        (scala_root, super::reconstruct::TxOrder::Scala),
+    ] {
+        let ann = reconstructable_announcement(
+            vec![ordering_tx.clone()],
+            &[],
+            root,
+            vec![([0x03, 0x02], input_block.to_vec())],
+        );
+        let header = ann.header.clone();
+        store_ordering_announcement(&mut state, ann, tag);
+        let header_id = store_header(&mut state, &header);
+        let rt = state.input_blocks.as_ref().unwrap();
+        let rec = super::reconstruct::plan_reconstruction(
+            &state.store,
+            &state.mempool,
+            rt,
+            &plan_for(header_id),
+            Some(peer),
+        )
+        .expect("no storage failure")
+        .expect("the announcement is stored");
+        assert_eq!(
+            rec.outcome,
+            super::reconstruct::Outcome::Assemble {
+                txs: 2,
+                order: expected,
+                // The plan is built by hand here, so it carries the
+                // default key; D5's own telemetry is covered in
+                // `ergo-inputblocks`.
+                key: Default::default(),
+            },
+            "a header rooted over the {} order must reconstruct under it",
+            expected.name()
+        );
+    }
+}
+
+/// Oracle parity for D4: a REAL ordering block mined by the pinned Scala
+/// `weak-blocks` node seats the collected input chain FIRST, which is
+/// what its `CandidateGenerator` builds and NOT what its own
+/// `processOrderingBlock` reassembles (upstream finding F12). Captured
+/// over REST from the devnet-matrix recipe.
+// oracle: test-vectors/weak-blocks/findings/2026-09-22-3/captured-block.json
+#[test]
+fn a_real_mined_ordering_block_uses_the_candidate_order() {
+    let captured: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../test-vectors/weak-blocks/findings/2026-09-22-3/captured-block.json"
+    ))
+    .unwrap();
+    let ids = |key: &str| -> Vec<String> {
+        captured[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is an array"))
+            .iter()
+            .map(|v| v.as_str().expect("tx id").to_string())
+            .collect()
+    };
+    let block = ids("block_transaction_ids_in_order");
+    let chain = ids("input_chain_tx_ids");
+    let ordering = ids("ordering_tx_ids");
+    assert!(
+        !chain.is_empty() && !ordering.is_empty(),
+        "the fixture must have both halves non-empty, or the two orders \
+         coincide and it proves nothing"
+    );
+    assert_eq!(
+        block,
+        [chain.clone(), ordering.clone()].concat(),
+        "a mined block is input chain ++ ordering transactions"
+    );
+    assert_ne!(
+        block,
+        [ordering, chain].concat(),
+        "and NOT the order Scala's own processOrderingBlock rebuilds"
+    );
+}
+
+/// A header that matches NEITHER order still falls back — trying two
+/// orders must not become "accept anything".
+#[test]
+fn reconstruction_falls_back_when_no_order_reproduces_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    state.input_blocks = Some(runtime());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19732,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+
+    let ordering_tx = ts::tx(0xd1, 1);
+    let chain_tx = ts::tx(0xd2, 1);
+    let input_block = [0x8e; 32];
+    let chain_refs = seat_in_input_chain(&mut state, std::slice::from_ref(&chain_tx));
+
+    let ann = reconstructable_announcement(
+        vec![ordering_tx.clone()],
+        &[],
+        [0x5c; 32],
+        vec![([0x03, 0x02], input_block.to_vec())],
+    );
+    // Receipt first, then the header: an announcement for a header the
+    // node already holds is discarded on receipt (spec 9.3), so seeding
+    // the header first would leave the ordering store empty.
+    let header = ann.header.clone();
+    store_ordering_announcement(&mut state, ann, tag);
+    let header_id = store_header(&mut state, &header);
+    let rt = state.input_blocks.as_ref().unwrap();
+    let rec = super::reconstruct::plan_reconstruction(
+        &state.store,
+        &state.mempool,
+        rt,
+        &ergo_inputblocks::ordering::ReconstructionPlan {
+            header_id,
+            non_broadcasted: vec![ordering_tx],
+            broadcasted_ids: Vec::new(),
+            input_chain_txs: chain_refs,
+            reconstruction_key: Default::default(),
+            prev_input_block_id: Some(input_block),
+        },
+        Some(peer),
+    )
+    .expect("no storage failure")
+    .expect("the announcement is stored");
+    assert!(
+        matches!(
+            rec.outcome,
+            super::reconstruct::Outcome::Fallback { reason }
+                if reason == "root_mismatch"
+        ),
+        "{:?}",
+        rec.outcome
+    );
+}
+
+// ----- mainnet reconstruction oracle (round 1, findings 1 + 2) -----
+
+/// One mainnet block from `blocks_1_5.json`, with its real header.
+struct MainnetBlock {
+    height: u32,
+    header: Header,
+    header_id: [u8; 32],
+    header_bytes: Vec<u8>,
+    transactions: Vec<ergo_ser::transaction::Transaction>,
+    /// The reference node's `BlockTransactions` bytes for this block,
+    /// from `test-vectors/weak-blocks/block_sections.json`.
+    section_bytes: Vec<u8>,
+    /// The reference node's modifier id for that section (Scala
+    /// `NonHeaderBlockSection.computeIdBytes`).
+    section_id: [u8; 32],
+    extension_bytes: Vec<u8>,
+}
+
+/// One `block_sections.json` case: what the pinned Scala node makes of a
+/// mainnet block's transaction section.
+#[derive(serde::Deserialize)]
+struct BlockSectionVector {
+    height: u32,
+    header_id: String,
+    tx_count: usize,
+    transactions_root: String,
+    header_transactions_root: String,
+    section_bytes_hex: String,
+    section_id: String,
+}
+
+/// The Scala harness's `block_sections` vector, keyed by height.
+///
+/// Generated by `python3 scripts/jvm_weak_blocks_oracle/gen.py
+/// block_sections` against the pinned `weak-blocks` reference build; the
+/// harness is fed this repo's own mainnet header and transaction bytes and
+/// emits what ergo-core's `BlockTransactionsSerializer` and
+/// `NonHeaderBlockSection.computeIdBytes` produce from them.
+fn scala_block_sections() -> std::collections::HashMap<u32, BlockSectionVector> {
+    #[derive(serde::Deserialize)]
+    struct Doc {
+        cases: Vec<BlockSectionVector>,
+    }
+    let path = "../test-vectors/weak-blocks/block_sections.json";
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!("read {path}: {e} — regenerate with `python3 scripts/jvm_weak_blocks_oracle/gen.py block_sections`")
+    });
+    let doc: Doc = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    doc.cases
+        .into_iter()
+        .map(|c| {
+            // The vector must be about the same block the Rust fixture is,
+            // and self-consistent: Scala's own recomputed root equals the
+            // real header's root.
+            assert_eq!(
+                c.transactions_root, c.header_transactions_root,
+                "oracle case at height {} does not match its own header",
+                c.height
+            );
+            (c.height, c)
+        })
+        .collect()
+}
+
+/// Load mainnet blocks 1..=`upto` (Scala-produced header bytes, transaction
+/// bytes and extension fields), pairing each with its real header.
+fn mainnet_blocks(upto: u32) -> Vec<MainnetBlock> {
+    #[derive(serde::Deserialize)]
+    struct BlockVector {
+        #[serde(rename = "headerId")]
+        header_id: String,
+        height: u32,
+        transactions: Vec<TxVector>,
+        extension: ExtVector,
+    }
+    #[derive(serde::Deserialize)]
+    struct TxVector {
+        bytes: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ExtVector {
+        fields: Vec<(String, String)>,
+    }
+
+    let headers = load_mainnet_headers("../test-vectors/mainnet/headers_1_10.json");
+    let raw = std::fs::read_to_string("../test-vectors/mainnet/blocks_1_5.json").unwrap();
+    let blocks: Vec<BlockVector> = serde_json::from_str(&raw).unwrap();
+    let oracle = scala_block_sections();
+
+    blocks
+        .into_iter()
+        .filter(|b| b.height <= upto)
+        .map(|b| {
+            let (_, header_id, header_bytes, header) = headers
+                .iter()
+                .find(|(h, ..)| *h == b.height)
+                .expect("header fixture covers this height")
+                .clone();
+            assert_eq!(
+                b.header_id,
+                hex::encode(header_id),
+                "the block and header fixtures must name the same block"
+            );
+            let transactions: Vec<ergo_ser::transaction::Transaction> = b
+                .transactions
+                .iter()
+                .map(|t| {
+                    let bytes = hex::decode(&t.bytes).unwrap();
+                    let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
+                    ergo_ser::transaction::read_transaction(&mut r).unwrap()
+                })
+                .collect();
+
+            // MAINNET ANCHOR: the fixture's transactions must reproduce
+            // the real header's `transactionsRoot`, or these are not this
+            // block's transactions.
+            let tx_ids: Vec<[u8; 32]> = transactions
+                .iter()
+                .map(|t| *ergo_ser::transaction::transaction_id(t).unwrap().as_bytes())
+                .collect();
+            let id_refs: Vec<&[u8]> = tx_ids.iter().map(|i| &i[..]).collect();
+            assert_eq!(
+                ergo_crypto::merkle::transactions_root(&id_refs, None),
+                *header.transactions_root.as_bytes(),
+                "fixture transactions do not reproduce block {}'s real \
+                 transactionsRoot",
+                b.height
+            );
+
+            // The expected section bytes and modifier id are the REFERENCE
+            // NODE's, built by ergo-core from these same header and
+            // transaction bytes — not assembled here.
+            let scala = oracle
+                .get(&b.height)
+                .unwrap_or_else(|| panic!("no Scala block_sections case at height {}", b.height));
+            assert_eq!(scala.header_id, hex::encode(header_id));
+            assert_eq!(scala.tx_count, transactions.len());
+            assert_eq!(
+                scala.header_transactions_root,
+                hex::encode(header.transactions_root.as_bytes()),
+                "the oracle case is about a different block"
+            );
+            let section = hex::decode(&scala.section_bytes_hex).unwrap();
+            let section_id: [u8; 32] = hex::decode(&scala.section_id).unwrap().try_into().unwrap();
+
+            let mut w = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::extension::write_extension(
+                &mut w,
+                &ergo_ser::extension::Extension {
+                    header_id: ergo_primitives::digest::ModifierId::from_bytes(header_id),
+                    fields: b
+                        .extension
+                        .fields
+                        .iter()
+                        .map(|(k, v)| ergo_ser::extension::ExtensionField {
+                            key: hex::decode(k).unwrap().try_into().unwrap(),
+                            value: hex::decode(v).unwrap(),
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+
+            MainnetBlock {
+                height: b.height,
+                header_id,
+                header_bytes,
+                transactions,
+                section_bytes: section,
+                section_id,
+                extension_bytes: w.result(),
+                header,
+            }
+        })
+        .collect()
+}
+
+/// A node whose committed tip is mainnet block `upto - 1`, reached by
+/// applying real blocks through the ordinary pipeline. Block `upto`'s
+/// header is deliberately NOT seeded: an ordering announcement for a
+/// header the node already holds is discarded on receipt (spec 9.3), and
+/// the reconstruction persists the announced header itself.
+fn mainnet_state_before(dir: &std::path::Path, upto: u32) -> (NodeState, Vec<MainnetBlock>) {
+    let mut state = live_state(dir);
+    let blocks = mainnet_blocks(upto);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .initialize_genesis(&crate::genesis::mainnet_genesis_boxes())
+        .expect("genesis");
+
+    let rows: Vec<(u32, [u8; 32], Vec<u8>, Header)> = blocks
+        .iter()
+        .filter(|b| b.height < upto)
+        .map(|b| {
+            (
+                b.height,
+                b.header_id,
+                b.header_bytes.clone(),
+                b.header.clone(),
+            )
+        })
+        .collect();
+    seed_mainnet_headers(&mut state, &rows, true);
+    state.executor.hydrate_block_context(&state.store).unwrap();
+
+    // Every block BELOW the target gets its real sections and is applied
+    // through the executor, so the committed tip really walks the chain.
+    for b in blocks.iter().filter(|b| b.height < upto) {
+        persist_sections(&mut state, b);
+    }
+    let first = &blocks[0];
+    let follow_ups = state.executor.execute(
+        Action::AssembleBlock {
+            header_id: first.header_id,
+        },
+        &mut state.store,
+        &mut state.coordinator,
+        Instant::now(),
+        None,
+    );
+    assert!(follow_ups.is_empty(), "no network follow-ups expected");
+    assert_eq!(
+        state.store.chain_state_meta().best_full_block_height,
+        upto - 1,
+        "the fixture must really apply mainnet blocks 1..{}",
+        upto - 1
+    );
+    (state, blocks)
+}
+
+/// Persist a mainnet block's transactions and extension sections under the
+/// ids the block pipeline names them by.
+fn persist_sections(state: &mut NodeState, b: &MainnetBlock) {
+    // The transactions section goes in under the REFERENCE NODE's modifier
+    // id; the extension under the id derived from its real root.
+    let extension_id = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_EXTENSION,
+        &b.header_id,
+        b.header.extension_root.as_bytes(),
+    );
+    for (id, bytes, type_id) in [
+        (
+            b.section_id,
+            &b.section_bytes,
+            ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+        ),
+        (
+            extension_id,
+            &b.extension_bytes,
+            ergo_ser::modifier_id::TYPE_EXTENSION,
+        ),
+    ] {
+        state
+            .store
+            .store_block_section_typed(&id, bytes, type_id)
+            .unwrap();
+    }
+}
+
+/// Round 1, findings 1 and 2: the success path, against Scala-produced
+/// mainnet blocks and through a real application.
+///
+/// Blocks 1-4 are applied through the ordinary pipeline; block 5 is then
+/// announced as an ordering block carrying its real transactions, and the
+/// reconstruction must (a) produce exactly the section bytes and section
+/// id the reference node produced for block 5, (b) drive that block to the
+/// COMMITTED tip through full validation, and (c) record the feed entry.
+#[test]
+fn reconstruct_of_a_mainnet_block_matches_the_scala_section_and_advances_the_committed_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19706,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+    let target = blocks.last().unwrap();
+    assert_eq!(target.height, 5);
+
+    // The announcement is the real block 5: its real header, its real
+    // extension fields, and its transactions carried in full.
+    let mut ann = ts::ordering_announcement([0u8; 32], target.height, 1, Vec::new());
+    ann.header = target.header.clone();
+    ann.non_broadcasted_transactions = target.transactions.clone();
+    ann.extension_fields = mainnet_extension_fields(target);
+    store_ordering_announcement(&mut state, ann, tag);
+
+    let before = state.store.chain_state_meta().best_full_block_height;
+    assert_eq!(before, 4);
+
+    let actions = execute_effects(
+        &mut state,
+        vec![Effect::OrderingReconstruct {
+            from: tag,
+            plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                header_id: target.header_id,
+                non_broadcasted: target.transactions.clone(),
+                broadcasted_ids: Vec::new(),
+                input_chain_txs: Vec::new(),
+                reconstruction_key: Default::default(),
+                prev_input_block_id: None,
+            },
+        }],
+        now,
+    );
+
+    // (a) Scala's bytes, under Scala's own modifier id: both sides of the
+    // `PersistSection` the reconstruction emitted come from the oracle.
+    assert_eq!(
+        state
+            .store
+            .get_block_section(&target.section_id)
+            .unwrap()
+            .as_deref(),
+        Some(&target.section_bytes[..]),
+        "the rebuilt section must be byte-identical to the reference \
+         node's, under the reference node's own modifier id"
+    );
+
+    // (b) the block really applied, through full validation.
+    assert_eq!(
+        state.store.chain_state_meta().best_full_block_height,
+        target.height,
+        "reconstruction advanced the COMMITTED tip to mainnet block 5"
+    );
+    assert!(
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER).is_empty(),
+        "a reconstructed block downloads nothing"
+    );
+
+    // (c) the feed entry the M2 smoke asserts.
+    assert!(
+        matches!(
+            feed_kinds(&state).last(),
+            Some(
+                crate::node::event_feed::FeedEventKind::OrderingReconstructed {
+                    height: 5,
+                    txs: 1,
+                    ..
+                }
+            )
+        ),
+        "the feed records the reconstruction: {:?}",
+        feed_kinds(&state)
+    );
+}
+
+/// A mainnet block's extension fields, as an announcement carries them.
+fn mainnet_extension_fields(b: &MainnetBlock) -> Vec<([u8; 2], Vec<u8>)> {
+    let mut r = ergo_primitives::reader::VlqReader::new(&b.extension_bytes);
+    let ext = ergo_ser::extension::read_extension(&mut r).unwrap();
+    ext.fields.into_iter().map(|f| (f.key, f.value)).collect()
+}
+
+// ----- the announcement-payload line the smoke harness parses -----
+
+/// Task 8b, carried ruling 1: the smoke's divergence artifacts have to
+/// carry the RAW announcement bytes for the block that mismatched.
+/// Before this line existed the harness scraped any long hex run off a
+/// line mentioning the id, so a parent id could be filed as
+/// "announcement evidence".
+///
+/// This pins the exact shape the extractor in
+/// `scripts/devnet-matrix/smoke.py` matches — message text, then
+/// `block=<64 hex>`, then `payload=<hex>`. Its counterpart there is
+/// covered by `smoke.py --self-test`; the two have to move together.
+#[test]
+fn the_announcement_payload_line_has_the_shape_the_harness_parses() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Sink {
+            self.clone()
+        }
+    }
+
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(Sink(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+
+    let id = [0xabu8; 32];
+    let payload = [0x01u8, 0x02, 0x03];
+    tracing::subscriber::with_default(subscriber, || {
+        super::dispatch::log_announcement_payload(&id, &payload);
+    });
+
+    let line = String::from_utf8(buf.lock().expect("sink").clone()).expect("utf8");
+    // The literal the harness's `ANNOUNCEMENT_LINE` regex matches.
+    // Spelled out here rather than shared with the production callsite
+    // through a constant, because a constant that both sides read would
+    // let the wording drift without either end noticing.
+    let expected = format!(
+        "input_blocks: raw announcement payload block={} payload={}",
+        hex::encode(id),
+        hex::encode(payload)
+    );
+    assert!(
+        line.contains(&expected),
+        "the harness matches `{expected}` literally; got `{line}`"
+    );
+}
+
+// ----- fix round 4 (M2 final whole-branch review) -----
+
+/// An announcement whose PoW hit sits strictly between the thresholds
+/// for multiplier 1 and multiplier 2: `target <= hit < 2 * target`.
+///
+/// `nBits` encodes a difficulty, and the target is `secp256k1_order /
+/// difficulty`; difficulty 2 therefore halves the target, putting the
+/// band within reach of an ordinary unmined test header. `nBits` is
+/// part of the hit's own preimage, so the target is fixed first and
+/// nonces are searched for a hit that lands in the band. Both ends are
+/// asserted at the callsite, so a search that drifted would fail loudly
+/// rather than silently testing nothing.
+fn announcement_with_hit_between_thresholds(
+    bodies: &[ergo_inputblocks::processor::Body],
+) -> ergo_ser::input_block::InputBlockAnnouncement {
+    use ergo_crypto::pow::{header_hit_v2, input_block_hit_valid};
+
+    let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(2u32));
+    for nonce in 1..4096u64 {
+        let mut ann = ts::announcement_for([0u8; 32], 1, nonce, None, bodies);
+        ann.header.n_bits = n_bits;
+        let hit = header_hit_v2(&ann.header).expect("v2 hit");
+        if !input_block_hit_valid(&hit, n_bits, 1) && input_block_hit_valid(&hit, n_bits, 2) {
+            return ann;
+        }
+    }
+    panic!("no nonce in range produced a hit between the two thresholds");
+}
+
+/// Finding 5: the announcement multiplier must come from the store, in
+/// the same read as the height.
+///
+/// `last_seen_active_params` is the action loop's mirror, refreshed by
+/// the 250 ms mempool tick, while the full-block height comes straight
+/// out of committed storage. Between an epoch block committing a raised
+/// `subBlocksPerBlock` and that tick firing the two disagree, and an
+/// announcement arriving in the gap is judged against the previous
+/// epoch's threshold. This one is a valid hit under the committed
+/// parameters and an invalid one under the mirror: it must be accepted,
+/// and its peer must not be penalised.
+#[test]
+fn announcement_pow_uses_the_stores_multiplier_not_the_stale_mirror() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    // Pre-epoch mirror: one input block per ordering block.
+    state.last_seen_active_params.subblocks_per_block = Some(1);
+    // The epoch block has committed; the store already carries the
+    // raised multiplier.
+    let mut committed = state.last_seen_active_params.clone();
+    committed.subblocks_per_block = Some(2);
+    state
+        .store
+        .as_utxo_mut()
+        .expect("utxo backend")
+        .set_active_params_for_test(committed);
+    state.input_blocks = Some(InputBlocksRuntime::new(&live_cfg(), Instant::now()));
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19631,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let bodies = [ts::body(1, 1)];
+    let ann = announcement_with_hit_between_thresholds(&bodies);
+    let hit = ergo_crypto::pow::header_hit_v2(&ann.header).expect("v2 hit");
+    assert!(
+        !ergo_crypto::pow::input_block_hit_valid(&hit, ann.header.n_bits, 1),
+        "premise: the stale multiplier rejects this hit"
+    );
+    assert!(
+        ergo_crypto::pow::input_block_hit_valid(&hit, ann.header.n_bits, 2),
+        "premise: the committed multiplier accepts it"
+    );
+    let ann_id = ts::ann_id(&ann);
+    let payload = ergo_p2p::message::serialize_input_block(&ann).unwrap();
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &payload,
+    );
+
+    assert!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .announcement(&ann_id)
+            .is_some(),
+        "a hit against the committed multiplier is accepted"
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, Action::Penalize { .. })),
+        "and its peer is not penalised: {actions:?}"
+    );
+}
+
+/// Finding 8: beyond the walk cap the classification asked
+/// `is_on_best_chain`, which follows the best HEADER chain
+/// (`HEADER_CHAIN_INDEX`). Header acceptance can move that index while
+/// the committed full blocks stay on another branch — the node holds
+/// headers for a heavier branch it has not downloaded bodies for yet.
+/// A full-block catch-up of more than 64 blocks along the committed
+/// branch was then reported as `OrderingReorg`, whose handler discards
+/// every retained tree but the new tip's.
+///
+/// Ancestry has to be decided against the committed tip. Here the
+/// committed branch is fully stored and linear while the header index
+/// has moved to a competing chain over the same heights.
+#[test]
+fn a_far_linear_advance_is_an_apply_even_when_the_header_index_forked_away() {
+    use ergo_sync::coordinator::ChainView;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let committed = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+    // A competing header chain over the same heights takes the index.
+    let _competing = seed_header_chain_with_nonces(&mut state, MAX_LINEAR_CATCHUP + 6, 900_000);
+
+    let prev = header_id_of(&committed[0]);
+    let far = &committed[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert!(
+        far.height - committed[0].height > MAX_LINEAR_CATCHUP,
+        "the fixture must exceed the walk cap"
+    );
+    assert!(
+        !state.store.is_on_best_chain(&prev),
+        "premise: the header index has moved off the committed branch"
+    );
+
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Applied,
+        "the committed branch advanced linearly; best-header membership is not the question"
+    );
+}
+
+/// The counterpart to the above: a committed tip that genuinely
+/// abandoned the previous one is still a reorg when the header index
+/// says both are on it. Best-header membership must not be able to
+/// report an apply on its own.
+#[test]
+fn a_far_advance_off_a_sibling_branch_is_a_reorg_despite_the_header_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let indexed = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+    // A second chain, stored and linked but never on the index. Its tip
+    // is the committed one; the previous tip sits on the INDEXED chain,
+    // so the index reports membership for a header the committed tip
+    // does not descend from.
+    let sibling = seed_header_chain_with_nonces(&mut state, MAX_LINEAR_CATCHUP + 6, 700_000);
+    // Put the index back on the first chain.
+    let _ = seed_header_chain(&mut state, MAX_LINEAR_CATCHUP + 6);
+
+    let prev = header_id_of(&indexed[0]);
+    let far = &sibling[(MAX_LINEAR_CATCHUP + 1) as usize];
+    assert_eq!(
+        classify_tip_change(&state, prev, header_id_of(far), far.height),
+        TipChange::Reorg,
+        "the committed tip is on a different branch from the previous tip"
+    );
+}
+
+/// Finding 3: a restarted follower must be able to recover from an
+/// ordering announcement alone.
+///
+/// The processor's state is in-memory (spec 9.5), so after a restart it
+/// holds no input blocks. The first ordering announcement it sees names
+/// an input block it does not have — or names none at all — which takes
+/// the "else" branch of spec 9.3: apply the announced header and
+/// extension, then request the transaction section from the announcer.
+///
+/// That branch emitted only `RequestBlockTransactions`, and the executor
+/// computes a section's modifier id from the STORED header, so with no
+/// header stored it logged and returned. Nothing was requested, nothing
+/// was stored, and the follower had to wait for ordinary block sync to
+/// reach the same height by itself.
+#[test]
+fn an_ordering_announcement_for_an_unknown_input_chain_still_fetches_the_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let now = Instant::now();
+    let (peer, mut rx) = handshake_peer(
+        &mut state,
+        19632,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // A fresh node: no headers at all.
+    assert!(state.store.chain_state_meta().best_full_block_height == 0);
+    let oa = ts::ordering_announcement(
+        [0x77; 32],
+        1,
+        9,
+        vec![(
+            ergo_ser::input_block::PREV_INPUT_BLOCK_ID_KEY,
+            // An input block this node has never seen.
+            [0x5c; 32].to_vec(),
+        )],
+    );
+    let header_id = ts::header_id(&oa.header);
+    let expected_section = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+        &header_id,
+        oa.header.transactions_root.as_bytes(),
+    );
+    let extension_id = ergo_ser::modifier_id::compute_section_id(
+        ergo_ser::modifier_id::TYPE_EXTENSION,
+        &header_id,
+        oa.header.extension_root.as_bytes(),
+    );
+
+    let actions = send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &ergo_p2p::message::serialize_ordering_block_announcement_msg(&oa).unwrap(),
+    );
+
+    // The announcement's extension is applied, exactly as spec 9.3's
+    // "else" branch says. (The header goes through the ordinary
+    // `ValidateHeader` path in the same handoff; this fixture's
+    // synthetic header cannot pass real header validation, so that
+    // action — not its storage — is what
+    // `reconstruct_persists_header_and_extension_through_normal_path_first`
+    // pins.)
+    assert!(
+        state
+            .store
+            .get_block_section(&extension_id)
+            .unwrap()
+            .is_some(),
+        "the extension the announcement carried is applied"
+    );
+
+    // Drain both the returned actions and anything flushed to the peer:
+    // the request is a `RequestModifier` for the block's transactions.
+    let mut requested: Vec<Vec<u8>> =
+        sent_frames(&actions, ergo_p2p::message::CODE_REQUEST_MODIFIER);
+    while let Ok(frame) = rx.try_recv() {
+        if frame.code == ergo_p2p::message::CODE_REQUEST_MODIFIER {
+            requested.push(frame.payload.to_vec());
+        }
+    }
+    let asked: Vec<[u8; 32]> = requested
+        .iter()
+        .filter_map(|p| ergo_p2p::message::deserialize_inv(p).ok())
+        .filter(|inv| inv.type_id == ergo_p2p::types::ModifierTypeId::BlockTransactions.as_byte())
+        .flat_map(|inv| inv.ids)
+        .collect();
+    assert!(
+        asked.contains(&expected_section),
+        "the announcer is asked for the block's transaction section; got {asked:?}"
+    );
+}
+
+/// Finding 6: on rollback the runtime treated every RETAINED entry as a
+/// rollback body. `RemovedEntry` carries two different things — the
+/// applied block's own transactions, and the pooled transactions
+/// `removeWithDoubleSpends` evicted because they conflicted with them —
+/// and Scala restores only the first kind (`history
+/// .getInputBlockTransactions(id)`).
+///
+/// Codex's scenario: pooled `C` conflicts with never-pooled `A`, and
+/// input block `I` applies `A`. On rollback, `C` was restored first,
+/// after which divergence D1 refused `A` as a conflict — so the pool
+/// came back holding the transaction the input chain had displaced
+/// instead of the one it had carried.
+///
+/// Retained entries are metadata now (they supply the cost Scala's `put`
+/// reuses); the restore set is the rolled-back block's cached bodies.
+#[test]
+fn rollback_restores_the_blocks_own_transactions_not_the_conflicts_they_evicted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&dir.path().join("state.redb"));
+    let mut rt = runtime();
+    let now = Instant::now();
+    let block = [0x31u8; 32];
+
+    // Same input box, different transactions (a transaction id does not
+    // cover the spending proof, so the two are told apart by a data
+    // input): they cannot both be in the pool.
+    let a = ts::body(0x33, 1);
+    let mut c_tx = ts::tx(0x33, 1);
+    c_tx.data_inputs = vec![ergo_ser::input::DataInput {
+        box_id: ergo_primitives::digest::Digest32::from_bytes([0x44; 32]),
+    }];
+    let c = ts::body_of(c_tx);
+    let a_id = ergo_primitives::digest::Digest32::from_bytes(a.tx_ref.tx_id);
+    let c_id = ergo_primitives::digest::Digest32::from_bytes(c.tx_ref.tx_id);
+    assert_ne!(a_id, c_id);
+
+    // C is pooled; A never was.
+    state
+        .mempool
+        .restore_input_block_txs(&[(c_id, c.bytes.clone(), None)], now);
+    assert!(state.mempool.contains(&c_id), "fixture seats C");
+
+    // Input block I applies A, which evicts C as a double spend.
+    apply_chain_change(&mut state, &mut rt, &[(block, vec![a.clone()])], &[], now);
+    assert!(!state.mempool.contains(&c_id), "C is evicted by the apply");
+    assert!(
+        rt.retained.contains_key(&block),
+        "and is retained against the block that evicted it"
+    );
+
+    // I is rolled back on a switch to an unrelated winning fork.
+    apply_chain_change(&mut state, &mut rt, &[], &[(block, vec![a.clone()])], now);
+
+    assert!(
+        state.mempool.contains(&a_id),
+        "Scala restores the rolled-back block's own transactions"
+    );
+    assert!(
+        !state.mempool.contains(&c_id),
+        "a conflict the apply evicted is not a rollback body"
+    );
+}
+
+// ----- the input-chain admission overlay (finding 1, spec §8) -----
+
+/// The miner-fee output every admissible transaction here carries, so it
+/// clears `min_relay_fee_nano_erg`.
+fn fee_output(value: u64, height: u32) -> ergo_ser::ergo_box::ErgoBoxCandidate {
+    let mut r = ergo_primitives::reader::VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES_FOR_TEST,
+    );
+    let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut r).expect("fee tree");
+    ergo_ser::ergo_box::ErgoBoxCandidate::new(
+        value,
+        tree,
+        height,
+        vec![],
+        ergo_ser::register::AdditionalRegisters::empty(),
+    )
+    .expect("fee output")
+}
+
+/// A transaction spending `input` into one true-script output plus a fee.
+fn spend_to_true(
+    input: ergo_primitives::digest::Digest32,
+    out_value: u64,
+    fee: u64,
+    height: u32,
+) -> ergo_ser::transaction::Transaction {
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    ergo_ser::transaction::Transaction {
+        inputs: vec![Input {
+            box_id: input,
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![
+            ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                out_value,
+                true_tree(),
+                height,
+                vec![],
+                ergo_ser::register::AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            fee_output(fee, height),
+        ],
+    }
+}
+
+/// The box id of `tx`'s output at `index`.
+fn output_box_id(
+    tx: &ergo_ser::transaction::Transaction,
+    index: u16,
+) -> ergo_primitives::digest::Digest32 {
+    ergo_ser::ergo_box::ErgoBox {
+        candidate: tx.output_candidates[index as usize].clone(),
+        transaction_id: ergo_ser::transaction::transaction_id(tx).unwrap(),
+        index,
+    }
+    .box_id()
+    .unwrap()
+}
+
+fn tx_bytes_of(tx: &ergo_ser::transaction::Transaction) -> Vec<u8> {
+    let mut w = ergo_primitives::writer::VlqWriter::new();
+    ergo_ser::transaction::write_transaction(&mut w, tx).unwrap();
+    w.result()
+}
+
+/// Finding 1: `InputBlockOverlay` existed but had no production caller,
+/// so peer and API admission still saw committed UTXOs plus ordinary
+/// pool outputs — the processor→mempool contract of §§2.7/8 did not
+/// hold in either direction.
+///
+/// Both directions, through the node's own `admit_transaction`:
+///
+/// * input block `I` applies `T`, which leaves the pool. A child `C`
+///   spending `T`'s output has nowhere to resolve that input — neither
+///   committed state nor the pool has it — and was rejected as
+///   unresolved. It must be admitted.
+/// * `T` consumed the funded box. That box is still in the COMMITTED
+///   UTXO set (an input block is provisional), so a rival `R` spending
+///   it was admitted, double-spending the input chain. It must be
+///   rejected.
+#[test]
+fn admission_sees_the_input_chains_outputs_and_not_the_boxes_it_spent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, best_id, best_height) = live_state_with_applied_tip(dir.path());
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19641,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let funded = seed_spendable_box(&mut state, 0xd2, 10_000_000, best_height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, best_height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+
+    // Seat T so the announcement resolves its weak id from the pool and
+    // the block completes on the announcement alone.
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        best_id,
+        best_height + 1,
+        41,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied"
+    );
+    assert!(
+        !state.mempool.contains(&t_id),
+        "premise: T left the pool when the block applied"
+    );
+
+    // Direction 1: a child of an input-block transaction resolves.
+    let child = spend_to_true(t_out, 6_000_000, 2_000_000, best_height);
+    let child_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&child)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&child), now);
+    assert!(
+        state.mempool.contains(&child_id),
+        "a child of an input-block transaction must resolve against the chain's outputs"
+    );
+
+    // Direction 2: a rival for a box the chain already consumed does not.
+    let rival = spend_to_true(funded, 7_000_000, 3_000_000, best_height);
+    let rival_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&rival)
+            .unwrap()
+            .as_bytes(),
+    );
+    assert_ne!(rival_id, t_id);
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&rival), now);
+    assert!(
+        !state.mempool.contains(&rival_id),
+        "a box an input-block transaction spent is not spendable again"
+    );
+}
+
+/// Round-2 finding 2: the admission context read the processor's input
+/// chain without checking which ordering block that chain hangs off.
+///
+/// The processor's view of the committed tip is synchronised only on the
+/// 1 s tick (`sync_ordering_tip`). Between a full-block commit (or a
+/// reorg) and that tick, `best_input_chain()` still describes the
+/// PREVIOUS ordering block — so admission overlaid an old provisional
+/// chain onto the new committed UTXO set, and an output of that old
+/// chain stayed spendable after the chain it belonged to was gone.
+///
+/// The layer is used only while the chain's ordering id equals the
+/// committed tip; otherwise it is empty and admission falls back to the
+/// ordinary pool view until the tick catches the processor up.
+#[test]
+fn admission_drops_the_chain_layer_when_the_committed_tip_has_moved_past_it() {
+    use crate::node::tip_context::build_tip_context;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 12);
+    let ordering = headers[10].clone();
+    let ordering_id = header_id_of(&ordering);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(ordering_id, ordering.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19642,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    // An input block under the CURRENT ordering block, carrying T.
+    let funded = seed_spendable_box(&mut state, 0xd3, 10_000_000, ordering.height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, ordering.height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        ordering_id,
+        ordering.height + 1,
+        43,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied under the current ordering block"
+    );
+    assert!(
+        !build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "premise: while the tips agree the chain layer is in use"
+    );
+
+    // The next full block commits. The processor is NOT told yet — that
+    // happens on the 1 s tick, and admission runs in between.
+    let next = headers[11].clone();
+    let next_id = header_id_of(&next);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(next_id, next.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_ordering_id(),
+        Some(ordering_id),
+        "premise: the processor still names the OLD ordering block"
+    );
+
+    assert!(
+        build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "a chain hanging off a superseded ordering block must not be overlaid"
+    );
+
+    // And the observable consequence: an output of that stale chain is
+    // no longer spendable.
+    let child = spend_to_true(t_out, 6_000_000, 2_000_000, ordering.height);
+    let child_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&child)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&child), now);
+    assert!(
+        !state.mempool.contains(&child_id),
+        "an output of the superseded chain is not spendable against the new tip"
+    );
+}
+
+/// Round-3 finding 2: the committed-consumption half of the same guard.
+///
+/// The test above moves the committed tip by advancing chain metadata.
+/// This one puts the UTXO SET into the state a committed block leaves
+/// behind, which is where the danger actually lives: ordering block B2
+/// includes the input-block transaction `T` (consuming `funded`,
+/// creating `O`) and a second transaction that spends `O`. After B2,
+/// committed state holds neither box.
+///
+/// If admission still overlaid the chain that hung off the PREVIOUS
+/// ordering block, `T` would re-create `O` on top of that committed
+/// state and a transaction spending `O` would be admitted — a double
+/// spend of a box the chain the node committed had already consumed.
+///
+/// The UTXO half is modelled with the same `tree.remove` the apply path
+/// performs per spent box, rather than by driving a synthetic block
+/// through full validation.
+#[test]
+fn admission_does_not_resurrect_a_chain_output_the_committed_block_consumed() {
+    use crate::node::tip_context::build_tip_context;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = live_state(dir.path());
+    let headers = seed_header_chain(&mut state, 12);
+    let ordering = headers[10].clone();
+    let ordering_id = header_id_of(&ordering);
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .advance_best_full_block(ordering_id, ordering.height)
+        .unwrap();
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    seed_best_ordering(&mut state);
+
+    let now = Instant::now();
+    let (peer, _rx) = handshake_peer(
+        &mut state,
+        19643,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+
+    let funded = seed_spendable_box(&mut state, 0xd4, 10_000_000, ordering.height);
+    let t = spend_to_true(funded, 8_000_000, 2_000_000, ordering.height);
+    let t_out = output_box_id(&t, 0);
+    let body = ts::body_of(t.clone());
+    let t_id = ergo_primitives::digest::Digest32::from_bytes(body.tx_ref.tx_id);
+    state
+        .mempool
+        .restore_input_block_txs(&[(t_id, body.bytes.clone(), None)], now);
+    let ann = ts::announcement_for(
+        ordering_id,
+        ordering.height + 1,
+        44,
+        None,
+        std::slice::from_ref(&body),
+    );
+    send_to(
+        &mut state,
+        peer,
+        ergo_p2p::message::CODE_INPUT_BLOCK,
+        &ergo_p2p::message::serialize_input_block(&ann).unwrap(),
+    );
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_input_chain(),
+        vec![ts::ann_id(&ann)],
+        "premise: the input block applied under the current ordering block"
+    );
+
+    // Ordering block B2 commits: it includes T (so `funded` is spent and
+    // `O` is created) and a transaction spending `O` (so `O` is spent
+    // too). Committed state ends up holding neither box.
+    let next = headers[11].clone();
+    let next_id = header_id_of(&next);
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        assert!(
+            store.tree_remove_for_test(funded.as_bytes()).is_some(),
+            "B2 spends the box the input-block transaction consumed"
+        );
+        // `O` is created and consumed inside B2, so it is never in the
+        // committed set at all.
+        store.advance_best_full_block(next_id, next.height).unwrap();
+    }
+    state.executor.hydrate_block_context(&state.store).unwrap();
+    assert_eq!(
+        state
+            .input_blocks
+            .as_ref()
+            .unwrap()
+            .processor()
+            .best_ordering_id(),
+        Some(ordering_id),
+        "premise: the tick has not run, so the processor still names O1"
+    );
+
+    assert!(
+        build_tip_context(&state)
+            .unwrap()
+            .input_block_txs
+            .is_empty(),
+        "the superseded chain must not be overlaid on B2's committed state"
+    );
+
+    // The observable: a transaction spending `O` is refused. Before the
+    // guard, the stale chain re-created `O` and this was admitted.
+    let spender = spend_to_true(t_out, 6_000_000, 2_000_000, ordering.height);
+    let spender_id = ergo_primitives::digest::Digest32::from_bytes(
+        *ergo_ser::transaction::transaction_id(&spender)
+            .unwrap()
+            .as_bytes(),
+    );
+    let _ = crate::node::admit_transaction(&mut state, peer, &tx_bytes_of(&spender), now);
+    assert!(
+        !state.mempool.contains(&spender_id),
+        "a box the committed block consumed is not spendable through the stale chain"
+    );
+}

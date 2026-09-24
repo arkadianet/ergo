@@ -1101,6 +1101,7 @@ fn read_state_with_slot_and_apply(
         started_at_unix_ms: 0,
         uptime_seconds: 0,
         target_block_interval_ms: 120_000,
+        best_input_block_id: None,
     };
     let publisher = crate::snapshot::SnapshotPublisher::new(
         api_info,
@@ -1116,6 +1117,7 @@ fn read_state_with_slot_and_apply(
         voting_targets,
         apply_phase,
         std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
+        None,
     )
 }
 
@@ -1173,6 +1175,7 @@ fn status_overlays_live_telemetry_values() {
         // Stale snapshot uptime that the live overlay must beat.
         uptime_seconds: 9_999,
         target_block_interval_ms: 120_000,
+        best_input_block_id: None,
     };
     let publisher = crate::snapshot::SnapshotPublisher::new(
         api_info,
@@ -1192,6 +1195,7 @@ fn status_overlays_live_telemetry_values() {
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
         telemetry.clone(),
+        None,
     );
 
     // Before the first telemetry sample: live fields stay None so

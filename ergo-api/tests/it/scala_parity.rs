@@ -54,6 +54,7 @@ fn sample_info() -> ScalaInfo {
             min_value_per_byte: 360,
         },
         is_mining: false,
+        best_input_block: None,
     }
 }
 

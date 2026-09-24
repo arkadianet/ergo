@@ -242,6 +242,7 @@ impl NodeSnapshot {
                 index_db_bytes: None,
                 disk_free_bytes: None,
                 disk_total_bytes: None,
+                input_blocks: None,
             },
             tip: ApiTip {
                 best_header: header_ref,
@@ -438,6 +439,10 @@ pub struct SnapshotParts<'a> {
     /// Monotonic count of peer-sourced txs rejected by admission, for
     /// the `ergo_node_mempool_peer_tx_rejected_total` Prometheus counter.
     pub mempool_peer_tx_rejected_total: u64,
+    /// Matrix (input blocks) subsystem status, projected from
+    /// `InputBlocksRuntime` at publish time. `None` when
+    /// `[input_blocks] enabled = false`. Drives `ApiStatus.input_blocks`.
+    pub input_blocks: Option<ergo_api::types::ApiInputBlocksStatus>,
 }
 
 /// Compute the canonical `now_unix_ms` for snapshot timestamps.

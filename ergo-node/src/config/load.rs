@@ -57,7 +57,88 @@ impl NodeConfig {
                 );
             }
         }
-        let chain_spec = Arc::new(ChainSpec::for_network(network));
+        let ib = &toml_cfg.input_blocks;
+        let input_blocks_enabled = ib.enabled.unwrap_or(false);
+        if input_blocks_enabled && network != Network::Devnet {
+            return Err("[input_blocks] enabled requires devnet".into());
+        }
+        let mut input_blocks_bounds = ergo_inputblocks::bounds::Bounds::default();
+        macro_rules! override_bound {
+            ($($f:ident),* $(,)?) => {
+                $( if let Some(v) = ib.bounds.$f { input_blocks_bounds.$f = v; } )*
+            };
+        }
+        override_bound!(
+            tx_cache_entries,
+            tx_cache_bytes,
+            tx_cache_ttl_ms,
+            waitlist_entries,
+            forks_per_ordering,
+            records_per_ordering,
+            records_total,
+            trees_total,
+            ordering_announcements,
+            staging_bytes_total,
+            requests_per_peer,
+            request_timeout_ms,
+            request_retries,
+            retry_pending_per_peer,
+            retired_jobs,
+            candidates_per_position,
+            digest_attempts_per_block,
+            prune_threshold,
+            ordering_announcement_prune_threshold,
+            height_reset_threshold,
+            staging_ttl_ms,
+            validation_retries_per_block,
+            digest_recovery_per_block,
+            validation_recovery_per_block,
+            pending_triggers,
+        );
+        let input_blocks = super::InputBlocksConfig {
+            enabled: input_blocks_enabled,
+            strict_field_binding: ib.strict_field_binding.unwrap_or(true),
+            relay_remote: ib.relay_remote.unwrap_or(false),
+            bounds: input_blocks_bounds,
+        };
+
+        let mut spec = ChainSpec::for_network(network);
+        // Private-devnet chain-spec overrides. Both are consensus
+        // parameters, so they are refused anywhere but devnet: a public
+        // network keeps the pinned spec byte for byte.
+        if let Some(hex) = &toml_cfg.chain.devnet_initial_difficulty_hex {
+            if network != Network::Devnet {
+                return Err("[chain] devnet_initial_difficulty_hex requires devnet".into());
+            }
+            let bytes = hex::decode(hex)
+                .map_err(|e| format!("[chain] devnet_initial_difficulty_hex: {e}"))?;
+            if bytes.is_empty() || bytes.len() > 32 || bytes.iter().all(|b| *b == 0) {
+                return Err(
+                    "[chain] devnet_initial_difficulty_hex: 1..=32 non-zero big-endian bytes"
+                        .into(),
+                );
+            }
+            spec.difficulty.initial_difficulty = bytes;
+        }
+        if let Some(delay) = toml_cfg.chain.devnet_miner_reward_delay {
+            if network != Network::Devnet {
+                return Err("[chain] devnet_miner_reward_delay requires devnet".into());
+            }
+            // The delay is compiled into the emission box's proposition,
+            // so it moves the genesis state root. Swapping it without
+            // swapping the genesis boxes would fork the node from its
+            // peer at height 0, which is why only delays with a captured
+            // box set are accepted.
+            let genesis = ergo_chain_spec::GenesisParams::devnet_for_reward_delay(delay)
+                .ok_or_else(|| {
+                    format!(
+                        "[chain] devnet_miner_reward_delay = {delay} has no captured genesis box set; supported: 10, 720"
+                    )
+                })?;
+            spec.monetary.miner_reward_delay = delay;
+            spec.genesis = genesis;
+        }
+        let chain_spec = Arc::new(spec);
         validate_supported(&chain_spec)?;
 
         let data_dir = cli
@@ -794,6 +875,24 @@ impl NodeConfig {
             staging_ttl_seconds: def.staging_ttl_seconds,
             staging_max_blocks: def.staging_max_blocks,
         };
+        // Input blocks ARE a provisional mempool chain: the processor
+        // resolves announced weak ids against the pool (spec 7.5 step 1)
+        // and applying an input block evicts from it (spec 8). With the
+        // mempool off it could do neither, and the ordering hook that
+        // keeps the processor's view of the committed tip fresh rides
+        // the mempool tick. Refusing the pair here is the only place
+        // that sees both decisions — note the mempool can also be forced
+        // off by digest mode or `verify_transactions = false`, which is
+        // why this gate lives after `mempool_config`, not beside the
+        // `[input_blocks]` block.
+        if input_blocks_enabled && !mempool_config.enabled {
+            return Err(
+                "[input_blocks] requires the mempool: enabled = true needs a live mempool \
+                 (not [mempool] disabled, state_type = \"digest\", or \
+                 verify_transactions = false)"
+                    .into(),
+            );
+        }
         if mempool_config.max_pool_size == 0 {
             return Err("[mempool] max_pool_size must be >= 1".into());
         }
@@ -1136,6 +1235,7 @@ impl NodeConfig {
             mining_config,
             voting_targets,
             wallet_expose_private_keys: toml_cfg.wallet.expose_private_keys.unwrap_or(false),
+            input_blocks,
         })
     }
 }
@@ -1144,6 +1244,27 @@ impl NodeConfig {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    // ----- helpers -----
+
+    /// Build a `Cli` pointing `--config` at an existing TOML file.
+    fn cli_with_config(path: &std::path::Path) -> Cli {
+        Cli::try_parse_from(["ergo-node", "--config", path.to_str().unwrap()]).unwrap()
+    }
+
+    /// Write `contents` to a fresh tempfile and build a `Cli` pointing
+    /// `--config` at it. `NodeConfig::load` re-reads the path from the
+    /// returned `Cli` after this function returns, so the tempfile is
+    /// deliberately leaked (never deleted) to keep it on disk that long.
+    fn cli_with_config_text(contents: &str) -> Cli {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), contents).unwrap();
+        let cli = cli_with_config(file.path());
+        // Leak the tempfile so its path stays valid after this function
+        // returns and `NodeConfig::load` reads it back.
+        std::mem::forget(file);
+        cli
+    }
 
     // ----- happy path -----
 
@@ -1191,5 +1312,191 @@ mod tests {
             let error = NodeConfig::load(cli).unwrap_err();
             assert!(error.to_string().contains("devnet_max_block_cost"));
         }
+    }
+
+    // ----- devnet chain-spec overrides -----
+
+    fn load_toml(body: &str) -> Result<NodeConfig, String> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), body).unwrap();
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        NodeConfig::load(cli).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn devnet_chain_overrides_apply_to_the_spec() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n             [chain]\ndevnet_initial_difficulty_hex = \"7d00\"\ndevnet_miner_reward_delay = 10\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.chain_spec.difficulty.initial_difficulty,
+            vec![0x7d, 0x00]
+        );
+        assert_eq!(cfg.chain_spec.monetary.miner_reward_delay, 10);
+        // The genesis moved with the delay: a node that kept the 720
+        // box set would fork from its peer at height 0.
+        assert_eq!(
+            hex::encode(cfg.chain_spec.genesis.state_digest),
+            "c01a142d004a917b4af35385265748e37f7c77ab8a4e8b2080b9c193516b845602"
+        );
+        assert_ne!(
+            cfg.chain_spec.genesis.state_digest,
+            ergo_chain_spec::GenesisParams::devnet().state_digest
+        );
+    }
+
+    #[test]
+    fn devnet_miner_reward_delay_without_a_captured_genesis_rejected() {
+        let err = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_miner_reward_delay = 3\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("no captured genesis box set"), "{err}");
+    }
+
+    #[test]
+    fn devnet_miner_reward_delay_720_keeps_the_stock_genesis() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_miner_reward_delay = 720\n",
+        )
+        .unwrap();
+        let pinned = ergo_chain_spec::ChainSpec::devnet();
+        assert_eq!(
+            cfg.chain_spec.genesis.state_digest,
+            pinned.genesis.state_digest
+        );
+        assert_eq!(cfg.chain_spec.genesis.boxes_json, pinned.genesis.boxes_json);
+    }
+
+    #[test]
+    fn devnet_chain_overrides_absent_keep_the_pinned_spec() {
+        let cfg = load_toml(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n",
+        )
+        .unwrap();
+        let pinned = ergo_chain_spec::ChainSpec::devnet();
+        assert_eq!(
+            cfg.chain_spec.difficulty.initial_difficulty,
+            pinned.difficulty.initial_difficulty
+        );
+        assert_eq!(
+            cfg.chain_spec.monetary.miner_reward_delay,
+            pinned.monetary.miner_reward_delay
+        );
+    }
+
+    #[test]
+    fn devnet_chain_overrides_on_public_networks_rejected() {
+        for network in ["mainnet", "testnet"] {
+            for key in [
+                "devnet_initial_difficulty_hex = \"7d00\"",
+                "devnet_miner_reward_delay = 3",
+            ] {
+                let err = load_toml(&format!(
+                    "network = \"{network}\"\n[api]\ndisabled = true\n[chain]\n{key}\n"
+                ))
+                .unwrap_err();
+                assert!(err.contains("requires devnet"), "{network}/{key}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn devnet_initial_difficulty_hex_rejects_degenerate_values() {
+        for value in ["", "00", "zz", &"11".repeat(33)] {
+            let err = load_toml(&format!(
+                "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n                 [chain]\ndevnet_initial_difficulty_hex = \"{value}\"\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.contains("devnet_initial_difficulty_hex"),
+                "{value:?}: {err}"
+            );
+        }
+    }
+
+    // ----- input_blocks -----
+
+    #[test]
+    fn input_blocks_enabled_on_devnet_loads() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[input_blocks]\nenabled = true\nstrict_field_binding = false\n[input_blocks.bounds]\nforks_per_ordering = 8\n").unwrap();
+        let cli = cli_with_config(file.path());
+        let cfg = NodeConfig::load(cli).unwrap();
+        assert!(cfg.input_blocks.enabled);
+        assert!(!cfg.input_blocks.strict_field_binding);
+        assert_eq!(cfg.input_blocks.bounds.forks_per_ordering, 8);
+        assert_eq!(
+            cfg.input_blocks.bounds.records_per_ordering,
+            ergo_inputblocks::bounds::Bounds::default().records_per_ordering
+        );
+    }
+
+    #[test]
+    fn input_blocks_enabled_on_public_networks_rejected() {
+        for network in ["mainnet", "testnet"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!("network = \"{network}\"\n[input_blocks]\nenabled = true\n"),
+            )
+            .unwrap();
+            let error = NodeConfig::load(cli_with_config(file.path())).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("[input_blocks] enabled requires devnet"),
+                "{network}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_blocks_enabled_with_the_mempool_disabled_is_rejected() {
+        // Input blocks ARE a provisional mempool chain: the processor
+        // resolves announced weak ids against the pool, and applying an
+        // input block evicts from it. With the mempool off the subsystem
+        // could do neither, and the ordering hook that keeps its view of
+        // the tip fresh rides the mempool tick.
+        for disabling in [
+            "[mempool]\ndisabled = true\n",
+            // Digest mode force-disables the mempool (box bytes are
+            // unavailable), so it reaches the same gate by another road.
+            // (`verify_transactions = false` is refused earlier, by the
+            // headers-only-needs-digest rule, so it never reaches here.)
+            "[node]\nstate_type = \"digest\"\n",
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                format!(
+                    "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n\
+                     [api]\ndisabled = true\n[input_blocks]\nenabled = true\n{disabling}"
+                ),
+            )
+            .unwrap();
+            let error = NodeConfig::load(cli_with_config(file.path())).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("[input_blocks] requires the mempool"),
+                "{disabling:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_blocks_default_is_disabled_with_default_bounds() {
+        let cfg = NodeConfig::load(cli_with_config_text(
+            "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n",
+        ))
+        .unwrap();
+        assert!(!cfg.input_blocks.enabled);
+        assert_eq!(
+            cfg.input_blocks.bounds,
+            ergo_inputblocks::bounds::Bounds::default()
+        );
     }
 }

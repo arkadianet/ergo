@@ -452,6 +452,8 @@ mod tests {
             size_bytes: Some(1234),
             addr: None,
             detail: None,
+            reconstructed_order: None,
+            reconstruction_key: None,
         }
     }
 
@@ -471,6 +473,8 @@ mod tests {
             size_bytes: None,
             addr: None,
             detail: None,
+            reconstructed_order: None,
+            reconstruction_key: None,
         }
     }
 
@@ -619,6 +623,8 @@ mod tests {
                         size_bytes: None,
                         addr: Some("1.2.3.4:9030".into()),
                         detail: None,
+                        reconstructed_order: None,
+                        reconstruction_key: None,
                     },
                     ApiNodeEvent {
                         seq: 2,
@@ -635,6 +641,8 @@ mod tests {
                         size_bytes: None,
                         addr: Some("1.2.3.4:9030".into()),
                         detail: None,
+                        reconstructed_order: None,
+                        reconstruction_key: None,
                     },
                 ],
             },

@@ -35,6 +35,8 @@ pub(super) fn build_events_projection(
                 size_bytes: None,
                 addr: None,
                 detail: None,
+                reconstructed_order: None,
+                reconstruction_key: None,
             };
             match e.kind {
                 K::BlockApplied {
@@ -105,6 +107,33 @@ pub(super) fn build_events_projection(
                             .into(),
                     );
                 }
+                // Snake-case kinds, deliberately: the M2 devnet smoke and
+                // the campaign's reconstruct-rate measurement key off
+                // these exact strings (plan 2 tasks 8 and 9).
+                K::OrderingReconstructed {
+                    height,
+                    header_id,
+                    txs,
+                    order,
+                    key,
+                } => {
+                    ev.kind = "ordering_reconstructed".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.txs = Some(txs);
+                    ev.reconstructed_order = Some(order.to_string());
+                    ev.reconstruction_key = Some(key.to_string());
+                }
+                K::OrderingReconstructFallback {
+                    height,
+                    header_id,
+                    reason,
+                } => {
+                    ev.kind = "ordering_reconstruct_fallback".into();
+                    ev.height = Some(height);
+                    ev.header_id = Some(header_id);
+                    ev.detail = Some(reason);
+                }
             }
             ev
         })
@@ -151,6 +180,100 @@ mod tests {
                 "returnedTxIds": ["aa11"],
                 "returnedTxsTotal": 1,
                 "deliveredBy": "1.2.3.4:9030",
+            })
+        );
+    }
+
+    /// The exact serialized shape `scripts/devnet-matrix/smoke.py` parses
+    /// for assertion 4 (task 8b, fix round 3).
+    ///
+    /// Round 2's "no reconstruction on a root mismatch" guard looked for
+    /// an `ordering_reconstructed` event carrying `detail ==
+    /// "root_mismatch"` — a shape this projection never produces, so the
+    /// guard could never fire. A mismatch reason rides on a FALLBACK
+    /// event; a reconstructed event carries no `detail` at all. This
+    /// pins that, and the field names the harness reads, so the guard
+    /// cannot silently go looking for a shape again.
+    #[test]
+    fn reconstruction_events_have_the_shape_the_smoke_harness_parses() {
+        use crate::node::event_feed::{EventFeedRing, FeedEventKind};
+
+        let mut ring = EventFeedRing::new();
+        ring.push(
+            1_700_000_000_000,
+            FeedEventKind::OrderingReconstructed {
+                height: 42,
+                header_id: "rebuilt".to_string(),
+                txs: 3,
+                order: "candidate",
+                key: "parent",
+            },
+        );
+        ring.push(
+            1_700_000_000_001,
+            FeedEventKind::OrderingReconstructFallback {
+                height: 43,
+                header_id: "downloaded".to_string(),
+                reason: "root_mismatch".to_string(),
+            },
+        );
+        ring.push(
+            1_700_000_000_002,
+            FeedEventKind::BlockApplied {
+                height: 43,
+                header_id: "downloaded".to_string(),
+                txs: 3,
+                size_bytes: 1234,
+            },
+        );
+
+        let events = build_events_projection(&ring);
+        let rebuilt = serde_json::to_value(&events.events[0]).unwrap();
+        let fallback = serde_json::to_value(&events.events[1]).unwrap();
+        let applied = serde_json::to_value(&events.events[2]).unwrap();
+
+        assert_eq!(
+            rebuilt,
+            serde_json::json!({
+                "seq": 1,
+                "unixMs": 1_700_000_000_000u64,
+                "kind": "ordering_reconstructed",
+                "height": 42,
+                "headerId": "rebuilt",
+                "txs": 3,
+                "reconstructedOrder": "candidate",
+                "reconstructionKey": "parent",
+            })
+        );
+        // The load-bearing absence: a reconstructed block reports no
+        // `detail`, so a mismatch reason can never appear on one.
+        assert!(
+            rebuilt.get("detail").is_none(),
+            "a reconstructed event must carry no detail: {rebuilt}"
+        );
+
+        assert_eq!(
+            fallback,
+            serde_json::json!({
+                "seq": 2,
+                "unixMs": 1_700_000_000_001u64,
+                "kind": "ordering_reconstruct_fallback",
+                "height": 43,
+                "headerId": "downloaded",
+                "detail": "root_mismatch",
+            })
+        );
+
+        assert_eq!(
+            applied,
+            serde_json::json!({
+                "seq": 3,
+                "unixMs": 1_700_000_000_002u64,
+                "kind": "blockApplied",
+                "height": 43,
+                "headerId": "downloaded",
+                "txs": 3,
+                "sizeBytes": 1234,
             })
         );
     }

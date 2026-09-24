@@ -52,6 +52,7 @@ fn tip_ctx<'a>(
         params,
         last_headers: &[],
         reemission: None,
+        input_block_txs: &[],
     }
 }
 

@@ -473,3 +473,50 @@ async fn run_inner_rejects_verify_transactions_false_alone() {
     assert!(msg.contains("verify_transactions"), "error: {msg}");
     assert!(msg.contains("not yet supported"), "error: {msg}");
 }
+
+// ----- input blocks: devnet-only (M2 final review, finding 2) -----
+
+/// `NodeConfig::load` refuses `[input_blocks] enabled = true` on any
+/// network but devnet. `run_inner` is exported, so an embedder can build
+/// a mainnet `NodeConfig` in code, set that public field, and boot a node
+/// that advertises 6.5.0, serves Matrix routes and processes the
+/// input-block message family on mainnet. The runtime gate must refuse
+/// it, and must do so before the data dir is touched.
+#[tokio::test]
+async fn run_inner_rejects_input_blocks_on_mainnet_before_opening_storage() {
+    let data_dir = test_data_dir();
+    let dir = data_dir.path().join("never-created");
+    let mut cfg = common::make_test_config(dir.clone());
+    cfg.input_blocks.enabled = true;
+    let err = match run_inner(cfg).await {
+        Ok(_) => panic!("mainnet + input blocks must be refused"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("input_blocks") && msg.contains("devnet"),
+        "rejection must name the field and the requirement: {msg}",
+    );
+    assert!(
+        !dir.exists(),
+        "the gate must fire before the data dir is created"
+    );
+}
+
+/// Same gate, testnet: the check is "devnet or nothing", not
+/// "not mainnet".
+#[tokio::test]
+async fn run_inner_rejects_input_blocks_on_testnet() {
+    let data_dir = test_data_dir();
+    let mut cfg = common::make_test_config(data_dir.path().to_path_buf());
+    cfg.network = ergo_node::config::Network::Testnet;
+    cfg.input_blocks.enabled = true;
+    let err = match run_inner(cfg).await {
+        Ok(_) => panic!("testnet + input blocks must be refused"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("devnet"),
+        "rejection must name devnet: {err}",
+    );
+}

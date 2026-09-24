@@ -1,0 +1,229 @@
+{
+  "id": "2026-09-22-5",
+  "title": "the follower never holds the miner's input chain at the same instant (exact tip equality unreachable)",
+  "severity": "observation",
+  "component": "rust \u2014 ergo-node follower throughput",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, funded run 2026-09-22 (release build)",
+  "summary": "With a steady payment workload the Rust node exceeded the +-2 ordering block window 24 times, peaking 4 blocks behind. Without a workload the same build stayed within 1. Startup is excluded (60 s per process); the post-restart catch-up is NOT, deliberately.",
+  "measurement": {
+    "max_height_gap": 4,
+    "height_window": 2,
+    "violation_count": 24,
+    "accumulated_drops": {
+      "AlreadyKnown": 1159,
+      "ValidationUnavailable": 45,
+      "OutsideHeightWindow": 33
+    },
+    "samples": 2029,
+    "peer_states_seen": [
+      "active"
+    ]
+  },
+  "violations": [
+    {
+      "at": 1790008372.1821158,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008373.187013,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008374.1937816,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008375.2000356,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008376.2047775,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008377.2105668,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008378.2154827,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008379.2211425,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008380.2259824,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008381.231804,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008382.2365654,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008383.242621,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008384.258574,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008385.2738557,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008386.3075655,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008387.318775,
+      "scala_height": 7,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008388.343199,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008389.348337,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008390.3538125,
+      "scala_height": 8,
+      "rust_height": 4
+    },
+    {
+      "at": 1790008391.359466,
+      "scala_height": 8,
+      "rust_height": 4
+    }
+  ],
+  "likely_related_to": "2026-09-22-3: every ordering block with transactions falls back to a full BlockTransactions download, so under load the follower pays the download it was supposed to avoid, on top of validating input blocks.",
+  "gate": "assertions 2 and 3 of the devnet-matrix smoke FAIL on this; 1, 4, 5 and 6 pass.",
+  "round_2_remeasurement": {
+    "build": "release",
+    "changes_since_round_1": [
+      "incremental weak-id index in ergo-mempool (the per-frame full-pool parse is gone)",
+      "waitlist_entries raised to 8192 (WaitlistFull no longer fires)",
+      "D4 + D5, so reconstruction now succeeds on multi-transaction blocks"
+    ],
+    "samples": 1183,
+    "same_tip_samples": 746,
+    "exact_tip_matches": 0,
+    "max_propagation_lag_seconds": 3.692,
+    "chain_history_mismatches": 0,
+    "accumulated_drops": {
+      "AlreadyKnown": 935,
+      "ValidationUnavailable": 67
+    },
+    "verdict": "unchanged: 0 exact matches in 746 same-tip samples. The follower is never WRONG - zero history mismatches, zero digest mismatches, no penalties, heights within 2 - it is simply several input blocks behind a miner publishing roughly one per second."
+  },
+  "profile_60s_under_load": {
+    "tool": "perf record -F 199 -g on the release node for 60 s during a funded run",
+    "artifact": ".superpowers/sdd/2026-09-21-input-blocks-port-plan-2/perf-top.txt",
+    "top_costs": [
+      {
+        "symbol": "__memmove_avx512_unaligned_erms (libc)",
+        "pct": 8.8,
+        "reading": "bulk copying - body/section buffers and snapshot rebuilds"
+      },
+      {
+        "symbol": "blake2::Blake2bVarCore::compress",
+        "pct": 7.96,
+        "reading": "hashing: transaction ids, weak ids, Merkle roots. Intrinsic to the protocol"
+      },
+      {
+        "symbol": "allocator churn (hashbrown RawTable::drop 4.40 + _int_free_chunk 4.28 + cfree 3.49)",
+        "pct": 12.17,
+        "reading": "the actionable one. drop_in_place<ApiInputBlockEntry> alone is 2.67%, which says the input-blocks REST read-slot snapshot is rebuilt and thrown away far more often than anything reads it. Rebuilding it on change rather than per effect batch is the next thing to try."
+      }
+    ],
+    "note": "the profiled run competed with perf for CPU and produced no multi-tx reconstruction; the numbers are indicative, not a clean measurement"
+  },
+  "round_3_remeasurement": {
+    "note": "assertions 2 and 3 were restated as consistency-under-lag with hard bounds (p95 <= 8, max <= 16 input blocks). The lag bound is what this finding is now measured against, and it fails by an order of magnitude.",
+    "run_a": {
+      "lag_p95": 81,
+      "lag_max": 85,
+      "lag_mean": 38.78,
+      "lag_samples": 294,
+      "exact_tip_matches": 0,
+      "assertion_6": "PASS (20/20 observed in a Rust input block)",
+      "assertion_5": "FAIL (max gap 4, 22 violations)",
+      "multi_tx_reconstructions": 6
+    },
+    "run_b": {
+      "lag_p95": 160,
+      "lag_max": 179,
+      "lag_mean": 69.04,
+      "lag_samples": 1100,
+      "exact_tip_matches": 0,
+      "assertion_6": "FAIL (0/20 observed in a Rust input block)",
+      "assertion_5": "FAIL (max gap 3, 70 violations)",
+      "multi_tx_reconstructions": 1
+    },
+    "run_to_run_variance": "the two runs differ by 2x in lag because the Scala miner's ordering-block acceptance is racy (CandidateGenerator clears cachedCandidate after every accepted input block, so ordering solutions are often rejected). When an ordering block takes minutes instead of ~55 s the input chain under it grows to 180 blocks and a follower with fixed throughput falls proportionally further behind. Lag in INPUT BLOCKS is therefore partly a measure of the miner's stall, not only of the follower.",
+    "escalation": "round-3 ruling item 4 parks the single-in-flight validation ceiling (spec 7.4) 'to revisit only if the p95 lag bound fails'. It failed, in both runs, by 10-20x. This is now the blocking item for assertions 2 and 3 and, indirectly, for 5 and 6 under load."
+  },
+  "assertion_3_residual": {
+    "prefix_violations_after_the_settled_rule": 10,
+    "shape": "every one is the same: Rust's listed chain still belongs to the PREVIOUS ordering block while `bestOrdering` already names the new one. Not one violation has a Rust block sitting at a different position in Scala's chain - Rust's ids are simply absent from the new chain.",
+    "why_the_harness_cannot_key_it_out": "on BOTH nodes /blocks/bestInputChain pairs `bestOrdering` (the best HEADER id) with a chain read from the input-block processor - Scala's route does the same (bestHeaderOpt + bestInputBlocksChain()). The two sources are not atomically consistent, and the width of the window is a throughput symptom. Dropping mid-transition pairs (same ordering id as the previous sample, non-empty Scala chain) removes most but not all: the Rust node stays on the old tree for several consecutive samples.",
+    "options_for_the_controller": [
+      "expose the ordering id a chain belongs to on the Rust endpoint, which would make the assertion decidable without guessing",
+      "define assertion 3 only over samples where every Rust id is in Scala's chain - which collapses it into assertion 2",
+      "accept it as a known artifact and gate on assertion 2's lag bound alone"
+    ]
+  },
+  "round_4_remeasurement": {
+    "note": "harness hardening round: the evaluators now require coverage, drop only samples where the two nodes name different ordering blocks, and run over EVERY sample of the run from a dedicated sampler thread. The lag measurement is therefore on far more samples than round 3, and it got worse, not better.",
+    "run_a": {
+      "lag_p95": 159,
+      "lag_max": 203,
+      "lag_mean": 54.06,
+      "lag_samples": 1547,
+      "qualifying_samples": 1830,
+      "prefix_violations": 230,
+      "exact_tip_matches": 0,
+      "assertion_6": "PASS (20/20 located, 20/20 removed before the next ordering block, no unattributed residue)",
+      "multi_tx_reconstructions": 6
+    },
+    "run_b": {
+      "lag_p95": 390,
+      "lag_max": 442,
+      "lag_mean": 116.96,
+      "lag_samples": 1973,
+      "qualifying_samples": 2242,
+      "prefix_violations": 162,
+      "exact_tip_matches": 0,
+      "assertion_6": "FAIL (0/20 located \u2014 the follower never held the input blocks carrying them within the tracking window)",
+      "multi_tx_reconstructions": 7
+    },
+    "prefix_violations_are_the_same_lag": "with the round-3 boundary exclusions removed, the prefix violations are no longer a sampling artifact to argue about: they are the lag. Rust's chain is hundreds of blocks behind the chain Scala reports, so it is not a truncation of it. The count (230 and 162 of ~2100 compared samples) tracks the lag, and not one violation has a Rust block at a DIFFERENT position in Scala's chain.",
+    "escalation": "unchanged and now better evidenced: the p95 bound fails by 20-50x over 1500-2000 lag samples. Task 8b."
+  }
+}

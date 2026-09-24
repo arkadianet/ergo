@@ -5,6 +5,7 @@ import io.circe.Json
 import io.circe.syntax._
 import org.ergoplatform.mining.InputBlockFields
 import org.ergoplatform.mining.difficulty.DifficultySerializer
+import org.ergoplatform.modifiers.history.{BlockTransactions, BlockTransactionsSerializer}
 import org.ergoplatform.modifiers.history.extension.{Extension, ExtensionCandidate}
 import org.ergoplatform.modifiers.history.header.{Header, HeaderSerializer}
 import org.ergoplatform.modifiers.mempool.{ErgoTransaction, ErgoTransactionSerializer}
@@ -589,6 +590,75 @@ object WeakBlocksOracle {
     Json.obj("cases" -> cases.asJson)
   }
 
+  // ── block_sections: Scala `BlockTransactions` bytes and modifier ids ──
+  //
+  // Feeds the reference node the mainnet fixtures the Rust tests already use
+  // (`test-vectors/mainnet/headers_1_10.json` header bytes and
+  // `blocks_1_5.json` per-transaction bytes), builds the real
+  // `BlockTransactions(headerId, header.version, txs)` and emits what the
+  // reference node makes of it: the serialized section, its modifier id
+  // (`NonHeaderBlockSection.computeIdBytes`) and its transactions root.
+  // `root` is the Rust worktree root, passed by `gen.py`.
+  def blockSectionCases(root: String): Json = {
+    def readJson(rel: String): Json = {
+      val bytes = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(root, rel))
+      io.circe.parser.parse(new String(bytes, "UTF-8")).fold(e => sys.error(s"$rel: $e"), identity)
+    }
+    def arr(j: Json): Vector[Json] = j.asArray.getOrElse(sys.error("expected a JSON array"))
+    def str(j: Json, f: String): String =
+      j.hcursor.get[String](f).fold(e => sys.error(s"field $f: $e"), identity)
+    def int(j: Json, f: String): Int =
+      j.hcursor.get[Int](f).fold(e => sys.error(s"field $f: $e"), identity)
+
+    val headers = arr(readJson("test-vectors/mainnet/headers_1_10.json"))
+    val blocks = arr(readJson("test-vectors/mainnet/blocks_1_5.json"))
+    val cases = blocks.map { b =>
+      val height = int(b, "height")
+      val headerJson = headers.find(h => int(h, "height") == height)
+        .getOrElse(sys.error(s"no header fixture at height $height"))
+      val header = HeaderSerializer.parseBytes(Base16.decode(str(headerJson, "bytes")).get)
+      require(Algos.encode(idToBytes(header.id)) == str(headerJson, "id"), "header id mismatch")
+      require(Algos.encode(idToBytes(header.id)) == str(b, "headerId"), "block/header fixture mismatch")
+      val txs = arr(b.hcursor.downField("transactions").focus.get)
+        .map(t => ErgoTransactionSerializer.parseBytes(Base16.decode(str(t, "bytes")).get))
+      val bt = BlockTransactions(header.id, header.version, txs)
+      Json.obj(
+        "height" -> height.asJson,
+        "header_id" -> Algos.encode(idToBytes(header.id)).asJson,
+        "header_version" -> header.version.toInt.asJson,
+        "tx_count" -> txs.size.asJson,
+        // The header's own root, recomputed from the transactions: equal to
+        // `header.transactionsRoot` for a real block.
+        "transactions_root" -> hex(bt.digest).asJson,
+        "header_transactions_root" -> hex(header.transactionsRoot).asJson,
+        "section_bytes_hex" -> hex(BlockTransactionsSerializer.toBytes(bt)).asJson,
+        "section_id" -> Algos.encode(idToBytes(bt.id)).asJson)
+    }
+    Json.obj("cases" -> cases.asJson)
+  }
+
+  /**
+    * `Parameters.DefaultParameters` from the pinned branch, as an ordered
+    * id -> value table. This is the table a chain that starts from the
+    * defaults carries at genesis, and the only authority for whether id 9
+    * (`SubblocksPerBlockIncrease`) is in it and what its value is. The
+    * Rust launch row is checked against this rather than against itself.
+    */
+  def launchParamsCases(): Json = {
+    val table = org.ergoplatform.settings.Parameters.DefaultParameters
+    val entries = table.toSeq.sortBy(_._1).map { case (id, value) =>
+      Json.obj("id" -> (id: Int).asJson, "value" -> value.asJson)
+    }
+    Json.obj("cases" -> Json.arr(Json.obj(
+      "name" -> "default_parameters".asJson,
+      "source" -> "org.ergoplatform.settings.Parameters.DefaultParameters".asJson,
+      "subblocks_per_block_id" ->
+        (org.ergoplatform.settings.Parameters.SubblocksPerBlockIncrease: Int).asJson,
+      "subblocks_per_block_default" ->
+        org.ergoplatform.settings.Parameters.SubsPerBlockDefault.asJson,
+      "entries" -> entries.asJson)))
+  }
+
   def main(args: Array[String]): Unit = {
     val out = args(0) match {
       case "announcement" => announcementCases()
@@ -600,6 +670,8 @@ object WeakBlocksOracle {
       case "extension_proof" => extensionProofCases()
       case "soft_fields" => softFieldCases()
       case "input_block_validation" => inputBlockValidationCases()
+      case "block_sections" => blockSectionCases(args(1))
+      case "launch_params" => launchParamsCases()
       case other => sys.error(s"unknown vector $other")
     }
     println(out.spaces2)

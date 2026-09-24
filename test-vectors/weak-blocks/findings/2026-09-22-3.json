@@ -1,0 +1,54 @@
+{
+  "id": "2026-09-22-3",
+  "title": "F12 \u2014 the weak-blocks miner and the weak-blocks follower assemble an ordering block's transactions in opposite orders",
+  "severity": "divergence",
+  "component": "scala (upstream) \u2014 ergoplatform/ergo weak-blocks @ 31a8de804f7328704f2753a1cf151dda8f64689f",
+  "status": "open",
+  "spec_finding": "F12",
+  "source": "scripts/devnet-matrix smoke, funded runs 2026-09-22",
+  "summary": "`CandidateGenerator` mines `previousOrderingBlockTransactions ++ orderingTxs` (CandidateGenerator.scala:771) \u2014 the collected input chain FIRST. `ErgoNodeViewHolder.processOrderingBlock` reassembles `orderingBlockTransactions ++ inputBlocksTransactions` (ErgoNodeViewHolder.scala:445) \u2014 the input chain LAST \u2014 and carries its own `todo: check if ordering block transactions should come first` two lines above. The transactions root is order-sensitive, so the reference follower cannot reconstruct a block the reference miner produced the moment either half is non-empty: it computes a different root and falls back to a full BlockTransactions download. Confirmed against a real mined block, below.",
+  "scala_code": {
+    "miner": {
+      "file": "src/main/scala/org/ergoplatform/mining/CandidateGenerator.scala",
+      "line": 771,
+      "code": "val txs = previousOrderingBlockTransactions ++ orderingTxs"
+    },
+    "follower": {
+      "file": "src/main/scala/org/ergoplatform/nodeView/ErgoNodeViewHolder.scala",
+      "line": 445,
+      "code": "val txs = orderingBlockTransactions ++ inputBlocksTransactions",
+      "adjacent_comment": "// todo: check if ordering block transactions should come first"
+    }
+  },
+  "captured_block": {
+    "file": "test-vectors/weak-blocks/findings/2026-09-22-3/captured-block.json",
+    "height": 13,
+    "header_id": "79fb28debfe9342a236e1f8c9adae9e05ea432082779f2bbe099f49dd780e9b3",
+    "header_transactions_root": "dcc46d134cf6efcb7ea3f8d7aa7a64783eadf39239e36b269ae49c8698587aa2",
+    "transactions": 2,
+    "input_chain_tx_ids": [
+      "f3359234480c825d1bd1d740083b2bca23022eb401df8f41ccf3225bd95fc948"
+    ],
+    "ordering_tx_ids": [
+      "c812b68f0a85f99d47a0b849b358e78b8ba40844f9c8f064af0995fdc3225b21"
+    ],
+    "block_order_equals_candidate_order": true,
+    "block_order_equals_scala_follower_order": false
+  },
+  "measured_before_the_fix": {
+    "fallback_rate_with_transactions": "100% (10/10 attempts, reason root_mismatch)",
+    "fallback_rate_coinbase_only": "0% (6/6 reconstructed, txs=1)",
+    "why_it_hid": "a coinbase-only ordering block has an empty input-chain half, so the two orders coincide and the defect is invisible until the devnet can fund transactions"
+  },
+  "port_response": {
+    "divergence": "D4",
+    "behaviour": "the planner tries Scala's follower order FIRST, then the candidate order, and only falls back under root_mismatch if neither reproduces the header root. The order that matched is reported as `reconstructed_order` on the /api/v1/events entry and in the debug log, so the split stays measurable instead of being absorbed.",
+    "code": "ergo-node/src/node/input_blocks/reconstruct.rs (TxOrder)",
+    "tests": [
+      "reconstruction_tries_both_orders_and_reports_the_one_that_matched",
+      "reconstruction_falls_back_when_no_order_reproduces_the_root"
+    ],
+    "when_upstream_settles_f12": "delete the losing arm of TxOrder"
+  },
+  "upstream_action": "make the two sides agree. The miner's order is the one real blocks hash to, so `processOrderingBlock` is the side to change \u2014 or the candidate must be rebuilt to match the follower."
+}

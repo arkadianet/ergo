@@ -25,6 +25,58 @@ pub(super) struct TomlConfig {
     pub(super) mining: ergo_mining::MiningConfig,
     pub(super) voting: TomlVoting,
     pub(super) shadow: TomlShadow,
+    pub(super) input_blocks: TomlInputBlocks,
+}
+
+/// `[input_blocks]` TOML section: the Matrix input-block processor
+/// (spec 6.3/7.4/7.5). Devnet-only — `enabled = true` on mainnet/testnet
+/// is rejected at load. Off by default.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default)]
+pub(super) struct TomlInputBlocks {
+    pub(super) enabled: Option<bool>,
+    /// Spec 6.3's strict-field-binding rule. Defaults to `true`;
+    /// switchable off to measure divergence against a relaxed binding
+    /// during parity work.
+    pub(super) strict_field_binding: Option<bool>,
+    /// Scala carries a `TODO` here (relay of remote input blocks isn't
+    /// implemented). `true` is a documented divergence from the
+    /// reference node. Defaults to `false`.
+    pub(super) relay_remote: Option<bool>,
+    pub(super) bounds: TomlInputBlockBounds,
+}
+
+/// `[input_blocks.bounds]`: per-field overrides of
+/// `ergo_inputblocks::bounds::Bounds`. Every field optional; `None`
+/// keeps the corresponding `Bounds::default()` value.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default)]
+pub(super) struct TomlInputBlockBounds {
+    pub(super) tx_cache_entries: Option<usize>,
+    pub(super) tx_cache_bytes: Option<usize>,
+    pub(super) tx_cache_ttl_ms: Option<u64>,
+    pub(super) waitlist_entries: Option<usize>,
+    pub(super) forks_per_ordering: Option<usize>,
+    pub(super) records_per_ordering: Option<usize>,
+    pub(super) records_total: Option<usize>,
+    pub(super) trees_total: Option<usize>,
+    pub(super) ordering_announcements: Option<usize>,
+    pub(super) staging_bytes_total: Option<usize>,
+    pub(super) requests_per_peer: Option<usize>,
+    pub(super) request_timeout_ms: Option<u64>,
+    pub(super) request_retries: Option<u32>,
+    pub(super) retry_pending_per_peer: Option<usize>,
+    pub(super) retired_jobs: Option<usize>,
+    pub(super) candidates_per_position: Option<usize>,
+    pub(super) digest_attempts_per_block: Option<usize>,
+    pub(super) prune_threshold: Option<u32>,
+    pub(super) ordering_announcement_prune_threshold: Option<u32>,
+    pub(super) height_reset_threshold: Option<u32>,
+    pub(super) staging_ttl_ms: Option<u64>,
+    pub(super) validation_retries_per_block: Option<usize>,
+    pub(super) digest_recovery_per_block: Option<usize>,
+    pub(super) validation_recovery_per_block: Option<usize>,
+    pub(super) pending_triggers: Option<usize>,
 }
 
 /// `[shadow]` TOML section: shadow validation — live cross-check against a
@@ -262,6 +314,15 @@ pub(super) struct TomlMempool {
 pub(super) struct TomlChain {
     /// Private devnet genesis cost cap; forbidden on public networks.
     pub(super) devnet_max_block_cost: Option<u32>,
+    /// Private devnet initial difficulty, hex (Scala
+    /// `chain.initialDifficultyHex`). The devnet spec's default is `01`,
+    /// which makes every Autolykos solution an ordering block — input
+    /// blocks need a target above 1. Forbidden on public networks.
+    pub(super) devnet_initial_difficulty_hex: Option<String>,
+    /// Private devnet miner-reward maturity delay in blocks (Scala
+    /// `monetary.minerRewardDelay`, default 720). Forbidden on public
+    /// networks.
+    pub(super) devnet_miner_reward_delay: Option<u32>,
     /// Override the network's default script-validation checkpoint
     /// height. Use 0 to disable.
     pub(super) script_validation_checkpoint_height: Option<u32>,

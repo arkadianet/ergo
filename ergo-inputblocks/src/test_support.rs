@@ -315,6 +315,9 @@ pub struct TestCtx {
     /// Ordering blocks whose transaction section the node already has
     /// (`ProcessorCtx::block_transactions_known`).
     pub known_block_txs: HashSet<OrderingId>,
+    /// Ordering blocks whose HEADER the node already holds
+    /// (`ProcessorCtx::header_known`).
+    pub known_headers: HashSet<OrderingId>,
     /// What `ProcessorCtx::expected_n_bits` answers for every parent.
     pub expected_n_bits: Option<u32>,
 }
@@ -329,6 +332,7 @@ impl TestCtx {
             full_block_height,
             multiplier: Some(i32::MAX),
             known_block_txs: HashSet::new(),
+            known_headers: HashSet::new(),
             expected_n_bits: None,
         }
     }
@@ -340,6 +344,7 @@ impl TestCtx {
         let mempool_lookup = |w: &WeakId| self.mempool.lookup(w);
         let expected_n_bits = |_: &[u8; 32]| self.expected_n_bits;
         let block_transactions_known = |id: &OrderingId| self.known_block_txs.contains(id);
+        let header_known = |id: &OrderingId| self.known_headers.contains(id);
         let ctx = ProcessorCtx {
             multiplier: self.multiplier,
             expected_n_bits: &expected_n_bits,
@@ -347,6 +352,7 @@ impl TestCtx {
             utxo_mode: self.utxo_mode,
             full_block_height: self.full_block_height,
             block_transactions_known: &block_transactions_known,
+            header_known: &header_known,
         };
         f(&ctx)
     }
@@ -397,7 +403,7 @@ pub fn validate_ok(p: &mut Processor, ctx: &TestCtx, effects: &[Effect], cost: u
         Event::ValidationResult {
             job,
             generation,
-            outcome: Ok(cost),
+            outcome: crate::processor::ValidationOutcome::Valid(cost),
         },
     )
 }
@@ -410,7 +416,21 @@ pub fn validate_err(p: &mut Processor, ctx: &TestCtx, effects: &[Effect]) -> Vec
         Event::ValidationResult {
             job,
             generation,
-            outcome: Err("simulated".to_string()),
+            outcome: crate::processor::ValidationOutcome::Invalid("simulated".to_string()),
+        },
+    )
+}
+
+/// Answer the single `Validate` in `effects` with a node-local
+/// "cannot run this job" outcome (no applied tip, no UTXO set).
+pub fn validate_unavailable(p: &mut Processor, ctx: &TestCtx, effects: &[Effect]) -> Vec<Effect> {
+    let (job, generation, _, _, _) = one_validate(effects);
+    ctx.handle(
+        p,
+        Event::ValidationResult {
+            job,
+            generation,
+            outcome: crate::processor::ValidationOutcome::Unavailable("TipUnready".to_string()),
         },
     )
 }

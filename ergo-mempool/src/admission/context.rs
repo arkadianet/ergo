@@ -30,6 +30,21 @@ pub struct TipContext<'a> {
     /// bundle so admission enforces the same burning condition as block
     /// application — same code path, no separate mempool check.
     pub reemission: Option<&'a ReemissionRuleInputs>,
+    /// Transactions of the best input chain under the best ordering
+    /// block (spec §8). Empty on every network but a devnet with
+    /// `[input_blocks] enabled`, and empty there until an input block
+    /// applies — so the admission view is bit-for-bit today's whenever
+    /// this is empty.
+    ///
+    /// Non-empty, admission validates through
+    /// [`crate::input_blocks::InputBlockOverlay`] instead of the plain
+    /// pool overlay: the outputs these transactions created are
+    /// spendable, and the boxes they consumed are not. Without it the
+    /// processor -> mempool contract of §§2.7/8 does not hold — a child
+    /// of a transaction an input block removed from the pool is rejected
+    /// as unresolved, and a transaction double-spending an input the
+    /// chain already consumed is admitted.
+    pub input_block_txs: &'a [ergo_ser::transaction::Transaction],
 }
 
 impl TipContext<'_> {

@@ -108,6 +108,7 @@ pub(super) fn build_snapshot(
         index_db_bytes: None,
         disk_free_bytes: None,
         disk_total_bytes: None,
+        input_blocks: p.input_blocks.clone(),
     };
 
     let tip = ApiTip {
@@ -159,6 +160,15 @@ pub(super) fn build_snapshot(
     };
 
     let _ = p.now_unix_ms;
+    // Fix-round-1: `ApiInfo.best_input_block_id` reuses the SAME
+    // `status.input_blocks` projection just built above (`.and_then`
+    // flattens: subsystem off -> None, subsystem on but nothing leads
+    // -> also None -- the native surface has no null-vs-absent state).
+    let mut info = info;
+    info.best_input_block_id = status
+        .input_blocks
+        .as_ref()
+        .and_then(|ib| ib.best_input_block.clone());
     NodeSnapshot {
         gauges: p.sync_gauges,
         info,

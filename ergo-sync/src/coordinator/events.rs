@@ -658,17 +658,43 @@ impl SyncCoordinator {
             // and headers keep the (conditionally) penalize + re-request path.
             // The just-timed-out ids sit in the tracker's recently-released
             // shadow, so `modifier_type` still resolves their requested class.
-            let (tx_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) = ids
-                .iter()
-                .partition(|id| self.delivery.modifier_type(id) == Some(tx_type));
-            for tx_id in &tx_ids {
+            //
+            // Input-block modifiers (-123/-122/-121) take the same
+            // forget-without-penalty path, and this is PARITY, not a
+            // local convenience. Scala's `checkDelivery` for the three
+            // input-block type ids only `setUnknown`s and re-requests --
+            // it applies no `NonDelivery` penalty at all (spec 2.7,
+            // "Delivery checks (`checkDelivery`): for the three new type
+            // ids, `setUnknown`; for -123 with `checksDone < 2`
+            // re-request the input block, otherwise re-request the
+            // transaction ids of the stored announcement").
+            //
+            // The expectation is still FORGOTTEN on timeout (below), so
+            // the id returns to `Unknown` and can be requested again;
+            // what does not happen is a penalty, a delivery-streak
+            // failure, or a generic redistribute. The retry path is the
+            // input-block processor's own deadline sweep
+            // (`Bounds::request_timeout_ms`, swept on `Event::Tick`),
+            // which is the component that knows which peer announced the
+            // block and whether it is still worth asking for. A generic
+            // redistribute here would be a SECOND retry engine asking
+            // other peers for a modifier the processor never decided to
+            // re-request, and would penalize a peer for a request the
+            // processor has already given up on.
+            let (forget_ids, block_ids): (Vec<[u8; 32]>, Vec<[u8; 32]>) =
+                ids.iter().partition(|id| {
+                    let ty = self.delivery.modifier_type(id);
+                    ty == Some(tx_type) || ty.is_some_and(ModifierTypeId::is_input_block_family)
+                });
+            for tx_id in &forget_ids {
                 // Fully drop the forgotten tx so the tracker stops tracking
                 // it (no recently-released shadow, no retry count, no late
                 // allowance) and never re-requests it.
                 self.delivery.forget_timed_out(tx_id);
             }
-            // If only txs timed out for this peer, there is nothing to
-            // penalize or re-request — leave the peer untouched.
+            // If only forgotten-class modifiers timed out for this peer,
+            // there is nothing to penalize or re-request — leave the peer
+            // untouched.
             if block_ids.is_empty() {
                 continue;
             }

@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ergo_mempool::Mempool;
-use ergo_p2p::handshake::{Handshake, PeerFeature, PeerSpec, Version};
+use ergo_p2p::handshake::{Handshake, PeerFeature, PeerSpec};
 use ergo_state::store::StateStore;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -304,8 +304,13 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // against the self-stamped sentinel), genesis init (no box arena),
     // the index back-fills, the prune-sentinel activation gate, and
     // `enable_persist_pipeline` — is UTXO-specific and is skipped.
-    let mut launch_parameters =
-        ergo_validation::scala_launch_for_network(config.chain_spec.network);
+    // `[input_blocks] enabled` (devnet-only) seeds id 9 = 64 so the
+    // multiplier matches the Scala `weak-blocks` branch from genesis;
+    // without it every announcement drops with `MultiplierUnavailable`.
+    let mut launch_parameters = ergo_validation::scala_launch_for_network_with_input_blocks(
+        config.chain_spec.network,
+        config.input_blocks.enabled,
+    );
     if let Some(cap) = config.devnet_max_block_cost {
         // Runtime mirror of the `NodeConfig::load` gate: tests and library
         // embedders construct `NodeConfig` directly, so without this check a
@@ -484,7 +489,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
     // 2. Initialize genesis if needed (use genesis_committed flag, not height)
     if !store.genesis_committed() {
         info!("initializing genesis state");
-        let boxes = genesis::genesis_boxes_for(config.chain_spec.network);
+        let boxes = genesis::genesis_boxes_for_spec(&config.chain_spec.genesis);
         store.initialize_genesis(&boxes)?;
 
         info!(boxes = boxes.len(), "genesis initialized");
@@ -716,7 +721,7 @@ async fn run_inner_with_backend(
             .as_millis() as u64,
         peer_spec: PeerSpec {
             agent_name: config.agent_name.clone(),
-            version: Version::CURRENT,
+            version: super::input_blocks::advertised_version(config.input_blocks.enabled),
             node_name: config.node_name.clone(),
             declared_address,
             features: vec![
@@ -906,6 +911,21 @@ async fn run_inner_with_backend(
         magic: config.chain_spec.network_params.magic,
         our_handshake,
         mempool,
+        // Input blocks are devnet-only and default-off. Both config load
+        // and `validate_runtime_mode_support` (run at the top of this
+        // function, before storage opens) refuse `enabled = true` on any
+        // other network, so by here the flag alone decides whether the
+        // subsystem exists at all.
+        input_blocks: if config.input_blocks.enabled {
+            info!("input blocks enabled (devnet)");
+            Some(super::input_blocks::InputBlocksRuntime::new(
+                &config.input_blocks,
+                Instant::now(),
+            ))
+        } else {
+            None
+        },
+        input_blocks_read_slot: scaffold.input_blocks_slot,
         mempool_notifier,
         mempool_gate_broken: false,
         throttle,
@@ -1018,6 +1038,12 @@ async fn run_inner_with_backend(
         event_feed_projection: None,
         reorg_history_projection: None,
     };
+
+    // Seed the input-block processor's view of the best full block.
+    // The processor restarts empty (spec 9.5) but must not believe the
+    // chain is at height 0 — every announcement would then land outside
+    // its +/-2 actionable window and be dropped.
+    super::input_blocks::seed_best_ordering(&mut state);
 
     // Spawn the Step B anchor-map builder. Background task that
     // periodically snapshots `rest_peer_urls` and queries

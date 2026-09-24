@@ -760,6 +760,25 @@ pub(crate) fn validate_runtime_mode_support(config: &NodeConfig) -> Result<(), N
                 .into(),
         );
     }
+    // Input blocks are devnet-only (spec §3). `NodeConfig::load`
+    // refuses `enabled = true` on any other network at TOML time, but
+    // `run_inner` is exported: an embedder can build a mainnet config in
+    // code and set the public field, booting a node that advertises
+    // 6.5.0, serves the Matrix routes and processes the input-block
+    // message family on a public network. Unlike `devnet_max_block_cost`
+    // the subsystem had no runtime backstop, so this is it — and it runs
+    // before storage opens, so such a config never reaches a data dir.
+    if config.input_blocks.enabled && config.network != crate::config::Network::Devnet {
+        return Err(format!(
+            "NodeConfig: [input_blocks] enabled = true requires devnet; got \
+             network = {:?}. The Matrix input-block protocol is an unactivated \
+             experiment — advertising 6.5.0 and processing its message family \
+             on a public network is not supported.",
+            config.network,
+        )
+        .into());
+    }
+
     // Mode 2 (utxo_bootstrap = true) is now accepted at runtime.
     // The consume-side pipeline is live; on a fresh data_dir the
     // node will discover snapshots, verify trust against

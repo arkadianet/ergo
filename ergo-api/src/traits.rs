@@ -96,6 +96,22 @@ pub trait NodeReadState: Send + Sync {
     fn votes(&self) -> ApiVotes {
         ApiVotes::default()
     }
+
+    /// Matrix (input blocks) read-side snapshot (Task 7). Backs the
+    /// Scala-compat `/blocks/bestInputBlock`, `/blocks/bestInputChain`,
+    /// `/blocks/{id}/inputBlockTransactions` and
+    /// `/blocks/{id}/inputBlockTransactionIds` routes.
+    ///
+    /// `None` when `[input_blocks] enabled = false` — the subsystem does
+    /// not exist on this node, so the four routes above are not mounted
+    /// at all (404, and absent from the router layout). Default `None`
+    /// so the many test fixtures that implement this trait don't have to
+    /// override; the production `SnapshotReadState` overrides it
+    /// whenever `[input_blocks] enabled = true`, even before any input
+    /// block has been seen (all-empty snapshot).
+    fn input_blocks(&self) -> Option<crate::compat::ApiInputBlocks> {
+        None
+    }
 }
 
 /// Submission boundary the node implements for the API server.

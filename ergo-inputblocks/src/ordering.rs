@@ -19,9 +19,10 @@ use crate::types::{InputBlockId, OrderingId, TxRef};
 /// section from an [`OrderingBlockAnnouncement`] plus the input-block
 /// chain the processor collected (spec 9.3).
 ///
-/// `input_chain_txs` is keyed by the **announced header's own id**, not
-/// by its parent: that is what Scala does, and it is preserved here as-is
-/// so the devnet campaign can measure finding F5 instead of hiding it.
+/// `input_chain_txs` is keyed by the announced header's own id when that
+/// has a tree and by its PARENT otherwise — divergence D5, upstream
+/// finding F5. [`ReconstructionPlan::reconstruction_key`] records which
+/// answered, so the divergence stays measurable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconstructionPlan {
     /// The announced ordering block's header id.
@@ -31,12 +32,43 @@ pub struct ReconstructionPlan {
     /// Transactions the announcement referenced by id; the node resolves
     /// these from its mempool and fails the plan if any is missing.
     pub broadcasted_ids: Vec<[u8; 32]>,
-    /// The collected best input chain's transactions for `header_id`
-    /// (finding F5: Scala keys this by the announced header's id).
+    /// The collected best input chain's transactions.
     pub input_chain_txs: Vec<TxRef>,
+    /// Which ordering id the chain above was read under (D5 telemetry).
+    pub reconstruction_key: ReconstructionKey,
     /// The `03 02` extension field's value, when present: the last input
     /// block the ordering block builds on.
     pub prev_input_block_id: Option<InputBlockId>,
+}
+
+/// Which ordering id the collected input chain was read under.
+///
+/// Divergence **D5**, upstream finding **F5**. Scala's follower keys the
+/// chain by the announced header's own id
+/// (`getCollectedInputBlocksTransactions(headerId)`) while its miner
+/// seats the chain collected under the PARENT
+/// (`getBestOrderingCollectedInputBlocksTransactions`). The trees are
+/// keyed by the block the chain sits ON, so the follower's key names a
+/// block with no tree and the lookup returns nothing. Scala's key is
+/// tried first and the parent's is the fallback; this says which won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReconstructionKey {
+    /// The announced header's own id — Scala's key.
+    #[default]
+    SelfId,
+    /// The announced header's parent — what the miner's candidate
+    /// committed to.
+    Parent,
+}
+
+impl ReconstructionKey {
+    /// The name the event feed and telemetry use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SelfId => "self",
+            Self::Parent => "parent",
+        }
+    }
 }
 
 /// Announcements by ordering-block header id, plus the transactions the

@@ -3,22 +3,27 @@
 import datetime
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+# The provisioned build may live in a sibling worktree (provisioning is
+# expensive and the pinned commits are the same), so the work directory
+# is overridable. It is only ever READ.
+WORK = Path(os.environ.get('WEAK_BLOCKS_ORACLE_WORK', str(HERE / '.work')))
 OUT = ROOT / 'test-vectors/weak-blocks'
 # Every name here must have a dispatch case in WeakBlocksOracle.main: an
 # unknown name makes the oracle exit non-zero, and `check=True` then aborts
 # the whole run, so a stale name silently starves every later vector.
-VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation']
+VECTORS = ['announcement', 'ordering_announcement', 'messages', 'weak_ids', 'pow', 'extension_leaf', 'extension_proof', 'soft_fields', 'input_block_validation', 'block_sections', 'launch_params']
 
 
 def main():
     names = sys.argv[1:] or VECTORS
-    manifest = json.loads((HERE / '.work/manifest.json').read_text())
+    manifest = json.loads((WORK / 'manifest.json').read_text())
     oracle = HERE / 'WeakBlocksOracle.scala'
     OUT.mkdir(parents=True, exist_ok=True)
     for name in names:
@@ -29,14 +34,18 @@ def main():
         # one, so every subcommand runs on it. `.work/classpath` is still
         # exported by provision.py as the Runtime-scope record and for the
         # README's smoke test, but no vector is generated from it.
-        classpath = (HERE / '.work/test-classpath').read_text().strip()
+        classpath = (WORK / 'test-classpath').read_text().strip()
         # The Test-scope helpers read `src/test/resources/application.conf` by a
         # RELATIVE path (`ErgoNodeTestConstants.initSettings`), so the JVM's
         # working directory has to be the pinned ergo checkout for the vectors
         # that touch them.
-        cwd = str(HERE / '.work/source') if name == 'input_block_validation' else None
+        cwd = str(WORK / 'source') if name == 'input_block_validation' else None
+        # `block_sections` reads this repo's mainnet fixtures, so it is handed
+        # the worktree root explicitly rather than inheriting a working
+        # directory (which the line above may override per vector).
+        extra = [str(ROOT)] if name == 'block_sections' else []
         result = subprocess.run(['scala-cli', '--skip-cli-updates', 'run', str(oracle), '--server=false',
-                                 '--scala', '2.12.20', '--classpath', classpath, '--', name],
+                                 '--scala', '2.12.20', '--classpath', classpath, '--', name, *extra],
                                 text=True, stdout=subprocess.PIPE, check=True, cwd=cwd).stdout
         # logback initialization banner (and scala-cli's outdated-version nag) land on
         # stdout ahead of the JSON payload, and can themselves contain '{' (log pattern

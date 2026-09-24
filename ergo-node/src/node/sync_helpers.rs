@@ -220,3 +220,113 @@ pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u
         }
     }
 }
+
+/// Register a `RequestModifier` with the delivery tracker and emit it to
+/// exactly one peer — the non-hedged counterpart of
+/// [`hedge_request_modifiers`].
+///
+/// Hedging duplicates a request to other peers and registers them as
+/// late-acceptable senders. That is right for block sections, where any
+/// archive peer can answer and the first reply wins. It is wrong for the
+/// input-block family: those requests are addressed to a specific peer
+/// that told us it has the block, the processor charges that peer one of
+/// its `requests_per_peer` slots, and a hedge peer's reply would be a
+/// delivery the processor never asked for.
+///
+/// Registering with the tracker is what buys the ordinary delivery
+/// lifecycle: `on_received` can recognise the answering frame (so the
+/// byte-cap exemption applies to a solicited reply), duplicate requests
+/// for an id already in flight are suppressed, and an unanswered request
+/// is swept by `check_timeouts`.
+///
+/// Returns the actions to flush AND the ids the tracker actually
+/// registered — which is a SUBSET of `ids` whenever one is already in
+/// flight (from this peer or another). Callers that record their own
+/// per-request state must key it off the returned subset: an id we did
+/// not ask this peer for is an id this peer owes us nothing on.
+pub(in crate::node) fn tracked_request_modifier(
+    state: &mut NodeState,
+    peer: PeerId,
+    type_id: u8,
+    ids: &[[u8; 32]],
+    now: Instant,
+) -> TrackedRequest {
+    // The input-block family walks one id through several phases
+    // (announcement -> weak-id list -> bodies). Each phase is a fresh
+    // request for the SAME id, and the previous phase left it in the
+    // tracker's `received` set, where `request` would skip it. Clearing
+    // that is exactly what `forget_received` is for.
+    if ergo_p2p::types::ModifierTypeId::is_input_block_family(type_id) {
+        for id in ids {
+            state.coordinator.delivery_mut().forget_received(id);
+        }
+    }
+    let registered = register_expectation(state, peer, type_id, ids, now);
+    if registered.is_empty() {
+        return TrackedRequest::default();
+    }
+    let inv = ergo_p2p::types::InvData {
+        type_id,
+        ids: registered.clone(),
+    };
+    match message::serialize_inv(&inv) {
+        Ok(payload) => TrackedRequest {
+            actions: vec![Action::SendToPeer {
+                peer,
+                code: message::CODE_REQUEST_MODIFIER,
+                payload,
+            }],
+            registered,
+        },
+        Err(e) => {
+            tracing::warn!(type_id, error = %e, "tracked RequestModifier does not serialize");
+            // The expectation is registered but no frame went out, so
+            // nothing will ever answer it. Release it (out of inflight
+            // via `mark_received`, then out of the received set so a
+            // later request for the same id is not skipped) rather than
+            // letting it hold a slot until the timeout sweep.
+            for id in &registered {
+                state.coordinator.delivery_mut().mark_received(id);
+                state.coordinator.delivery_mut().forget_received(id);
+            }
+            TrackedRequest::default()
+        }
+    }
+}
+
+/// What [`tracked_request_modifier`] did: the frames to flush, and the
+/// ids the delivery tracker took responsibility for. `registered` is
+/// empty exactly when nothing went out.
+#[derive(Default)]
+pub(in crate::node) struct TrackedRequest {
+    pub(in crate::node) actions: Vec<Action>,
+    pub(in crate::node) registered: Vec<[u8; 32]>,
+}
+
+/// Register a delivery expectation WITHOUT emitting a `RequestModifier`.
+///
+/// Message 105 (`RequestInputBlockTransactions`) is its own wire frame,
+/// not a `RequestModifier`, and its answer arrives as code 104 — but it
+/// still needs the expectation, so the reply is recognised as solicited
+/// (byte-cap exemption, progress credit) instead of looking unsolicited.
+/// Keyed by the input block id, like the other phases of the same block.
+///
+/// Returns the ids actually registered; empty means "already in flight",
+/// which is how a duplicate request is suppressed.
+pub(in crate::node) fn register_expectation(
+    state: &mut NodeState,
+    peer: PeerId,
+    type_id: u8,
+    ids: &[[u8; 32]],
+    now: Instant,
+) -> Vec<[u8; 32]> {
+    if ergo_p2p::types::ModifierTypeId::is_input_block_family(type_id) {
+        for id in ids {
+            state.coordinator.delivery_mut().forget_received(id);
+        }
+    }
+    state
+        .coordinator
+        .delivery_mut()
+        .request(peer, type_id, ids, now)
+}

@@ -43,6 +43,23 @@ pub struct ApiNodeEvent {
     pub addr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// `ordering_reconstructed` only: which assembly order reproduced
+    /// the header's transactions root — `"scala"`
+    /// (`orderingBlockTransactions ++ inputBlocksTransactions`, what the
+    /// reference follower builds) or `"candidate"`
+    /// (`previousOrderingBlockTransactions ++ orderingTxs`, what the
+    /// reference miner actually mines). Divergence D4 / upstream finding
+    /// F12: the two Scala sides disagree, so the node tries both and
+    /// reports which won rather than hiding the split.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reconstructed_order: Option<String>,
+    /// `ordering_reconstructed` only: which ordering id the collected
+    /// input chain was read under — `"self"` (the announced header's own
+    /// id, which is Scala's key) or `"parent"` (the previous ordering
+    /// block, which is what the miner's candidate committed). Divergence
+    /// D5 / upstream finding F5.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reconstruction_key: Option<String>,
 }
 
 /// Event-feed page for `GET /api/v1/events`: the retained tail (bounded by
@@ -108,6 +125,8 @@ mod tests {
             size_bytes: None,
             addr: None,
             detail: None,
+            reconstructed_order: None,
+            reconstruction_key: None,
         };
 
         let v = serde_json::to_value(event).unwrap();
@@ -143,6 +162,8 @@ mod tests {
             size_bytes: None,
             addr: Some("127.0.0.1:9030".to_string()),
             detail: None,
+            reconstructed_order: None,
+            reconstruction_key: None,
         };
 
         let v = serde_json::to_value(event).unwrap();

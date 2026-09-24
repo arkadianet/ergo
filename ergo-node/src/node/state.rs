@@ -94,6 +94,22 @@ pub(crate) struct NodeState {
     // a 250ms tick; on tip change it calls `on_tip_change`. P2P
     // transaction admission goes through `Mempool::process`.
     pub(super) mempool: Mempool,
+    /// Input-block (weak-block) subsystem. `Some` only when
+    /// `[input_blocks] enabled` (devnet-only, refused elsewhere at config
+    /// load); every code path that touches it must be a no-op when it is
+    /// `None`. Held here rather than beside the mempool because it owns
+    /// mutable processor state driven from the same single-writer loop.
+    pub(super) input_blocks: Option<super::input_blocks::InputBlocksRuntime>,
+    /// Live-refresh slot for the Matrix (input blocks) REST surface
+    /// (Task 7): `Some` in exact lockstep with `input_blocks` above —
+    /// same boot-time `[input_blocks] enabled` gate, built alongside it
+    /// so the two are never out of sync. Written by
+    /// `input_blocks::effects::execute_effects` whenever an event
+    /// changes the read side (announcement, delivery, ordering apply /
+    /// reorg — anything that can move `best_input_block`); the API
+    /// bridge's `SnapshotReadState::input_blocks()` reads it via
+    /// lock-free `ArcSwap::load`, same pattern as `identity_slot`.
+    pub(super) input_blocks_read_slot: Option<crate::api_bridge::InputBlocksSlot>,
     /// Shadow-validation outcome state (`Some` only when `[shadow]`
     /// enabled): written by the watch task, projected into the snapshot
     /// (status/metrics) and the operator event differ each publish.

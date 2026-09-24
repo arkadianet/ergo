@@ -22,7 +22,8 @@ mod persist_codec;
 
 pub use extension_codec::{active_params_to_extension_fields, parse_active_params};
 pub use launch::{
-    scala_launch, scala_launch_for_network, scala_launch_mainnet, scala_launch_testnet,
+    scala_launch, scala_launch_for_network, scala_launch_for_network_with_input_blocks,
+    scala_launch_mainnet, scala_launch_testnet, SUBBLOCKS_PER_BLOCK_DEFAULT,
 };
 
 use crate::voting::validation_settings::{
@@ -38,7 +39,7 @@ pub const SYSTEM_PARAMETERS_PREFIX: u8 = 0x00;
 /// separately from the numeric parameter map.
 pub const SOFT_FORK_DISABLING_RULES_ID: u8 = 124;
 
-mod ids {
+pub(crate) mod ids {
     pub const STORAGE_FEE_FACTOR: u8 = 1;
     pub const MIN_VALUE_PER_BYTE: u8 = 2;
     pub const MAX_BLOCK_SIZE: u8 = 3;

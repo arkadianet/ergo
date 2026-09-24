@@ -75,6 +75,32 @@ pub(crate) enum FeedEventKind {
         height: u32,
         header_id: String,
     },
+    /// An ordering block's transaction section was rebuilt locally from
+    /// the announcement plus the collected input blocks — no
+    /// `BlockTransactions` download (spec 9.3).
+    OrderingReconstructed {
+        height: u32,
+        header_id: String,
+        txs: u32,
+        /// Which assembly order reproduced the header's transactions
+        /// root: `"scala"` or `"candidate"` (divergence D4, upstream
+        /// finding F12). Reported so the split stays measurable.
+        order: &'static str,
+        /// Which ordering id the input chain was read under: `"self"`
+        /// (the announced header's own id, Scala's key) or `"parent"`
+        /// (what the miner's candidate committed) — divergence D5,
+        /// upstream finding F5.
+        key: &'static str,
+    },
+    /// Reconstruction did not reproduce the header's transactions root
+    /// (or an ingredient was missing), so the section is being downloaded
+    /// in full instead. `reason` is one of `missing_broadcasted_tx`,
+    /// `missing_input_body`, `root_mismatch`.
+    OrderingReconstructFallback {
+        height: u32,
+        header_id: String,
+        reason: String,
+    },
 }
 
 /// Previous-tick observations the differ compares against. `primed=false`
@@ -548,6 +574,12 @@ mod tests {
                 FeedEventKind::SyncWedged { height, .. } => format!("wedged:{height}"),
                 FeedEventKind::ShadowDivergence { kind, height, .. } => {
                     format!("shadow:{kind}:{height}")
+                }
+                FeedEventKind::OrderingReconstructed {
+                    height, order, key, ..
+                } => format!("reconstructed:{order}:{key}:{height}"),
+                FeedEventKind::OrderingReconstructFallback { reason, .. } => {
+                    format!("reconstruct_fallback:{reason}")
                 }
             })
             .collect()

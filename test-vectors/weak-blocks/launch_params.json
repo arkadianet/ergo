@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "default_parameters",
+      "source": "org.ergoplatform.settings.Parameters.DefaultParameters",
+      "subblocks_per_block_id": 9,
+      "subblocks_per_block_default": 64,
+      "entries": [
+        {
+          "id": 1,
+          "value": 1250000
+        },
+        {
+          "id": 2,
+          "value": 360
+        },
+        {
+          "id": 3,
+          "value": 524288
+        },
+        {
+          "id": 4,
+          "value": 1000000
+        },
+        {
+          "id": 5,
+          "value": 100
+        },
+        {
+          "id": 6,
+          "value": 2000
+        },
+        {
+          "id": 7,
+          "value": 100
+        },
+        {
+          "id": 8,
+          "value": 100
+        },
+        {
+          "id": 9,
+          "value": 64
+        },
+        {
+          "id": 123,
+          "value": 1
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "ergo_commit": "31a8de804f7328704f2753a1cf151dda8f64689f",
+    "sigma_commit": "368a860be033af94aa14895381f42099b3646db6",
+    "sigma_version": "6.0.5-22-368a860b-SNAPSHOT",
+    "generator": "scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala",
+    "generator_sha256": "2afca868bd533a3f3a9340d0dec3390959a6b2e41290e4be500c779c09e48899",
+    "timestamp": "2026-09-21T16:12:40.531002+00:00"
+  }
+}

@@ -480,6 +480,43 @@ impl GenesisParams {
         }
     }
 
+    /// The miner-reward delay the default devnet genesis corresponds to
+    /// (Scala `monetary.minerRewardDelay`, inherited from testnet).
+    pub const DEFAULT_MINER_REWARD_DELAY: u32 = 720;
+
+    /// Devnet genesis for a shortened miner-reward delay.
+    ///
+    /// `minerRewardDelay` feeds the emission box's proposition, so
+    /// changing it changes the genesis boxes and therefore the state
+    /// root both nodes have to agree on at height 0 — a devnet that
+    /// shortens the delay on one side only forks at genesis. Each
+    /// supported delay therefore needs its own oracle-captured box set;
+    /// there is no derivation here, because this build does not
+    /// construct emission trees.
+    ///
+    /// `None` for a delay no fixture covers, so the config layer can
+    /// refuse it rather than booting a node onto a genesis it invented.
+    pub fn devnet_for_reward_delay(delay: u32) -> Option<Self> {
+        match delay {
+            Self::DEFAULT_MINER_REWARD_DELAY => Some(Self::devnet()),
+            // Captured from `GET /utxo/genesis` on the pinned Scala
+            // `weak-blocks` node booted with `minerRewardDelay = 10`,
+            // which logs the same root as
+            // `Genesis UTXO state generated with hex digest ...`.
+            // Only the emission box differs from the 720 set.
+            10 => Some(Self {
+                state_digest: parse_digest33_hex(
+                    "c01a142d004a917b4af35385265748e37f7c77ab8a4e8b2080b9c193516b845602",
+                ),
+                header_id: None,
+                boxes_json: Some(include_str!(
+                    "../../test-vectors/devnet/genesis_boxes_reward_delay_10.json"
+                )),
+            }),
+            _ => None,
+        }
+    }
+
     /// Dispatch to the per-network genesis parameters. Mirrors the
     /// `for_network` accessor on the sibling chain-spec params types so
     /// boot can resolve the genesis state digest without a manual match.

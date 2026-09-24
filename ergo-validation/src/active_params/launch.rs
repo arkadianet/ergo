@@ -44,18 +44,49 @@ pub fn scala_launch_testnet() -> ActiveProtocolParameters {
     scala_launch_mainnet()
 }
 
+/// `Parameters.SubsPerBlockDefault` on the `weak-blocks` branch: the
+/// number of input (sub-) blocks per ordering block that the branch's
+/// `Parameters.DefaultParameters` carries under id 9 from genesis.
+pub const SUBBLOCKS_PER_BLOCK_DEFAULT: i32 = 64;
+
 /// Launch parameters for the given network. Production callers that
 /// hold a `Network` should use this; consumers without network
 /// context (most tests) can keep calling [`scala_launch`].
 pub fn scala_launch_for_network(net: Network) -> ActiveProtocolParameters {
-    match net {
+    scala_launch_for_network_with_input_blocks(net, false)
+}
+
+/// Launch parameters for the given network, optionally seeding the
+/// input-block multiplier (id 9).
+///
+/// Stock Scala 6.0.x has no id 9 in `Parameters.DefaultParameters`, so
+/// with `input_blocks = false` this is byte-identical to
+/// [`scala_launch_for_network`] on every network. The pinned
+/// `weak-blocks` branch DOES carry id 9 = `SubsPerBlockDefault` (64)
+/// from genesis, so a devnet node that follows that branch must seed
+/// the same row — otherwise its multiplier is `None` and every
+/// input-block announcement drops with `MultiplierUnavailable`.
+///
+/// This is consensus-visible (the parameters table is hashed into the
+/// extension at epoch boundaries), which is why it is gated on the
+/// devnet-only `[input_blocks] enabled` switch and refused elsewhere:
+/// see spec §12 finding F10.
+pub fn scala_launch_for_network_with_input_blocks(
+    net: Network,
+    input_blocks: bool,
+) -> ActiveProtocolParameters {
+    let mut params = match net {
         Network::Mainnet => scala_launch_mainnet(),
         Network::Testnet => scala_launch_testnet(),
         Network::Devnet => ActiveProtocolParameters {
             block_version: 4,
             ..scala_launch_mainnet()
         },
+    };
+    if input_blocks && net == Network::Devnet {
+        params.subblocks_per_block = Some(SUBBLOCKS_PER_BLOCK_DEFAULT);
     }
+    params
 }
 
 /// Backwards-compatible alias for [`scala_launch_mainnet`]. Kept so
@@ -109,7 +140,150 @@ mod tests {
         assert!(m.activated_update.status_updates.is_empty());
     }
 
+    /// The launch tables as they were BEFORE id 9 could be seeded,
+    /// captured from `git show 18ff2943:.../launch.rs` and written out
+    /// here as literals. A regression test that called the new
+    /// constructor for both sides would only prove it agrees with
+    /// itself; these tuples are an independent record of what the three
+    /// networks used to produce.
+    ///
+    /// `(block_version, storage_fee_factor, min_value_per_byte,
+    ///   max_block_size, max_block_cost, token_access_cost, input_cost,
+    ///   data_input_cost, output_cost, subblocks_per_block)`
+    const BASELINE_MAINNET: (u8, i32, i32, i32, i32, i32, i32, i32, i32, Option<i32>) = (
+        1, 1_250_000, 360, 524_288, 1_000_000, 100, 2_000, 100, 100, None,
+    );
+    const BASELINE_TESTNET: (u8, i32, i32, i32, i32, i32, i32, i32, i32, Option<i32>) =
+        BASELINE_MAINNET;
+    /// Devnet differs from mainnet in exactly one field at 18ff2943:
+    /// `block_version = 4` (Scala `Devnet60LaunchParameters`).
+    const BASELINE_DEVNET: (u8, i32, i32, i32, i32, i32, i32, i32, i32, Option<i32>) = (
+        4, 1_250_000, 360, 524_288, 1_000_000, 100, 2_000, 100, 100, None,
+    );
+
+    fn as_tuple(
+        p: &ActiveProtocolParameters,
+    ) -> (u8, i32, i32, i32, i32, i32, i32, i32, i32, Option<i32>) {
+        (
+            p.block_version,
+            p.storage_fee_factor,
+            p.min_value_per_byte,
+            p.max_block_size,
+            p.max_block_cost,
+            p.token_access_cost,
+            p.input_cost,
+            p.data_input_cost,
+            p.output_cost,
+            p.subblocks_per_block,
+        )
+    }
+
+    fn baseline(net: Network) -> (u8, i32, i32, i32, i32, i32, i32, i32, i32, Option<i32>) {
+        match net {
+            Network::Mainnet => BASELINE_MAINNET,
+            Network::Testnet => BASELINE_TESTNET,
+            Network::Devnet => BASELINE_DEVNET,
+        }
+    }
+
+    #[test]
+    fn launch_without_input_blocks_matches_the_pre_change_tables() {
+        for net in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+            assert_eq!(
+                as_tuple(&scala_launch_for_network(net)),
+                baseline(net),
+                "{net:?} launch row moved"
+            );
+            assert_eq!(
+                as_tuple(&scala_launch_for_network_with_input_blocks(net, false)),
+                baseline(net),
+                "{net:?} with the switch off moved"
+            );
+            let row = scala_launch_for_network(net);
+            assert_eq!(row.epoch_start_height, 0);
+            assert!(row.extra.is_empty());
+            assert_eq!(row.proposed_update, ErgoValidationSettingsUpdate::empty());
+            assert_eq!(row.activated_update, ErgoValidationSettingsUpdate::empty());
+        }
+    }
+
+    #[test]
+    fn enabling_input_blocks_touches_only_id_9_and_only_on_devnet() {
+        let enabled = scala_launch_for_network_with_input_blocks(Network::Devnet, true);
+        let mut without_id_9 = as_tuple(&enabled);
+        without_id_9.9 = None;
+        assert_eq!(
+            without_id_9, BASELINE_DEVNET,
+            "seeding id 9 must change nothing else"
+        );
+        // The switch is devnet-only: a caller that passes `true` for a
+        // public network still gets the pre-change table.
+        for net in [Network::Mainnet, Network::Testnet] {
+            assert_eq!(
+                as_tuple(&scala_launch_for_network_with_input_blocks(net, true)),
+                baseline(net),
+                "{net:?} must be untouched"
+            );
+        }
+    }
+
     // ----- oracle parity -----
+
+    /// The seeded value and its id come from the pinned Scala branch's
+    /// own `Parameters.DefaultParameters`, not from this file.
+    // oracle: scripts/jvm_weak_blocks_oracle/WeakBlocksOracle.scala launch_params
+    #[test]
+    fn devnet_input_block_launch_table_matches_the_scala_defaults() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/weak-blocks/launch_params.json"
+        ))
+        .unwrap();
+        let case = &oracle["cases"][0];
+        assert_eq!(case["name"], "default_parameters");
+        let id_9 = case["subblocks_per_block_id"].as_u64().unwrap();
+        assert_eq!(
+            id_9,
+            u64::from(crate::active_params::ids::SUBBLOCKS_PER_BLOCK)
+        );
+
+        let table: std::collections::BTreeMap<u64, i64> = case["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["id"].as_u64().unwrap(), e["value"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(
+            table.get(&id_9).copied(),
+            Some(i64::from(SUBBLOCKS_PER_BLOCK_DEFAULT)),
+            "the branch's SubsPerBlockDefault"
+        );
+
+        let row = scala_launch_for_network_with_input_blocks(Network::Devnet, true);
+        use crate::active_params::ids;
+        for (id, actual) in [
+            (ids::STORAGE_FEE_FACTOR, row.storage_fee_factor),
+            (ids::MIN_VALUE_PER_BYTE, row.min_value_per_byte),
+            (ids::MAX_BLOCK_SIZE, row.max_block_size),
+            (ids::MAX_BLOCK_COST, row.max_block_cost),
+            (ids::TOKEN_ACCESS_COST, row.token_access_cost),
+            (ids::INPUT_COST, row.input_cost),
+            (ids::DATA_INPUT_COST, row.data_input_cost),
+            (ids::OUTPUT_COST, row.output_cost),
+            (ids::SUBBLOCKS_PER_BLOCK, row.subblocks_per_block.unwrap()),
+        ] {
+            assert_eq!(
+                table.get(&u64::from(id)).copied(),
+                Some(i64::from(actual)),
+                "parameter id {id}"
+            );
+        }
+        // id 123 (BlockVersion) is the one field the devnet launch
+        // object deliberately overrides: the Scala defaults carry 1,
+        // `Devnet60LaunchParameters` seeds 4. Pinned here so the
+        // divergence stays intentional.
+        assert_eq!(table.get(&u64::from(ids::BLOCK_VERSION)).copied(), Some(1));
+        assert_eq!(row.block_version, 4);
+    }
 
     // ledger: BLOCK-cost-parameter-defaults-B008
     #[test]

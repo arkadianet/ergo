@@ -1,0 +1,57 @@
+{
+  "id": "2026-09-22-1",
+  "title": "Rust retains only a short suffix of the input chain the Scala miner publishes",
+  "severity": "observation",
+  "status": "open",
+  "source": "scripts/devnet-matrix smoke, run 2026-09-22",
+  "summary": "With the Scala weak-blocks miner publishing an input block roughly every half second (initialDifficultyHex=4e20, subblocksPerBlock=64), the Rust follower never holds more than a couple of input blocks of the chain the miner has built. The blocks it does hold are byte-identical and on the same fork - `bestInputChain` is exactly Scala's list with the newest k entries removed, never a different history - so this is throughput, not a consensus divergence. It is recorded because the shortfall is large and steady, and because the disconnected waitlist overflows while it happens (`WaitlistFull`), which means announcements are being discarded rather than merely delayed.",
+  "observed": {
+    "scala_app_version": "6.0.4-492-31a8de80-SNAPSHOT",
+    "rust_git_sha": "e1aba813a112ddaf5fce1c671f2197781f79b675",
+    "rust_build_profile": "debug (cargo build -p ergo-node)",
+    "rust_blocks_behind_at_the_agreement_moment": 5,
+    "rust_chain_length_at_that_moment": 2,
+    "scala_chain_length_at_that_moment": 7,
+    "exact_tip_matches_over_the_run": 0,
+    "samples": 148,
+    "max_propagation_lag_seconds": 3.037,
+    "rust_drop_counters": {
+      "AlreadyKnown": 517,
+      "WaitlistFull": 230
+    },
+    "scala_peer_as_rust_sees_it": {
+      "addr": "127.0.0.1:19560",
+      "direction": "outbound",
+      "state": "active",
+      "score": 4,
+      "agent": "ergoref",
+      "node_name": "matrix-scala",
+      "version": "6.5.0",
+      "sync_version": "V2",
+      "connected_seconds": 340,
+      "last_seen_seconds": 0,
+      "bytes_in": 657225,
+      "bytes_out": 45600,
+      "peer_height": 9,
+      "declared_address": "127.0.0.1:19560"
+    }
+  },
+  "raw": {
+    "scala_bestInputChain": [
+      "e60a8a23f2f76fc96ee0662e2e54a31b7427e2fc2c8732436eeb22453b6979b1",
+      "eba4ab39f6dcb18ad952429bb31eb5b951189bb293635fc74289a2574d8a3c51",
+      "7349690530ac7610845197110c11fe64881bfca0c42a0ca42e03ff25214747e9",
+      "bb6d008a75b827ce014a50ad038f89bce363badcd24e1e62ad41c52d73dbbfa7",
+      "739a12fbd92d2994f70faa55f66ce063d45f7721e078db62460d0784511e499a",
+      "0c6bb0a1bff3dc03389e90cd771e1511f1aa428c7d2b1d427a46c9277e235a30",
+      "aa321f81c8bfbbc19f31b1aa5c65a53eb5f8c160c7f2f3094b14b58f4dfa5eac"
+    ],
+    "rust_bestInputChain": [
+      "0c6bb0a1bff3dc03389e90cd771e1511f1aa428c7d2b1d427a46c9277e235a30",
+      "aa321f81c8bfbbc19f31b1aa5c65a53eb5f8c160c7f2f3094b14b58f4dfa5eac"
+    ],
+    "best_full_header_id": "de404989c84073ee0703178ab958949d4d3f1925ccbe9ae96cb58914b9d65a1a"
+  },
+  "not_a_divergence_because": "every input block the Rust node did apply matches Scala's byte for byte, the chains never disagree about history (the smoke fails the run if they do), no DigestMismatch/TxDigestMismatch drop fired, the Scala peer was never penalised, and ordering-block heights stayed within 1.",
+  "next": "re-measure against a release build before drawing any conclusion about the processor's throughput; if the shortfall survives that, the waitlist_entries bound and the per-announcement validation cost are the two things to look at."
+}

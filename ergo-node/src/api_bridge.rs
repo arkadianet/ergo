@@ -38,7 +38,7 @@ use tokio::sync::Notify;
 use crate::snapshot::{unix_now_ms, SnapshotHandle};
 
 mod block_reassembly;
-mod compat;
+pub(crate) mod compat;
 mod emission;
 mod error;
 mod nipopow;
@@ -56,6 +56,15 @@ use error::BridgeError;
 /// bridge reads via `load()` per request. Cheap to clone (Arc).
 pub type IdentitySlot = Arc<arc_swap::ArcSwap<ApiIdentity>>;
 
+/// Lock-free live-refresh slot for the Matrix (input blocks) read side
+/// (Task 7) — same shape as [`IdentitySlot`]. `Some` on `NodeState` and
+/// `SnapshotReadState` in lockstep with `[input_blocks] enabled`; when
+/// the subsystem is off neither side ever constructs one, so
+/// `NodeReadState::input_blocks()` returns `None` and the four
+/// Scala-compat routes are not mounted at all (see
+/// `ergo-api/src/server/scala_api.rs`).
+pub type InputBlocksSlot = Arc<arc_swap::ArcSwap<ergo_api::compat::ApiInputBlocks>>;
+
 pub struct SnapshotReadState {
     handle: SnapshotHandle,
     /// Lock-free slot the action loop publishes to whenever
@@ -64,6 +73,10 @@ pub struct SnapshotReadState {
     /// `/api/v1/identity` request reads the current value via
     /// `load()`; no allocation on the hot path.
     identity: IdentitySlot,
+    /// Matrix (input blocks) read-side slot (Task 7). `None` when
+    /// `[input_blocks] enabled = false` — `input_blocks()` then answers
+    /// `None` unconditionally and the four routes stay unmounted.
+    input_blocks: Option<InputBlocksSlot>,
     /// Paths host metrics need at request time. Captured at boot; never
     /// change. `state_db` and `index_db` are file paths whose `metadata().len()`
     /// is the on-disk size; `data_dir` is the volume the disk-space readout
@@ -265,10 +278,12 @@ impl SnapshotReadState {
         voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
         apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
         telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
+        input_blocks: Option<InputBlocksSlot>,
     ) -> Self {
         Self {
             handle,
             identity,
+            input_blocks,
             host_paths,
             voting_targets,
             apply_phase,
@@ -549,6 +564,18 @@ impl NodeReadState for SnapshotReadState {
             .last_progress_age_ms
             .saturating_add(self.age_ms(snap.produced_at));
         h
+    }
+
+    fn input_blocks(&self) -> Option<ergo_api::compat::ApiInputBlocks> {
+        // `None` at the struct level means `[input_blocks] enabled =
+        // false` at boot — no slot was ever constructed, so this answers
+        // `None` unconditionally rather than racing an uninitialized
+        // ArcSwap. `Some` means a slot exists; its CONTENT starts as
+        // `ApiInputBlocks::default()` (empty) and is kept current by
+        // `input_blocks::effects::execute_effects`.
+        self.input_blocks
+            .as_ref()
+            .map(|slot| (**slot.load()).clone())
     }
 }
 

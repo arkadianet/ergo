@@ -91,6 +91,21 @@ pub struct ScalaInfo {
     pub parameters: Parameters,
     #[serde(rename = "isMining")]
     pub is_mining: bool,
+    /// Matrix (input blocks) fix-round-1: hex id of the current best
+    /// input block. THREE wire states, not two:
+    /// - outer `None` (`[input_blocks] enabled = false`) -> key entirely
+    ///   ABSENT. This keeps the pinned mainnet-captured `/info` fixture
+    ///   (`ergo-api/tests/fixtures/scala/info.json`, predates Matrix)
+    ///   byte-for-byte comparable — see `scala_parity.rs`.
+    /// - `Some(None)` (subsystem on, no input block currently leads) ->
+    ///   `null`, matching Scala's `Option[ModifierId].asJson`.
+    /// - `Some(Some(id))` -> the hex id.
+    #[serde(
+        rename = "bestInputBlock",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub best_input_block: Option<Option<String>>,
 }
 
 /// Voted protocol parameters at the current epoch. Until the rust node
@@ -328,6 +343,7 @@ mod tests {
                 min_value_per_byte: 0,
             },
             is_mining: false,
+            best_input_block: None,
         };
         let v = serde_json::to_value(&info).unwrap();
         let obj = v.as_object().unwrap();
@@ -373,5 +389,91 @@ mod tests {
         ] {
             assert!(p.contains_key(key), "missing parameters.{key}");
         }
+    }
+
+    // ----- best_input_block: three wire states (fix-round-1) -----
+
+    fn info_with_best_input_block(v: Option<Option<String>>) -> ScalaInfo {
+        let mut info = sample_scala_info();
+        info.best_input_block = v;
+        info
+    }
+
+    fn sample_scala_info() -> ScalaInfo {
+        ScalaInfo {
+            last_mempool_update_time: 0,
+            current_time: 0,
+            network: "mainnet".into(),
+            name: "ergo-rust-mainnet-0.1.0".into(),
+            state_type: "utxo".into(),
+            difficulty: 0,
+            best_full_header_id: String::new(),
+            best_header_id: String::new(),
+            peers_count: 0,
+            unconfirmed_count: 0,
+            app_version: "0.1.0".into(),
+            eip37_supported: true,
+            state_root: String::new(),
+            genesis_block_id: String::new(),
+            rest_api_url: None,
+            previous_full_header_id: String::new(),
+            full_height: 0,
+            headers_height: 0,
+            state_version: String::new(),
+            full_blocks_score: 0,
+            max_peer_height: 0,
+            launch_time: 0,
+            is_explorer: false,
+            last_seen_message_time: 0,
+            eip27_supported: true,
+            headers_score: 0,
+            parameters: Parameters {
+                output_cost: 0,
+                token_access_cost: 0,
+                max_block_cost: 0,
+                height: 0,
+                max_block_size: 0,
+                data_input_cost: 0,
+                block_version: 0,
+                input_cost: 0,
+                storage_fee_factor: 0,
+                subblocks_per_block: 0,
+                min_value_per_byte: 0,
+            },
+            is_mining: false,
+            best_input_block: None,
+        }
+    }
+
+    #[test]
+    fn best_input_block_key_absent_when_subsystem_off() {
+        let v = serde_json::to_value(info_with_best_input_block(None)).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("bestInputBlock"),
+            "outer None (subsystem off) must omit the key entirely"
+        );
+    }
+
+    #[test]
+    fn best_input_block_is_null_when_subsystem_on_but_none_leads() {
+        let v = serde_json::to_value(info_with_best_input_block(Some(None))).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("bestInputBlock"),
+            Some(&serde_json::Value::Null),
+            "subsystem on but no leading block must serialize null, not omit the key"
+        );
+    }
+
+    #[test]
+    fn best_input_block_carries_the_id_when_one_leads() {
+        let id = "ab".repeat(32);
+        let v = serde_json::to_value(info_with_best_input_block(Some(Some(id.clone())))).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("bestInputBlock"),
+            Some(&serde_json::Value::String(id))
+        );
     }
 }

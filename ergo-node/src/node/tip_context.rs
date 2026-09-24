@@ -26,6 +26,12 @@ pub(super) struct OwnedTipContext {
     /// executor's boot-time copy so admission enforces the same burning
     /// condition the block validator does. `None` on networks without EIP-27.
     pub(super) reemission: Option<ergo_validation::ReemissionRuleInputs>,
+    /// Transactions of the best input chain under the best ordering
+    /// block, for the §8 admission view. Always empty unless the
+    /// devnet-only Matrix subsystem is running AND has applied an input
+    /// block, so on every other configuration the mempool sees exactly
+    /// the view it saw before.
+    pub(super) input_block_txs: Vec<ergo_ser::transaction::Transaction>,
 }
 
 impl OwnedTipContext {
@@ -39,8 +45,58 @@ impl OwnedTipContext {
             params: &self.params,
             last_headers: &self.last_headers,
             reemission: self.reemission.as_ref(),
+            input_block_txs: &self.input_block_txs,
         }
     }
+}
+
+/// The transactions of the best input chain under the best ordering
+/// block, in chain order, as the §8 admission overlay consumes them.
+///
+/// Empty when the subsystem is off; empty too while its chain is, so a
+/// devnet node that has not seen an input block validates against the
+/// ordinary pool view.
+///
+/// Also empty whenever the processor's ordering block is not the
+/// committed tip. An input chain is provisional state hanging off ONE
+/// ordering block, while the processor learns about a commit or a reorg
+/// only on the 1 s tick (`input_blocks::hooks::sync_ordering_tip`).
+/// Admission runs in between, and without this check it overlaid the
+/// PREVIOUS ordering block's chain onto the new committed UTXO set — an
+/// output of the superseded chain stayed spendable, and a box the
+/// committed block consumed could be resurrected by the stale layer.
+///
+/// This is a read-side gate rather than a `Event::OrderingBlockApplied`
+/// issued from here on purpose: the tick is the single writer of
+/// processor state, and driving the processor from the admission path
+/// would make admission a second one — on a `&NodeState` borrow that
+/// cannot mutate anyway. The cost of the gate is that admission uses the
+/// ordinary pool view for at most one tick after each commit, which is
+/// the conservative direction: it can reject a child of an input-block
+/// transaction that a moment later resolves, never admit a double spend.
+fn best_input_chain_txs(state: &NodeState) -> Vec<ergo_ser::transaction::Transaction> {
+    let Some(rt) = state.input_blocks.as_ref() else {
+        return Vec::new();
+    };
+    let processor = rt.processor();
+    // Both sides must name the same ordering block. `None` on either
+    // side (a processor with no ordering block yet, a node with no
+    // committed full block) is a disagreement, not a match.
+    let committed = state.store.chain_state_meta().best_full_block_id;
+    if processor.best_ordering_id() != Some(committed) || committed == [0u8; 32] {
+        return Vec::new();
+    }
+    processor
+        .best_input_chain()
+        .into_iter()
+        .rev()
+        .flat_map(|id| {
+            processor
+                .bodies(&id)
+                .map(|bodies| bodies.into_iter().map(|b| b.tx.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// Returns `None` when the recent-headers window is cold (no full
@@ -93,5 +149,10 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
         params,
         last_headers,
         reemission,
+        // Spec §8: the current best input chain's transactions, taken
+        // from the node. Gated on the runtime existing, so this is an
+        // empty Vec (no allocation, no clone) on every configuration
+        // without input blocks.
+        input_block_txs: best_input_chain_txs(state),
     })
 }

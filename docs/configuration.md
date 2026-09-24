@@ -354,6 +354,50 @@ storageFeeFactor = 1250000
 | `rotation` | string | `"daily"` | Rotation cadence: `"minutely"`, `"hourly"`, `"daily"`, or `"never"`. An unknown value is rejected. |
 | `max_files` | usize | `14` | Number of rotated files retained; older files are deleted on rotation. Must be at least 1. |
 
+## `[input_blocks]` (Matrix, devnet only)
+
+The Matrix input-block processor (spec 6.3/7.4/7.5). `enabled = true` is
+rejected at load on every network but `devnet` — this subsystem has no
+mainnet/testnet activation yet.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master switch. Load fails with `[input_blocks] enabled requires devnet` if `true` on `mainnet` or `testnet`. |
+| `strict_field_binding` | bool | `true` | Spec 6.3's strict-field-binding rule. Switchable off to measure divergence against a relaxed binding during parity work. |
+| `relay_remote` | bool | `false` | Relay of remote input blocks. Scala carries a `TODO` here (unimplemented); `true` is a documented divergence from the reference node. |
+
+### `[input_blocks.bounds]`
+
+Explicit resource bounds for the input-block processor
+(`ergo_inputblocks::bounds::Bounds`); every field is optional and
+defaults to the value below when omitted.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `tx_cache_entries` | usize | `1000000` | Transaction-cache entries (Scala Guava `maximumSize`). |
+| `tx_cache_bytes` | usize | `268435456` (256 MiB) | Byte cap on the transaction cache. |
+| `tx_cache_ttl_ms` | u64 | `7200000` (2 h) | Transaction-cache TTL (Scala `expireAfterWrite`). |
+| `waitlist_entries` | usize | `256` | Disconnected-waitlist announcements. |
+| `forks_per_ordering` | usize | `64` | Competing forks retained per ordering block. |
+| `records_per_ordering` | usize | `8192` | Announcement records per ordering block. |
+| `records_total` | usize | `24576` | Announcement records across every retained tree. |
+| `trees_total` | usize | `8` | Retained per-ordering trees. |
+| `ordering_announcements` | usize | `64` | Stored ordering-block announcements. |
+| `staging_bytes_total` | usize | `67108864` (64 MiB) | Bytes held across every staging slot. |
+| `requests_per_peer` | usize | `32` | Outstanding requests issued to one peer. |
+| `request_timeout_ms` | u64 | `60000` | How long an unanswered request holds its `requests_per_peer` slot. |
+| `retired_jobs` | usize | `64` | Retired validation-job ids remembered for telemetry. |
+| `candidates_per_position` | usize | `4` | Candidate bodies tried per announced weak-id position. |
+| `digest_attempts_per_block` | usize | `16` | Ordered-digest combinations tried per block before requesting bodies. |
+| `prune_threshold` | u32 | `2` | Scala `InputBlocksProcessor.PruningThreshold`. |
+| `ordering_announcement_prune_threshold` | u32 | `6` | Scala `OrderingBlockAnnouncementPruningThreshold` (`prune_threshold * 3`). |
+| `height_reset_threshold` | u32 | `2` | Scala `applyInputBlock`'s `HeightThreshold`. |
+| `staging_ttl_ms` | u64 | `600000` (10 min) | Staging-slot lifetime (Scala `LocalInputBlockChunksTTL`). |
+| `validation_retries_per_block` | usize | `8` | Validation attempts spent on one input block before giving up. |
+| `digest_recovery_per_block` | usize | `1` | Extra ordered-digest attempts granted once to the announcing peer. |
+| `validation_recovery_per_block` | usize | `1` | Extra validation dispatches granted once under the same conditions as `digest_recovery_per_block`. |
+| `pending_triggers` | usize | `1024` | Deferred application triggers retained while a validation job is in flight. |
+
 ## CLI-only flags
 
 These flags have no `ergo-node.toml` equivalent:

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use ergo_chain_spec::ChainSpec;
 use ergo_indexer::IndexerConfig;
 use ergo_mempool::MempoolConfig;
-use ergo_node::config::{LoggingConfig, LoggingFormat, Network, NodeConfig};
+use ergo_node::config::{InputBlocksConfig, LoggingConfig, LoggingFormat, Network, NodeConfig};
 use ergo_node::{run_inner, RunHandle};
 use ergo_p2p::peer_manager::PeerLimits;
 
@@ -88,6 +88,12 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         mining_config: ergo_mining::MiningConfig::default(),
         voting_targets: std::collections::BTreeMap::new(),
         wallet_expose_private_keys: false,
+        input_blocks: InputBlocksConfig {
+            enabled: false,
+            strict_field_binding: true,
+            relay_remote: false,
+            bounds: ergo_inputblocks::bounds::Bounds::default(),
+        },
     }
 }
 

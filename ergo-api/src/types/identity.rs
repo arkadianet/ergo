@@ -22,6 +22,14 @@ pub struct ApiInfo {
     /// the mainnet value (which was wrong on testnet).
     #[serde(default = "default_block_interval_ms")]
     pub target_block_interval_ms: u64,
+    /// Matrix (input blocks) fix-round-1: hex id of the current best
+    /// input block. `None` when `[input_blocks] enabled = false` OR the
+    /// subsystem is on but no input block currently leads — the native
+    /// surface has no `null`-vs-absent distinction (unlike the
+    /// Scala-compat `ScalaInfo::best_input_block`); both collapse to
+    /// "key omitted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_input_block_id: Option<String>,
 }
 
 fn default_block_interval_ms() -> u64 {
@@ -254,5 +262,40 @@ mod tests {
         }
         let err = serde_json::from_value::<ApiStateType>(serde_json::json!("ledger"));
         assert!(err.is_err(), "unknown state_type variant must reject");
+    }
+
+    // ----- ApiInfo.best_input_block_id: fix-round-1 -----
+
+    fn sample_api_info() -> ApiInfo {
+        ApiInfo {
+            agent_name: "test".into(),
+            node_name: "test".into(),
+            network: "mainnet".into(),
+            version: "0.0.0".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 120_000,
+            best_input_block_id: None,
+        }
+    }
+
+    #[test]
+    fn best_input_block_id_omitted_when_none() {
+        let v = serde_json::to_value(sample_api_info()).unwrap();
+        assert!(
+            !v.as_object().unwrap().contains_key("best_input_block_id"),
+            "None must omit the key, not serialize null"
+        );
+    }
+
+    #[test]
+    fn best_input_block_id_present_when_some() {
+        let mut info = sample_api_info();
+        info.best_input_block_id = Some("ab".repeat(32));
+        let v = serde_json::to_value(info).unwrap();
+        assert_eq!(
+            v["best_input_block_id"],
+            serde_json::Value::String("ab".repeat(32))
+        );
     }
 }

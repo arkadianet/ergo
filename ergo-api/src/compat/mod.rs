@@ -10,9 +10,11 @@
 
 pub mod blocks;
 pub mod handlers;
+pub mod input_blocks;
 pub mod traits;
 pub mod transactions;
 pub mod types;
 
+pub use input_blocks::{ApiInputBlockEntry, ApiInputBlocks};
 pub use traits::NodeChainQuery;
 pub use types::{Parameters, ScalaInfo};
