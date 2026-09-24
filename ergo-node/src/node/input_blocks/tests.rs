@@ -2687,11 +2687,11 @@ fn code_106_acknowledges_the_tracked_ordering_request() {
     // PoW, so the reconstruction handoff's header validation fails and
     // rolls the id's delivery state back to `Unknown`, as every failed
     // header delivery does — a header that was not stored must stay
-    // requestable. Only a missing acknowledgement leaves it `Requested`.
-    assert_ne!(
+    // requestable. A missing acknowledgement would leave it `Requested`.
+    assert_eq!(
         state.coordinator.delivery().status(&oa_id),
-        ModifierStatus::Requested,
-        "the reply clears the expectation it answered"
+        ModifierStatus::Unknown,
+        "the reply clears the expectation it answered, then the failed header validation rolls it back"
     );
     assert!(
         state.peer_manager.get(&peer).unwrap().last_progress > before,
@@ -3179,10 +3179,10 @@ fn a_batch_inv_does_not_steal_another_peer_s_outstanding_expectation() {
     // Acknowledged means out of `inflight`; the invalid fixture header
     // then rolls `Received` back to `Unknown` (see
     // `code_106_acknowledges_the_tracked_ordering_request`).
-    assert_ne!(
+    assert_eq!(
         state.coordinator.delivery().status(&x),
-        ModifierStatus::Requested,
-        "A's 106 acknowledges A's own outstanding request"
+        ModifierStatus::Unknown,
+        "A's 106 acknowledges A's own outstanding request, then the failed header validation rolls it back"
     );
     assert!(
         state.peer_manager.get(&peer_a).unwrap().last_progress > before,
