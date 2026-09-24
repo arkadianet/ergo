@@ -9,7 +9,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use ergo_state::store::StateError;
+use ergo_primitives::digest::{Digest32, ModifierId};
+use ergo_primitives::writer::VlqWriter;
+use ergo_ser::autolykos::AutolykosSolution;
+use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+use ergo_ser::header::{serialize_header, Header};
+use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+use ergo_state::store::{block_txs_for_wallet_at_height, StateError, StateStore};
+use ergo_state::wallet::reader::WalletReader;
 use ergo_state::wallet::scan::{
     OwnedBlockOutput, RescanBlock, RescanError, RescanReadError, RescanTx, ScanRescanMatcher,
     WalletScanService,
@@ -72,6 +79,107 @@ fn scan_txs(db: &Database) -> Vec<ScanTxRecord> {
 }
 
 #[test]
+fn full_rescan_from_zero_replays_applied_blocks_without_genesis_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = StateStore::open(&path).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let mut parent = ModifierId::from_bytes([0; 32]);
+    let mut header_ids = Vec::new();
+    for height in 1..=3 {
+        let header = Header {
+            version: 2,
+            parent_id: parent,
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: store.root_digest(),
+            timestamp: 1_000_000 + height as u64,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 16842752,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
+                nonce: [0; 8],
+            },
+        };
+        let (header_bytes, header_id) = serialize_header(&header).unwrap();
+        let header_id_bytes: [u8; 32] = *header_id.as_bytes();
+        store.store_header(&header_id_bytes, &header_bytes).unwrap();
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id,
+                transactions: Vec::new(),
+            },
+        )
+        .unwrap();
+        let section_id = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &header_id_bytes,
+            header.transactions_root.as_bytes(),
+        );
+        store
+            .store_block_section(&section_id, &writer.result())
+            .unwrap();
+        let expected = store.root_digest();
+        store
+            .apply_block_unchecked_for_test(height, &header_id_bytes, &expected, &[])
+            .unwrap();
+        parent = header_id;
+        header_ids.push(header_id_bytes);
+    }
+
+    let db = store.db_arc();
+    let read_db = db.clone();
+    WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        3,
+        move |height| {
+            block_txs_for_wallet_at_height(&read_db, height).map(|block| {
+                block.map(|(block_id, txs)| RescanBlock {
+                    block_id,
+                    txs: txs
+                        .into_iter()
+                        .map(|tx| RescanTx {
+                            tx_id: tx.tx_id,
+                            inputs: tx.inputs,
+                            outputs: tx
+                                .outputs
+                                .into_iter()
+                                .map(|output| OwnedBlockOutput {
+                                    box_id: output.box_id,
+                                    output_index: output.output_index,
+                                    ergo_tree_bytes: output.ergo_tree_bytes,
+                                    value: output.value,
+                                    assets: output.assets,
+                                    miner_reward_pubkey: output.miner_reward_pubkey,
+                                    box_bytes: output.box_bytes,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
+        },
+        || Ok(3),
+        || false,
+        None,
+    )
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    let cursor = WalletReader::new(&read).scan_cursor().unwrap().unwrap();
+    assert_eq!(cursor.height, 3);
+    assert_eq!(cursor.header_id, Some(header_ids[2]));
+}
+
+#[test]
 fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
@@ -103,10 +211,6 @@ fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
 
     let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
-            0 => Some(RescanBlock {
-                block_id: [0; 32],
-                txs: vec![],
-            }),
             1 => Some(block1.clone()),
             2 => Some(block2.clone()),
             _ => None,
@@ -197,10 +301,6 @@ fn full_rescan_clears_stale_scan_rows_before_rebuilding() {
     };
     let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
-            0 => Some(RescanBlock {
-                block_id: [0; 32],
-                txs: vec![],
-            }),
             1 => Some(block1.clone()),
             _ => None,
         })
@@ -244,10 +344,6 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
     };
     let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
-            0 => Some(RescanBlock {
-                block_id: [0; 32],
-                txs: vec![],
-            }),
             1 => Some(block1.clone()),
             _ => None,
         })
@@ -393,10 +489,6 @@ fn count_mismatch_leaves_wallet_invalidated_not_falsely_complete() {
     };
     let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
-            0 => Some(RescanBlock {
-                block_id: [0; 32],
-                txs: vec![],
-            }),
             1 => Some(block1.clone()),
             _ => None,
         })

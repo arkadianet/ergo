@@ -377,7 +377,7 @@ impl WalletScanService {
         // blocks that arrived during the rebuild.
         let mut processed = 0u32;
         let mut current_target = tip_height;
-        let mut current_start = start_height;
+        let mut current_start = start_height.max(1);
 
         loop {
             for h in current_start..=current_target {

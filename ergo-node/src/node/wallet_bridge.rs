@@ -787,7 +787,7 @@ pub trait ChainStateAccessor: Send + Sync {
     /// wallet state, preventing the destructive clear-then-skip sequence.
     /// Default impl probes `read_block_at(0)`; override for efficiency.
     fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
-        Ok(self.read_block_at(0)?.is_some())
+        Ok(self.read_block_at(1)?.is_some())
     }
 
     fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
