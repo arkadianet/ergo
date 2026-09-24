@@ -207,7 +207,7 @@ impl NodeChainQuery for ScalaCompatBridge {
             .map(|ids| ids.into_iter().map(hex::encode).collect())
             .map_err(|e| {
                 warn!(handler = "header_ids_at_height_all", height, error = %e, "scala-compat handler failed");
-                ChainReadError::Unavailable(e.to_string())
+                ChainReadError::from(BridgeError::from(e))
             })
     }
 

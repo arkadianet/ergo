@@ -1924,6 +1924,61 @@ fn mainnet_block_545684_section_bytes(v: &BlockSectionsVector) -> Vec<u8> {
     bytes
 }
 
+// ----- error paths -----
+
+#[test]
+fn bridge_try_header_ids_at_height_malformed_row_is_corrupt() {
+    let height = 7;
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .write_malformed_headers_by_height_row_for_test(height)
+            .unwrap();
+    });
+    let err = bridge.try_header_ids_at_height(height).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.header_ids_at_height(height).is_empty());
+    assert!(bridge
+        .try_header_ids_at_height(height + 1)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bridge_try_proof_for_tx_root_mismatch_is_corrupt_compat_stays_none() {
+    let v = mainnet_block_545684_sections();
+    let section_bytes = mainnet_block_545684_section_bytes(&v);
+    let header_id: [u8; 32] = hex::decode(&v.header.id).unwrap().try_into().unwrap();
+    let mut header = ergo_rest_json::decode_scala_header_struct(&v.header).unwrap();
+    let mut root = *header.transactions_root.as_bytes();
+    root[0] ^= 1;
+    header.transactions_root = Digest32::from(root);
+    let mut writer = VlqWriter::new();
+    ergo_ser::header::write_header(&mut writer, &header).unwrap();
+    let header_bytes = writer.result();
+    let expected = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &header_id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    let (_dir, bridge) = bridge_over_store(|store| {
+        // Keep the original header id so the real section still names its header.
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .store_block_section_typed(
+                &expected.transactions_id,
+                &section_bytes,
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap();
+    });
+    let tx_id = &v.block_transactions.transactions[0].id;
+    let err = bridge.try_proof_for_tx(&v.header.id, tx_id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("proof does not verify"));
+    assert!(bridge.proof_for_tx(&v.header.id, tx_id).is_none());
+}
+
 // ----- oracle parity -----
 
 /// Serving a stored block whose output carries a future-version ErgoTree
