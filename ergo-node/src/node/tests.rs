@@ -3730,6 +3730,11 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
 
 // ----- NiPoPoW proof vs the header checkpoint (ingress) -----
 
+/// Mainnet genesis header, hex, as served on the wire. The only real header
+/// that passes validation on an empty store, so delivery tests use it as a
+/// genuinely admitted header.
+const POPOW_GENESIS_HEX: &str = "010000000000000000000000000000000000000000000000000000000000000000766ab7a313cd2fb66d135b0be6662aa02dfa8e5b17342c05a04396268df0bfbb93fb06aa44413ff57ac878fda9377207d5db0e78833556b331b4d9727b3153ba18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303f1f6cee9ba2d0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8060117650100000003be7ad70c74f691345cbedba19f4844e7fc514e1188a7929f5ae261d5bb00bb6602da9385ac99014ddcffe88d2ac5f28ce817cd615f270a0a5eae58acfb9fd9f6a0000000030151dc631b7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b";
+
 /// Mainnet height-2 header, hex, as served on the wire. Same
 /// vector the `ergo-sync` popow reducer tests use; duplicated here because
 /// this test drives the node's real message dispatch rather than the reducer.
