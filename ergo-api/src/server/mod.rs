@@ -126,6 +126,10 @@ pub struct ServerCtx {
     /// state type" body — the rest of the API remains available.
     /// The integrator sets this from the resolved `state_type`.
     pub utxo_reads_supported: bool,
+    /// Declare a loopback reverse proxy so peer sockets receive no loopback
+    /// rate-limit exemption and use the remote Admin policy (warn-and-allow
+    /// in production). Forwarded headers never determine client identity.
+    pub local_reverse_proxy: bool,
 }
 
 /// Bind a TCP listener for the API server without starting axum.
@@ -200,6 +204,7 @@ pub fn serve_on(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
 }
@@ -576,6 +581,7 @@ pub fn router_with_wallet(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
 }
@@ -686,6 +692,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         emission,
         emission_scripts,
         utxo_reads_supported,
+        local_reverse_proxy,
     } = ctx;
     // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
     // reads). Cloned up front because the compat / submit handles are moved into
@@ -832,7 +839,9 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // The v1 T1 (operator) auth config — the same api-key gate the wallet
     // surface uses, reused for the `webhooks/*` management routes below.
     // Captured before `security` is consumed by the native wallet mount.
-    let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone()).into_shared();
+    let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone())
+        .with_local_reverse_proxy(local_reverse_proxy)
+        .into_shared();
     // Captured before the native mount consumes `wallet_admin`: the v1
     // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`)
     // reuses the SAME wallet-admin bridge for scan + key operations.
@@ -947,8 +956,11 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         realtime: Some(v1_realtime),
         network,
     };
-    let v1_governor = crate::v1::governor::Governor::new(Default::default())
-        .expect("default GovernorConfig is valid");
+    let v1_governor = crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
+        local_reverse_proxy,
+        ..Default::default()
+    })
+    .expect("GovernorConfig is valid");
     // The `script/*` playground shares the one per-node governor (bounded
     // at the `Compute` class — the load-bearing anti-DoS control) and the
     // one v1 auth config (so `[api.script] require_api_key` can flip the group

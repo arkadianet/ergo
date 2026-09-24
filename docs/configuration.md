@@ -133,6 +133,7 @@ beyond loopback.
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
 | `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. This is the loader default; the shipped ready-to-use template sets it to `true`. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
+| `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
 ### `[api.security]`
@@ -173,6 +174,31 @@ Consequences:
   `local_reserved_cost_budget` below.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
+- **Set `local_reverse_proxy = true` when a reverse proxy connects to a
+  loopback API bind.** Client identity comes only from the real peer socket;
+  the node never trusts `X-Forwarded-For`. All clients through the same proxy
+  peer IP (usually `127.0.0.1`, or `::1`) share **one v1 governor bucket**:
+  default burst 40 tokens, refill 20 tokens/second, Compute requests costing
+  10 tokens each. Direct local operator access also loses its loopback
+  exemption and shares that bucket when using the same peer IP. Apply
+  per-client rate limits at the proxy and size aggregate traffic for this
+  budget. Raising governor limits requires changing the server's
+  `GovernorConfig`; these limits are not currently exposed in TOML.
+- **Realtime connections also share the proxy's peer IP.** The fixed
+  `MAX_SOCKETS_PER_IP = 16` cap applies across all proxied clients using that
+  IP, including direct local connections from that IP. This socket cap uses
+  peer identity regardless of `local_reverse_proxy`; budget concurrent
+  WebSocket clients accordingly. Proxy rate limiting does not raise the cap.
+- **A declared proxy routes all API transaction submissions through the
+  public mempool budget**, including direct local submissions. At boot,
+  `api_publicly_bound` becomes true and admission uses `TxSource::PublicApi`
+  (shared `global_cost_budget`) rather than `TxSource::Api`
+  (`local_reserved_cost_budget`), even though the API binds to loopback.
+- **Admin operations remain authenticated and warn-and-allow in production.**
+  With `local_reverse_proxy = true`, loopback requests use the remote Admin
+  policy and emit a warning after a valid API key is supplied. The setting
+  does not enable `admin_hard_deny_nonloopback` or block authenticated Admin
+  operations; restrict remote Admin access at the proxy if needed.
 - **The `Host` header is checked to close the DNS-rebinding read path.**
   A loopback bind (the default) rejects any request whose `Host` header
   isn't `localhost`, `127.0.0.1`, `[::1]`, the literal `bind` address, or

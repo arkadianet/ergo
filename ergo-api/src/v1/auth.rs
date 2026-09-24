@@ -439,6 +439,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_declared_proxy_default_policy_allows_valid_key() {
+        let cfg = V1AuthConfig::new(Some(security_for(b"secretkey")))
+            .with_local_reverse_proxy(true)
+            .into_shared();
+        assert_eq!(
+            status(&cfg, Tier::Admin, request(Some("secretkey"), Some(LOCAL))).await,
+            200
+        );
+    }
+
+    #[tokio::test]
     async fn admin_accepts_valid_key_from_loopback() {
         let cfg = V1AuthConfig::new(Some(security_for(b"secretkey"))).into_shared();
         assert_eq!(

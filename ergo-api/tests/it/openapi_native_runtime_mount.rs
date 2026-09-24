@@ -461,6 +461,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
     }
 }
 
@@ -481,6 +482,7 @@ fn fully_wired_ctx() -> ServerCtx {
             pay2_reemission: String::new(),
         })),
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
     }
 }
 

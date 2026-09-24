@@ -307,6 +307,23 @@ fn default_api_bind_is_loopback() {
 }
 
 #[test]
+fn api_local_reverse_proxy_defaults_false() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(!cfg.api_local_reverse_proxy);
+}
+
+#[test]
+fn api_local_reverse_proxy_explicit_true() {
+    let path =
+        write_toml("[api]\nlocal_reverse_proxy = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(cfg.api_local_reverse_proxy);
+}
+
+#[test]
 fn api_disabled_yields_none() {
     let path = write_toml("[api]\ndisabled = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cli = minimal_cli(Some(&path));

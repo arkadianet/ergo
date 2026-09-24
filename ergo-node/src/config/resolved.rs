@@ -188,6 +188,9 @@ pub struct NodeConfig {
     /// may include a port (`"example.com:9099"`) to pin it, or omit one
     /// to match any port.
     pub api_allowed_hosts: Vec<String>,
+    /// `[api] local_reverse_proxy` — withdraw loopback trust when a reverse
+    /// proxy terminates on loopback. Default `false`.
+    pub api_local_reverse_proxy: bool,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.

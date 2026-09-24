@@ -28,6 +28,7 @@ mod host_allowlist;
 mod host_schema;
 mod identity_schema;
 mod indexer_status_endpoint;
+mod local_reverse_proxy;
 mod mempool_overlay_oracle;
 mod mempool_source_schema;
 mod metrics_gauges;

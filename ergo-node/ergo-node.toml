@@ -38,6 +38,17 @@ max_connections = 384
 disabled = true
 bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
                                  # `public_bind = true` (and read the note below).
+# local_reverse_proxy = false  # set true when a proxy connects to this loopback API.
+# All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
+# bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator
+# access also loses its exemption. Rate-limit per client at the proxy; raising
+# governor limits currently requires a code change (no TOML setting).
+# The realtime cap is 16 sockets TOTAL per peer IP across proxied and direct
+# local clients, regardless of this flag. Budget WebSocket concurrency.
+# With this flag, ALL API tx submissions use the public mempool global budget,
+# including direct local submissions; they cannot use the local reserve.
+# Admin requests with a valid key warn-and-allow; this does not enable hard deny.
+# X-Forwarded-For is never trusted. See docs/configuration.md for details.
 # allowed_hosts = ["my-node.example.com"]  # extra Host headers to accept, guarding
                                  # against DNS rebinding (default []; loopback binds
                                  # always accept localhost/127.0.0.1/::1/the bind IP).

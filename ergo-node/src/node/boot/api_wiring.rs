@@ -376,6 +376,7 @@ pub(super) async fn bind(
         // backend's boot dispatch (Mode 5) doesn't reach
         // here yet, but the gate is the right shape now.
         utxo_reads_supported: config.state_type == crate::config::StateType::Utxo,
+        local_reverse_proxy: config.api_local_reverse_proxy,
     };
     // Mandatory api_key_hash per Scala ErgoApp.scala:40-43.
     // `NodeConfig::load` rejects (api_bind = Some,
