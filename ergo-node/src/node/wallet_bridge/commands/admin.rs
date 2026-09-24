@@ -221,10 +221,10 @@ fn rescan_chain_preflight(chain: &dyn ChainStateAccessor) -> Result<u32, WalletA
     let tip = chain
         .tip_height()
         .map_err(|e| WalletAdminError::Internal(format!("chain tip read failed: {e}")))?;
+    // A genesis-only chain has no blocks to replay: the rescan completes
+    // immediately, leaving empty wallet tables and clearing invalidation.
     if tip == 0 {
-        return Err(WalletAdminError::RescanUnavailable(
-            "chain block-read history is unavailable before height 1".to_string(),
-        ));
+        return Ok(0);
     }
     let first = chain.read_block_at(1).map_err(map_rescan_read_error)?;
     let tip_block = chain.read_block_at(tip).map_err(map_rescan_read_error)?;
@@ -1708,15 +1708,12 @@ mod rescan_preflight_tests {
     }
 
     #[test]
-    fn rescan_preflight_no_committed_chain_returns_unavailable() {
+    fn rescan_preflight_no_committed_chain_returns_genesis_tip() {
         let dir = tempfile::tempdir().unwrap();
         let db =
             std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let chain = crate::node::wallet_bridge::ChainStateAccessorImpl::new(db, false, None);
-        assert!(matches!(
-            rescan_chain_preflight(&chain),
-            Err(WalletAdminError::RescanUnavailable(message)) if message.contains("before height 1")
-        ));
+        assert!(matches!(rescan_chain_preflight(&chain), Ok(0)));
     }
 
     #[test]

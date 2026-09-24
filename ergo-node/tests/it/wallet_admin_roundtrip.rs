@@ -318,23 +318,32 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
 }
 
 #[tokio::test]
-async fn rescan_on_genesis_tip_is_refused_before_rebuild() {
+async fn rescan_on_genesis_tip_is_accepted() {
     use std::time::Duration;
 
     let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
     let (admin, _db, _dir) =
         spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
-    let result = tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
+    tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
         .await
-        .expect("tip-zero preflight must return promptly");
-    assert!(matches!(
-        result,
-        Err(WalletAdminError::RescanUnavailable(_))
-    ));
-    assert!(matches!(
-        admin.native_status().await.unwrap().rescan,
-        ergo_api::wallet::native::dto::RescanStateDto::Idle
-    ));
+        .expect("tip-zero rescan must be accepted")
+        .expect("tip-zero rescan must start");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                admin.native_status().await.expect("status").rescan,
+                ergo_api::wallet::native::dto::RescanStateDto::Idle
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("tip-zero rescan must finish");
+    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed
