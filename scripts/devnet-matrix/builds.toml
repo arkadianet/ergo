@@ -21,9 +21,11 @@
 # records a different `ergo_commit`. `branch` is information only.
 # F12F05 and F14 are pinned at the commits their evidence was measured
 # on; their branches have since moved by test-fixture changes only (no
-# production class differs). F13, F11 and `all` are pinned at the heads
-# carrying the final review fixes, so their provisioned work directories
-# (8036a71d9, 817b66b5c, f0562361d) are refused until re-provisioned.
+# production class differs). F13, F11 and `all` are pinned at the final
+# heads (F13 530a5a1b0 over the delivery-release fix 334df6e89, F11
+# ed6e91489 over the retry-budget fix a3dde7466, all f31f09064), so their
+# provisioned work directories (8036a71d9, 817b66b5c, f0562361d) are
+# refused until re-provisioned.
 
 root = "../input-blocks/scripts/jvm_weak_blocks_oracle"
 
@@ -53,7 +55,7 @@ description = "F14: applyDisconnected becomes a graph walk that consumes attache
 
 [builds.F13]
 work_dir = ".work-F13"
-ergo_ref = "334df6e897f64fdf8fdbaaefd72c3ffa1dfba7ee"
+ergo_ref = "530a5a1b038aaa1a8cb2c49e584393ce65211e13"
 branch = "matrix/F13-pending-root-announcements"
 description = "F13: a bounded untrusted pending store for the root announcement, replayed through the +1 validation path"
 
@@ -65,12 +67,12 @@ description = "F4/F4b: every PRESENT announced field bound to its extension leaf
 
 [builds.F11]
 work_dir = ".work-F11"
-ergo_ref = "a3dde7466bd5b2068a46c0c08ad3ba87d899a5dc"
+ergo_ref = "ed6e914898a53a098ef40baa9596dac633b3e5f0"
 branch = "matrix/F11-candidate-retained-work"
 description = "F11: a bounded ring of recent candidates, retained work separated from active work, and a reply on every submission"
 
 [builds.all]
 work_dir = ".work-all"
-ergo_ref = "42e18800dfd6df77069ccb9592cc3a4ed77b1db1"
+ergo_ref = "f31f09064e8c16f9bd9397bc3e582447c2eb176e"
 branch = "matrix-fixes-all"
 description = "the integration build: base + every patch branch merged, measured ONCE at the end and never used for a per-patch claim"
