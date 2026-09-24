@@ -1018,7 +1018,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
         // Skip during rescan: the live apply hook returns empty so chain-apply
         // doesn't interfere with the background rescan writing the same tables.
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        if crate::wallet_boot::rescan_in_progress() {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1026,7 +1026,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        if crate::wallet_boot::rescan_in_progress() {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
@@ -1038,7 +1038,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
         // block, so a concurrent live write would race it (miss a spend
         // against the cleared reverse index, or stale that index). Mirrors
-        // how the pubkey path skips during RESCAN_IN_PROGRESS. A PARTIAL
+        // how the pubkey path skips during a rescan. A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
         if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {

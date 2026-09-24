@@ -1,7 +1,6 @@
 //! Integration test: NodeWalletAdmin init→status round-trip via the
 //! channel-backed writer task.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -140,6 +139,48 @@ impl ChainStateAccessor for BlockingRescanChain {
             block_id: [height as u8; 32],
             txs: vec![],
         }))
+    }
+}
+
+/// Pauses each rebuild at its final tip read, after the last loop-boundary
+/// cancellation check. Preflight tip reads, including the rejected concurrent
+/// request, never block.
+struct RescanTipBarrier {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: std::sync::mpsc::Sender<()>,
+    releases: [std::sync::Mutex<std::sync::mpsc::Receiver<()>>; 2],
+}
+
+impl ChainStateAccessor for RescanTipBarrier {
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
+    }
+
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 1 || call == 4 {
+            self.entered.send(()).unwrap();
+            self.releases[usize::from(call == 4)]
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        Ok(0)
+    }
+
+    fn is_pruned(&self) -> bool {
+        false
+    }
+
+    fn read_block_at(
+        &self,
+        _height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
     }
 }
 
@@ -312,7 +353,7 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         .map(|row| row.value())
         .unwrap_or(false);
     assert!(invalidated);
-    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+    while ergo_node::wallet_boot::rescan_in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -341,9 +382,80 @@ async fn rescan_on_genesis_tip_is_accepted() {
     })
     .await
     .expect("tip-zero rescan must finish");
-    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+    while ergo_node::wallet_boot::rescan_in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test]
+async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
+    use ergo_api::wallet::native::dto::RescanStateDto;
+    use ergo_node::wallet_boot::{rescan_in_progress, ProdRescanGuard, SCAN_REBUILD_IN_PROGRESS};
+    use ergo_state::wallet::apply::RescanGuard;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let _lock = RESCAN_TEST_LOCK.lock().await;
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release_a, wait_a) = std::sync::mpsc::channel();
+    let (release_b, wait_b) = std::sync::mpsc::channel();
+    let chain = Arc::new(RescanTipBarrier {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        entered,
+        releases: [std::sync::Mutex::new(wait_a), std::sync::Mutex::new(wait_b)],
+    });
+    let (admin, db, _dir) = spawn_writer_with_chain(chain.clone(), Arc::new(StubTxSubmitter));
+    admin.rescan(0).await.unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(admin.rescan(0).await,
+        Err(WalletAdminError::RescanUnavailable(reason)) if reason == "rescan already in progress"));
+
+    let txn = db.begin_write().unwrap();
+    ProdRescanGuard.abort_in_progress(&txn).unwrap();
+    txn.commit().unwrap();
+    admin.rescan(0).await.unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        Arc::strong_count(&chain),
+        4,
+        "writer plus two rebuild tasks"
+    );
+
+    release_a.send(()).unwrap();
+    // The captured chain Arc is dropped after the task's local flags guard.
+    // Wait for task A to exit while B stays blocked; no timing-based sleep.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&chain) != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled rescan must exit");
+    assert!(rescan_in_progress());
+    assert!(SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    let status = admin.native_status().await.unwrap();
+    assert!(matches!(
+        status.rescan,
+        RescanStateDto::Running { from_height: 0 }
+    ));
+    assert!(
+        status.scan_invalidated,
+        "A cannot clear rollback invalidation"
+    );
+
+    release_b.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&chain) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement rescan must finish");
+    assert!(!rescan_in_progress());
+    assert!(!SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    let status = admin.native_status().await.unwrap();
+    assert!(matches!(status.rescan, RescanStateDto::Idle));
+    assert!(!status.scan_invalidated);
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed

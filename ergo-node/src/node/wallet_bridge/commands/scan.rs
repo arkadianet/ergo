@@ -2264,6 +2264,7 @@ mod tests {
 
     #[test]
     fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
+        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
         // While a full rescan rebuilds the scan tables, the live block-apply
         // scan path must no-op so it doesn't race the rebuild's block-by-block
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
@@ -2322,6 +2323,7 @@ mod tests {
 
     #[test]
     fn scan_mutation_guard_rejects_during_rebuild() {
+        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
         use std::sync::atomic::Ordering;
         // Guard passes when no rebuild is in flight...
         crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
