@@ -12,8 +12,7 @@ use super::super::NodeState;
 /// bootstrap rejection or verifier errors (strong signals of malicious
 /// or misconfigured peers).
 ///
-/// No-op when `popow_bootstrap` is `None` (either feature disabled
-/// or already terminal). Silent drop on decode errors plus a
+/// No-op when bootstrap is disabled or the reducer is terminal. Silent drop on decode errors plus a
 /// telemetry warn; the wire codec is byte-strict, so a parse
 /// failure is either a malicious peer (penalize) or a peer running
 /// an incompatible protocol version (degrade).
@@ -24,7 +23,11 @@ pub(super) fn handle_inbound_popow_proof(
 ) -> Vec<Action> {
     use ergo_validation::popow::NipopowVerificationResult;
 
-    if state.popow_bootstrap.is_none() {
+    if state
+        .popow_bootstrap
+        .as_ref()
+        .is_none_or(|popow| popow.is_terminal())
+    {
         // Either NiPoPoW disabled or reducer already terminal —
         // silently drop. A peer responding late after we've already
         // applied a proof is not misbehavior.
@@ -79,6 +82,9 @@ pub(super) fn handle_inbound_popow_proof(
     let result = match state.popow_bootstrap.as_mut() {
         Some(popow) => match popow.on_proof_received(peer, proof) {
             PopowProofOutcome::Verified(r) => r,
+            // Late proof after apply/abandon: not misbehavior (see the
+            // terminal check above).
+            PopowProofOutcome::Ignored => return Vec::new(),
             PopowProofOutcome::Duplicate => {
                 // Scala parity (ErgoNodeViewSynchronizer.scala:1082-1093):
                 // a peer gets one response, regardless of its validity.
