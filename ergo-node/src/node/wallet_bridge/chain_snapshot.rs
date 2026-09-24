@@ -61,7 +61,7 @@ impl ChainSnapshot {
             height: committed.best_full_block_height(),
             header_id: committed.best_full_block_id(),
         };
-        let headers = committed.last_ancestor_headers_window()?.to_vec();
+        let headers = committed.last_ancestor_headers_window()?;
         let tip_header = headers.first().ok_or(StateError::InternalInvariant {
             what: "ChainSnapshot::from_committed: empty ancestor header window",
         })?;
@@ -183,6 +183,19 @@ mod tests {
             parent = id;
         }
         (parent, tip)
+    }
+
+    #[test]
+    fn snapshot_supports_short_chain_with_five_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        apply_headers(&mut store, 5);
+        let accessor = super::super::ChainStateAccessorImpl::new(store.db_arc(), false, None);
+        let snapshot = accessor.chain_snapshot().unwrap();
+        assert_eq!(snapshot.tip().height, 5);
+        assert_eq!(snapshot.headers().len(), 5);
+        assert_eq!(snapshot.headers()[0].height, 5);
     }
 
     #[test]

@@ -156,7 +156,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
                             "{label} override[{i}]: bad box id hex"
                         ))
                     })?;
-                lookup_snapshot_utxo(snapshot, &id, "data_input")
+                lookup_snapshot_utxo(snapshot, &id, "input")
             })
             .collect(),
         None => unsigned_tx
@@ -197,7 +197,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
             .iter()
             .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                lookup_snapshot_utxo(snapshot, box_id, "input")
+                lookup_snapshot_utxo(snapshot, box_id, "data_input")
             })
             .collect(),
     }
@@ -261,7 +261,7 @@ pub(crate) fn resolve_data_inputs_for_signed(
             .iter()
             .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                lookup_snapshot_utxo(snapshot, box_id, "input")
+                lookup_snapshot_utxo(snapshot, box_id, "data_input")
             })
             .collect(),
     }

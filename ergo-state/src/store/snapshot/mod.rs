@@ -320,19 +320,18 @@ impl CommittedSnapshot {
             })
     }
 
-    /// The last 10 applied-chain headers walked by parent id, tip-first.
-    pub fn last_ancestor_headers_window(&self) -> Result<[Header; 10], StateError> {
+    /// The last up-to-10 applied-chain headers walked by parent id, tip-first.
+    pub fn last_ancestor_headers_window(&self) -> Result<Vec<Header>, StateError> {
         let tip_height = self.chain_state.best_full_block_height;
-        if tip_height < 10 {
-            return Err(StateError::EarlyIBD {
-                needed_min: 10,
-                observed: tip_height,
-            });
+        let count = tip_height.min(10) as usize;
+        if count == 0 {
+            return Ok(Vec::new());
         }
+        let first_height = tip_height + 1 - count as u32;
         let headers_table = self.txn.open_table(HEADERS)?;
         let mut current_id = self.chain_state.best_full_block_id;
-        let mut headers = Vec::with_capacity(10);
-        for expected_height in (tip_height - 9..=tip_height).rev() {
+        let mut headers = Vec::with_capacity(count);
+        for expected_height in (first_height..=tip_height).rev() {
             let bytes = headers_table.get(current_id.as_slice())?.ok_or_else(|| {
                 StateError::DbCorruption {
                     table: "headers",
@@ -361,12 +360,7 @@ impl CommittedSnapshot {
             current_id = *header.parent_id.as_bytes();
             headers.push(header);
         }
-        headers
-            .try_into()
-            .map_err(|_| StateError::InternalInvariant {
-                what:
-                    "CommittedSnapshot::last_ancestor_headers_window: built window with size != 10",
-            })
+        Ok(headers)
     }
 
     /// Active protocol parameters at the committed tip — the block version

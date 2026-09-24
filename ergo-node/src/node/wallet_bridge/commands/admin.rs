@@ -2,7 +2,7 @@
 //!
 //! See `super::mod` for the WriterContext design and grouping rationale.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -289,6 +289,9 @@ pub(crate) async fn rescan(
     let db = ctx.db.clone();
     let chain = ctx.chain.clone();
     let store = ctx.store.clone();
+    let reached_height = std::sync::Arc::new(AtomicU32::new(start_h));
+    let reached_for_block = reached_height.clone();
+    let reached_for_tip = reached_height.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _flags = RescanFlagsGuard;
         let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
@@ -297,12 +300,18 @@ pub(crate) async fn rescan(
             pks,
             start_h,
             tip_h,
-            |height| chain.read_block_at(height),
+            |height| {
+                let result = chain.read_block_at(height);
+                if matches!(&result, Ok(Some(_))) {
+                    reached_for_block.store(height, Ordering::SeqCst);
+                }
+                result
+            },
             || {
                 chain
                     .tip_height()
                     .map_err(|e| ergo_state::wallet::scan::RescanReadError::Storage {
-                        height: 0,
+                        height: reached_for_tip.load(Ordering::SeqCst),
                         source: e,
                     })
             },
@@ -1538,6 +1547,23 @@ mod attempt_limiter_tests {
             limiter.record_failure_at(t0 + Duration::from_secs(30 + i as u64));
         }
         assert!(limiter.gate_at(t0 + Duration::from_secs(60)).is_ok());
+    }
+
+    #[test]
+    fn rescan_storage_failure_preserves_reached_height() {
+        let state = super::rescan_failure_state(
+            0,
+            &ergo_state::wallet::scan::RescanError::Read(
+                ergo_state::wallet::scan::RescanReadError::Storage {
+                    height: 42,
+                    source: ergo_state::store::StateError::Serialization("boom".to_string()),
+                },
+            ),
+        );
+        assert!(matches!(
+            state,
+            ergo_state::wallet::RescanState::Failed { height: 42, .. }
+        ));
     }
 
     #[test]

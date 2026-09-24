@@ -1,6 +1,7 @@
 //! Integration test: NodeWalletAdmin init→status round-trip via the
 //! channel-backed writer task.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -253,10 +254,14 @@ fn spawn_writer_with_chain(
     (NodeWalletAdmin::new(tx), db_seed, dir)
 }
 
+static RESCAN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn rescan_runs_in_background_and_reports_durable_failure() {
     use ergo_api::wallet::native::dto::RescanStateDto;
     use std::time::{Duration, Instant};
+
+    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -311,6 +316,38 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         .map(|row| row.value())
         .unwrap_or(false);
     assert!(invalidated);
+    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn rescan_on_genesis_tip_is_accepted() {
+    use std::time::Duration;
+
+    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
+    let (admin, _db, _dir) =
+        spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
+    tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
+        .await
+        .expect("tip-zero rescan must be accepted")
+        .expect("tip-zero rescan must start");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                admin.native_status().await.expect("status").rescan,
+                ergo_api::wallet::native::dto::RescanStateDto::Idle
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("tip-zero rescan must finish");
+    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed

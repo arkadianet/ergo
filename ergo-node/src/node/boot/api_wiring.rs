@@ -129,6 +129,24 @@ pub(super) struct ApiBind {
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
+fn recover_interrupted_rescan(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    let state = {
+        let read = store.begin_read()?;
+        read.rescan_state()?
+    };
+    let ergo_state::wallet::RescanState::Running { from_height } = state else {
+        return Ok(());
+    };
+    let mut write = store.begin_write()?;
+    write.set_rescan_state(&ergo_state::wallet::RescanState::Failed {
+        height: from_height,
+        reason: "interrupted by restart".to_string(),
+    })?;
+    write.commit()
+}
+
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
 /// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
@@ -173,6 +191,9 @@ pub(super) async fn bind(
     let db_arc = store.db_arc();
     let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
         Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
+    if let Err(error) = recover_interrupted_rescan(wallet_store.as_ref()) {
+        tracing::warn!(%error, "wallet boot: failed to mark interrupted rescan");
+    }
     let is_pruned = config.blocks_to_keep != -1;
     // `ChainStateAccessorImpl::tip_height()` now reads the live committed
     // tip from redb per-call (no captured value), so no boot-time tip is
@@ -414,4 +435,34 @@ pub(super) async fn bind(
         api_shutdown_tx: Some(api_shutdown_tx),
         live_wallet_hook: Some(hook),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recover_interrupted_rescan;
+    use ergo_state::wallet::{RedbWalletStore, RescanState, WalletStore};
+    use std::sync::Arc;
+
+    #[test]
+    fn recover_interrupted_rescan_marks_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        recover_interrupted_rescan(&store).unwrap();
+
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed {
+                height: 7,
+                reason: "interrupted by restart".to_string(),
+            }
+        );
+    }
 }

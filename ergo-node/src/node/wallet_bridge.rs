@@ -785,9 +785,17 @@ pub trait ChainStateAccessor: Send + Sync {
     /// `is_pruned()` (which gates `/wallet/restore`) — this gates
     /// `/wallet/rescan`. When false, rescan is refused before touching any
     /// wallet state, preventing the destructive clear-then-skip sequence.
-    /// Default impl probes `read_block_at(0)`; override for efficiency.
+    /// Default impl treats a genesis-only tip as supported; otherwise it
+    /// probes height one. Overrides may avoid the probe for efficiency.
     fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
-        Ok(self.read_block_at(1)?.is_some())
+        match self.tip_height() {
+            Ok(0) => Ok(true),
+            Ok(_) => Ok(self.read_block_at(1)?.is_some()),
+            Err(error) => Err(ergo_state::wallet::scan::RescanReadError::Storage {
+                height: 0,
+                source: error,
+            }),
+        }
     }
 
     fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
@@ -850,9 +858,7 @@ pub trait ChainStateAccessor: Send + Sync {
 pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
     let detail = error.to_string();
     match error {
-        ChainStateError::StaleTip { .. } => {
-            WalletAdminError::BadRequest(format!("stale_chain_tip: {detail}"))
-        }
+        ChainStateError::StaleTip { .. } => WalletAdminError::StaleChainTip(detail),
         _ => WalletAdminError::Internal(detail),
     }
 }

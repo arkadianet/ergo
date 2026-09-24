@@ -104,6 +104,11 @@ pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
             String::new(),
         ),
         E::BadRequest(d) => (Reason::BadRequest, "the request is invalid", d),
+        E::StaleChainTip(d) => (
+            Reason::StaleCandidate,
+            "the committed chain tip changed; retry",
+            d,
+        ),
         E::Internal(_) => (
             Reason::InternalError,
             "the wallet operation failed",
