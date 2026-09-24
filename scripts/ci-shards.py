@@ -28,7 +28,10 @@ GROUPS = {
         # 4.3 / 5.7 / 7.3 / 11.5 min because ergo-api, ergo-indexer and
         # ergo-sync carry large `it` binaries. They move onto the two
         # node shards, which had the headroom.
-        ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-api"),
+        (
+            "ergo-node --lib", "ergo-node --bin ergo-node",
+            "ergo-node --example p2p_adversary", "ergo-api",
+        ),
         (
             "ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json",
             "ergo-indexer", "ergo-sync",
@@ -45,7 +48,8 @@ GROUPS = {
     ),
     "macOS": (
         (
-            "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-state",
+            "ergo-node --lib", "ergo-node --bin ergo-node",
+            "ergo-node --example p2p_adversary", "ergo-state",
             "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-mining", "ergo-inputblocks", "ergo-p2p", "ergo-sigma", "ergo-compiler",
             "ergo-wallet",

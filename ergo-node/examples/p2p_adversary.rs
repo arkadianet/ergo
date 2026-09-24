@@ -96,6 +96,19 @@
 //!                         --reference-follower patched`, which reads the
 //!                         store's caps off `/info` and the honest root
 //!                         announcements off the follower's log.
+//!
+//!                         `--hold-ms <ms>` (after the positionals) is the
+//!                         HELD-connection mode: one connection per host,
+//!                         opened once and kept for the whole flood, every
+//!                         wave sent over it, then held `ms` past the last
+//!                         wave while draining whatever the node sends. A
+//!                         store that drops a host's entries on disconnect
+//!                         keeps them only while the connection stays up,
+//!                         so this is the shape that tests its caps for a
+//!                         full TTL. Only `hosts` addresses are used (not
+//!                         `hosts x waves`). The report says how many
+//!                         connections the node closed before the hold
+//!                         ended.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -942,46 +955,224 @@ async fn input_block_flood(ctx: &Ctx, announcements: u32, deliveries: u32) -> bo
     ok
 }
 
-/// The ROOT-announcement flood: waves of announcements at height + 2, each
-/// wave from `hosts` source addresses nobody has used before.
-///
-/// Like `input_block_flood` the verdict is narrow — the traffic was
-/// delivered — and the store's caps, the honest roots and the honest
-/// peers are judged by the campaign from the follower's own `/info` and
-/// log.
-async fn input_block_root_flood(
-    ctx: &Ctx,
+/// `input_block_root_flood`'s arguments: five positionals, each with the
+/// default it has always had, and the optional `--hold-ms` flag that
+/// selects the held-connection mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootFloodArgs {
     hosts: u8,
     per_host: u32,
     waves: u8,
     interval: Duration,
     first: u8,
-) -> bool {
-    let needed = u32::from(hosts) * u32::from(waves);
-    if u32::from(first) + needed > 255 {
+    /// `Some` = held connections, kept this long past the last wave.
+    hold: Option<Duration>,
+}
+
+impl RootFloodArgs {
+    fn parse(rest: &[String]) -> Result<Self, String> {
+        let mut positional = Vec::new();
+        let mut hold = None;
+        let mut it = rest.iter();
+        while let Some(arg) = it.next() {
+            if arg == "--hold-ms" {
+                let value = it.next().ok_or("--hold-ms needs a value")?;
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|e| format!("--hold-ms {value}: {e}"))?;
+                if ms == 0 {
+                    return Err("--hold-ms must be positive".into());
+                }
+                hold = Some(Duration::from_millis(ms));
+            } else {
+                positional.push(arg.as_str());
+            }
+        }
+        if positional.len() > 5 {
+            return Err(format!("unexpected arguments: {:?}", &positional[5..]));
+        }
+        fn field<T: std::str::FromStr>(
+            values: &[&str],
+            i: usize,
+            name: &str,
+            default: T,
+        ) -> Result<T, String>
+        where
+            T::Err: std::fmt::Display,
+        {
+            values.get(i).map_or(Ok(default), |v| {
+                v.parse().map_err(|e| format!("{name} {v}: {e}"))
+            })
+        }
+        let args = Self {
+            hosts: field(&positional, 0, "hosts", 10)?,
+            per_host: field(&positional, 1, "per_host", 40)?,
+            waves: field(&positional, 2, "waves", 10)?,
+            interval: Duration::from_millis(field(&positional, 3, "interval_ms", 15_000)?),
+            first: field(&positional, 4, "first", 100)?,
+            hold,
+        };
+        if args.hold.is_some() && args.per_host.saturating_mul(u32::from(args.waves)) > 0xffff {
+            // The held mode numbers a host's announcements across waves in
+            // the low 16 bits of the draw index; past that they repeat.
+            return Err(format!(
+                "--hold-ms: per_host x waves = {} exceeds 65535 distinct announcements per host",
+                u64::from(args.per_host) * u64::from(args.waves)
+            ));
+        }
+        Ok(args)
+    }
+
+    /// How many distinct `127.<k>.0.1` sources the flood uses: fresh
+    /// hosts every wave, or the same `hosts` held for all of them.
+    fn hosts_needed(&self) -> u32 {
+        let per_wave = u32::from(self.hosts);
+        if self.hold.is_some() {
+            per_wave
+        } else {
+            per_wave * u32::from(self.waves)
+        }
+    }
+
+    /// The draw index of announcement `i` of `wave` from source octet
+    /// `k`: distinct per announcement across the whole flood. A fresh
+    /// host sends one wave, so its index is `i`; a held host sends every
+    /// wave, so its index runs on across them.
+    fn announcement_index(&self, k: u8, wave: u8, i: u32) -> u32 {
+        let within = if self.hold.is_some() {
+            u32::from(wave) * self.per_host + i
+        } else {
+            i
+        };
+        (u32::from(k) << 16) | within
+    }
+}
+
+/// A held flood connection and, once seen, when the node closed it.
+struct HeldConn {
+    conn: Conn,
+    closed_after: Option<Duration>,
+}
+
+/// Read and discard whatever the node sent on every held connection, for
+/// `dur`. Draining matters: a node that fills an unread socket is
+/// measuring back-pressure, not the store. A connection that reads EOF or
+/// an error is marked closed, with the time since the flood started.
+async fn drain_held(conns: &mut [HeldConn], dur: Duration, started: Instant) {
+    let end = Instant::now() + dur;
+    let mut tmp = vec![0u8; 65536];
+    loop {
+        for held in conns.iter_mut().filter(|h| h.closed_after.is_none()) {
+            loop {
+                match held.conn.stream.try_read(&mut tmp) {
+                    Ok(0) => {
+                        held.closed_after = Some(started.elapsed());
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        held.closed_after = Some(started.elapsed());
+                        break;
+                    }
+                }
+            }
+        }
+        let now = Instant::now();
+        if now >= end {
+            return;
+        }
+        tokio::time::sleep((end - now).min(Duration::from_millis(250))).await;
+    }
+}
+
+/// The ROOT-announcement flood: waves of announcements at height + 2.
+///
+/// Hit-and-run (no `--hold-ms`): each wave from `hosts` source addresses
+/// nobody has used before, each connection closed half a second after its
+/// last frame. Held (`--hold-ms`): `hosts` connections opened once, every
+/// wave sent over them, held past the last wave.
+///
+/// Like `input_block_flood` the verdict is narrow — the traffic was
+/// delivered — and the store's caps, the honest roots and the honest
+/// peers are judged by the campaign from the follower's own `/info` and
+/// log.
+async fn input_block_root_flood(ctx: &Ctx, args: &RootFloodArgs) -> bool {
+    let RootFloodArgs {
+        hosts,
+        per_host,
+        waves,
+        interval,
+        first,
+        hold,
+    } = args.clone();
+    if u32::from(first) + args.hosts_needed() > 255 {
         println!(
-            "FAIL input_block_root_flood: {hosts} hosts x {waves} waves from 127.{first}.0.1 \
-             runs past 127.255.0.1"
+            "FAIL input_block_root_flood: {} hosts from 127.{first}.0.1 runs past 127.255.0.1",
+            args.hosts_needed()
         );
         return false;
     }
     let seed = 0x4d61_7472_6978_0002; // "Matrix" + the root-flood tag.
+    let started_flood = Instant::now();
     let mut sent_total = 0u32;
     let mut refused_hosts = 0u32;
+    let mut held: Vec<HeldConn> = Vec::new();
+    if hold.is_some() {
+        for h in 0..hosts {
+            let k = first + h;
+            match Conn::open_as(src(k), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+                Ok(conn) => held.push(HeldConn {
+                    conn,
+                    closed_after: None,
+                }),
+                Err(e) => {
+                    refused_hosts += 1;
+                    println!("[root_flood] held: {} refused: {e}", src(k));
+                }
+            }
+        }
+        println!("[root_flood] held: {} connections open", held.len());
+    }
     for wave in 0..waves {
         let Some(height) = height(&ctx.api).await else {
             println!("[root_flood] wave {wave}: node height unreadable, wave skipped");
-            tokio::time::sleep(interval).await;
+            if hold.is_some() {
+                drain_held(&mut held, interval, started_flood).await;
+            } else {
+                tokio::time::sleep(interval).await;
+            }
             continue;
         };
         let flood_height = height as u32 + 2;
         let started = Instant::now();
-        let mut conns = Vec::new();
         let mut sent_wave = 0u32;
-        for h in 0..hosts {
-            let k = first + wave * hosts + h;
-            let mut conn =
-                match Conn::open_as(src(k), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
+        if hold.is_some() {
+            for held_conn in held.iter_mut().filter(|h| h.closed_after.is_none()) {
+                let k = held_conn.conn.src.octets()[1];
+                for i in 0..per_host {
+                    let n = args.announcement_index(k, wave, i);
+                    let payload = bogus_announcement(seed, n, flood_height, draw(seed, 9, n));
+                    let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+                    if held_conn.conn.stream.write_all(&frame).await.is_err() {
+                        held_conn.closed_after = Some(started_flood.elapsed());
+                        break;
+                    }
+                    sent_wave += 1;
+                }
+            }
+        } else {
+            let mut conns = Vec::new();
+            for h in 0..hosts {
+                let k = first + wave * hosts + h;
+                let mut conn = match Conn::open_as(
+                    src(k),
+                    ctx.target,
+                    ctx.magic,
+                    SUBBLOCKS_PEER_VERSION,
+                )
+                .await
+                {
                     Ok(c) => c,
                     Err(e) => {
                         refused_hosts += 1;
@@ -989,30 +1180,54 @@ async fn input_block_root_flood(
                         continue;
                     }
                 };
-            for i in 0..per_host {
-                let n = (u32::from(k) << 16) | i;
-                let payload = bogus_announcement(seed, n, flood_height, draw(seed, 9, n));
-                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
-                if conn.stream.write_all(&frame).await.is_err() {
-                    break;
+                for i in 0..per_host {
+                    let n = args.announcement_index(k, wave, i);
+                    let payload = bogus_announcement(seed, n, flood_height, draw(seed, 9, n));
+                    let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
+                    if conn.stream.write_all(&frame).await.is_err() {
+                        break;
+                    }
+                    sent_wave += 1;
                 }
-                sent_wave += 1;
+                conns.push(conn);
             }
-            conns.push(conn);
+            // Held open briefly so the node reads every frame before the
+            // sockets close; the entries it admitted outlive the connection.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(conns);
         }
-        // Held open briefly so the node reads every frame before the
-        // sockets close; the entries it admitted outlive the connection.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        drop(conns);
         sent_total += sent_wave;
+        let open = held.iter().filter(|h| h.closed_after.is_none()).count();
         println!(
             "[root_flood] wave {wave}: {sent_wave} announcements at height {flood_height} \
-             from {hosts} hosts in {:?}",
+             from {} hosts in {:?}",
+            if hold.is_some() {
+                open
+            } else {
+                usize::from(hosts)
+            },
             started.elapsed()
         );
         use std::io::Write;
         let _ = std::io::stdout().flush();
-        tokio::time::sleep(interval).await;
+        if hold.is_some() {
+            drain_held(&mut held, interval, started_flood).await;
+        } else {
+            tokio::time::sleep(interval).await;
+        }
+    }
+    if let Some(hold) = hold {
+        drain_held(&mut held, hold, started_flood).await;
+        let closed: Vec<Duration> = held.iter().filter_map(|h| h.closed_after).collect();
+        println!(
+            "[root_flood] held: {} connections held {:?} past the last wave; {} closed by \
+             the node before that, at {:?} after the flood started",
+            held.len(),
+            hold,
+            closed.len(),
+            closed
+        );
+        drop(held);
     }
     let after = height(&ctx.api).await;
     println!(
@@ -1560,22 +1775,13 @@ async fn main() {
             let d: u32 = rest.get(1).map_or(1_000, |s| s.parse().unwrap());
             input_block_flood(&ctx, a, d).await
         }
-        "input_block_root_flood" => {
-            let hosts: u8 = rest.first().map_or(10, |s| s.parse().unwrap());
-            let per_host: u32 = rest.get(1).map_or(40, |s| s.parse().unwrap());
-            let waves: u8 = rest.get(2).map_or(10, |s| s.parse().unwrap());
-            let interval_ms: u64 = rest.get(3).map_or(15_000, |s| s.parse().unwrap());
-            let first: u8 = rest.get(4).map_or(100, |s| s.parse().unwrap());
-            input_block_root_flood(
-                &ctx,
-                hosts,
-                per_host,
-                waves,
-                Duration::from_millis(interval_ms),
-                first,
-            )
-            .await
-        }
+        "input_block_root_flood" => match RootFloodArgs::parse(rest) {
+            Ok(args) => input_block_root_flood(&ctx, &args).await,
+            Err(e) => {
+                eprintln!("input_block_root_flood: {e}");
+                std::process::exit(2);
+            }
+        },
         other => {
             eprintln!("unknown scenario: {other}");
             std::process::exit(2);
@@ -1585,4 +1791,109 @@ async fn main() {
     let h_after = height(&ctx.api).await;
     println!("[node] fullHeight after: {h_after:?}");
     println!("[result] {scenario}: {}", if ok { "PASS" } else { "FAIL" });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- helpers -----
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn root_flood_args_positionals_only_keep_the_hit_and_run_defaults() {
+        let parsed = RootFloodArgs::parse(&args(&["10", "40", "12", "20000", "100"])).unwrap();
+        assert_eq!(
+            parsed,
+            RootFloodArgs {
+                hosts: 10,
+                per_host: 40,
+                waves: 12,
+                interval: Duration::from_millis(20_000),
+                first: 100,
+                hold: None,
+            }
+        );
+        assert_eq!(parsed.hosts_needed(), 120);
+        let defaults = RootFloodArgs::parse(&[]).unwrap();
+        assert_eq!(
+            (
+                defaults.hosts,
+                defaults.per_host,
+                defaults.waves,
+                defaults.first
+            ),
+            (10, 40, 10, 100)
+        );
+        assert_eq!(defaults.interval, Duration::from_millis(15_000));
+        assert_eq!(defaults.hold, None);
+    }
+
+    #[test]
+    fn root_flood_args_hold_ms_selects_held_mode_with_one_host_set() {
+        let parsed = RootFloodArgs::parse(&args(&[
+            "10",
+            "160",
+            "12",
+            "20000",
+            "100",
+            "--hold-ms",
+            "130000",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.hold, Some(Duration::from_millis(130_000)));
+        assert_eq!(parsed.per_host, 160);
+        // The same ten hosts carry every wave.
+        assert_eq!(parsed.hosts_needed(), 10);
+        // The flag may also precede the positionals.
+        let early = RootFloodArgs::parse(&args(&["--hold-ms", "5", "3"])).unwrap();
+        assert_eq!(early.hold, Some(Duration::from_millis(5)));
+        assert_eq!(early.hosts, 3);
+    }
+
+    #[test]
+    fn root_flood_announcement_index_held_host_never_repeats_across_waves() {
+        let held =
+            RootFloodArgs::parse(&args(&["2", "160", "12", "1", "100", "--hold-ms", "1"])).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for wave in 0..12 {
+            for i in 0..160 {
+                assert!(seen.insert(held.announcement_index(100, wave, i)));
+            }
+        }
+        // Another host's indices are disjoint from this one's.
+        assert!(!seen.contains(&held.announcement_index(101, 0, 0)));
+        // Hit-and-run keeps the index it always had: `(k << 16) | i`.
+        let fresh = RootFloodArgs::parse(&args(&["2", "40", "3"])).unwrap();
+        assert_eq!(fresh.announcement_index(105, 2, 7), (105 << 16) | 7);
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn root_flood_args_bad_hold_ms_errors() {
+        for bad in [
+            &["--hold-ms"][..],
+            &["--hold-ms", "soon"][..],
+            &["--hold-ms", "0"][..],
+        ] {
+            assert!(RootFloodArgs::parse(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn root_flood_args_extra_or_malformed_positionals_error() {
+        assert!(RootFloodArgs::parse(&args(&["1", "2", "3", "4", "5", "6"])).is_err());
+        assert!(RootFloodArgs::parse(&args(&["300"])).is_err());
+        // A held host's announcements must stay distinct across waves.
+        assert!(
+            RootFloodArgs::parse(&args(&["1", "10000", "7", "1", "100", "--hold-ms", "1"]))
+                .is_err()
+        );
+    }
 }
