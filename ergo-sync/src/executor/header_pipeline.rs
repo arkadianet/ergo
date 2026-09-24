@@ -151,6 +151,7 @@ impl SyncExecutor {
     pub(super) fn handle_validate_header(
         &mut self,
         peer: PeerId,
+        modifier_id: &[u8; 32],
         header_bytes: &[u8],
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
@@ -168,6 +169,7 @@ impl SyncExecutor {
                 self.header_perf.add_pow_cpu(pow_ns);
                 self.header_perf.add_headers(1);
                 report_header_failure(store, peer, "pre_validate_header", &e);
+                coordinator.forget_received_modifier(modifier_id);
                 return vec![Action::Penalize {
                     peer,
                     penalty: Penalty::Misbehavior,
@@ -269,6 +271,7 @@ impl SyncExecutor {
             }
             Err(e) => {
                 report_header_failure(store, peer, "finalize_header", &e);
+                coordinator.forget_received_modifier(modifier_id);
                 vec![Action::Penalize {
                     peer,
                     penalty: Penalty::Misbehavior,
@@ -283,15 +286,22 @@ impl SyncExecutor {
     /// Single orphan drain at the end covers all newly stored headers.
     pub(super) fn batch_validate_headers(
         &mut self,
-        headers: Vec<(PeerId, Vec<u8>)>,
+        headers: Vec<(PeerId, [u8; 32], Vec<u8>)>,
         store: &mut ergo_state::StateBackendKind,
         coordinator: &mut SyncCoordinator,
         now: Instant,
     ) -> Vec<Action> {
         // Single header: skip rayon overhead, use direct path
         if headers.len() == 1 {
-            let (peer, bytes) = headers.into_iter().next().unwrap();
-            return self.handle_validate_header(peer, &bytes, store, coordinator, now);
+            let (peer, modifier_id, bytes) = headers.into_iter().next().unwrap();
+            return self.handle_validate_header(
+                peer,
+                &modifier_id,
+                &bytes,
+                store,
+                coordinator,
+                now,
+            );
         }
 
         // Phase 1: parallel pre-validation (parse + PoW)
@@ -306,14 +316,14 @@ impl SyncExecutor {
         let t_pow_wall = Instant::now();
         let mut pre_validated: Vec<_> = headers
             .into_par_iter()
-            .map(|(peer, bytes)| {
+            .map(|(peer, modifier_id, bytes)| {
                 let t = Instant::now();
                 let result = header_proc::pre_validate_header(&bytes);
                 pow_cpu_acc.fetch_add(
                     t.elapsed().as_nanos() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
-                (peer, bytes, result)
+                (peer, modifier_id, bytes, result)
             })
             .collect();
         self.header_perf
@@ -330,7 +340,7 @@ impl SyncExecutor {
         // ends up in the orphan buffer whose own drain can't resolve
         // self-contained chains — progress stalls hard. Parse/PoW errors
         // bubble to the end (u32::MAX) so they don't contaminate ordering.
-        pre_validated.sort_by_key(|(_, _, result)| {
+        pre_validated.sort_by_key(|(_, _, _, result)| {
             result
                 .as_ref()
                 .map(|pre| pre.header().height)
@@ -343,7 +353,7 @@ impl SyncExecutor {
         store.begin_header_batch();
         let t_fin = Instant::now();
         let mut actions = Vec::new();
-        for (peer, bytes, result) in pre_validated {
+        for (peer, modifier_id, bytes, result) in pre_validated {
             match result {
                 Ok(pre) => {
                     let header_id = *pre.header_id();
@@ -400,6 +410,7 @@ impl SyncExecutor {
                         }
                         Err(e) => {
                             report_header_failure(store, peer, "finalize_header_batch", &e);
+                            coordinator.forget_received_modifier(&modifier_id);
                             actions.push(Action::Penalize {
                                 peer,
                                 penalty: Penalty::Misbehavior,
@@ -409,6 +420,7 @@ impl SyncExecutor {
                 }
                 Err(e) => {
                     report_header_failure(store, peer, "pre_validate_header_batch", &e);
+                    coordinator.forget_received_modifier(&modifier_id);
                     actions.push(Action::Penalize {
                         peer,
                         penalty: Penalty::Misbehavior,
@@ -594,13 +606,16 @@ impl SyncExecutor {
                     // penalty even though the identical header on the
                     // normal (non-orphan) path is penalized.
                     report_header_failure(store, peer, "finalize_header_orphan_drain", &e);
+                    coordinator.forget_received_modifier(&header_id);
                     all_actions.push(Action::Penalize {
                         peer,
                         penalty: Penalty::Misbehavior,
                     });
                 }
                 Err(HeaderProcessError::AlreadyKnown { .. }) => {}
-                Err(_) => {} // drop invalid
+                Err(_) => {
+                    coordinator.forget_received_modifier(&header_id);
+                }
             }
         }
         self.header_perf
