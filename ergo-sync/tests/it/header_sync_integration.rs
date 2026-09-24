@@ -235,6 +235,132 @@ fn process_header_with_real_mainnet_header() {
 }
 
 #[test]
+fn configured_mainnet_genesis_is_accepted_and_persisted() {
+    use ergo_sync::header_proc::process_header_cfg_with_genesis;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+
+    let processed = process_header_cfg_with_genesis(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+        Some(genesis_id),
+    )
+    .expect("the configured mainnet genesis must be accepted");
+
+    assert_eq!(processed.header_id, genesis_id);
+    assert!(store.get_header(&genesis_id).unwrap().is_some());
+    assert_eq!(store.chain_state_meta().best_header_height, 1);
+}
+
+#[test]
+fn wrong_configured_mainnet_genesis_is_rejected_before_persistence() {
+    use ergo_sync::header_proc::process_header_cfg_with_genesis;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+    let expected = [0x7f; 32];
+
+    let err = process_header_cfg_with_genesis(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+        Some(expected),
+    )
+    .expect_err("a header different from the configured genesis must be rejected");
+
+    assert!(matches!(
+        err,
+        HeaderProcessError::GenesisIdMismatch {
+            expected: actual_expected,
+            got,
+        } if actual_expected == expected && got == genesis_id
+    ));
+    assert!(store.get_header(&genesis_id).unwrap().is_none());
+    assert_eq!(store.chain_state_meta().best_header_height, 0);
+}
+
+#[test]
+fn disabled_genesis_check_preserves_header_processing() {
+    use ergo_sync::header_proc::process_header_cfg;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+
+    let processed = process_header_cfg(
+        &mut store,
+        &genesis_bytes,
+        &ergo_crypto::difficulty::DifficultyParams::mainnet(),
+        None,
+    )
+    .expect("None must preserve development genesis behavior");
+
+    assert_eq!(processed.header_id, genesis_id);
+    assert!(store.get_header(&genesis_id).unwrap().is_some());
+}
+
+#[test]
+fn configured_genesis_mismatch_penalizes_header_sender() {
+    use ergo_p2p::peer::Penalty;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut store);
+    let headers = load_headers();
+    let genesis_bytes = get_header_bytes(&headers, 1);
+    let genesis_id = get_header_id(&headers, 1);
+    let mut store = ergo_state::StateBackendKind::Utxo(store);
+    let mut coordinator = SyncCoordinator::new(0);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    executor.set_genesis_id(Some([0x7f; 32]));
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9030);
+
+    let actions = executor.execute(
+        Action::ValidateHeader {
+            peer,
+            modifier_id: genesis_id,
+            header_bytes: genesis_bytes,
+        },
+        &mut store,
+        &mut coordinator,
+        Instant::now(),
+        None,
+    );
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert!(store.get_header(&genesis_id).unwrap().is_none());
+}
+
+#[test]
 fn process_header_refuses_child_of_invalidated_parent() {
     // Regression for the branch-invalidation liveness fix: once a header is
     // durably invalidated (full-block validation reject), NO descendant may
@@ -323,6 +449,7 @@ fn finalize_header_at_checkpoint_height_with_matching_id_accepted() {
         &h2_bytes,
         &ergo_crypto::difficulty::DifficultyParams::mainnet(),
         Some(ckpt),
+        None,
     )
     .expect("header matching the checkpoint must be accepted");
     assert_eq!(processed.header_id, h2_id);
@@ -359,6 +486,7 @@ fn finalize_header_at_checkpoint_height_with_wrong_id_rejected() {
         &h2_bytes,
         &ergo_crypto::difficulty::DifficultyParams::mainnet(),
         Some(ckpt),
+        None,
     )
     .expect_err("header at the checkpoint height with a different id must be rejected");
     match err {
@@ -404,6 +532,7 @@ fn finalize_header_below_checkpoint_height_unaffected() {
             &h_bytes,
             &ergo_crypto::difficulty::DifficultyParams::mainnet(),
             Some(ckpt),
+            None,
         )
         .unwrap_or_else(|e| panic!("height {height} must be unaffected by the checkpoint: {e}"));
         assert_eq!(processed.height, height);

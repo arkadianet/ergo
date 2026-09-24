@@ -138,6 +138,7 @@ impl SyncExecutor {
             header_bytes,
             &self.chain_config,
             self.header_checkpoint,
+            self.genesis_id,
         );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
@@ -196,6 +197,7 @@ impl SyncExecutor {
             header_bytes,
             &self.chain_config,
             self.header_checkpoint,
+            self.genesis_id,
         );
         self.header_perf
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
@@ -307,6 +309,7 @@ impl SyncExecutor {
         // Phase 1: parallel pre-validation (parse + PoW)
         let config = self.chain_config.clone();
         let checkpoint = self.header_checkpoint;
+        let genesis_id = self.genesis_id;
         let batch_len = headers.len() as u64;
         // Per-header CPU time accumulator. Captured by reference inside the
         // rayon closure so each worker thread can fetch_add its own work
@@ -359,7 +362,9 @@ impl SyncExecutor {
                     let header_id = *pre.header_id();
                     let header_height = pre.height;
                     let pre_for_buffer = pre.clone();
-                    match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint) {
+                    match header_proc::finalize_header(
+                        store, pre, &bytes, &config, checkpoint, genesis_id,
+                    ) {
                         Ok(processed) => {
                             let expected = ExpectedSections::from_header(
                                 &processed.header_id,
@@ -524,12 +529,14 @@ impl SyncExecutor {
         let mut newly_installed_local = newly_installed;
         let config = self.chain_config.clone();
         let checkpoint = self.header_checkpoint;
+        let genesis_id = self.genesis_id;
         let t_fin = Instant::now();
         while let Some((peer, pre, bytes)) = work_queue.pop() {
             let header_id = *pre.header_id();
             let header_height = pre.height;
             let pre_for_buffer = pre.clone();
-            match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint) {
+            match header_proc::finalize_header(store, pre, &bytes, &config, checkpoint, genesis_id)
+            {
                 Ok(processed) => {
                     // Children waiting on THIS header are now eligible
                     // — pull them out of the buffer and onto the queue.
@@ -594,7 +601,10 @@ impl SyncExecutor {
                         coordinator,
                     );
                 }
-                Err(e @ HeaderProcessError::CheckpointMismatch { .. }) => {
+                Err(
+                    e @ (HeaderProcessError::CheckpointMismatch { .. }
+                    | HeaderProcessError::GenesisIdMismatch { .. }),
+                ) => {
                     // A checkpoint mismatch is peer misbehavior, not a
                     // transient gap — same as the single-header and
                     // batch paths' generic error arm (both fall through
