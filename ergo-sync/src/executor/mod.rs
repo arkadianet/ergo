@@ -421,9 +421,18 @@ impl SyncExecutor {
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
         match action {
-            Action::ValidateHeader { peer, header_bytes } => {
-                self.handle_validate_header(peer, &header_bytes, store, coordinator, now)
-            }
+            Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } => self.handle_validate_header(
+                peer,
+                &modifier_id,
+                &header_bytes,
+                store,
+                coordinator,
+                now,
+            ),
             Action::AssembleBlock { header_id } => {
                 self.handle_assemble_block(&header_id, store, coordinator, wallet_wiring)
             }
@@ -468,8 +477,13 @@ impl SyncExecutor {
         let mut headers_to_validate = Vec::new();
         let mut remaining = VecDeque::new();
         for action in actions {
-            if let Action::ValidateHeader { peer, header_bytes } = action {
-                headers_to_validate.push((peer, header_bytes));
+            if let Action::ValidateHeader {
+                peer,
+                modifier_id,
+                header_bytes,
+            } = action
+            {
+                headers_to_validate.push((peer, modifier_id, header_bytes));
             } else {
                 remaining.push_back(action);
             }

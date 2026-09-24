@@ -545,7 +545,9 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     // is InvalidModifier and the sender is penalised. Drive the real
     // executor path (`Action::ValidateHeader`) so the penalty, not just the
     // error, is pinned.
+    use ergo_p2p::delivery::ModifierStatus;
     use ergo_p2p::peer::Penalty;
+    use ergo_p2p::types::InvData;
     use ergo_sync::coordinator::{Action, SyncCoordinator};
     use ergo_sync::executor::SyncExecutor;
     use ergo_sync::header_proc::HeaderCheckpoint;
@@ -572,18 +574,24 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     }));
 
     let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9030);
+    let now = Instant::now();
     let h2_bytes = get_header_bytes(&headers, 2);
     let h2_id = get_header_id(&headers, 2);
-    let actions = executor.execute_all(
-        vec![Action::ValidateHeader {
-            peer,
-            header_bytes: h2_bytes,
-        }],
-        &mut store,
-        &mut coordinator,
-        Instant::now(),
-        None,
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![h2_id],
+        },
+        &store,
+        now,
     );
+    let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes.clone(), now);
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Received
+    );
+    let actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
 
     assert!(
         actions.iter().any(|a| matches!(
@@ -598,6 +606,121 @@ fn header_checkpoint_mismatch_penalizes_sending_peer() {
     assert!(
         store.get_header(&h2_id).unwrap().is_none(),
         "a header rejected by the checkpoint must not be persisted"
+    );
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Unknown
+    );
+
+    executor.set_header_checkpoint(None);
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![h2_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, h2_id, h2_bytes, now);
+    let retry_actions = executor.execute_all(received, &mut store, &mut coordinator, now, None);
+    assert!(!retry_actions
+        .iter()
+        .any(|action| matches!(action, Action::Penalize { .. })));
+    assert!(store.get_header(&h2_id).unwrap().is_some());
+    assert_eq!(
+        coordinator.delivery().status(&h2_id),
+        ModifierStatus::Received
+    );
+}
+
+#[test]
+fn hash_matching_malformed_header_rolls_back_and_allows_valid_delivery() {
+    use ergo_p2p::delivery::ModifierStatus;
+    use ergo_p2p::peer::Penalty;
+    use ergo_p2p::types::InvData;
+    use ergo_primitives::digest::blake2b256;
+    use ergo_sync::coordinator::{Action, SyncCoordinator};
+    use ergo_sync::executor::SyncExecutor;
+    use ergo_validation::context::ProtocolParams;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut raw_store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    init_genesis(&mut raw_store);
+    let headers = load_headers();
+    seed_header_1(&mut raw_store, &headers);
+    let mut store = ergo_state::StateBackendKind::Utxo(raw_store);
+    let mut coordinator = SyncCoordinator::new(1);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        ergo_crypto::difficulty::DifficultyParams::mainnet(),
+    );
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 9030);
+    let now = Instant::now();
+
+    let malformed = vec![0x7f, 0x00];
+    let malformed_id = *blake2b256(&malformed).as_bytes();
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![malformed_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, malformed_id, malformed, now);
+    assert_eq!(
+        coordinator.delivery().status(&malformed_id),
+        ModifierStatus::Received
+    );
+    let validate = received
+        .into_iter()
+        .find(|action| matches!(action, Action::ValidateHeader { .. }))
+        .expect("malformed header must be routed for validation");
+    let rejected = executor.execute(validate, &mut store, &mut coordinator, now, None);
+    assert!(rejected.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            penalty: Penalty::Misbehavior,
+            ..
+        }
+    )));
+    assert_eq!(
+        coordinator.delivery().status(&malformed_id),
+        ModifierStatus::Unknown
+    );
+
+    let valid_bytes = get_header_bytes(&headers, 2);
+    let valid_id = get_header_id(&headers, 2);
+    coordinator.on_inv(
+        peer,
+        &InvData {
+            type_id: 101,
+            ids: vec![valid_id],
+        },
+        &store,
+        now,
+    );
+    let received = coordinator.on_modifier_received(peer, 101, valid_id, valid_bytes, now);
+    assert_eq!(
+        coordinator.delivery().status(&valid_id),
+        ModifierStatus::Received
+    );
+    let validate = received
+        .into_iter()
+        .find(|action| matches!(action, Action::ValidateHeader { .. }))
+        .expect("valid header must be routed for validation");
+    let accepted = executor.execute(validate, &mut store, &mut coordinator, now, None);
+    assert!(!accepted
+        .iter()
+        .any(|action| matches!(action, Action::Penalize { .. })));
+    assert!(store.get_header(&valid_id).unwrap().is_some());
+    assert_eq!(
+        coordinator.delivery().status(&valid_id),
+        ModifierStatus::Received
     );
 }
 
@@ -637,6 +760,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let orphan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 9030);
     let installer_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 9030);
     let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
     let h3_bytes = get_header_bytes(&headers, 3);
     let h3_id = get_header_id(&headers, 3);
 
@@ -650,6 +774,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let orphan_actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer: orphan_peer,
+            modifier_id: h3_id,
             header_bytes: h3_bytes,
         }],
         &mut store,
@@ -680,6 +805,7 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
     let drain_actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer: installer_peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes,
         }],
         &mut store,
@@ -1051,6 +1177,7 @@ fn block_2_without_downloaded_proofs(best_header_height: u32, retain_proofs: boo
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes.clone(),
         }],
         &mut store,
@@ -1579,6 +1706,7 @@ fn executor_parent_walk_requests_missing_parent() {
 
     let h1_id = get_header_id(&headers, 1);
     let h2_bytes = get_header_bytes(&headers, 2);
+    let h2_id = get_header_id(&headers, 2);
 
     let mut coordinator = SyncCoordinator::new(0);
     let mut executor = SyncExecutor::new(
@@ -1590,6 +1718,7 @@ fn executor_parent_walk_requests_missing_parent() {
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: h2_id,
             header_bytes: h2_bytes.clone(),
         }],
         &mut store,
@@ -1725,6 +1854,7 @@ fn process_header_at_eip37_boundary_with_truncated_lookback_buffers_not_penalize
     let actions = executor.execute_all(
         vec![Action::ValidateHeader {
             peer,
+            modifier_id: child_id,
             header_bytes: child_bytes.clone(),
         }],
         &mut store,
