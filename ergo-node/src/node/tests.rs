@@ -3589,8 +3589,8 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
 
 // ----- NiPoPoW proof vs the header checkpoint (ingress) -----
 
-/// Mainnet genesis and height-2 headers, hex, as served on the wire. Same
-/// vectors the `ergo-sync` popow reducer tests use; duplicated here because
+/// Mainnet height-2 header, hex, as served on the wire. Same
+/// vector the `ergo-sync` popow reducer tests use; duplicated here because
 /// this test drives the node's real message dispatch rather than the reducer.
 const POPOW_HEIGHT_2_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
 
@@ -3648,6 +3648,56 @@ fn state_with_popow_bootstrap(state: &mut NodeState) {
         None,
         DifficultyParams::mainnet(),
     ));
+}
+
+#[test]
+fn popow_proof_wrong_profile_penalizes_peer_and_records_response() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+
+    let valid_frame = popow_proof_frame();
+    let body = message::deserialize_nipopow_proof(&valid_frame).unwrap();
+    let mut proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&body).unwrap();
+    proof.m = 5;
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    let wrong_frame = message::serialize_nipopow_proof(&body).unwrap();
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &wrong_frame,
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [Action::Penalize { peer: p, penalty: Penalty::Misbehavior }] if *p == peer
+        ),
+        "a first wrong-profile response must be rejected, not treated as a duplicate: {actions:?}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(popow.provider_count(), 1);
+    assert_eq!(popow.proofs_processed(), 0);
+    assert!(popow.best_proof().is_none());
+    assert!(!popow.quorum_reached());
+
+    // Both invalid and corrected retries from this provider are duplicates.
+    for frame in [wrong_frame, valid_frame] {
+        let actions = handle_message(
+            &mut state,
+            peer,
+            message::CODE_NIPOPOW_PROOF,
+            &frame,
+            Instant::now(),
+        );
+        assert!(actions.is_empty(), "duplicate response: {actions:?}");
+        let popow = state.popow_bootstrap.as_ref().unwrap();
+        assert_eq!(popow.provider_count(), 1);
+        assert_eq!(popow.proofs_processed(), 0);
+    }
 }
 
 #[test]
