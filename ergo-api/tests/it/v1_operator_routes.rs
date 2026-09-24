@@ -7,7 +7,10 @@
 //! * the T2 `node/shutdown` loopback-preference (hard-deny remote vs loopback);
 //! * honest `*_unavailable` / `mining_disabled` where a capability isn't wired.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
@@ -244,6 +247,160 @@ impl NodeChainQuery for StubChain {
             num_failed: 1,
         }
     }
+}
+
+/// Each read models a fresh snapshot; joining mode inserts before the page boundary.
+#[derive(Default)]
+struct ChangingNetwork {
+    calls: AtomicUsize,
+    joins: bool,
+}
+
+impl ChangingNetwork {
+    fn addresses(&self) -> Vec<String> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        let mut addresses: Vec<_> = (2..=6).map(|i| format!("10.0.0.{i}")).collect();
+        if self.joins {
+            if call > 0 {
+                addresses.insert(0, "10.0.0.1".into());
+            }
+        } else {
+            let len = addresses.len();
+            addresses.rotate_left(call % len);
+        }
+        addresses
+    }
+}
+
+impl NodeReadState for ChangingNetwork {
+    fn info(&self) -> ApiInfo {
+        StubRead.info()
+    }
+    fn status(&self) -> ApiStatus {
+        StubRead.status()
+    }
+    fn tip(&self) -> ApiTip {
+        StubRead.tip()
+    }
+    fn sync(&self) -> ApiSyncStatus {
+        StubRead.sync()
+    }
+    fn peers(&self) -> Vec<ApiPeer> {
+        self.addresses()
+            .into_iter()
+            .map(|addr| peer(&format!("{addr}:9030"), ApiPeerState::Active))
+            .collect()
+    }
+    fn mempool_summary(&self) -> ApiMempoolSummary {
+        StubRead.mempool_summary()
+    }
+    fn mempool_transactions(&self) -> ApiMempoolTransactions {
+        StubRead.mempool_transactions()
+    }
+    fn mempool_transaction(&self, id: &str) -> Option<ApiMempoolTransaction> {
+        StubRead.mempool_transaction(id)
+    }
+    fn health(&self) -> ApiHealth {
+        StubRead.health()
+    }
+    fn identity(&self) -> ApiIdentity {
+        StubRead.identity()
+    }
+    fn votes(&self) -> ApiVotes {
+        StubRead.votes()
+    }
+}
+
+impl NodeChainQuery for ChangingNetwork {
+    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
+        StubChain.header_ids_at_height(height)
+    }
+    fn full_block_by_id(&self, id: &str) -> Option<ergo_rest_json::types::ScalaFullBlock> {
+        StubChain.full_block_by_id(id)
+    }
+    fn info(&self) -> ScalaInfo {
+        StubChain.info()
+    }
+    fn peers_blacklisted(&self) -> ScalaBlacklistedPeers {
+        ScalaBlacklistedPeers {
+            addresses: self
+                .addresses()
+                .into_iter()
+                .map(|addr| format!("/{addr}"))
+                .collect(),
+        }
+    }
+    fn peers_sync_info(&self) -> Vec<ScalaSyncInfoEntry> {
+        self.addresses()
+            .into_iter()
+            .map(|addr| ScalaSyncInfoEntry {
+                address: format!("{addr}:9030"),
+                height: 100,
+                status: "Younger".into(),
+            })
+            .collect()
+    }
+}
+
+fn app_changing_network(joins: bool) -> Router {
+    let network = Arc::new(ChangingNetwork {
+        joins,
+        ..Default::default()
+    });
+    operator_router(
+        OperatorState {
+            read: network.clone(),
+            chain: Some(network),
+            admin: None,
+            mining: None,
+            network: NetworkPrefix::Mainnet,
+        },
+        Governor::new(Default::default()).unwrap(),
+        default_auth(),
+    )
+}
+
+async fn network_page(app: &Router, route: &str, cursor: Option<&str>) -> serde_json::Value {
+    let mut uri = format!("/api/v1/network/{route}?limit=2");
+    if let Some(cursor) = cursor {
+        uri.push_str(&format!("&cursor={cursor}"));
+    }
+    let (status, page) = send(app.clone(), req(Method::GET, &uri, None, None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["page"]["limit"], 2);
+    page
+}
+
+async fn assert_network_pages(route: &str, joins: bool) {
+    let app = app_changing_network(joins);
+    let mut cursor = None;
+    let mut addresses = Vec::new();
+    for page_index in 0..3 {
+        let page = network_page(&app, route, cursor.as_deref()).await;
+        addresses.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["addr"].as_str().unwrap().to_owned()),
+        );
+        assert_eq!(page["page"]["has_more"], page_index < 2);
+        cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        assert_eq!(cursor.is_some(), page_index < 2);
+    }
+    let expected: Vec<_> = (2..=6)
+        .map(|i| {
+            if route == "blacklisted" {
+                format!("10.0.0.{i}")
+            } else {
+                format!("10.0.0.{i}:9030")
+            }
+        })
+        .collect();
+    assert_eq!(
+        addresses, expected,
+        "each original address must appear exactly once, in order"
+    );
 }
 
 #[derive(Default)]
@@ -529,6 +686,55 @@ async fn voting_history_t0_snake_case() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(v["changes"].is_array());
+}
+
+#[tokio::test]
+async fn network_sync_info_reordered_snapshot_pages_without_duplicates() {
+    assert_network_pages("sync-info", false).await;
+}
+
+#[tokio::test]
+async fn network_peers_reordered_snapshot_pages_without_duplicates() {
+    assert_network_pages("peers", false).await;
+}
+
+#[tokio::test]
+async fn network_connected_reordered_snapshot_pages_without_duplicates() {
+    assert_network_pages("connected", false).await;
+}
+
+#[tokio::test]
+async fn network_blacklisted_reordered_snapshot_pages_without_duplicates() {
+    assert_network_pages("blacklisted", false).await;
+}
+
+#[tokio::test]
+async fn network_peers_peer_joins_before_cursor_does_not_duplicate() {
+    assert_network_pages("peers", true).await;
+}
+
+#[tokio::test]
+async fn network_peers_cursor_replayed_on_sync_info_is_invalid_cursor() {
+    let app = app_changing_network(false);
+    let page = network_page(&app, "peers", None).await;
+    let cursor = page["page"]["next_cursor"].as_str().unwrap();
+    let uri = format!("/api/v1/network/sync-info?limit=2&cursor={cursor}");
+    let (status, body) = send(app, req(Method::GET, &uri, None, None, None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["reason"], "invalid_cursor");
+}
+
+#[tokio::test]
+async fn network_peers_offset_cursor_is_invalid_cursor() {
+    let cursor = ergo_api::v1::cursor::encode_cursor(&serde_json::json!({"off": 2}));
+    let uri = format!("/api/v1/network/peers?cursor={cursor}");
+    let (status, body) = send(
+        app_changing_network(false),
+        req(Method::GET, &uri, None, None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["reason"], "invalid_cursor");
 }
 
 // ----- T1 gate: reject no/invalid key, accept valid key -----
