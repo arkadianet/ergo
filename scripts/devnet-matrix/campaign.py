@@ -489,6 +489,12 @@ def scala_override(scenario, node, nodes, data_dir, extra=''):
     known = [f'"{CAMPAIGN_P2P_HOST[n]}:{CAMPAIGN_P2P[n]}"'
              for n in nodes if n != node]
     listen = f'{CAMPAIGN_P2P_HOST[node]}:{CAMPAIGN_P2P[node]}'
+    pending = ''
+    if scenario == 'flood':
+        from scenarios.flood import ROOT_FLOOD_CAPS
+        # The fixed store reads this under ergo.node; stock builds ignore it.
+        pending = ''.join(f'ergo.node.matrix.pendingAnnouncements.{key} = {value}\n'
+                          for key, value in ROOT_FLOOD_CAPS.items())
     return (
         f'include file("{base}")\n'
         f'ergo.directory = "{data_dir}"\n'
@@ -497,7 +503,7 @@ def scala_override(scenario, node, nodes, data_dir, extra=''):
         f'scorex.network.declaredAddress = "{listen}"\n'
         f'scorex.network.knownPeers = [{", ".join(known)}]\n'
         f'scorex.restApi.bindAddress = "127.0.0.1:{CAMPAIGN_REST[node]}"\n'
-        f'{extra}'
+        f'{pending}{extra}'
     )
 
 
@@ -3855,7 +3861,7 @@ def _self_test_remeasure():
 
     # ----- flood: the shipped caps and the two adversary shapes -----
     assert flood.ROOT_FLOOD_CAPS == {'maxEntries': 256, 'maxBytes': 4194304,
-                                     'perPeer': 128, 'ttlMs': 120000}, \
+                                     'perPeer': 128, 'ttlMs': 120000, 'replayPerParent': 64}, \
         flood.ROOT_FLOOD_CAPS
     _hit = flood.root_flood_plan('hit-and-run')
     _held = flood.root_flood_plan('held')
@@ -3893,6 +3899,12 @@ def _self_test_remeasure():
          'replayed': 3}) == {'drops.duplicate': 3, 'drops.hostLimit': 7,
                              'replayed': 0}
     assert flood.counters_between(None, {'drops': 1}) == {}
+    flood.self_test_held_evaluation()
+    flood_conf = scala_override('flood', 'scala3', ('scala', 'scala3'), '/tmp/test')
+    for key, value in flood.ROOT_FLOOD_CAPS.items():
+        assert f'ergo.node.matrix.pendingAnnouncements.{key} = {value}' in flood_conf
+    assert 'pendingAnnouncements' not in scala_override(
+        'steady', 'scala3', ('scala', 'scala3'), '/tmp/test')
     _flood_src = inspect.getsource(flood._run_against_scala_follower)
     assert 'root_flood_command(' in _flood_src and \
         'adversary_octets(plan)' in _flood_src, 'the scenario uses the plan'

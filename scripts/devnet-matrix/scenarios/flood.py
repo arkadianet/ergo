@@ -20,6 +20,7 @@ slot to its own `127.<k>.0.1` and those addresses poison the address
 book, starving the next run's dialer.
 """
 from pathlib import Path
+import json
 import re
 import subprocess
 import threading
@@ -120,12 +121,12 @@ def _binary_provenance(path):
 # (d) the follower keeps applying blocks on time.
 #
 # The store's caps as #2563 ships them (`upstream/pending-root-announcement-
-# store` @ 3e20c270b, `matrix.pendingAnnouncements`); the harness does not
-# override them, so the numbers here are the ones a node ships with. The
+# store` @ 3e20c270b, `ergo.node.matrix.pendingAnnouncements`); the flood overlay pins
+# these defaults explicitly. Builds without the store ignore those keys. The
 # early F13 build ran `perPeer = 32`; its flood runs are not evidence for
 # the shipped cap (REVIEW-2563 §3.1).
 ROOT_FLOOD_CAPS = {'maxEntries': 256, 'maxBytes': 4 * 1024 * 1024,
-                   'perPeer': 128, 'ttlMs': 120_000}
+                   'perPeer': 128, 'ttlMs': 120_000, 'replayPerParent': 64}
 # The two adversary shapes `--flood-mode` selects (REVIEW-2563 §3.3
 # items 4-5). They differ once the store drops a host's entries when its
 # connection closes and keeps an unknown-parent entry until the TTL: a
@@ -246,7 +247,7 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
         size = None
         for sample in samples:
             if sample['lines'] <= index:
-                size = sample.get('size')
+                size = sample.get('size') if _number(sample.get('size')) else None
         return size
 
     saturated_at = caps['maxEntries'] * SATURATED_SHARE
@@ -289,8 +290,8 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
             blacklisted_honest.append(line)
     while_saturated = {block for block, index in honest.items()
                        if (size_at(index) or 0) >= saturated_at}
-    sizes = [s['size'] for s in samples if s.get('size') is not None]
-    byte_counts = [s['bytes'] for s in samples if s.get('bytes') is not None]
+    sizes = [s['size'] for s in samples if _number(s.get('size'))]
+    byte_counts = [s['bytes'] for s in samples if _number(s.get('bytes'))]
     peak_size = max(sizes) if sizes else None
     peak_bytes = max(byte_counts) if byte_counts else None
     return {
@@ -305,8 +306,11 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
         'peak_size': peak_size,
         'peak_bytes': peak_bytes,
         'caps': caps,
-        'caps_held': (peak_size is not None and peak_size <= caps['maxEntries']
-                      and (peak_bytes or 0) <= caps['maxBytes']),
+        'caps_held': (bool(samples) and len(sizes) == len(samples)
+                      and len(byte_counts) == len(samples)
+                      and min(sizes) >= 0 and min(byte_counts) >= 0
+                      and peak_size <= caps['maxEntries']
+                      and peak_bytes <= caps['maxBytes']),
         'honest_penalties': penalties_honest,
         # A NonDeliveryPenalty against the honest miner is STOCK behaviour
         # (the peered stock follower logs it without any flood), and so is
@@ -319,6 +323,181 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
         'honest_blacklisted': blacklisted_honest[:10],
         'adversary_penalties': penalties_adversary,
     }
+
+
+STORE_COUNTERS = ('admitted', 'replayed', 'replayInvalid', 'evictions') + tuple(
+    'drops.' + reason for reason in ('duplicate', 'hostLimit', 'variantLimit',
+    'oversize', 'fairness', 'expired', 'staleParent', 'disconnected'))
+
+
+def _number(value):
+    return type(value) in (int, float) and 0 <= value < float('inf')
+
+
+def parse_root_result(stdout):
+    records = [line.removeprefix('ROOT_FLOOD_RESULT ') for line in stdout.splitlines()
+               if line.startswith('ROOT_FLOOD_RESULT ')]
+    try:
+        result = json.loads(records[0]) if len(records) == 1 else None
+        return result if isinstance(result, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def held_coverage(result, plan):
+    """Zero early closures allowed: a rejected peer cannot prove held coverage.
+
+    EOF and I/O errors remain separate evidence, but neither excuses missing
+    traffic. All configured hosts must survive every wave and the whole hold.
+    """
+    if not isinstance(result, dict) or result.get('ok') is not True:
+        return False
+    waves, conns = result.get('waves'), result.get('connections')
+    if not isinstance(waves, list) or not isinstance(conns, list):
+        return False
+    expected_sources = {f'127.{k}.0.1' for k in adversary_octets(plan)}
+    if len(waves) != plan['waves'] or len(conns) != plan['hosts']:
+        return False
+    if any(not isinstance(w, dict) or w.get('wave') != i
+           or w.get('sent') != plan['hosts'] * plan['per_host']
+           or w.get('write_errors') != 0 or w.get('height_observed') is not True
+           for i, w in enumerate(waves)):
+        return False
+    if any(not isinstance(c, dict) or c.get('opened') is not True
+           or c.get('survived') is not True or c.get('closure') is not None
+           for c in conns):
+        return False
+    if {c.get('source') for c in conns} != expected_sources:
+        return False
+    for key in ('started_unix_ms', 'sockets_open_ms', 'last_send_ms',
+                'hold_end_ms', 'finished_ms'):
+        if not _number(result.get(key)):
+            return False
+    return (result['sockets_open_ms'] <= result['last_send_ms']
+            and result['hold_end_ms'] - result['last_send_ms'] == plan['hold_ms']
+            and result['finished_ms'] >= result['hold_end_ms'])
+
+
+def evaluate_store_window(samples, baseline, patched, plan, result):
+    """Pure verdict; an unavailable measurement is incomplete, never zero."""
+    errors = []
+    present = any(isinstance(s.get('pending'), dict) for s in samples)
+    old = any(isinstance(p, dict) and _number(p.get('drops')) for p in
+              [baseline or {}] + [s.get('pending') or {} for s in samples])
+    report = {'store_present': present, 'telemetry': 'old telemetry' if old else
+              ('fixed telemetry' if present else 'missing'), 'errors': errors}
+    held = plan.get('hold_ms') is not None
+    coverage = held_coverage(result, plan) if held else None
+    report['held_coverage'] = coverage
+    if held and not coverage:
+        errors.append('incomplete held experiment: all waves and surviving hosts required')
+    if not patched and not present:
+        report['exemption'] = 'stock target: store telemetry is not applicable'
+        return report
+    if not present:
+        errors.append('incomplete: patched target has no store telemetry in window')
+    readings = [baseline] + [s.get('pending') for s in samples]
+    flat = [smoke.flatten_counters(p or {}) for p in readings]
+    if (not samples or any(not isinstance(p, dict) for p in readings)
+            or any(not _number(p.get(k)) for p in flat
+                   for k in ('size', 'bytes') + STORE_COUNTERS)):
+        errors.append('incomplete: required fixed-store gauges or counters missing'
+                      + (' (old telemetry)' if old else ''))
+    if any(not _number(p.get(k)) or p[k] > ROOT_FLOOD_CAPS[cap]
+           for p in flat for k, cap in (('size', 'maxEntries'), ('bytes', 'maxBytes'))):
+        errors.append('store bounds exceeded or unobserved')
+    if any(b.get(k, -1) < a.get(k, -1)
+           for a, b in zip(flat, flat[1:]) for k in STORE_COUNTERS
+           if _number(a.get(k)) and _number(b.get(k))):
+        errors.append('store counter reset during experiment')
+    report['store_counters_in_window'] = counters_between(baseline, readings[-1])
+    report['evictions_in_window'] = report['store_counters_in_window'].get('evictions')
+    if held and patched:
+        # Both ends of the REST request must lie inside the all-sockets-open
+        # window. A sample completed during disconnect/drain cannot prove TTL.
+        opened = (result['started_unix_ms'] + result['sockets_open_ms']) if coverage else 0
+        ended = (result['started_unix_ms'] + result['hold_end_ms']) if coverage else 0
+        live = [s for s in samples if coverage
+                and opened <= s.get('request_started_ms', -1)
+                and s.get('request_finished_ms', float('inf')) < ended]
+        deltas = [counters_between(baseline, s.get('pending')) for s in live]
+        report['live_samples'] = len(live)
+        report['live_counter_deltas'] = deltas[-1] if deltas else {}
+        for key, exercised in (
+                ('drops.hostLimit', plan['per_host'] > ROOT_FLOOD_CAPS['perPeer']),
+                ('drops.expired', plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs'])):
+            if not exercised or not any(d.get(key, 0) > 0 for d in deltas):
+                errors.append(f'{key} growth not observed while sockets were open')
+    return report
+
+
+def self_test_held_evaluation():
+    from copy import deepcopy
+    plan = root_flood_plan('held')
+    baseline = dict(size=0, bytes=0, admitted=100, replayed=10,
+                    replayInvalid=0, evictions=20,
+                    drops={k.removeprefix('drops.'): 30 for k in STORE_COUNTERS
+                           if k.startswith('drops.')})
+    pending = deepcopy(baseline)
+    pending.update(size=256, bytes=40000)
+    pending['drops'].update(hostLimit=31, expired=31)
+    result = dict(ok=True, started_unix_ms=1000, sockets_open_ms=10,
+                  last_send_ms=220000, hold_end_ms=350000, finished_ms=350010,
+                  waves=[dict(wave=i, sent=1600, write_errors=0, height_observed=True)
+                         for i in range(12)],
+                  connections=[dict(source=f'127.{k}.0.1', opened=True,
+                                    survived=True, closure=None)
+                               for k in adversary_octets(plan)])
+    sample = dict(pending=pending, request_started_ms=340000,
+                  request_finished_ms=340100)
+
+    def verdict(samples=None, base=None, outcome=None, patched=True):
+        return evaluate_store_window([sample] if samples is None else samples,
+                                     baseline if base is None else base,
+                                     patched, plan, result if outcome is None else outcome)
+
+    assert not verdict()['errors'], verdict()
+    assert parse_root_result('log\nROOT_FLOOD_RESULT ' + json.dumps(result)) == result
+    assert parse_root_result('ROOT_FLOOD_RESULT bad') is None
+    assert parse_root_result('no result') is None
+    assert verdict(samples=[{}])['errors']  # patched missing store
+    stock = verdict(samples=[{}], patched=False)
+    assert not stock['errors'] and 'stock' in stock['exemption']
+    missing = deepcopy(sample)
+    del missing['pending']['bytes']
+    assert verdict(samples=[sample, missing])['errors']
+    assert not evaluate_root_flood([], [{'lines': 0, 'size': 1}],
+                                   ROOT_FLOOD_CAPS, ())['caps_held']
+    for key in ('hostLimit', 'expired'):
+        unchanged = deepcopy(sample)
+        unchanged['pending']['drops'][key] = baseline['drops'][key]
+        assert any(f'drops.{key}' in e for e in verdict(samples=[unchanged])['errors'])
+    # Large baseline counts do not count as growth, even if a sampler started
+    # before those counts were accumulated during the honest baseline blocks.
+    assert verdict(base=deepcopy(pending))['errors']
+    assert verdict(base=deepcopy(pending))['store_counters_in_window']['drops.expired'] == 0
+    late = dict(sample, request_finished_ms=351001)
+    assert verdict(samples=[late])['errors']
+    for mutate in ('wave', 'close', 'short_hold', 'write_error'):
+        truncated = deepcopy(result)
+        if mutate == 'wave':
+            truncated['waves'].pop()
+        elif mutate == 'close':
+            truncated['connections'][0].update(survived=False,
+                closure={'kind': 'eof', 'observed_ms': 2, 'error': None})
+        elif mutate == 'short_hold':
+            truncated['hold_end_ms'] -= 1000
+        else:
+            truncated['waves'][0]['write_errors'] = 1
+        assert not held_coverage(truncated, plan), mutate
+        assert verdict(outcome=truncated)['errors'], mutate
+    old = deepcopy(sample)
+    old['pending']['drops'] = 999
+    assert verdict(samples=[old])['telemetry'] == 'old telemetry'
+    assert verdict(samples=[old])['errors']
+    over = deepcopy(sample)
+    over['pending']['bytes'] = ROOT_FLOOD_CAPS['maxBytes'] + 1
+    assert verdict(samples=[over, sample])['errors']
 
 
 def _percentiles(values):
@@ -365,12 +544,15 @@ class _FollowerSampler:
                       'lines': len(common._scala_log_lines(self.target))}
             for node in (self.target, self.miner):
                 began = time.monotonic()
+                request_started_ms = time.time() * 1000
                 try:
                     info = api(node, '/info', timeout=10) or {}
                 except Unavailable:
                     sample[f'{node}_unavailable'] = True
                     continue
                 if node == self.target:
+                    sample['request_started_ms'] = request_started_ms
+                    sample['request_finished_ms'] = time.time() * 1000
                     sample['latency_s'] = round(time.monotonic() - began, 3)
                     pending = info.get('pendingInputAnnouncements')
                     sample['store_present'] = isinstance(pending, dict)
@@ -445,11 +627,19 @@ def _run_against_scala_follower(ctx, target):
         f'127.0.0.1:{lifecycle.REST[target]}', plan)
     ctx.note('adversary_command', ' '.join(command))
     ctx.note('adversary_binary', _binary_provenance(binary))
+    try:
+        baseline = (api(target, '/info', timeout=10) or {}).get('pendingInputAnnouncements')
+    except Unavailable:
+        baseline = None
+    ctx.note('store_pre_launch_snapshot', baseline)
+    result = None
     sampler.phase = 'flood'
     started = time.monotonic()
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
                                    timeout=1800, check=False)
+        result = parse_root_result(completed.stdout)
+        ctx.note('adversary_result', result)
         ctx.note('adversary', {'returncode': completed.returncode,
                                'seconds': round(time.monotonic() - started, 1),
                                'stdout': completed.stdout[-4000:],
@@ -486,20 +676,19 @@ def _run_against_scala_follower(ctx, target):
                      for s in sampler.samples if s['phase'] in ('flood', 'drain')]
     octets = adversary_octets(plan)
     verdict = evaluate_root_flood(window, flood_samples, ROOT_FLOOD_CAPS, octets)
-    store_present = any(s.get('store_present') for s in sampler.samples)
-    verdict['store_present'] = store_present
+    # Only an explicitly stock role receives the missing-store exemption.
+    spec = campaign.lifecycle_roles().get(role)
+    patched = spec is None or spec.patched
+    store_verdict = evaluate_store_window(
+        flood_samples, baseline, patched, plan, result)
+    verdict.update(store_verdict)
+    store_present = verdict['store_present']
     verdict['log_window'] = {'from_line': log_from, 'to_line': log_to}
-    last = next((s for s in reversed(flood_samples) if 'evictions' in s), {})
-    first = next((s for s in sampler.samples if 'evictions' in s), {})
-    verdict['evictions_in_window'] = ((last.get('evictions') or 0)
-                                      - (first.get('evictions') or 0))
-    # Every store counter's movement over the flood: drops by reason
-    # (once the store splits them), admitted, replayed, invalid replays.
-    verdict['store_counters_in_window'] = counters_between(
-        first.get('pending'), last.get('pending'))
     verdict['drops_in_window'] = {
-        key: value for key, value in verdict['store_counters_in_window'].items()
-        if key == 'drops' or key.startswith('drops.')}
+        k: v for k, v in verdict.get('store_counters_in_window', {}).items()
+        if k == 'drops' or k.startswith('drops.')}
+    for error in store_verdict['errors']:
+        ctx.fail(error, store_verdict)
     ctx.note('root_flood', verdict)
 
     # The same three counts BEFORE the flood, as the honest baseline the
@@ -577,7 +766,7 @@ def _run_against_scala_follower(ctx, target):
             ctx.fail('no honest root announcement that arrived during '
                      'saturation was replayed into the input chain',
                      {'while_saturated': verdict['honest_roots_while_saturated']})
-    else:
+    elif not patched:
         ctx.note('store_absent', 'this build publishes no pendingInputAnnouncements '
                                  '(stock): caps and replay are not applicable, '
                                  'the honest-root counts are the stock comparison')
