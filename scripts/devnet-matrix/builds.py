@@ -37,6 +37,10 @@ BUILDS_TOML = HERE / 'builds.toml'
 # than a new build nobody provisions.
 BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all')
 
+# A registry entry's `ergo_ref`: a full commit id, never a branch name,
+# so a later branch move cannot change what a rerun provisions.
+FULL_COMMIT = re.compile(r'[0-9a-f]{40}')
+
 # A class directory as sbt's `export Runtime / fullClasspath` names it.
 CLASSES_DIR = re.compile(r'/target/scala-[^/]+/classes/?$')
 
@@ -223,6 +227,16 @@ class Build:
         if not self.available:
             raise BuildError(
                 f'build {self.name!r} is not provisioned at {self.work_dir}')
+        # The source commit first: the class hash says the output has not
+        # moved since provisioning, this says it was provisioned from the
+        # commit the registry names.
+        pinned = self.declared.get('ergo_ref')
+        provisioned = self.manifest.get('ergo_commit')
+        if pinned and FULL_COMMIT.fullmatch(pinned) and provisioned != pinned:
+            raise BuildError(
+                f'build {self.name!r} at {self.work_dir} was provisioned from '
+                f'{provisioned}, but builds.toml pins {pinned}. Re-provision '
+                'it at the pinned commit before a role runs it.')
         expected = self.class_hash()
         actual = class_dir_sha256(self.classpath_file.read_text())
         if actual != expected:
@@ -291,6 +305,13 @@ def registry(path=BUILDS_TOML):
     missing = [name for name in BUILD_NAMES if name not in declared]
     if missing:
         raise BuildError(f'{path} does not declare {missing}')
+    unpinned = sorted(name for name in BUILD_NAMES
+                      if not FULL_COMMIT.fullmatch(
+                          str(declared[name].get('ergo_ref', ''))))
+    if unpinned:
+        raise BuildError(
+            f'{path}: ergo_ref of {unpinned} is not a full commit id; pin '
+            'every build by its 40-hex commit, not a branch name')
     return {name: Build(name, root / declared[name]['work_dir'],
                         declared=declared[name])
             for name in BUILD_NAMES}
@@ -457,8 +478,36 @@ def _self_test():
         else:
             raise AssertionError('a legacy build must still be pinned')
 
+        # ----- the registry pins a COMMIT, and a build provisioned from
+        # any other commit is refused -----
+        pinned = Build('pinned', work, declared={'ergo_ref': 'c0ffee' * 6 + 'abcd'})
+        assert pinned.verify()['ergo_commit'] == 'c0ffee' * 6 + 'abcd'
+        moved = Build('moved', work, declared={'ergo_ref': 'beef' * 10})
+        try:
+            moved.verify()
+        except BuildError as error:
+            assert 'was provisioned from' in str(error), error
+        else:
+            raise AssertionError('a build from another commit must be refused')
+
     # ----- the registry -----
     known = registry()
+    # Every entry is pinned by a full commit id: a branch name resolves to
+    # whatever the branch points at on the day a build is provisioned.
+    for name, build in known.items():
+        assert FULL_COMMIT.fullmatch(build.declared.get('ergo_ref', '')), \
+            (name, build.declared)
+    with tempfile.TemporaryDirectory() as tmp:
+        branchy = Path(tmp) / 'builds.toml'
+        branchy.write_text(BUILDS_TOML.read_text().replace(
+            'ergo_ref = "62c10315e1ebcac4480dba6bacdc2100a38119e5"',
+            'ergo_ref = "weak-blocks"'))
+        try:
+            registry(branchy)
+        except BuildError as error:
+            assert 'not a full commit id' in str(error), error
+        else:
+            raise AssertionError('a branch name in the registry must be refused')
     assert list(known) == list(BUILD_NAMES), list(known)
     assert known['stock'].work_dir.name == '.work-62c10315', known['stock']
     for name in BUILD_NAMES:

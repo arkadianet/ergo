@@ -263,7 +263,10 @@ what JOB it is doing.
 `builds.toml` lists the provisioned Scala builds by the names
 `campaign.py --build` accepts — `stock`, `F16`, `F12F05`, `F14`, `F13`,
 `F04`, `F11`, `all` — and `builds.py` loads them. A build's identity is
-its COMPILED OUTPUT, not its source commit: `class_dir_sha256` is the
+its COMPILED OUTPUT as well as its source commit. Each entry's
+`ergo_ref` is a full commit id (a branch name is refused), and a build
+whose manifest records another `ergo_commit` is refused until it is
+re-provisioned. `class_dir_sha256` is the
 SHA-256 over the sorted `<project>/<path>` plus content of every class
 file on the exported runtime classpath, and a node refuses to start on a
 build that no longer reproduces its manifest's hash. Two work
@@ -338,8 +341,18 @@ reads as UNKNOWN, not as a clean run of zeroes.
 A MEASUREMENT scenario with no pass criterion, for F11: it runs one
 Scala miner on `--build` for 40 ordering blocks under a funded workload
 and counts submissions, successful replies, error replies, submissions
-that got NO reply, `Invalid input block` PoW failures, applied input
-blocks, and how many of those reached the best input chain. A stock run
-is the baseline the patched run is read against; `never_sealed = 0`
-alone proves nothing, which is why all six denominators are reported
-together.
+that got NO reply, PoW failures, applied input blocks, and how many of
+those reached the best input chain. A stock run is the baseline the
+patched run is read against; `never_sealed = 0` alone proves nothing,
+which is why all six denominators are reported together.
+
+PoW failures are counted from the generator's own WARN in either
+wording — stock `Removing candidate due to invalid input block`, F11
+`No retained candidate matches input solution PoW` — anchored on the
+`WARN org.ergoplatform.mining.CandidateGenerator - ` prefix so F11's
+`StatusReply$ErrorMessage` echo of the same words is not counted
+twice. The ordering arm, F11's stale-parent rejection and F11's other
+reply arms (already known, pending, already solved, invalid solution,
+timeout, deferral limit) are counted separately, never as PoW
+failures. `rejections_exceed_error_replies` flags a window with more
+rejections than `ErgoMiningThread` error replies.
