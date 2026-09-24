@@ -45,6 +45,16 @@ pub struct ScalaCompatBridge {
 }
 
 impl ScalaCompatBridge {
+    /// Voting epoch length surfaced by votes history, so the UI can explain
+    /// that parameter changes land only on epoch boundaries.
+    fn voting_epoch_length(&self) -> u32 {
+        match self.static_cfg.network.as_str() {
+            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
+            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
+            _ => 0,
+        }
+    }
+
     pub fn new(
         handle: SnapshotHandle,
         static_cfg: ScalaCompatStatic,
@@ -174,40 +184,26 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn votes_history(&self) -> ergo_api::types::ApiVotesHistory {
-        let snap = self.handle.load();
-        let current_height = snap.tip.best_full_block.height;
-        // Epoch length is network-fixed; surfaced so the UI can explain that
-        // changes only land on `voting_length`-block boundaries.
-        let epoch_length = match self.static_cfg.network.as_str() {
-            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
-            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
-            _ => 0,
-        };
-        match self.store_reader.voted_params_history() {
-            Ok(rows) => build_votes_history(&rows, epoch_length, current_height),
-            Err(e) => {
-                warn!(handler = "votes_history", error = %e, "scala-compat handler failed");
-                ergo_api::types::ApiVotesHistory {
-                    epoch_length,
-                    current_height,
-                    changes: Vec::new(),
-                }
-            }
-        }
+        // Legacy best-effort: a failed read still answers with an empty history.
+        self.try_votes_history()
+            .unwrap_or_else(|_| ergo_api::types::ApiVotesHistory {
+                epoch_length: self.voting_epoch_length(),
+                current_height: self.handle.load().tip.best_full_block.height,
+                changes: Vec::new(),
+            })
     }
 
     fn try_votes_history(&self) -> Result<ergo_api::types::ApiVotesHistory, ChainReadError> {
         let current_height = self.handle.load().tip.best_full_block.height;
-        let epoch_length = match self.static_cfg.network.as_str() {
-            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
-            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
-            _ => 0,
-        };
         let rows = self.store_reader.voted_params_history().map_err(|e| {
-            warn!(handler = "try_votes_history", error = %e, "v1 store read failed");
+            warn!(handler = "votes_history", error = %e, "voted-params store read failed");
             ChainReadError::from(super::error::BridgeError::from(e))
         })?;
-        Ok(build_votes_history(&rows, epoch_length, current_height))
+        Ok(build_votes_history(
+            &rows,
+            self.voting_epoch_length(),
+            current_height,
+        ))
     }
 
     fn header_ids_at_height(&self, height: u32) -> Vec<String> {
