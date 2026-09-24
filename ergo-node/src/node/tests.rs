@@ -610,7 +610,7 @@ fn unknown_modifier_type_is_rejected_before_delivery_mutation() {
 /// `send_to_peer` both see it. The returned receiver must be held for the
 /// duration of the test, otherwise the outbound channel reads as closed.
 #[must_use]
-fn connect_test_peer(
+pub(super) fn connect_test_peer(
     state: &mut NodeState,
     peer: SocketAddr,
     now: Instant,

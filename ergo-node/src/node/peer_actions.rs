@@ -310,6 +310,11 @@ pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
                 code,
                 payload,
             } => {
+                if code == message::CODE_SYNC_INFO
+                    && super::sync_helpers::popow_blocks_sync_info(state)
+                {
+                    continue;
+                }
                 // Negative branch only — the failure path runs all
                 // the recovery work; collapsing into a match guard
                 // would require an explicit empty arm for the

@@ -1187,6 +1187,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -2189,6 +2194,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiRecentBlock:
       type: object
