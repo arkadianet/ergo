@@ -687,12 +687,14 @@ pub struct HolderMetrics {
         (status = 400, description = "Missing/malformed token_id, or invalid cursor", body = V1Error),
         (status = 404, description = "No token with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQuery>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(token_hex) = q.token_id else {
@@ -710,72 +712,80 @@ pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQu
         );
     };
     let tid = TokenId::from_bytes(raw);
-    if idx.token_by_id(&tid).is_none() {
-        return v1_error(
-            Reason::TokenNotFound,
-            "no token with that id",
-            "the id is well-formed but unknown to this node",
-        );
-    }
-    let start = match super::offset_from_cursor(q.cursor.as_deref()) {
-        Ok(o) => o,
-        Err(e) => return *e,
-    };
+    let start = super::offset_from_cursor(q.cursor.as_deref());
     let limit = clamp_limit(q.limit, HOLDERS_DEFAULT_LIMIT, HOLDERS_MAX_LIMIT);
     let include_metrics = q.include_metrics.unwrap_or(true);
 
-    let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
-    let total = scan.circulating.max(1);
-    let mut items: Vec<HolderRow> = scan
-        .holders
-        .iter()
-        .skip(start as usize)
-        .take(limit as usize + 1)
-        .map(|(address, amount)| HolderRow {
-            address: address.clone(),
-            amount: amount.to_string(),
-            share_pct: pct(*amount, total),
-        })
-        .collect();
-    let has_more = items.len() as u32 > limit;
-    if has_more {
-        items.truncate(limit as usize);
-    }
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&super::OffsetCursor {
-            off: start.saturating_add(limit),
-        })
-    });
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            if idx.token_by_id(&tid).is_none() {
+                return v1_error(
+                    Reason::TokenNotFound,
+                    "no token with that id",
+                    "the id is well-formed but unknown to this node",
+                );
+            }
+            // A missing token takes precedence over a malformed cursor.
+            let start = match start {
+                Ok(o) => o,
+                Err(e) => return *e,
+            };
+            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let total = scan.circulating.max(1);
+            let mut items: Vec<HolderRow> = scan
+                .holders
+                .iter()
+                .skip(start as usize)
+                .take(limit as usize + 1)
+                .map(|(address, amount)| HolderRow {
+                    address: address.clone(),
+                    amount: amount.to_string(),
+                    share_pct: pct(*amount, total),
+                })
+                .collect();
+            let has_more = items.len() as u32 > limit;
+            if has_more {
+                items.truncate(limit as usize);
+            }
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&super::OffsetCursor {
+                    off: start.saturating_add(limit),
+                })
+            });
 
-    let metrics = if include_metrics {
-        let top10: u128 = scan.holders.iter().take(10).map(|(_, a)| *a).sum();
-        HolderMetrics {
-            holder_count: scan.holders.len() as u64,
-            top10_share_pct: pct(top10, total),
-            gini: gini(&scan.holders),
-            total_amount: scan.circulating.to_string(),
-            scan_capped: scan.capped,
-        }
-    } else {
-        HolderMetrics {
-            holder_count: scan.holders.len() as u64,
-            top10_share_pct: "0".to_string(),
-            gini: "0".to_string(),
-            total_amount: scan.circulating.to_string(),
-            scan_capped: scan.capped,
-        }
-    };
+            let metrics = if include_metrics {
+                let top10: u128 = scan.holders.iter().take(10).map(|(_, a)| *a).sum();
+                HolderMetrics {
+                    holder_count: scan.holders.len() as u64,
+                    top10_share_pct: pct(top10, total),
+                    gini: gini(&scan.holders),
+                    total_amount: scan.circulating.to_string(),
+                    scan_capped: scan.capped,
+                }
+            } else {
+                HolderMetrics {
+                    holder_count: scan.holders.len() as u64,
+                    top10_share_pct: "0".to_string(),
+                    gini: "0".to_string(),
+                    total_amount: scan.circulating.to_string(),
+                    scan_capped: scan.capped,
+                }
+            };
 
-    Json(CollectionMeta {
-        items,
-        page: Page {
-            limit,
-            next_cursor,
-            has_more,
-        },
-        meta: metrics,
-    })
-    .into_response()
+            Json(CollectionMeta {
+                items,
+                page: Page {
+                    limit,
+                    next_cursor,
+                    has_more,
+                },
+                meta: metrics,
+            })
+            .into_response()
+        })
+        .await
 }
 
 /// `amount / total` as a 1-decimal percentage string.

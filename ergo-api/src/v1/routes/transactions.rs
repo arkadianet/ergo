@@ -27,6 +27,7 @@ use crate::blockchain::{
     build_indexed_box_response, build_indexed_tx_response, IndexedErgoBoxResponse,
 };
 use crate::types::{RawTransactionBytes, SubmitError, SubmitMode};
+use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
 
 /// Fee-proposition ErgoTree, canonical wire hex. Oracle-pinned against
@@ -59,8 +60,9 @@ fn invalid_tx_id() -> Response {
         (status = 400, description = "Malformed tx id", body = V1Error),
         (status = 404, description = "Unknown, confirmed or pooled", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 500, description = "Failed to assemble the transaction response", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 500, description = "Failed to assemble the transaction response; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {
@@ -94,39 +96,51 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
         }
     }
 
-    // Confirmed path: extra-index wins over a same-id pool entry.
-    if let Some(itx) = indexer.tx_by_id(&tx_id) {
-        let bstate = state.blockchain_state(&indexer);
-        return match build_indexed_tx_response(&bstate, &itx) {
-            Ok(resp) => {
-                let best = state.read.status().best_full_block_height;
-                Json(confirmed_tx(resp, best)).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            // Confirmed path: extra-index wins over a same-id pool entry.
+            if let Some(itx) = indexer.tx_by_id(&tx_id) {
+                let bstate = state.blockchain_state(&indexer);
+                return match build_indexed_tx_response(&bstate, &itx) {
+                    Ok(resp) => {
+                        let best = state.read.sync().best_full_block_height;
+                        Json(confirmed_tx(resp, best)).into_response()
+                    }
+                    Err(detail) => v1_error(
+                        Reason::InternalError,
+                        "failed to assemble the confirmed transaction",
+                        detail,
+                    ),
+                };
             }
-            Err(detail) => v1_error(
-                Reason::InternalError,
-                "failed to assemble the confirmed transaction",
-                detail,
-            ),
-        };
-    }
 
-    // Unconfirmed path: coherent single-snapshot pool read.
-    if let Some((bytes, pool_outputs)) = state.mempool.pool_tx_detail(&tx_id) {
-        return match unconfirmed_tx(&state, indexer.as_ref(), &tx_id_hex, &bytes, &pool_outputs) {
-            Ok(tx) => Json(tx).into_response(),
-            Err(detail) => v1_error(
-                Reason::InternalError,
-                "failed to assemble the unconfirmed transaction",
-                detail,
-            ),
-        };
-    }
+            // Unconfirmed path: coherent single-snapshot pool read.
+            if let Some((bytes, pool_outputs)) = state.mempool.pool_tx_detail(&tx_id) {
+                return match unconfirmed_tx(
+                    &state,
+                    indexer.as_ref(),
+                    &tx_id_hex,
+                    &bytes,
+                    &pool_outputs,
+                ) {
+                    Ok(tx) => Json(tx).into_response(),
+                    Err(detail) => v1_error(
+                        Reason::InternalError,
+                        "failed to assemble the unconfirmed transaction",
+                        detail,
+                    ),
+                };
+            }
 
-    v1_error(
-        Reason::TxNotFound,
-        "no transaction with that id, confirmed or pooled",
-        "the id is well-formed but unknown to this node",
-    )
+            v1_error(
+                Reason::TxNotFound,
+                "no transaction with that id, confirmed or pooled",
+                "the id is well-formed but unknown to this node",
+            )
+        })
+        .await
 }
 
 /// Sum output values paying the fee proposition. Output-side only, so it is
@@ -308,7 +322,7 @@ fn unconfirmed_tx(
                 let resp = build_indexed_box_response(network, &b)?;
                 Ok(v1box_from_indexed(
                     resp,
-                    state.read.status().best_full_block_height,
+                    state.read.sync().best_full_block_height,
                 ))
             } else if let Some(eb) = pool_outputs.get(&input.box_id) {
                 v1box_from_ergo_box(network, eb, false)

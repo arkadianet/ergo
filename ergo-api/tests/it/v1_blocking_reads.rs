@@ -1,4 +1,4 @@
-//! Scheduling and capacity isolation for the product chain-reader routes.
+//! Scheduling and capacity isolation for the product store-reader routes.
 use axum::{
     body::{to_bytes, Body},
     extract::ConnectInfo,
@@ -11,6 +11,10 @@ use ergo_api::{
     traits::{NodeReadState, NodeSubmit, NoopMempoolView},
     types::*,
     v1::{v1_router, BlockingReads, BlockingReadsConfig, V1State},
+};
+use ergo_indexer_types::{
+    query::{BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto},
+    BoxId, IndexerQuery, IndexerStatus, Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
 };
 use ergo_rest_json::types::ScalaHeader;
 use ergo_ser::address::NetworkPrefix;
@@ -147,6 +151,96 @@ impl NodeChainQuery for Store {
         Vec::new()
     }
 }
+#[derive(Default)]
+struct StubIndexer {
+    delay: Duration,
+    calls: AtomicUsize,
+}
+
+impl IndexerQuery for StubIndexer {
+    fn indexed_height(&self) -> u64 {
+        u64::from(HEIGHT)
+    }
+    fn status(&self) -> IndexerStatus {
+        IndexerStatus::CaughtUp
+    }
+    fn box_by_id(&self, id: &BoxId) -> Option<IndexedBoxDto> {
+        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        None
+    }
+    fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn boxes_by_global_range(&self, _l: u64, _h: u64) -> Vec<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn tx_by_id(&self, tx_id: &TxId) -> Option<IndexedTxDto> {
+        assert_eq!(hex::encode(tx_id.as_bytes()), format!("{HEIGHT:064x}"));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        None
+    }
+    fn tx_by_global_index(&self, _n: u64) -> Option<IndexedTxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn txs_by_global_range(&self, _l: u64, _h: u64) -> Vec<IndexedTxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_balance(&self, _t: &TreeHash) -> Option<BalanceDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_txs_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedTxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_boxes_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_unspent_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_total_txs(&self, _t: &TreeHash) -> u64 {
+        unreachable!("unexpected indexer query")
+    }
+    fn address_total_boxes(&self, _t: &TreeHash) -> u64 {
+        unreachable!("unexpected indexer query")
+    }
+    fn template_boxes_paged(&self, _t: &TemplateHash, _p: Page) -> Vec<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn template_unspent_paged(
+        &self,
+        _t: &TemplateHash,
+        _p: Page,
+        _d: SortDir,
+    ) -> Vec<IndexedBoxDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn template_total_boxes(&self, _t: &TemplateHash) -> u64 {
+        unreachable!("unexpected indexer query")
+    }
+    fn token_by_id(&self, _t: &TokenId) -> Option<IndexedTokenDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
+        unreachable!("unexpected indexer query")
+    }
+    fn token_boxes_paged(&self, id: &TokenId, page: Page) -> Vec<IndexedBoxDto> {
+        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+        assert_eq!((page.offset, page.limit), (0, 2));
+        Vec::new()
+    }
+    fn token_unspent_paged(&self, id: &TokenId, page: Page, dir: SortDir) -> Vec<IndexedBoxDto> {
+        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+        assert_eq!((page.offset, page.limit), (0, 1000));
+        assert_eq!(dir, SortDir::Asc);
+        Vec::new()
+    }
+    fn token_total_boxes(&self, _t: &TokenId) -> u64 {
+        unreachable!("unexpected indexer query")
+    }
+}
 
 struct Submit;
 #[async_trait::async_trait]
@@ -179,11 +273,20 @@ fn config() -> BlockingReadsConfig {
 }
 
 fn app(store: Arc<Store>, cfg: BlockingReadsConfig, panic_status: bool) -> Router {
+    app_with_indexer(store, cfg, panic_status, Arc::new(StubIndexer::default()))
+}
+
+fn app_with_indexer(
+    store: Arc<Store>,
+    cfg: BlockingReadsConfig,
+    panic_status: bool,
+    indexer: Arc<StubIndexer>,
+) -> Router {
     let state = V1State {
         blocking: BlockingReads::new(cfg).unwrap(),
         read: Arc::new(StubRead(panic_status)),
         chain: Some(store),
-        indexer: None,
+        indexer: Some(indexer),
         submit: Some(Arc::new(Submit)),
         tx_builder: None,
         mempool: Arc::new(NoopMempoolView::new()),
@@ -220,7 +323,6 @@ async fn reason(response: Response, status: StatusCode, reason: &str) {
 fn header_path() -> String {
     format!("/api/v1/chain/headers/{HEIGHT:064x}")
 }
-
 const BLOCKS: &str = "/api/v1/chain/blocks?limit=1";
 
 // ----- happy path -----
@@ -281,6 +383,70 @@ async fn chain_blocks_by_ids_slow_body_does_not_hold_read_permit() {
     polled_rx.await.unwrap();
     assert_eq!(request(router, BLOCKS, None).await.status(), StatusCode::OK);
     pending.abort();
+}
+
+#[tokio::test]
+async fn boxes_by_id_slow_indexer_read_does_not_block_runtime() {
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let counter = ticks.clone();
+    let heartbeat = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    tokio::task::yield_now().await;
+    let indexer = Arc::new(StubIndexer {
+        delay: Duration::from_millis(300),
+        ..Default::default()
+    });
+    let router = app_with_indexer(Arc::new(Store::default()), config(), false, indexer.clone());
+    let response = request(router, &format!("/api/v1/boxes/{HEIGHT:064x}"), None).await;
+    heartbeat.abort();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(indexer.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        ticks.load(Ordering::SeqCst) >= 3,
+        "heartbeat was blocked by the read"
+    );
+}
+
+#[tokio::test]
+async fn boxes_list_reads_tip_without_calling_status() {
+    let response = request(
+        app(Arc::new(Store::default()), config(), true),
+        &format!("/api/v1/boxes/by-token/{HEIGHT:064x}?limit=1"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn boxes_by_ergo_tree_slow_body_does_not_hold_read_permit() {
+    let router = app(Arc::new(Store::default()), config(), false);
+    let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
+    let mut polled_tx = Some(polled_tx);
+    let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+        if let Some(tx) = polled_tx.take() {
+            let _ = tx.send(());
+        }
+        std::task::Poll::<Option<Result<axum::body::Bytes, std::io::Error>>>::Pending
+    }));
+    let pending = tokio::spawn(request(
+        router.clone(),
+        "/api/v1/boxes/by-ergo-tree",
+        Some(body),
+    ));
+    polled_rx.await.unwrap();
+    let response = request(
+        router,
+        &format!("/api/v1/boxes/by-token/{HEIGHT:064x}?limit=1"),
+        None,
+    )
+    .await;
+    pending.abort();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 // ----- error paths -----
@@ -405,4 +571,35 @@ async fn chain_header_by_id_malformed_id_takes_no_permit() {
     .await;
     assert_eq!(first.await.unwrap().status(), StatusCode::NOT_FOUND);
     assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn tokens_holders_saturated_scan_lane_is_overloaded_503() {
+    let response = saturated_request(&format!("/api/v1/tokens/{HEIGHT:064x}/holders"), None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    reason(response, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+}
+
+#[tokio::test]
+async fn transactions_by_id_malformed_id_takes_no_permit() {
+    let store = Arc::new(Store {
+        header_delay: Duration::from_millis(300),
+        ..Default::default()
+    });
+    let indexer = Arc::new(StubIndexer::default());
+    let router = app_with_indexer(store.clone(), config(), false, indexer.clone());
+    let first_router = router.clone();
+    let first = tokio::spawn(async move { request(first_router, &header_path(), None).await });
+    while store.calls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    reason(
+        request(router, "/api/v1/transactions/nope", None).await,
+        StatusCode::BAD_REQUEST,
+        "invalid_tx_id",
+    )
+    .await;
+    assert_eq!(first.await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(indexer.calls.load(Ordering::SeqCst), 0);
 }
