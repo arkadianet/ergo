@@ -2453,7 +2453,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2536,7 +2536,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2572,7 +2572,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2608,7 +2608,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
