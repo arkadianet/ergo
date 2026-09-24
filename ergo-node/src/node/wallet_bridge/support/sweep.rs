@@ -5,7 +5,9 @@ use parking_lot::RwLock;
 
 use super::sign_submit::{map_submit_error, serialize_signed_tx, sign_unsigned_tx};
 use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE, MIN_FEE};
-use crate::node::wallet_bridge::{ChainStateAccessor, TxSubmitter, WalletAdminError};
+use crate::node::wallet_bridge::{
+    map_chain_error, ChainStateAccessor, TxSubmitter, WalletAdminError,
+};
 
 /// Outcome of a "retrieve matured mining rewards" sweep. `tx_id` is `None` on a
 /// dry-run (preview); `Some` once built, signed, self-verified, and submitted.
@@ -444,17 +446,22 @@ pub(crate) async fn retrieve_rewards_impl(
 
     // 5. Execute: sign (mandatory self-verify, incl. `verify_reemission_spending`)
     //    then submit.
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
             db,
-            chain,
+            &snapshot,
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
         )?
     };
+    chain
+        .ensure_snapshot_current(&snapshot)
+        .map_err(map_chain_error)?;
+    drop(snapshot);
     let tx_id = ergo_ser::transaction::transaction_id(&signed_tx)
         .map_err(|e| WalletAdminError::Internal(format!("transaction_id: {e:?}")))?;
     let tx_id_hex = hex::encode(tx_id.as_bytes());

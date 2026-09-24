@@ -320,6 +320,55 @@ impl CommittedSnapshot {
             })
     }
 
+    /// The last 10 applied-chain headers walked by parent id, tip-first.
+    pub fn last_ancestor_headers_window(&self) -> Result<[Header; 10], StateError> {
+        let tip_height = self.chain_state.best_full_block_height;
+        if tip_height < 10 {
+            return Err(StateError::EarlyIBD {
+                needed_min: 10,
+                observed: tip_height,
+            });
+        }
+        let headers_table = self.txn.open_table(HEADERS)?;
+        let mut current_id = self.chain_state.best_full_block_id;
+        let mut headers = Vec::with_capacity(10);
+        for expected_height in (tip_height - 9..=tip_height).rev() {
+            let bytes = headers_table.get(current_id.as_slice())?.ok_or_else(|| {
+                StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("missing ancestor header at h={expected_height}"),
+                }
+            })?;
+            let mut reader = VlqReader::new(bytes.value());
+            let header = ergo_ser::header::read_header(&mut reader).map_err(|error| {
+                StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("header decode at h={expected_height}: {error}"),
+                }
+            })?;
+            if header.height != expected_height {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!(
+                        "header height {} does not match expected {expected_height}",
+                        header.height
+                    ),
+                });
+            }
+            current_id = *header.parent_id.as_bytes();
+            headers.push(header);
+        }
+        headers
+            .try_into()
+            .map_err(|_| StateError::InternalInvariant {
+                what:
+                    "CommittedSnapshot::last_ancestor_headers_window: built window with size != 10",
+            })
+    }
+
     /// Active protocol parameters at the committed tip — the block version
     /// the candidate must carry. Read from `VOTED_PARAMS` in this
     /// transaction; the genesis row written by open's reconcile guarantees

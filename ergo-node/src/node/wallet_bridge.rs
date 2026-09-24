@@ -27,6 +27,9 @@ use ergo_api::wallet::{WalletAdmin, WalletAdminError};
 use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 
+pub mod chain_snapshot;
+pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
+
 /// Abstracts the chain submit path so the wallet writer can submit a
 /// signed transaction without depending on the API crate's concrete
 /// `SubmitBridge`. Production impl wraps `NodeSubmit`; tests can
@@ -787,6 +790,29 @@ pub trait ChainStateAccessor: Send + Sync {
         Ok(self.read_block_at(0)?.is_some())
     }
 
+    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+        Err(ChainStateError::Unsupported)
+    }
+
+    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+        Err(ChainStateError::Unsupported)
+    }
+
+    fn ensure_snapshot_current(&self, snapshot: &ChainSnapshot) -> Result<(), ChainStateError> {
+        let actual = self
+            .committed_tip()?
+            .ok_or(ChainStateError::NoCommittedState)?;
+        if actual == snapshot.tip() {
+            return Ok(());
+        }
+        Err(ChainStateError::StaleTip {
+            expected_height: snapshot.tip().height,
+            expected_id: hex::encode(snapshot.tip().header_id),
+            actual_height: actual.height,
+            actual_id: hex::encode(actual.header_id),
+        })
+    }
+
     /// Build the blockchain state context needed for signing: last ≤10
     /// applied headers + candidate pre-header + previous state digest.
     /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
@@ -824,6 +850,16 @@ pub trait ChainStateAccessor: Send + Sync {
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
         let _ = box_id;
         None
+    }
+}
+
+pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
+    let detail = error.to_string();
+    match error {
+        ChainStateError::StaleTip { .. } => {
+            WalletAdminError::BadRequest(format!("stale_chain_tip: {detail}"))
+        }
+        _ => WalletAdminError::Internal(detail),
     }
 }
 
@@ -934,130 +970,41 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         Ok(Some(RescanBlock { block_id, txs }))
     }
 
+    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+        let committed = self
+            .reader
+            .committed_snapshot()?
+            .ok_or(ChainStateError::NoCommittedState)?;
+        ChainSnapshot::from_committed(committed, self.reemission.as_ref()).map_err(Into::into)
+    }
+
+    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+        Ok(self
+            .reader
+            .committed_tip()?
+            .map(|(height, header_id)| ChainTip { height, header_id }))
+    }
+
     fn build_signing_context(
         &self,
     ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, WalletAdminError> {
-        use ergo_primitives::digest::ADDigest;
-        use ergo_primitives::reader::VlqReader;
-        use ergo_ser::header::read_header;
-        use ergo_validation::pre_header::CandidatePreHeader;
-
-        // Determine committed tip from chain_state_meta.
-        let (tip_height, tip_id) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| {
-                WalletAdminError::Internal("no committed tip (chain not started)".into())
-            })?;
-
-        if tip_height < 10 {
-            return Err(WalletAdminError::Internal(format!(
-                "chain tip {tip_height} < 10; wait for more sync before signing"
-            )));
-        }
-
-        // Read the last ≤10 applied headers from the canonical chain.
-        let window_lo = tip_height.saturating_sub(9);
-        let header_ids = self
-            .reader
-            .scan_header_chain_range(window_lo, tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("scan_header_chain_range: {e}")))?;
-
-        let mut sigma_last_headers = Vec::with_capacity(header_ids.len());
-        for (_, hid) in &header_ids {
-            let hdr_bytes = self
-                .reader
-                .get_header(hid)
-                .map_err(|e| WalletAdminError::Internal(format!("get_header: {e}")))?
-                .ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "header missing for id {}",
-                        hex::encode(hid)
-                    ))
-                })?;
-            let mut r = VlqReader::new(&hdr_bytes);
-            let h = read_header(&mut r)
-                .map_err(|e| WalletAdminError::Internal(format!("read_header: {e:?}")))?;
-            sigma_last_headers.push(h);
-        }
-        // Reverse so index 0 = most recent (tip) — `sigma_last_headers[0]` is
-        // the parent of the candidate block per BlockchainStateContext contract.
-        sigma_last_headers.reverse();
-
-        let tip_header = sigma_last_headers
-            .first()
-            .ok_or_else(|| WalletAdminError::Internal("empty header window".into()))?;
-
-        // Read previous state digest (STATE_META). We fall back to the tip
-        // header's state_root if STATE_META isn't readable.
-        let previous_state_digest = ADDigest::from_bytes(*tip_header.state_root.as_bytes());
-
-        // Build CandidatePreHeader from the tip header.
-        let sigma_pre_header = CandidatePreHeader {
-            version: tip_header.version,
-            parent_id: tip_id,
-            height: tip_height + 1,
-            timestamp: tip_header.timestamp + 1,
-            n_bits: tip_header.n_bits,
-            votes: [0, 0, 0],
-            // Use the tip header's miner pubkey as a stand-in. Wallet signing
-            // doesn't mine — the pubkey only affects CONTEXT.preHeader.minerPk
-            // in script evaluation (rare for P2PK spend scripts).
-            miner_pubkey: *tip_header.solution.pk().as_bytes(),
-        };
-
-        Ok(ergo_wallet::tx_context::BlockchainStateContext {
-            sigma_last_headers,
-            sigma_pre_header,
-            previous_state_digest,
-        })
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.state_context().clone())
+            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
     fn build_signing_params(
         &self,
     ) -> Result<ergo_wallet::tx_context::BlockchainParameters, WalletAdminError> {
-        let (tip_height, _) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no committed tip".into()))?;
-
-        let params = self
-            .reader
-            .active_params_at(tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("active_params_at: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no active params at tip".into()))?;
-
-        Ok(ergo_wallet::tx_context::BlockchainParameters {
-            max_block_cost: params.max_block_cost as u64,
-            input_cost: params.input_cost as u64,
-            data_input_cost: params.data_input_cost as u64,
-            output_cost: params.output_cost as u64,
-            token_access_cost: params.token_access_cost as u64,
-            // interpreter_init_cost is a fixed constant not stored in voted params;
-            // must match ergo_validation::INTERPRETER_INIT_COST (10_000) exactly so
-            // wallet self-verify reproduces the chain validator's cost accounting.
-            interpreter_init_cost: ergo_validation::INTERPRETER_INIT_COST,
-            block_version: params.block_version,
-        })
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.signing_params().clone())
+            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
     fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, WalletAdminError> {
-        let (tip_height, _) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no committed tip".into()))?;
-        let active = self
-            .reader
-            .active_params_at(tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("active_params_at: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no active params at tip".into()))?;
-        // Authoritative per-epoch params — the same source the consensus
-        // validator uses, so the wallet's pre-submit structural check can't
-        // drift from on-chain min-box-value / box-cap rules.
-        Ok(ergo_validation::ProtocolParams::from_active(&active))
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.protocol_params().clone())
+            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
