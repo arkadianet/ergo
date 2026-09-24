@@ -12,9 +12,9 @@
 //! `NoopMempoolView`/`NoopWalletAdmin` and no auth gate — they let tests
 //! stand up a router without assembling a full `ServerCtx`. Production
 //! goes through the explicit builder
-//! (`serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy` /
-//! `router_with_mempool_and_wallet_and_security_with_local_reverse_proxy`), which
-//! takes the `Option<ApiSecurity>` gate as a required argument, never defaulted, so
+//! (`serve_on_with_mempool_and_wallet_and_security` /
+//! `router_with_mempool_and_wallet_and_security`), which takes the
+//! `Option<ApiSecurity>` gate as a required argument, never defaulted, so
 //! enabling auth is a conscious decision at every call site rather than a
 //! fallthrough.
 
@@ -126,6 +126,10 @@ pub struct ServerCtx {
     /// state type" body — the rest of the API remains available.
     /// The integrator sets this from the resolved `state_type`.
     pub utxo_reads_supported: bool,
+    /// Declare a loopback reverse proxy so peer sockets receive no loopback
+    /// rate-limit exemption and use the remote Admin policy (warn-and-allow
+    /// in production). Forwarded headers never determine client identity.
+    pub local_reverse_proxy: bool,
 }
 
 /// Bind a TCP listener for the API server without starting axum.
@@ -188,31 +192,6 @@ pub fn serve_on(
     listener: tokio::net::TcpListener,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> JoinHandle<()> {
-    serve_on_with_local_reverse_proxy(
-        read,
-        compat,
-        submit,
-        indexer,
-        network,
-        utxo_reads_supported,
-        listener,
-        shutdown_rx,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn serve_on_with_local_reverse_proxy(
-    read: Arc<dyn NodeReadState>,
-    compat: Option<Arc<dyn NodeChainQuery>>,
-    submit: Option<Arc<dyn NodeSubmit>>,
-    indexer: Option<Arc<dyn IndexerQuery>>,
-    network: NetworkPrefix,
-    utxo_reads_supported: bool,
-    listener: tokio::net::TcpListener,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    local_reverse_proxy: bool,
-) -> JoinHandle<()> {
     let ctx = ServerCtx {
         read,
         compat,
@@ -225,50 +204,37 @@ pub fn serve_on_with_local_reverse_proxy(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
-    serve_on_with_mempool_with_local_reverse_proxy(
-        ctx,
-        listener,
-        shutdown_rx,
-        None,
-        local_reverse_proxy,
-    )
+    serve_on_with_mempool(ctx, listener, shutdown_rx, None)
 }
 
 /// Variant of [`serve_on`] that accepts a snapshot-backed
 /// [`MempoolView`] so the P5 unconfirmed overlay (`/blockchain/balance`,
 /// `/blockchain/box/unspent/*` `includeUnconfirmed` /
 /// `excludeMempoolSpent`) can read pool state without going through the
-/// node's main loop. The legacy entry point keeps the positional signature;
-/// proxy-aware callers use the `_with_local_reverse_proxy` variant.
+/// node's main loop. Production code uses this entry point;
+/// [`serve_on`] keeps the legacy positional signature for the test
+/// callers that don't need the overlay.
 ///
 /// Wallet routes are backed by a [`crate::wallet::NoopWalletAdmin`] and
 /// the auth gate is `None`. For production, use
-/// [`serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy`] directly.
+/// [`serve_on_with_mempool_and_wallet_and_security`] directly.
 pub fn serve_on_with_mempool(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
 ) -> JoinHandle<()> {
-    serve_on_with_mempool_with_local_reverse_proxy(ctx, listener, shutdown_rx, admin, false)
-}
-
-pub fn serve_on_with_mempool_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    listener: tokio::net::TcpListener,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    local_reverse_proxy: bool,
-) -> JoinHandle<()> {
-    serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
+    // Test entry point: no wallet, no auth. Production uses
+    // [`serve_on_with_mempool_and_wallet_and_security`] directly.
+    serve_on_with_mempool_and_wallet_and_security(
         ctx,
         listener,
         shutdown_rx,
         admin,
         Arc::new(crate::wallet::NoopWalletAdmin),
         None,
-        local_reverse_proxy,
     )
 }
 
@@ -290,28 +256,7 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> JoinHandle<()> {
-    serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-        ctx,
-        listener,
-        shutdown_rx,
-        admin,
-        wallet_admin,
-        security,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    listener: tokio::net::TcpListener,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-    security: Option<Arc<crate::auth::ApiSecurity>>,
-    local_reverse_proxy: bool,
-) -> JoinHandle<()> {
-    serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy(
+    serve_on_with_mempool_and_wallet_and_security_and_hosts(
         ctx,
         listener,
         shutdown_rx,
@@ -319,7 +264,6 @@ pub fn serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
         wallet_admin,
         security,
         &[],
-        local_reverse_proxy,
     )
 }
 
@@ -333,10 +277,9 @@ pub fn serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
 /// the literal bind address); empty + a non-loopback bind disables the
 /// guard entirely, matching the module docs.
 ///
-/// Production (`ergo-node`) calls the `_with_local_reverse_proxy` variant
-/// with the resolved `[api] allowed_hosts` and proxy posture. The legacy
-/// hosts entry forwards `false`; other `serve_on*` variants forward an empty
-/// allowlist.
+/// Production (`ergo-node`) calls this entry point directly with the
+/// resolved `[api] allowed_hosts`; every other `serve_on*` variant
+/// forwards an empty list here.
 #[allow(clippy::too_many_arguments)]
 pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     ctx: ServerCtx,
@@ -347,29 +290,6 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     security: Option<Arc<crate::auth::ApiSecurity>>,
     allowed_hosts: &[String],
 ) -> JoinHandle<()> {
-    serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy(
-        ctx,
-        listener,
-        shutdown_rx,
-        admin,
-        wallet_admin,
-        security,
-        allowed_hosts,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    listener: tokio::net::TcpListener,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-    security: Option<Arc<crate::auth::ApiSecurity>>,
-    allowed_hosts: &[String],
-    local_reverse_proxy: bool,
-) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
@@ -377,13 +297,7 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_revers
     if let Some(addr) = bind_addr {
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
-    let app = router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-        ctx,
-        admin,
-        wallet_admin,
-        security,
-        local_reverse_proxy,
-    );
+    let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -473,34 +387,8 @@ pub async fn serve(
     addr: SocketAddr,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
-    serve_with_local_reverse_proxy(
-        read,
-        compat,
-        submit,
-        indexer,
-        network,
-        utxo_reads_supported,
-        addr,
-        shutdown_rx,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn serve_with_local_reverse_proxy(
-    read: Arc<dyn NodeReadState>,
-    compat: Option<Arc<dyn NodeChainQuery>>,
-    submit: Option<Arc<dyn NodeSubmit>>,
-    indexer: Option<Arc<dyn IndexerQuery>>,
-    network: NetworkPrefix,
-    utxo_reads_supported: bool,
-    addr: SocketAddr,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    local_reverse_proxy: bool,
-) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
     let (actual, listener) = bind(addr).await?;
-    let handle = serve_on_with_local_reverse_proxy(
+    let handle = serve_on(
         read,
         compat,
         submit,
@@ -509,7 +397,6 @@ pub async fn serve_with_local_reverse_proxy(
         utxo_reads_supported,
         listener,
         shutdown_rx,
-        local_reverse_proxy,
     );
     Ok((actual, handle))
 }
@@ -655,18 +542,7 @@ pub fn router(
     indexer: Option<Arc<dyn IndexerQuery>>,
     network: NetworkPrefix,
 ) -> Router {
-    router_with_local_reverse_proxy(read, compat, submit, indexer, network, false)
-}
-
-pub fn router_with_local_reverse_proxy(
-    read: Arc<dyn NodeReadState>,
-    compat: Option<Arc<dyn NodeChainQuery>>,
-    submit: Option<Arc<dyn NodeSubmit>>,
-    indexer: Option<Arc<dyn IndexerQuery>>,
-    network: NetworkPrefix,
-    local_reverse_proxy: bool,
-) -> Router {
-    router_with_wallet_with_local_reverse_proxy(
+    router_with_wallet(
         read,
         compat,
         submit,
@@ -674,7 +550,6 @@ pub fn router_with_local_reverse_proxy(
         network,
         true,
         Arc::new(crate::wallet::NoopWalletAdmin),
-        local_reverse_proxy,
     )
 }
 
@@ -682,7 +557,7 @@ pub fn router_with_local_reverse_proxy(
 /// Used by tests that need a real `WalletAdmin` and a configurable
 /// `utxo_reads_supported` without constructing a full
 /// [`ServerCtx`]. Production `ergo-node` goes directly through
-/// [`router_with_mempool_and_wallet_and_security_with_local_reverse_proxy`] with a fully-
+/// [`router_with_mempool_and_wallet_and_security`] with a fully-
 /// resolved [`ServerCtx`] whose `utxo_reads_supported` is derived
 /// from the resolved `state_type`.
 pub fn router_with_wallet(
@@ -693,29 +568,6 @@ pub fn router_with_wallet(
     network: NetworkPrefix,
     utxo_reads_supported: bool,
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-) -> Router {
-    router_with_wallet_with_local_reverse_proxy(
-        read,
-        compat,
-        submit,
-        indexer,
-        network,
-        utxo_reads_supported,
-        wallet_admin,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn router_with_wallet_with_local_reverse_proxy(
-    read: Arc<dyn NodeReadState>,
-    compat: Option<Arc<dyn NodeChainQuery>>,
-    submit: Option<Arc<dyn NodeSubmit>>,
-    indexer: Option<Arc<dyn IndexerQuery>>,
-    network: NetworkPrefix,
-    utxo_reads_supported: bool,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-    local_reverse_proxy: bool,
 ) -> Router {
     let ctx = ServerCtx {
         read,
@@ -729,14 +581,9 @@ pub fn router_with_wallet_with_local_reverse_proxy(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-        ctx,
-        None,
-        wallet_admin,
-        None,
-        local_reverse_proxy,
-    )
+    router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
 }
 
 /// Variant of [`router`] that installs a snapshot-backed
@@ -748,22 +595,13 @@ pub fn router_with_wallet_with_local_reverse_proxy(
 /// Mounts wallet routes backed by a [`crate::wallet::NoopWalletAdmin`].
 /// Test-only entry point — calls the security-aware builder with
 /// `wallet_admin = NoopWalletAdmin` and `security = None`. Production
-/// uses [`router_with_mempool_and_wallet_and_security_with_local_reverse_proxy`] directly.
+/// uses [`router_with_mempool_and_wallet_and_security`] directly.
 pub fn router_with_mempool(ctx: ServerCtx, admin: Option<Arc<dyn NodeAdmin>>) -> Router {
-    router_with_mempool_with_local_reverse_proxy(ctx, admin, false)
-}
-
-pub fn router_with_mempool_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    local_reverse_proxy: bool,
-) -> Router {
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
+    router_with_mempool_and_wallet_and_security(
         ctx,
         admin,
         Arc::new(crate::wallet::NoopWalletAdmin),
         None,
-        local_reverse_proxy,
     )
 }
 
@@ -832,30 +670,7 @@ pub fn router_with_mempool_and_wallet_and_security(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> Router {
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-        ctx,
-        admin,
-        wallet_admin,
-        security,
-        false,
-    )
-}
-
-pub fn router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-    security: Option<Arc<crate::auth::ApiSecurity>>,
-    local_reverse_proxy: bool,
-) -> Router {
-    router_with_mempool_and_wallet_and_security_and_inventory_with_local_reverse_proxy(
-        ctx,
-        admin,
-        wallet_admin,
-        security,
-        local_reverse_proxy,
-    )
-    .0
+    router_with_mempool_and_wallet_and_security_and_inventory(ctx, admin, wallet_admin, security).0
 }
 
 pub fn router_with_mempool_and_wallet_and_security_and_inventory(
@@ -863,22 +678,6 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     admin: Option<Arc<dyn NodeAdmin>>,
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
-) -> (Router, ApiRouteInventory) {
-    router_with_mempool_and_wallet_and_security_and_inventory_with_local_reverse_proxy(
-        ctx,
-        admin,
-        wallet_admin,
-        security,
-        false,
-    )
-}
-
-pub fn router_with_mempool_and_wallet_and_security_and_inventory_with_local_reverse_proxy(
-    ctx: ServerCtx,
-    admin: Option<Arc<dyn NodeAdmin>>,
-    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
-    security: Option<Arc<crate::auth::ApiSecurity>>,
-    local_reverse_proxy: bool,
 ) -> (Router, ApiRouteInventory) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
@@ -893,6 +692,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory_with_local_reve
         emission,
         emission_scripts,
         utxo_reads_supported,
+        local_reverse_proxy,
     } = ctx;
     // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
     // reads). Cloned up front because the compat / submit handles are moved into

@@ -376,6 +376,7 @@ pub(super) async fn bind(
         // backend's boot dispatch (Mode 5) doesn't reach
         // here yet, but the gate is the right shape now.
         utxo_reads_supported: config.state_type == crate::config::StateType::Utxo,
+        local_reverse_proxy: config.api_local_reverse_proxy,
     };
     // Mandatory api_key_hash per Scala ErgoApp.scala:40-43.
     // `NodeConfig::load` rejects (api_bind = Some,
@@ -395,17 +396,15 @@ pub(super) async fn bind(
     let security_inner = ergo_api::auth::ApiSecurity::new(hash)
         .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?;
     let security = Arc::new(security_inner);
-    let handle =
-        ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy(
-            api_ctx,
-            listener,
-            api_shutdown_rx,
-            Some(admin_handle),
-            wallet_admin,
-            Some(security),
-            &config.api_allowed_hosts,
-            config.api_local_reverse_proxy,
-        );
+    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
+        api_ctx,
+        listener,
+        api_shutdown_rx,
+        Some(admin_handle),
+        wallet_admin,
+        Some(security),
+        &config.api_allowed_hosts,
+    );
 
     Ok(ApiBind {
         api_addr: Some(actual),

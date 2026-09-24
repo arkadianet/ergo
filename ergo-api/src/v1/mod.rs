@@ -200,6 +200,8 @@ mod tests {
     use axum::body::Body;
     use std::net::Ipv4Addr;
 
+    // ----- helpers -----
+
     fn req_with_peer(ip: Option<IpAddr>) -> Request<Body> {
         let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
         if let Some(ip) = ip {
@@ -208,6 +210,8 @@ mod tests {
         }
         req
     }
+
+    // ----- happy path -----
 
     #[test]
     fn loopback_socket_is_trusted_on_direct_bind() {
@@ -234,6 +238,19 @@ mod tests {
     fn absent_connect_info_is_not_trusted() {
         // No ConnectInfo ⇒ unknown peer ⇒ never loopback-privileged.
         let req = req_with_peer(None);
+        assert!(!is_trusted_loopback(&req, false));
+        assert!(!is_trusted_loopback(&req, true));
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn loopback_trust_remote_peer_spoofing_forwarded_header_is_untrusted() {
+        let remote = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let mut req = req_with_peer(Some(remote));
+        req.headers_mut()
+            .insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+        assert_eq!(client_ip(&req), Some(remote));
         assert!(!is_trusted_loopback(&req, false));
         assert!(!is_trusted_loopback(&req, true));
     }

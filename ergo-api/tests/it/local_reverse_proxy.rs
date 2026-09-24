@@ -5,9 +5,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ergo_api::auth::ApiSecurity;
-use ergo_api::server::{
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy, ServerCtx,
-};
+use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
 use ergo_api::traits::{NodeReadState, NoopMempoolView};
 use ergo_api::types::{
     ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction, ApiMempoolTransactions, ApiPeer,
@@ -16,6 +14,8 @@ use ergo_api::types::{
 use ergo_api::wallet::NoopWalletAdmin;
 use ergo_ser::address::NetworkPrefix;
 use tower::ServiceExt;
+
+// ----- helpers -----
 
 struct UnusedReadState;
 
@@ -70,6 +70,7 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy,
     };
     let security = Arc::new(
         ApiSecurity::new(
@@ -77,35 +78,34 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         )
         .expect("valid api key hash"),
     );
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy(
+    router_with_mempool_and_wallet_and_security(
         ctx,
         None,
         Arc::new(NoopWalletAdmin),
         Some(security),
-        local_reverse_proxy,
     )
 }
 
-fn request() -> Request<Body> {
+fn request(peer: SocketAddr, forwarded_for: &str) -> Request<Body> {
     let mut request = Request::builder()
         .method("POST")
         .uri("/api/v1/script/compile")
         .header("content-type", "application/json")
-        .header("x-forwarded-for", "203.0.113.7")
+        .header("x-forwarded-for", forwarded_for)
         .body(Body::from("{}"))
         .expect("request");
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40_000))));
+    request.extensions_mut().insert(ConnectInfo(peer));
     request
 }
 
-async fn statuses(app: axum::Router) -> Vec<StatusCode> {
+async fn statuses(app: axum::Router, peer: SocketAddr, forwarded_for: &str) -> Vec<StatusCode> {
     let mut statuses = Vec::new();
-    for _ in 0..8 {
+    // Compute costs 10 tokens against burst 40: 128 requests exceed the
+    // burst by a wide margin even if a loaded test runner permits refill.
+    for _ in 0..128 {
         statuses.push(
             app.clone()
-                .oneshot(request())
+                .oneshot(request(peer, forwarded_for))
                 .await
                 .expect("router response")
                 .status(),
@@ -114,11 +114,25 @@ async fn statuses(app: axum::Router) -> Vec<StatusCode> {
     statuses
 }
 
+// ----- happy path -----
+
 #[tokio::test]
-async fn production_router_applies_local_reverse_proxy_to_governor() {
-    let proxied = statuses(app(true)).await;
+async fn production_router_local_reverse_proxy_limits_loopback() {
+    let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+    let proxied = statuses(app(true), peer, "203.0.113.7").await;
     assert!(proxied.contains(&StatusCode::TOO_MANY_REQUESTS));
 
-    let direct = statuses(app(false)).await;
+    let direct = statuses(app(false), peer, "203.0.113.7").await;
     assert!(!direct.contains(&StatusCode::TOO_MANY_REQUESTS));
+}
+
+// ----- error paths -----
+
+#[tokio::test]
+async fn production_router_remote_peer_spoofing_loopback_is_rate_limited() {
+    let peer = SocketAddr::from(([203, 0, 113, 7], 40_000));
+    for local_reverse_proxy in [false, true] {
+        let responses = statuses(app(local_reverse_proxy), peer, "127.0.0.1").await;
+        assert!(responses.contains(&StatusCode::TOO_MANY_REQUESTS));
+    }
 }

@@ -37,19 +37,9 @@ mod web;
 pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
-    bind, realtime_handle, router_with_local_reverse_proxy, router_with_mempool,
-    router_with_mempool_and_wallet_and_security,
-    router_with_mempool_and_wallet_and_security_and_inventory,
-    router_with_mempool_and_wallet_and_security_and_inventory_with_local_reverse_proxy,
-    router_with_mempool_and_wallet_and_security_with_local_reverse_proxy,
-    router_with_mempool_with_local_reverse_proxy, router_with_wallet,
-    router_with_wallet_with_local_reverse_proxy, serve, serve_on,
-    serve_on_with_local_reverse_proxy, serve_on_with_mempool,
+    bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,
     serve_on_with_mempool_and_wallet_and_security,
-    serve_on_with_mempool_and_wallet_and_security_and_hosts,
-    serve_on_with_mempool_and_wallet_and_security_and_hosts_with_local_reverse_proxy,
-    serve_on_with_mempool_and_wallet_and_security_with_local_reverse_proxy,
-    serve_on_with_mempool_with_local_reverse_proxy, serve_with_local_reverse_proxy, ServerCtx,
+    serve_on_with_mempool_and_wallet_and_security_and_hosts, ServerCtx,
 };
 pub use traits::{
     ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
