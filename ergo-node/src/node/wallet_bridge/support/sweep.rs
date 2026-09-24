@@ -129,7 +129,7 @@ fn sweep_breakdown(
 /// a zero-proof `Transaction` view suffices.
 fn validate_built_structural(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
-    chain: &dyn ChainStateAccessor,
+    protocol_params: &ergo_validation::ProtocolParams,
     max_tx_size: usize,
 ) -> Result<(), WalletAdminError> {
     // Each reward-script input is a single ProveDlog Schnorr proof =
@@ -169,8 +169,7 @@ fn validate_built_structural(
         )));
     }
 
-    let params = chain.build_protocol_params().map_err(map_chain_error)?;
-    ergo_validation::tx::structural::validate_structural(&tx, &params)
+    ergo_validation::tx::structural::validate_structural(&tx, protocol_params)
         .map_err(|e| WalletAdminError::BadRequest(format!("sweep rejected: {e}")))
 }
 
@@ -323,6 +322,8 @@ pub(crate) async fn retrieve_rewards_impl(
         }
     }
 
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+
     // 2. Breakdown via the SHARED obligation (cannot drift from the build below).
     //    Fee floor = max(protocol min, configured relay floor); a sweep below it
     //    is rejected by submit before validation, so default to it and reject
@@ -344,10 +345,8 @@ pub(crate) async fn retrieve_rewards_impl(
         other_tokens,
     } = sweep_breakdown(
         &reward_boxes,
-        chain.reemission_rules(),
-        chain
-            .tip_height()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+        snapshot.reemission_rules(),
+        snapshot.tip().height,
         fee,
     )?;
     if other_tokens.len() > SWEEP_MAX_TOKENS_PER_BOX {
@@ -423,7 +422,8 @@ pub(crate) async fn retrieve_rewards_impl(
     // Structural + total-size validation (incl. the configured tx-size cap) via a
     // safe-upper-bound signed-shape serialization — so a dry-run rejects exactly
     // what execute/submit would.
-    validate_built_structural(&unsigned_tx, chain, max_tx_size)?;
+    validate_built_structural(&unsigned_tx, snapshot.protocol_params(), max_tx_size)?;
+    drop(snapshot);
 
     let box_count = reward_boxes.len() as u32;
     let box_ids = reward_box_ids;

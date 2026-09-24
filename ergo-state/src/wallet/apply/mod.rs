@@ -307,12 +307,12 @@ fn apply_outputs(
     }
 
     // If this tx touched the wallet (in or out), record it in WALLET_TXS.
-    let wallet_inputs: Vec<[u8; 32]> = tx
-        .inputs
-        .iter()
-        .filter(|id| boxes_tbl.get(**id).ok().flatten().is_some())
-        .copied()
-        .collect();
+    let mut wallet_inputs: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
+    for input in tx.inputs {
+        if boxes_tbl.get(*input)?.is_some() {
+            wallet_inputs.push(*input);
+        }
+    }
     if !wallet_outputs.is_empty() || !wallet_inputs.is_empty() {
         let wt = WalletTransaction {
             tx_id: tx.tx_id,
