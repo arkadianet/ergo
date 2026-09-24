@@ -36,7 +36,7 @@ pub trait ScanRescanMatcher {
     /// For each serialized output box (in block order, across all of the
     /// block's transactions), the ids of registered scans whose rule matches
     /// it. MUST return exactly one result per input box, in the same order.
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>>;
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error>;
 }
 
 /// Service that drives a rescan against a chain-state read interface.
@@ -326,7 +326,7 @@ impl WalletScanService {
                                 box_meta.push((o.box_id, o.output_index));
                             }
                         }
-                        let matches = matcher.match_boxes(&box_refs);
+                        let matches = matcher.match_boxes(&box_refs)?;
                         if matches.len() == box_refs.len() {
                             Some(
                                 box_meta

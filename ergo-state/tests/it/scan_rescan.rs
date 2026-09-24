@@ -26,11 +26,11 @@ struct FakeMatcher {
 }
 
 impl ScanRescanMatcher for FakeMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        boxes
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
+        Ok(boxes
             .iter()
             .map(|b| self.by_box_bytes.get(*b).cloned().unwrap_or_default())
-            .collect()
+            .collect())
     }
 }
 
@@ -258,8 +258,8 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
 /// returns an empty Vec regardless of input count.
 struct BadCountMatcher;
 impl ScanRescanMatcher for BadCountMatcher {
-    fn match_boxes(&self, _boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        Vec::new() // wrong length whenever the block has ≥1 output box
+    fn match_boxes(&self, _boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
+        Ok(Vec::new()) // wrong length whenever the block has ≥1 output box
     }
 }
 
