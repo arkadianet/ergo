@@ -74,6 +74,18 @@ impl NodeMining for Dispatch {
 }
 #[async_trait]
 impl NodeSubmit for Dispatch {
+    fn direct_block_submit_enabled(&self) -> bool {
+        true
+    }
+
+    async fn submit_full_block(
+        &self,
+        _: ergo_api::compat::types::ScalaFullBlock,
+    ) -> Result<String, SubmitError> {
+        self.record();
+        Ok("accepted".into())
+    }
+
     async fn submit_transaction(&self, _: Vec<u8>, _: SubmitMode) -> Result<String, SubmitError> {
         self.record();
         Ok("accepted".into())
@@ -326,6 +338,20 @@ const ROUTES: &[(&str, &str, &str, StatusCode)] = &[
     ("GET", "/mining/rewardPublicKey", "", StatusCode::OK),
 ];
 
+fn privileged_routes() -> Vec<(&'static str, &'static str, String, StatusCode)> {
+    let mut routes: Vec<_> = ROUTES
+        .iter()
+        .map(|&(method, path, body, status)| (method, path, body.to_owned(), status))
+        .collect();
+    routes.push((
+        "POST",
+        "/blocks",
+        String::from_utf8(super::compat_blocks_submit_route::synthetic_block_json()).unwrap(),
+        StatusCode::OK,
+    ));
+    routes
+}
+
 fn request(method: &str, path: &str, body: &str, key: Option<&str>) -> Request<Body> {
     let mut req = Request::builder()
         .method(method)
@@ -341,10 +367,10 @@ fn request(method: &str, path: &str, body: &str, key: Option<&str>) -> Request<B
 
 #[tokio::test]
 async fn privileged_mounts_configured_valid_key_dispatch_once() {
-    for &(method, path, body, expected) in ROUTES {
+    for (method, path, body, expected) in privileged_routes() {
         let dispatch = Arc::new(Dispatch::default());
         let resp = app(true, dispatch.clone())
-            .oneshot(request(method, path, body, Some("hello")))
+            .oneshot(request(method, path, &body, Some("hello")))
             .await
             .unwrap();
         assert_eq!(resp.status(), expected, "{method} {path}");
@@ -356,7 +382,14 @@ async fn privileged_mounts_configured_valid_key_dispatch_once() {
 async fn public_routes_unconfigured_remain_available() {
     let dispatch = Arc::new(Dispatch::default());
     let app = app(false, dispatch.clone());
-    for path in ["/", "/info", "/api/v1/votes", "/swagger", "/swagger/native"] {
+    for path in [
+        "/",
+        "/info",
+        "/blocks",
+        "/api/v1/votes",
+        "/swagger",
+        "/swagger/native",
+    ] {
         let resp = app
             .clone()
             .oneshot(request("GET", path, "", None))
@@ -368,27 +401,42 @@ async fn public_routes_unconfigured_remain_available() {
             resp.status()
         );
     }
-    let resp = app
-        .oneshot(request("POST", "/transactions/bytes", r#""00""#, None))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        dispatch.calls(),
-        1,
-        "public transaction reaches submission boundary"
-    );
+    for (path, body) in [
+        ("/transactions/bytes", r#""00""#),
+        ("/transactions/checkBytes", r#""00""#),
+        (
+            "/transactions",
+            r#"{"inputs":[],"dataInputs":[],"outputs":[]}"#,
+        ),
+        (
+            "/transactions/check",
+            r#"{"inputs":[],"dataInputs":[],"outputs":[]}"#,
+        ),
+    ] {
+        let before = dispatch.calls();
+        let resp = app
+            .clone()
+            .oneshot(request("POST", path, body, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            dispatch.calls(),
+            before + 1,
+            "{path} reaches submission boundary"
+        );
+    }
 }
 
 // ----- error paths -----
 
 #[tokio::test]
 async fn privileged_mounts_unconfigured_deny_without_dispatch() {
-    for &(method, path, body, _) in ROUTES {
+    for (method, path, body, _) in privileged_routes() {
         for key in [None, Some("hello"), Some("wrong")] {
             let dispatch = Arc::new(Dispatch::default());
             let resp = app(false, dispatch.clone())
-                .oneshot(request(method, path, body, key))
+                .oneshot(request(method, path, &body, key))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");
@@ -408,11 +456,11 @@ async fn privileged_mounts_unconfigured_deny_without_dispatch() {
 
 #[tokio::test]
 async fn privileged_mounts_configured_wrong_or_missing_key_deny_without_dispatch() {
-    for &(method, path, body, _) in ROUTES {
+    for (method, path, body, _) in privileged_routes() {
         for key in [None, Some("wrong")] {
             let dispatch = Arc::new(Dispatch::default());
             let resp = app(true, dispatch.clone())
-                .oneshot(request(method, path, body, key))
+                .oneshot(request(method, path, &body, key))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");

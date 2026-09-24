@@ -656,12 +656,12 @@ impl NodeConfig {
             if !addr.ip().is_loopback() && !public_bind {
                 return Err(format!(
                     "[api] bind = {raw:?} is not a loopback address. \
-                     api_key_hash gates /wallet/* and /node/shutdown only; \
-                     /transactions, /blocks, and /api/v1/mempool/{{submit,check}} \
+                     api_key_hash gates privileged routes including POST /blocks; \
+                     /transactions and /api/v1/mempool/{{submit,check}} \
                      remain unauthenticated (matches Scala node behavior). \
                      For remote operator access, bind 127.0.0.1 / ::1 and put a \
                      reverse proxy in front, OR set [api] public_bind = true \
-                     and accept that submission routes are publicly callable."
+                     and accept that transaction submission routes are publicly callable."
                 ));
             }
             Some(addr)

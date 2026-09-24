@@ -54,10 +54,11 @@ Specifics operators should read before deploying:
   "bootstrap complete" on mainnet. The Mode 2 trust anchor is provisional —
   cross-check the installed UTXO root against a known-good reference manifest
   before treating it as authoritative.
-- **REST API authentication** applies only to `/wallet/*` and `/node/shutdown`
-  (Blake2b-256 of the `api_key` header vs `[api.security].api_key_hash`).
-  Read/submit routes stay unauthenticated by design — front the public surface
-  with a reverse proxy if exposing off loopback.
+- **REST API authentication** gates privileged routes, including `POST /blocks`,
+  wallet, scan, mining and operator controls (Blake2b-256 of the `api_key` header
+  vs `[api.security].api_key_hash`). Public reads and transaction submission
+  remain unauthenticated — front the public surface with a reverse proxy if
+  exposing off loopback. See the [route inventory](docs/configuration.md#security-notes-for-the-api).
 
 Configuration enforces four of Scala's five `consistentSettings` rules at load
 time (R1, R2, R3, R5); R4 has no analogue because the node exposes no

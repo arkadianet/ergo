@@ -481,7 +481,23 @@ pub(super) fn compat_read_router(
     FamilyRouter::new(ApiFamily::Scala).merge_documented(router, operations)
 }
 
-pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {
+pub(super) fn compat_write_router(
+    submit: Arc<dyn NodeSubmit>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> FamilyRouter {
+    // Scala BlocksApiRoute.scala:127 requires withAuth for block submission.
+    let blocks = FamilyRouter::new(ApiFamily::Scala)
+        .route(
+            "/blocks",
+            "/blocks",
+            &["post"],
+            post(crate::compat::blocks::submit_handler),
+        )
+        .with_state(submit.clone())
+        .route_layer(axum::middleware::from_fn_with_state(
+            security,
+            crate::auth::require_api_key,
+        ));
     FamilyRouter::new(ApiFamily::Scala)
         .route(
             "/transactions/bytes",
@@ -507,13 +523,8 @@ pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {
             &["post"],
             post(crate::compat::transactions::check_handler),
         )
-        .route(
-            "/blocks",
-            "/blocks",
-            &["post"],
-            post(crate::compat::blocks::submit_handler),
-        )
         .with_state(submit)
+        .merge(blocks)
 }
 
 pub(super) fn wallet_router(

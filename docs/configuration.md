@@ -147,8 +147,8 @@ The API distinguishes public routes from privileged routes:
 | Privileged (require a configured hash and valid `api_key`) | Public (no key required) |
 |---|---|
 | `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
-| `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
-| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}`; `POST /blocks` |
+| `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
+| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
 | v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
 
 The whole wallet, scan and node prefixes are gated, including unknown subpaths;
@@ -156,8 +156,7 @@ other unmatched paths return `404`. Public means no API-key authentication;
 normal validation, subsystem availability and admission policies still apply.
 
 Transaction submission is public in Scala (`TransactionsApiRoute.scala:174-209`).
-This node also keeps block submission public by policy; Scala gates it
-(`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
+Block submission requires an API key, matching Scala (`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
 Scala leaves those four open (`MiningApiRoute.scala:45,77,86,98`).
 
 Consequences:
@@ -171,7 +170,7 @@ Consequences:
   in constant time; a missing/wrong key retains the existing invalid-key response.
 - **`public_bind = true` exposes the submission and read surface to the
   network.** Binding `0.0.0.0` with `public_bind = true` makes
-  transaction submission, block submission, and `/metrics` world-callable.
+  transaction submission and `/metrics` world-callable.
   For remote operator access, prefer binding loopback and fronting the
   node with an authenticated reverse proxy. On a public bind, transaction
   submissions are automatically charged against the shared

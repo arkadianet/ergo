@@ -115,10 +115,10 @@ download_window = 384
 # checkpoint = { height = 0, block_id = "" }
 
 [api]
-# Dashboard, swagger, public reads and tx/block submission work without a key.
+# Dashboard, swagger, public reads and transaction submission work without a key.
 # Privileged routes stay locked: /wallet/*, /scan/*, /api/v1/wallet/*,
 # /node/shutdown, /api/v1/node/shutdown, /peers/connect, POST /api/v1/votes,
-# /mining/* and v1 Operator/Admin routes (accounts, webhooks, operator controls).
+# POST /blocks, /mining/* and v1 Operator/Admin routes (accounts, webhooks, operator controls).
 # To unlock them, generate a random secret and its Blake2b-256 hash:
 #   secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 # Save the secret for the api_key header; set the hash in [api.security]

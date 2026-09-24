@@ -15,9 +15,9 @@
 //!   (`http/api/ApiError.scala:37`).
 //!
 //! Mounted by [`crate::wallet::router_with_security`] and [`crate::server`] around the
-//! privileged subtrees (wallets, scans, admin controls and mining).
+//! privileged routes (wallets, scans, admin controls, mining and block submission).
 //! Without a configured [`ApiSecurity`], they fail closed. Public reads and
-//! transaction/block submissions do not receive the layer.
+//! transaction submissions do not receive the layer.
 //!
 //! **Mounting discipline**: always attach this gate with
 //! `Router::route_layer`, never `Router::layer`. A plain `layer` also

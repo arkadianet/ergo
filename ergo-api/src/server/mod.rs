@@ -811,7 +811,9 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         Some(chain) => {
             let scala = scala_api::compat_read_router(chain, utxo_reads_supported);
             let scala = match submit {
-                Some(submit) => scala.merge(scala_api::compat_write_router(submit)),
+                Some(submit) => {
+                    scala.merge(scala_api::compat_write_router(submit, security.clone()))
+                }
                 None => scala,
             };
             route_registry::merge_family_router(operator, &mut inventory, scala)
