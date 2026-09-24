@@ -17,6 +17,7 @@ pub mod maturity;
 pub mod miner_reward;
 pub mod reader;
 pub mod scan;
+pub mod store;
 pub mod tables;
 pub mod types;
 
@@ -128,6 +129,10 @@ fn read_chain_index_header(db: &Database, height: u32) -> Result<[u8; 32], State
 pub use apply::RescanGuard;
 pub use hydration::{HydrationSource, WalletApplyHook};
 pub use reader::{RewardKeyResolution, WalletReader};
+pub use store::{
+    RedbWalletStore, ScanRegistrySnapshot, StoredScan, WalletRead, WalletStore, WalletStoreError,
+    WalletWrite,
+};
 pub use types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
 
 /// Bundle of wallet-side dependencies threaded through the chain-

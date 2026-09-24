@@ -171,6 +171,8 @@ pub(super) async fn bind(
     // state behind RwLocks; the writer task is a dedicated tokio
     // task receiving commands via a channel.
     let db_arc = store.db_arc();
+    let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
+        Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
     let is_pruned = config.blocks_to_keep != -1;
     // `ChainStateAccessorImpl::tip_height()` now reads the live committed
     // tip from redb per-call (no captured value), so no boot-time tip is
@@ -254,6 +256,7 @@ pub(super) async fn bind(
     let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
         wallet: wallet_state_for_hook,
         db: db_arc.clone(),
+        store: wallet_store,
     });
 
     let Some(bind_addr) = config.api_bind else {

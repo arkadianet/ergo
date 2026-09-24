@@ -104,20 +104,11 @@ pub(crate) async fn status(
         } else {
             String::new()
         };
-        let read_txn = ctx
-            .db
+        let invalidated = ctx
+            .store
             .begin_read()
+            .and_then(|read| read.scan_invalidated())
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let invalidated =
-            match read_txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED) {
-                Ok(table) => table
-                    .get(())
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                    .map(|g| g.value())
-                    .unwrap_or(false),
-                Err(redb::TableError::TableDoesNotExist(_)) => false,
-                Err(e) => return Err(WalletAdminError::Internal(e.to_string())),
-            };
         Ok(WalletStatus {
             is_initialized: !matches!(
                 storage.lock_state(),
@@ -245,7 +236,7 @@ pub(crate) async fn rescan(
     };
     let start_h = from_height.min(tip_h);
     let scan_matcher = if start_h == 0 {
-        match super::scan::build_rescan_matcher(ctx.db) {
+        match super::scan::build_rescan_matcher_from_store(ctx.store.as_ref()) {
             Ok(matcher) => matcher,
             Err(e) => {
                 let _ = reply.send(Err(WalletAdminError::Internal(format!(

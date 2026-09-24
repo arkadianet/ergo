@@ -426,17 +426,10 @@ pub enum StateError {
         #[source]
         source: ergo_validation::ActiveParamsError,
     },
-    /// Wallet apply / rollback hook (called from the chain-apply
-    /// path inside `store/mod.rs`) returned a `redb::Error`. `what`
-    /// names the specific hook (e.g. `"apply hook"`,
-    /// `"rollback"`, `"abort_in_progress"`), `height` is the block
-    /// height where the hook ran, and `source` is the underlying
-    /// redb error. Separate from `Db`/`StorageError` etc. so
-    /// operators can pattern-match wallet-side failures: the
-    /// wallet-apply seam runs in a different write transaction from
-    /// chain state, so a crash between chain commit and the wallet
-    /// write txn leaves `wallet_scan_height < chain_height` and
-    /// requires the rescan-on-restart path to recover.
+    /// Wallet apply / rollback hook failed while the chain and wallet
+    /// shared the same redb write transaction. `what` names the operation,
+    /// `height` is the block height, and `source` is the underlying store
+    /// error. A failure aborts the chain commit as well.
     #[error("wallet {what} at h={height}: {source}")]
     WalletApply {
         what: &'static str,

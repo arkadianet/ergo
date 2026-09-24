@@ -818,20 +818,16 @@ pub trait ChainStateAccessor: Send + Sync {
     /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_signing_context not implemented for this accessor".into(),
-        ))
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Build per-block cost parameters from the active protocol parameters
     /// at the tip.
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_signing_params not implemented for this accessor".into(),
-        ))
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Structural protocol parameters at the tip (min-value-per-byte,
@@ -839,10 +835,8 @@ pub trait ChainStateAccessor: Send + Sync {
     /// the consensus validator's `ProtocolParams`; the wallet runs
     /// `ergo_validation::validate_structural` against these so it never
     /// submits a tx the node would reject (e.g. a dust output).
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_protocol_params not implemented for this accessor".into(),
-        ))
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Look up a full `ErgoBox` from the UTXO set by its 32-byte box ID.
@@ -987,24 +981,21 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, WalletAdminError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.state_context().clone())
-            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, WalletAdminError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.signing_params().clone())
-            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, WalletAdminError> {
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.protocol_params().clone())
-            .map_err(|error| WalletAdminError::Internal(error.to_string()))
     }
 
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
@@ -1033,6 +1024,7 @@ pub struct WalletStateHook {
     /// Shared redb handle — used to read the registered scans for block-apply
     /// matching (the scans live in redb, not `WalletState`).
     pub db: Arc<redb::Database>,
+    pub store: Arc<dyn ergo_state::wallet::WalletStore>,
 }
 
 impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
@@ -1069,18 +1061,14 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // independent of the wallet-pubkey rescan, so (unlike the methods above)
         // it is NOT skipped while a *partial* rescan is in progress. A read error
         // skips scan work for this block (logged) rather than aborting chain apply.
-        use redb::ReadableTableMetadata;
-        let count = self.db.begin_read().ok().and_then(|r| {
-            match r.open_table(ergo_state::wallet::tables::WALLET_SCANS) {
-                Ok(t) => t.len().ok().map(|n| n as usize),
-                Err(redb::TableError::TableDoesNotExist(_)) => Some(0),
-                Err(_) => None,
-            }
-        });
+        let count = self
+            .store
+            .begin_read()
+            .and_then(|read| read.registered_scan_count());
         match count {
-            Some(n) => n,
-            None => {
-                tracing::error!("scan apply: WALLET_SCANS count read failed; skipping this block");
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
                 mark_scan_invalidated(&self.db);
                 0
             }
@@ -1095,7 +1083,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
             return vec![Vec::new(); boxes.len()];
         }
         // Load the registry once for the whole block, then match each box.
-        match commands::scan::load_registry(&self.db) {
+        match commands::scan::load_registry_from_store(self.store.as_ref()) {
             Ok(registry) => boxes
                 .iter()
                 .map(|b| registry.matching_scan_ids(b))
@@ -1182,10 +1170,13 @@ pub async fn run_wallet_writer(
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
 ) {
+    let store: Arc<dyn ergo_state::wallet::WalletStore> =
+        Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
     let ctx = commands::WriterContext {
         storage: &storage,
         state: &state,
         db: &db,
+        store: &store,
         chain: &chain,
         cfg: &cfg,
         submit_handle: &submit_handle,
@@ -1410,6 +1401,7 @@ mod scan_invalidation_tests {
         let hook = WalletStateHook {
             wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
             db: db.clone(),
+            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone())),
         };
         // match_boxes loads the registry first (regardless of the box slice), so
         // the corrupt row trips the Err branch even with no boxes.

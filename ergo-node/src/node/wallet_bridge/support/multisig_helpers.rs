@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use super::hints_codec::tx_hints_bag_to_dto;
 use super::sign_submit::decode_external_secret;
-use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError};
+use crate::node::wallet_bridge::{map_chain_error, ChainStateAccessor, WalletAdminError};
 
 /// Collect all `SigmaBoolean` propositions the registry can prove.
 ///
@@ -302,7 +302,7 @@ pub(crate) async fn generate_commitments_impl(
     let data_boxes =
         resolve_data_inputs_for_unsigned(&unsigned_tx, request.data_inputs.as_deref(), chain)?;
 
-    let state_ctx = chain.build_signing_context()?;
+    let state_ctx = chain.build_signing_context().map_err(map_chain_error)?;
 
     let mut rng = ergo_wallet::proving::randomness::OsRngBackend;
     let tbag = ergo_wallet::proving::commitments::generate_commitments_for_tx(
@@ -353,7 +353,7 @@ pub(crate) async fn extract_hints_impl(
     let boxes_to_spend = resolve_inputs_for_signed(&tx, request.inputs.as_deref(), chain)?;
     let data_boxes = resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), chain)?;
 
-    let state_ctx = chain.build_signing_context()?;
+    let state_ctx = chain.build_signing_context().map_err(map_chain_error)?;
 
     let tbag = ergo_wallet::proving::extract::bag_for_transaction(
         &tx,

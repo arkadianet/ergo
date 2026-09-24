@@ -85,14 +85,26 @@ impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
 /// it can't read — treating the error as "no scans" would clear the flag and
 /// falsely report a healthy wallet while the registry is still corrupt and the
 /// dropped block's scan matches were never rebuilt.
+#[cfg(test)]
 pub(crate) fn build_rescan_matcher(
     db: &redb::Database,
 ) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
     let registry = load_registry(db)?;
+    Ok(build_rescan_matcher_from_registry(registry))
+}
+
+pub(crate) fn build_rescan_matcher_from_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
+    let registry = load_registry_from_store(store)?;
+    Ok(build_rescan_matcher_from_registry(registry))
+}
+
+fn build_rescan_matcher_from_registry(registry: ScanRegistry) -> Option<RescanScanMatcher> {
     if registry.list().is_empty() {
-        Ok(None)
+        None
     } else {
-        Ok(Some(RescanScanMatcher { registry }))
+        Some(RescanScanMatcher { registry })
     }
 }
 
@@ -146,6 +158,22 @@ pub(crate) fn load_registry(db: &redb::Database) -> Result<ScanRegistry, WalletA
     };
 
     Ok(ScanRegistry::from_persisted(scans, last_used))
+}
+
+pub(crate) fn load_registry_from_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<ScanRegistry, WalletAdminError> {
+    let read = store.begin_read().map_err(internal)?;
+    let snapshot = read.scan_registry().map_err(internal)?;
+    let scans = snapshot
+        .scans
+        .into_iter()
+        .map(|scan| serde_json::from_slice::<Scan>(&scan.json).map_err(internal))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ScanRegistry::from_persisted(
+        scans,
+        snapshot.last_used_id.unwrap_or(PAYMENTS_SCAN_ID),
+    ))
 }
 
 pub(crate) async fn register(
@@ -2199,11 +2227,13 @@ mod tests {
             index: parsed.index,
         };
 
+        let db = std::sync::Arc::new(db);
         let hook = crate::node::wallet_bridge::WalletStateHook {
             wallet: std::sync::Arc::new(parking_lot::RwLock::new(
                 ergo_wallet::state::WalletState::empty(false),
             )),
-            db: std::sync::Arc::new(db),
+            db: db.clone(),
+            store: std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db)),
         };
 
         // Baseline (flag clear): the scan is live and the box matches.

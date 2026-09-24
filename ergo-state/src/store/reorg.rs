@@ -16,9 +16,9 @@ use tracing::{info, warn};
 use super::meta::StateMeta;
 use super::undo::undo_log_key;
 use super::{
-    build_wallet_block_txs_from_sections, node_to_bytes, owned_to_block_txs, StateError,
-    StateStore, UndoEntry, AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, NODE_FORMAT_V2,
-    NODE_FORMAT_VERSION_KEY, STATE_META, UNDO_LOG,
+    build_wallet_block_txs_from_sections, node_to_bytes, StateError, StateStore, UndoEntry,
+    AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, NODE_FORMAT_V2, NODE_FORMAT_VERSION_KEY, STATE_META,
+    UNDO_LOG,
 };
 
 impl StateStore {
@@ -444,33 +444,26 @@ impl StateStore {
                 // Re-read block transactions from BLOCK_SECTIONS.
                 match build_wallet_block_txs_from_sections(&self.db, hid) {
                     Ok(Some(owned)) => {
-                        let bound = owned_to_block_txs(&owned);
-                        let btxs = bound.as_block_txs();
-                        crate::wallet::apply::rollback_block_from_wallet(
-                            &write_txn, h, &btxs, guard,
+                        guard.abort_in_progress(&write_txn).map_err(|e| {
+                            StateError::WalletApply {
+                                what: "abort_in_progress",
+                                height: h,
+                                source: Box::new(e),
+                            }
+                        })?;
+                        let mut wallet_store =
+                            crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
+                        crate::wallet::WalletWrite::rollback_block(
+                            &mut wallet_store,
+                            h,
+                            &owned,
+                            false,
                         )
                         .map_err(|e| StateError::WalletApply {
                             what: "rollback",
                             height: h,
-                            source: Box::new(e),
+                            source: Box::new(e.into()),
                         })?;
-                        crate::wallet::maturity::unpromote_matured_boxes(
-                            &write_txn,
-                            h.saturating_sub(1),
-                        )
-                        .map_err(|e| StateError::WalletApply {
-                            what: "maturity unpromote",
-                            height: h,
-                            source: Box::new(e),
-                        })?;
-                        // Scan tracking rolls back in the same write-txn. No-op
-                        // when no scan rows exist for this block's boxes.
-                        crate::wallet::apply::rollback_scans_from_block(&write_txn, &btxs, h)
-                            .map_err(|e| StateError::WalletApply {
-                                what: "scan rollback",
-                                height: h,
-                                source: Box::new(e),
-                            })?;
                     }
                     Ok(None) => {
                         // Block section not available (pruned / not yet downloaded).

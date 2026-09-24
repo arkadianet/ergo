@@ -169,7 +169,7 @@ fn validate_built_structural(
         )));
     }
 
-    let params = chain.build_protocol_params()?;
+    let params = chain.build_protocol_params().map_err(map_chain_error)?;
     ergo_validation::tx::structural::validate_structural(&tx, &params)
         .map_err(|e| WalletAdminError::BadRequest(format!("sweep rejected: {e}")))
 }
