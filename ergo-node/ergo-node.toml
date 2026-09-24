@@ -32,6 +32,7 @@ max_connections = 384
 [api]
 bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
                                  # `public_bind = true` (and read the note below).
+# local_reverse_proxy = false     # set true when a loopback reverse proxy terminates here.
 # allowed_hosts = ["my-node.example.com"]  # extra Host headers to accept, guarding
                                  # against DNS rebinding (default []; loopback binds
                                  # always accept localhost/127.0.0.1/::1/the bind IP).

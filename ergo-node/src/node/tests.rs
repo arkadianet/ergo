@@ -1323,6 +1323,7 @@ fn cfg_with_mode(
         api_bind: None,
         api_key_hash: None,
         api_allowed_hosts: Vec::new(),
+        api_local_reverse_proxy: false,
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config,

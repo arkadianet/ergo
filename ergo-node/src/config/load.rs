@@ -722,6 +722,7 @@ impl NodeConfig {
         // are compared as opaque strings, not `SocketAddr`s, so a typo
         // just never matches rather than failing to parse.
         let api_allowed_hosts = toml_cfg.api.allowed_hosts.clone().unwrap_or_default();
+        let api_local_reverse_proxy = toml_cfg.api.local_reverse_proxy.unwrap_or(false);
 
         // [mempool] — TOML overrides defaults; CLI flags override TOML.
         let def = MempoolConfig::default();
@@ -1125,6 +1126,7 @@ impl NodeConfig {
             api_bind,
             api_key_hash,
             api_allowed_hosts,
+            api_local_reverse_proxy,
             allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
             devnet_max_block_cost,
             mempool_config,

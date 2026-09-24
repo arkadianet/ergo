@@ -128,6 +128,7 @@ beyond loopback.
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
 | `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
+| `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peer sockets no longer receive the v1 rate-limit exemption or admin loopback trust. Client identity still comes only from the peer socket; `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
 ### `[api.security]`
@@ -168,6 +169,10 @@ Consequences:
   `local_reserved_cost_budget` below.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
+- **`local_reverse_proxy` withdraws loopback privilege behind a declared
+  proxy.** Set it to `true` when a reverse proxy terminates on a loopback
+  API bind; the node uses the real peer socket and never trusts
+  `X-Forwarded-For`.
 - **The `Host` header is checked to close the DNS-rebinding read path.**
   A loopback bind (the default) rejects any request whose `Host` header
   isn't `localhost`, `127.0.0.1`, `[::1]`, the literal `bind` address, or
