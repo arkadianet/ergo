@@ -62,10 +62,15 @@ configuration reference is the README and `ergo-node/ergo-node.toml`.
 
 ### API bind defaults to loopback
 
-The REST API binds to `127.0.0.1:9099` by default. A non-loopback `[api]
-bind` is **rejected at config load** unless `[api] public_bind = true` is
-also set — the node refuses to start and prints why. Loopback binds
-(`127.0.0.1`, `[::1]`) need no flag.
+When enabled, the REST API binds to `127.0.0.1:9099` by default. A
+non-loopback `[api] bind` is **rejected at config load** unless `[api]
+public_bind = true` is also set — the node refuses to start and prints
+why. Loopback binds (`127.0.0.1`, `[::1]`) need no flag.
+
+The loader default is loopback; the shipped ready-to-use
+`ergo-node/ergo-node.toml` explicitly sets `[api] disabled = true` and
+contains no credential, so the API is not started until the operator
+enables it and supplies a generated hash.
 
 ```toml
 [api]
