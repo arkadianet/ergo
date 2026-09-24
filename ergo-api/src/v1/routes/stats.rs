@@ -256,6 +256,17 @@ pub async fn supply(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuer
         .await
 }
 
+/// Canonical headers for the inclusive height range `[first, last]`.
+/// `chain_slice` excludes its lower bound (Scala `chainSlice` parity), so the
+/// range is requested from one below `first`.
+fn headers_in_range(
+    chain: &dyn crate::compat::NodeChainQuery,
+    first: u32,
+    last: u32,
+) -> Result<Vec<crate::compat::types::ScalaHeader>, ChainReadError> {
+    chain.try_chain_slice(first.saturating_sub(1), last)
+}
+
 /// Optional timestamps: an absent reader leaves emission math usable, but a failed read fails the request.
 fn timestamps_for(
     state: &V1State,
@@ -266,8 +277,7 @@ fn timestamps_for(
         return Ok(None);
     };
     Ok(Some(
-        chain
-            .try_chain_slice(from, to)?
+        headers_in_range(chain.as_ref(), from, to)?
             .into_iter()
             .map(|h| (h.height, h.timestamp))
             .collect(),
@@ -432,7 +442,7 @@ pub async fn difficulty(
                 return series_response(Vec::<DifficultyPoint>::new(), &window);
             };
             let by_height: std::collections::HashMap<u32, _> =
-                match chain.try_chain_slice(first, last) {
+                match headers_in_range(chain.as_ref(), first, last) {
                     Ok(headers) => headers,
                     Err(error) => return chain_read_failed(error),
                 }
@@ -520,7 +530,7 @@ pub async fn fees(State(state): State<V1State>, V1Query(q): V1Query<SeriesQuery>
                 return series_response(Vec::<FeesPoint>::new(), &window);
             };
             let headers: std::collections::HashMap<u32, (String, u64)> =
-                match chain.try_chain_slice(first, last) {
+                match headers_in_range(chain.as_ref(), first, last) {
                     Ok(headers) => headers,
                     Err(error) => return chain_read_failed(error),
                 }
