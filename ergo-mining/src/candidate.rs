@@ -39,7 +39,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::{read_header, serialize_header_without_pow, Header};
 use ergo_ser::transaction::{bytes_to_sign, write_transaction, Transaction};
 use ergo_validation::active_params::active_params_to_extension_fields;
-use ergo_validation::popow::algos::unpack_interlinks;
+use ergo_validation::popow::algos::{is_genesis, unpack_interlinks};
 use ergo_validation::voting::validation_settings::validation_settings_update_to_extension_fields;
 use ergo_validation::{
     compute_epoch_votes, compute_next_params, validate_transaction_parsed,
@@ -140,7 +140,8 @@ pub struct Candidate {
 
 /// Build a candidate for the next block. Returns `None` if the chain
 /// has not reached a state from which mining is possible (tip below
-/// height 10, or a tip-flip caught by the post-dry-run guard).
+/// height 10, no transactions available, or a tip-flip caught by the
+/// post-dry-run guard).
 ///
 /// **Applied-tip contract:** the caller is expected to have gated on the
 /// mining-started latch (`BestTip::synced`) already, and every consensus input
@@ -373,7 +374,7 @@ pub fn generate_candidate<V: CandidateStateView>(
         // extension is malformed or missing them. Fail the build with a typed error
         // here rather than panicking the engine task downstream (`update_interlinks`
         // asserts a non-empty interlinks vector for a non-genesis header).
-        if *parent_header.parent_id.as_bytes() != [0u8; 32] && parent_interlinks.is_empty() {
+        if !is_genesis(&parent_header) && parent_interlinks.is_empty() {
             return Err(MiningError::Decode {
                 op: "parent_interlinks",
                 reason: "non-genesis parent extension carries no interlinks fields".into(),
@@ -683,6 +684,11 @@ pub fn generate_candidate<V: CandidateStateView>(
     }
     if let Some(cf) = checked_fee {
         checked.push(cf);
+    }
+    // BlockTransactions.scala:42 requires a non-empty section, including after
+    // emission ends. Wait for a rent claim or user transaction before mining.
+    if checked.is_empty() {
+        return Ok(None);
     }
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
 
@@ -1214,13 +1220,13 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn candidate_exhausted_emission_builds_without_emission_transaction() {
+    fn candidate_exhausted_emission_without_transactions_returns_none() {
         let mut header = crate::genesis::parent_header();
         header.height = 14;
         header.n_bits = 16_842_752;
         let view = ExhaustedView { header };
         for mode in [BuildMode::Minimal, BuildMode::Full] {
-            let (candidate, _, _) = generate_candidate(
+            let candidate = generate_candidate(
                 &view,
                 ergo_chain_spec::Network::Mainnet,
                 mode,
@@ -1236,9 +1242,8 @@ mod tests {
                 &[],
                 &mut vec![],
             )
-            .unwrap()
             .unwrap();
-            assert!(candidate.transactions.is_empty());
+            assert!(candidate.is_none());
         }
     }
 

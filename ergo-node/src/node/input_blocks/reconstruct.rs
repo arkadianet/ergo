@@ -214,7 +214,11 @@ pub(in crate::node) fn header_and_extension_handoff(
         .map_err(|e| failed("get_header", e))?;
     match (header_known, peer) {
         (true, _) => {}
-        (false, Some(peer)) => actions.push(Action::ValidateHeader { peer, header_bytes }),
+        (false, Some(peer)) => actions.push(Action::ValidateHeader {
+            peer,
+            modifier_id: header_id,
+            header_bytes,
+        }),
         (false, None) => debug!(
             ordering = %hex::encode(header_id),
             "input_blocks: no peer for the header handoff, header stays unknown"

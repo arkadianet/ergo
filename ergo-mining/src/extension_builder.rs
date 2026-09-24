@@ -308,14 +308,14 @@ mod tests {
 
     /// Build a minimal synthetic parent header with the given height,
     /// version=2, all-zero hashes. Sufficient for `update_interlinks`
-    /// (which only reads `version` via `max_level_of` and `parent_id`
-    /// via `is_genesis`).
+    /// (which only reads `version` via `max_level_of` and height via
+    /// `is_genesis`).
     fn synth_header(height: u32) -> Header {
         use ergo_primitives::digest::{ADDigest, Digest32};
         use ergo_ser::autolykos::AutolykosSolution;
         Header {
             version: 2,
-            parent_id: Digest32::from_bytes([0x42u8; 32]).into(), // non-zero = not genesis
+            parent_id: Digest32::from_bytes([0x42u8; 32]).into(), // height is not 1
             ad_proofs_root: Digest32::from_bytes([0u8; 32]),
             transactions_root: Digest32::from_bytes([0u8; 32]),
             state_root: ADDigest::from_bytes([0u8; 33]),

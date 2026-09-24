@@ -121,7 +121,7 @@ the node binary
   `(Stats, Coverage, Vec<Finding>)` — `src/lib.rs:130`
 - `run_input` (fn) — replay one hex input through all (or one) surfaces — `src/lib.rs:196`
 - `selftest` (fn) — asserts the `catch_unwind` path actually catches and reports a
-  panic as `Outcome::Bug`; run out-of-process by `tests/selftest.rs` — `src/lib.rs:219`
+  panic as `Outcome::Bug`; run out-of-process by `tests/it/selftest.rs` — `src/lib.rs:219`
 - `Surface` (struct) — `name: &'static str` + `run: RunFn`; one named invariant check
   — `src/surfaces.rs:24`
 - `surfaces::registry` (fn) — build the 26-surface hermetic registry, optionally

@@ -110,6 +110,9 @@ pub enum ValidationErr {
     MonetaryFailed,
     /// Cost accumulator exceeded its configured limit.
     CostExceeded,
+    /// Relay policy: an output carries the configured re-emission token.
+    /// This is not a consensus-invalidity verdict.
+    ReemissionPolicy,
     /// Anything else validator-defined. Carries a human string for
     /// logs only; admission does not branch on the payload.
     Other(String),

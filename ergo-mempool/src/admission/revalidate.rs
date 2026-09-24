@@ -141,9 +141,13 @@ pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
     )
 }
 
+/// Relay-policy failures are also evictable, without classifying them as
+/// consensus-invalid or penalizing their sender.
+///
 /// Should the proactive recheck EVICT a pooled tx that failed with `err`?
 ///
-/// [`is_hard_invalid`] plus one case it deliberately excludes:
+/// [`is_hard_invalid`] plus relay-policy failures and the following case it
+/// deliberately excludes:
 /// `UnresolvedDataInput`. Data inputs resolve against the COMMITTED view only
 /// (`revalidate_pooled` passes `CommittedOnly`, never the pool overlay), so
 /// unlike a regular `UnresolvedInput` — which can be a demoted parent still
@@ -166,5 +170,9 @@ pub(crate) fn is_hard_invalid(err: &ValidationErr) -> bool {
 /// blacklisted tx, which is refused for `invalidation_ttl_seconds` (4h) and
 /// stops being fetched over Inv.
 pub(crate) fn is_recheck_evictable(err: &ValidationErr) -> bool {
-    is_hard_invalid(err) || matches!(err, ValidationErr::UnresolvedDataInput)
+    is_hard_invalid(err)
+        || matches!(
+            err,
+            ValidationErr::UnresolvedDataInput | ValidationErr::ReemissionPolicy
+        )
 }

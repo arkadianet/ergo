@@ -7,7 +7,7 @@ use crate::error::WriteError;
 use crate::transaction::{read_transaction, write_transaction, Transaction};
 
 /// A block's transactions section: the header it belongs to plus the
-/// ordered list of transactions. Authenticated by the header's
+/// non-empty ordered list of transactions. Authenticated by the header's
 /// `transactions_root` (Merkle over `transaction_id`s in order).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockTransactions {
@@ -187,6 +187,14 @@ pub fn read_block_transactions_with_group_elements(
         (1, ver_or_count as usize)
     };
 
+    // Scala constructs BlockTransactions during parse (BlockTransactions.scala:204),
+    // whose invariant at line 42 rejects an empty section, including stored data.
+    if count == 0 {
+        return Err(ReadError::InvalidData(
+            "BlockTransactions must contain at least one transaction".to_owned(),
+        ));
+    }
+
     // Scala `BlockTransactionsSerializer.parse` (`BlockTransactions.scala:184-202`)
     // scopes the transaction parse in `VersionContext.withVersions(blockVersion - 1,
     // blockVersion - 1)` ONLY for `blockVersion >= Header.Interpreter60Version (4)`;
@@ -228,6 +236,8 @@ pub fn read_block_transactions_with_group_elements(
         for tx_idx in 0..count {
             let tx = read_transaction(r)
                 .map_err(|e| ReadError::InvalidData(format!("tx[{tx_idx}]: {e}")))?;
+            // Missing inputs/outputs are validation failures (ErgoTransaction.scala:93-94),
+            // not parse failures: committed bytes must reach header invalidation.
             transactions.push(tx);
             per_tx_group_elements.push(r.take_group_elements());
         }
@@ -308,21 +318,6 @@ mod tests {
     // ----- round-trips -----
 
     #[test]
-    fn block_transactions_roundtrip_empty() {
-        let bt = BlockTransactions {
-            header_id: ModifierId::from_bytes([0x11; 32]),
-            transactions: vec![],
-        };
-        let mut w = VlqWriter::new();
-        write_block_transactions(&mut w, &bt).unwrap();
-        let data = w.result();
-        let mut r = VlqReader::new(&data);
-        let decoded = read_block_transactions(&mut r).unwrap();
-        assert!(r.is_empty(), "leftover bytes");
-        assert_eq!(decoded, bt);
-    }
-
-    #[test]
     fn block_transactions_roundtrip_one_tx() {
         let bt = BlockTransactions {
             header_id: ModifierId::from_bytes([0x22; 32]),
@@ -335,6 +330,34 @@ mod tests {
         let decoded = read_block_transactions(&mut r).unwrap();
         assert!(r.is_empty(), "leftover bytes");
         assert_eq!(decoded, bt);
+    }
+
+    #[test]
+    fn block_transactions_missing_inputs_or_outputs_roundtrip() {
+        let mut no_output = make_tx(0xBB);
+        no_output.output_candidates.clear();
+        let no_input = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![make_candidate(1_000_000)],
+        };
+        let empty = Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let bt = BlockTransactions {
+            header_id: ModifierId::from_bytes([0x57; 32]),
+            transactions: vec![empty, no_input, no_output],
+        };
+        let mut w = VlqWriter::new();
+        write_block_transactions(&mut w, &bt).unwrap();
+        let bytes = w.result();
+        let mut reader = VlqReader::new(&bytes);
+        let decoded = read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(decoded, bt);
+        assert_eq!(read_stored_block_transactions(&bytes).unwrap(), bt);
     }
 
     /// Pin Scala-canonical v2 wire format for the new
@@ -406,6 +429,26 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn block_transactions_zero_count_rejected() {
+        for version in [1, 2, 4] {
+            let bt = BlockTransactions {
+                header_id: ModifierId::from_bytes([0x11; 32]),
+                transactions: vec![],
+            };
+            let mut writer = VlqWriter::new();
+            write_block_transactions_with_version(&mut writer, &bt, version).unwrap();
+            let bytes = writer.result();
+            for result in [
+                read_block_transactions(&mut VlqReader::new(&bytes)),
+                read_stored_block_transactions(&bytes),
+            ] {
+                assert!(matches!(result, Err(ReadError::InvalidData(ref message))
+                    if message.contains("must contain at least one transaction")));
+            }
+        }
+    }
 
     /// Build a v2+ marker preamble (header_id + marker only, no count or
     /// txs) so callers can append a hostile or boundary count and assert

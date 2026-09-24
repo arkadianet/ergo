@@ -362,6 +362,9 @@ pub struct ApiBootstrapStatus {
     /// started.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub popow_phase: Option<ApiPopowPhase>,
+    /// Reason NiPoPoW bootstrap was abandoned, when application failed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub popow_abandon_reason: Option<String>,
     /// Number of distinct peers that have responded with a NiPoPoW
     /// proof so far. `0` when popow_phase is absent or before any
     /// inbound proof.
@@ -423,6 +426,8 @@ pub enum ApiPopowPhase {
     /// Proof applied to the chain state — `header_availability` is
     /// now `Sparse`.
     Applied,
+    /// Proof application failed; ordinary header sync may proceed.
+    Abandoned,
     /// Bounded forward catch-up from the proof's anchor height in
     /// flight.
     Catchup,
@@ -546,6 +551,7 @@ mod tests {
             (ApiPopowPhase::Requesting, "requesting"),
             (ApiPopowPhase::QuorumMet, "quorum_met"),
             (ApiPopowPhase::Applied, "applied"),
+            (ApiPopowPhase::Abandoned, "abandoned"),
             (ApiPopowPhase::Catchup, "catchup"),
         ] {
             let got = serde_json::to_value(variant).unwrap();
@@ -559,6 +565,7 @@ mod tests {
             ApiPopowPhase::Requesting,
             ApiPopowPhase::QuorumMet,
             ApiPopowPhase::Applied,
+            ApiPopowPhase::Abandoned,
             ApiPopowPhase::Catchup,
         ] {
             let s = serde_json::to_string(&v).unwrap();
@@ -611,6 +618,7 @@ mod tests {
             trust_check_passed: false,
             started_unix_ms: 0,
             popow_phase,
+            popow_abandon_reason: None,
             popow_providers: None,
             header_availability,
             popow_dense_from_height: None,

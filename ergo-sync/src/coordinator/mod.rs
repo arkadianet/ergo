@@ -58,7 +58,11 @@ pub enum Action {
     NoteDeliveryOutcome { peer: PeerId, succeeded: bool },
     /// A header has been received and should be validated + persisted.
     /// The caller runs PoW check, chain linkage, difficulty adjustment.
-    ValidateHeader { peer: PeerId, header_bytes: Vec<u8> },
+    ValidateHeader {
+        peer: PeerId,
+        modifier_id: [u8; 32],
+        header_bytes: Vec<u8>,
+    },
     /// A block section has been received. Persist it.
     ///
     /// `section_type` is the wire `ModifierTypeId` byte (102 / 104 / 108)

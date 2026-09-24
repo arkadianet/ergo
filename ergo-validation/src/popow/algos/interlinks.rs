@@ -123,7 +123,7 @@ pub fn build_popow_header(
         serialize_batch_merkle_proof, BatchMerkleProof, ProofEntry, Side,
     };
 
-    // Empty interlinks (genesis) → the EMPTY BatchMerkleProof, which
+    // Empty interlinks (height-1 genesis) → the EMPTY BatchMerkleProof, which
     // Scala serializes as 8 zero bytes (two u32 counts), NOT as zero
     // bytes: `proofForInterlinkVector` returns
     // `BatchMerkleProof(Seq.empty, Seq.empty)` (NipopowAlgos.scala:
@@ -132,11 +132,9 @@ pub fn build_popow_header(
     // wire-divergent from Scala (their parser rejects a 0-byte proof
     // blob) -- caught by a live differential run against block h=1.
     if interlinks.is_empty() {
-        // Only genesis legitimately carries no interlinks. A non-genesis
-        // header with an empty vector is corrupt or forged — the empty
-        // BatchMerkleProof verifies vacuously, so without this guard the
-        // malformed PoPowHeader would be served as valid. `is_genesis`
-        // (zero parent_id) is the codebase's own genesis predicate.
+        // Only height 1 legitimately carries no interlinks. A non-genesis
+        // header with an empty vector is corrupt or forged; the generic
+        // verifier rejects its empty proof.
         if !is_genesis(&header) {
             return Err("build_popow_header: empty interlinks vector for a \
                  non-genesis header"
@@ -479,6 +477,13 @@ mod tests {
         // serialized empty BatchMerkleProof), NOT 0 bytes — see the
         // genesis wire-form fix in build_popow_header.
         assert_eq!(p.interlinks_proof, vec![0u8; 8]);
+    }
+
+    #[test]
+    fn build_popow_header_rejects_empty_interlinks_for_height_two_zero_parent() {
+        let mut h2 = header_from_hex(HEIGHT_2_V1_HEX);
+        h2.parent_id = ModifierId::from_bytes([0u8; 32]);
+        assert!(build_popow_header(h2, vec![], &[]).is_err());
     }
 
     #[test]

@@ -121,7 +121,7 @@ fn sigma_value_json(v: &SigmaValue) -> Value {
         // Canonical serialized header bytes — Debug output is not a stable
         // wire shape. (Defensive: consensus rejects Header-typed register /
         // context constants at every version, so real boxes never reach this.)
-        SigmaValue::Header(h) => {
+        SigmaValue::Header(h, _) => {
             let mut w = ergo_primitives::writer::VlqWriter::new();
             match ergo_ser::header::write_header(&mut w, h) {
                 Ok(()) => Value::String(hex::encode(w.result())),

@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask};
 use ergo_mempool::weight;
+use ergo_primitives::digest::blake2b256;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::header::read_header;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::SyncExecutor;
@@ -37,6 +40,74 @@ fn report_sync_boot_failure(
         },
         error,
     );
+}
+
+fn check_configured_genesis(
+    store: &ergo_state::StateBackendKind,
+    genesis_id: Option<[u8; 32]>,
+) -> Result<(), String> {
+    let Some(expected) = genesis_id else {
+        return Ok(());
+    };
+    let chain = store.chain_state_meta();
+    if chain.best_header_height < 1
+        || matches!(
+            chain.header_availability,
+            ergo_state::chain::HeaderAvailability::PoPowSparse { .. }
+        )
+    {
+        return Ok(());
+    }
+    let actual = store
+        .get_header_id_at_height(1)
+        .map_err(|e| format!("boot: failed to read canonical genesis header id: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store has no canonical header at height 1 (best_header_height = {})",
+                chain.best_header_height
+            )
+        })?;
+    if actual != expected {
+        return Err(format!(
+            "boot: configured genesis id mismatch: expected {}, got {}",
+            hex::encode(expected),
+            hex::encode(actual)
+        ));
+    }
+    let bytes = store
+        .get_header(&actual)
+        .map_err(|e| format!("boot: failed to read stored genesis header: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "boot: Dense store is missing stored genesis header {}",
+                hex::encode(actual)
+            )
+        })?;
+    let computed = blake2b256(&bytes);
+    if computed.as_bytes() != &actual {
+        return Err(format!(
+            "boot: stored genesis header hash mismatch: expected {}, got {}",
+            hex::encode(actual),
+            hex::encode(computed.as_bytes())
+        ));
+    }
+    let mut reader = VlqReader::new(&bytes);
+    let header = read_header(&mut reader)
+        .map_err(|e| format!("boot: failed to decode stored genesis header: {e}"))?;
+    if reader.remaining() != 0 {
+        return Err(format!(
+            "boot: stored genesis header has {} trailing bytes",
+            reader.remaining()
+        ));
+    }
+    if header.height != 1 || header.parent_id.as_bytes() != &[0u8; 32] {
+        return Err(format!(
+            "boot: stored genesis header fields mismatch: height={}, parent_id={}",
+            header.height,
+            hex::encode(header.parent_id.as_bytes())
+        ));
+    }
+    Ok(())
 }
 
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
@@ -101,20 +172,8 @@ pub(super) fn setup(
             .block_timing
             .header_freshness_threshold_ms(),
     );
-    // Modes 1/2/3 (UTXO) and Mode 5 (digest-verifier): block application
-    // consumes the ADProofs section — Scala `stateType.requireProofs` is
-    // true for both. UTXO-mode validation verifies the SHIPPED section
-    // against the declared roots at O(block size) (issue #264 fast
-    // path); coordinator `requires_proofs` makes delivery request the
-    // section alongside txs+extension and keeps assembly from signaling
-    // the block complete until it lands. Mode 6 (headers-only) never
-    // applies blocks, so it stays on the two-section path.
-    if !headers_only {
+    if !headers_only && matches!(store, ergo_state::StateBackendKind::Digest(_)) {
         coordinator.set_requires_proofs(true);
-        if let ergo_state::StateBackendKind::Utxo(utxo_store) = store {
-            utxo_store
-                .set_ad_proofs_apply_policy(ergo_state::store::AdProofsApplyPolicy::VerifyShipped);
-        }
     }
     // Operator escape hatch (sibling of ERGO_BAN_HEADERS): force the
     // headers-chain-synced latch at boot so block downloads start even
@@ -219,6 +278,10 @@ pub(super) fn setup(
         ergo_validation::context::ProtocolParams::mainnet_default(),
         config.chain_spec.difficulty.clone(),
     );
+    executor.set_genesis_id(config.genesis_id);
+    if let Err(e) = check_configured_genesis(store, config.genesis_id) {
+        return Err(e.into());
+    }
     executor.set_script_validation_checkpoint(config.script_validation_checkpoint);
     if let Some((h, id)) = config.script_validation_checkpoint {
         info!(
@@ -514,13 +577,13 @@ pub(super) fn setup(
             crate::node::identity::NipopowResumeState::PartialHeaderSync => {
                 // The reducer's PopowBootstrap::new contract is
                 // fresh-only, and `apply_popow_proof` returns
-                // `ApplyPopowProofWrongMode` on a non-fresh
-                // store. Resuming Mode 4 from partial header
+                // `ApplyPopowProofNotFresh` on a Dense store with
+                // an existing header tip. Resuming Mode 4 from partial header
                 // progress needs new machinery on the reducer +
                 // apply path. Until that lands, refuse to boot
                 // rather than arm a reducer whose proof apply
-                // would later trigger sync_tick's terminal
-                // mark_applied and silently abort bootstrap.
+                // would later abandon bootstrap because the
+                // store is not fresh.
                 return Err(Box::new(std::io::Error::other(format!(
                     "boot: NiPoPoW bootstrap cannot resume from partial \
                          header progress (best_header_height = {}, \
@@ -553,4 +616,157 @@ pub(super) fn setup(
         last_seen_active_params,
         last_seen_validation_settings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use ergo_state::chain::HeaderMeta;
+    use ergo_state::store::StateStore;
+    use ergo_state::{DigestStateStore, StateBackendKind};
+
+    fn mainnet_header_bytes(height: u32) -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["height"].as_u64() == Some(u64::from(height)))
+            .unwrap();
+        hex::decode(row["bytes"].as_str().unwrap()).unwrap()
+    }
+
+    fn store_with_genesis_header() -> (tempfile::TempDir, StateStore, [u8; 32]) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let bytes = mainnet_header_bytes(1);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &actual,
+                &bytes,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        (dir, store, actual)
+    }
+
+    #[test]
+    fn configured_genesis_check_validates_stored_header() {
+        let (_dir, store, actual) = store_with_genesis_header();
+        let store = StateBackendKind::Utxo(store);
+
+        assert!(check_configured_genesis(&store, Some(actual)).is_ok());
+        assert!(check_configured_genesis(&store, Some([0x22; 32])).is_err());
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_missing_stored_header() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store.test_remove_header_row_unsafe(&actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("missing stored genesis header"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_stored_hash_mismatch() {
+        let (_dir, mut store, actual) = store_with_genesis_header();
+        store
+            .test_corrupt_header_bytes_unsafe(&actual, b"not a header")
+            .unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("hash mismatch"));
+    }
+
+    #[test]
+    fn configured_genesis_check_rejects_non_genesis_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let bytes = mainnet_header_bytes(2);
+        let mut reader = VlqReader::new(&bytes);
+        let header = read_header(&mut reader).unwrap();
+        let actual = *blake2b256(&bytes).as_bytes();
+        store
+            .store_validated_header(
+                &actual,
+                &bytes,
+                &HeaderMeta {
+                    parent_id: *header.parent_id.as_bytes(),
+                    height: 2,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                None,
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(actual, 2, vec![1])
+            .unwrap();
+        store.test_force_put_header_chain_index(1, &actual).unwrap();
+        let store = StateBackendKind::Utxo(store);
+
+        let err = check_configured_genesis(&store, Some(actual)).unwrap_err();
+        assert!(err.contains("fields mismatch"));
+    }
+
+    #[tokio::test]
+    async fn boot_requires_downloaded_proofs_only_for_digest_state() {
+        for state_type in ["utxo", "digest"] {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("node.toml");
+            std::fs::write(&config_path, format!(
+                "[node]\nstate_type = \"{state_type}\"\n[chain]\nscript_validation_checkpoint_height = 0\n[indexer]\nenabled = false\n[api.security]\napi_key_hash = \"{}\"\n",
+                "42".repeat(32),
+            )).unwrap();
+            let cli = crate::config::Cli::parse_from([
+                "ergo-node",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--data-dir",
+                dir.path().to_str().unwrap(),
+            ]);
+            let config = NodeConfig::load(cli).unwrap();
+            let path = dir.path().join("state.redb");
+            let mut store = if state_type == "utxo" {
+                StateBackendKind::Utxo(StateStore::open(&path).unwrap())
+            } else {
+                StateBackendKind::Digest(
+                    DigestStateStore::open(
+                        &path,
+                        ergo_validation::scala_launch(),
+                        config.chain_spec.voting,
+                        ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network)
+                            .state_digest,
+                    )
+                    .unwrap(),
+                )
+            };
+            let setup = setup(&config, &mut store, 0).unwrap();
+            assert_eq!(setup.coordinator.requires_proofs(), state_type == "digest");
+            if let Some(utxo) = store.as_utxo() {
+                assert_eq!(
+                    utxo.ad_proofs_apply_policy(),
+                    ergo_state::store::AdProofsApplyPolicy::Regenerate
+                );
+            }
+        }
+    }
 }

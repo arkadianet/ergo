@@ -37,7 +37,7 @@ cargo run -p ergo-difftest -- --selftest              # prove the detector has t
 ```
 
 Determinism: a `(seed, iter)` pair reproduces an identical input; every finding
-prints a `--repro <hex>`. `tests/smoke.rs` and `tests/selftest.rs` are the CI
+prints a `--repro <hex>`. `tests/it/smoke.rs` and `tests/it/selftest.rs` are the CI
 regression guards (no `scala-cli` needed).
 
 ## Phase 2 — differential vs the JVM reference (`--oracle`)

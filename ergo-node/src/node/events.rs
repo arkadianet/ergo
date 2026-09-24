@@ -8,7 +8,7 @@ use std::time::Instant;
 use ergo_api::SubmitError;
 use ergo_p2p::handshake::PeerFeature;
 use ergo_p2p::message;
-use ergo_p2p::peer::{Direction, PeerId, SyncVersion};
+use ergo_p2p::peer::{Direction, PeerId, Penalty, SyncVersion};
 use ergo_p2p::peer_manager::ConnectError;
 use ergo_p2p::types::ModifierTypeId;
 use ergo_primitives::reader::VlqReader;
@@ -17,15 +17,14 @@ use ergo_ser::modifier_id::ExpectedSections;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 use ergo_sync::header_proc::HeaderProcessError;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::anchor_map::parse_rest_url;
 use crate::peer_loop::{self, PeerEvent};
 
 use super::{
-    cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer, send_to_peer,
-    try_send_anchor_sync_info, NodeState, PeerRuntime,
+    admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
+    send_to_peer, try_send_anchor_sync_info, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -49,26 +48,44 @@ pub(super) fn handle_event_batch(state: &mut NodeState, events: Vec<PeerEvent>) 
     let mut other: Vec<PeerEvent> = Vec::new();
 
     for ev in events {
-        if let PeerEvent::Message {
-            peer,
-            code,
-            payload,
-        } = &ev
-        {
-            if *code == message::CODE_MODIFIER {
-                // Pre-deserialize so we can route header-Modifiers
-                // to the coalesced path without re-parsing. Tx-typed
-                // Modifiers and parse failures fall through to
-                // individual handle_event dispatch (unchanged
-                // semantics — Tx admission is per-message, parse
-                // failures emit Penalize per-message).
-                if let Ok(mods) = message::deserialize_modifiers(payload) {
-                    if mods.type_id != ModifierTypeId::Transaction.as_byte() {
-                        header_mods.push((*peer, mods));
-                        continue;
-                    }
-                }
+        let is_header_modifier = matches!(
+            &ev,
+            PeerEvent::Message { code, payload, .. }
+                if *code == message::CODE_MODIFIER
+                    && payload.first().copied() == Some(ModifierTypeId::Header.as_byte())
+        );
+        if is_header_modifier {
+            let PeerEvent::Message {
+                peer,
+                code,
+                payload,
+            } = ev
+            else {
+                continue;
+            };
+            if state.peer_manager.get(&peer).is_none() {
+                warn!(peer = %peer, "dropping message from untracked peer");
+                cleanup_disconnected_peer(state, &peer);
+                continue;
             }
+            state.peer_manager.touch(&peer, now);
+            match admit_frame(state, peer, code, &payload, now) {
+                Ok(()) => match message::deserialize_modifiers(&payload) {
+                    Ok(mods) => header_mods.push((peer, mods)),
+                    Err(e) => {
+                        warn!(peer = %peer, error = %e, "bad Modifier");
+                        flush_actions(
+                            state,
+                            vec![Action::Penalize {
+                                peer,
+                                penalty: Penalty::Misbehavior,
+                            }],
+                        );
+                    }
+                },
+                Err(actions) => flush_actions(state, actions),
+            }
+            continue;
         }
         other.push(ev);
     }
@@ -364,6 +381,9 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                     }
                 }
                 Err(e) => {
+                    if state.peer_manager.is_banned(&addr, now) {
+                        super::peer_actions::cleanup_banned_ip(state, addr.ip(), now);
+                    }
                     // After the TcpConnected fix, `UnknownPeer` here
                     // means the peer was evicted between TCP-up and
                     // handshake-bytes-done — typically a stalled
@@ -400,7 +420,8 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 
             let sync_version = SyncVersion::for_peer(&peer_spec.version);
             // 2048: enough for burst of 400 headers × 2 section requests + SyncInfo
-            let (outbound_tx, outbound_rx) = mpsc::channel(2048);
+            let (outbound_tx, outbound_rx) =
+                peer_loop::outbound::channel(peer_loop::outbound::MAX_MESSAGES);
 
             // Hand the per-peer byte counters to the I/O task so it can
             // record post-handshake framed bytes. complete_handshake just
@@ -445,26 +466,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                 "peer connected",
             );
 
-            // Send initial SyncInfo immediately. Step C may swap our
-            // tip-tail for a single anchor ID for REST-capable peers
-            // (see `try_send_anchor_sync_info` for the eligibility
-            // gate); fall back to the standard payload otherwise.
-            // Mark sync_sent in either branch so Lever 1's per-peer
-            // throttle accounts for this send — without it, the next
-            // periodic dispatch would re-send a redundant SyncInfo
-            // ~1s later (the throttle would think no recent send had
-            // happened on this peer).
-            if !try_send_anchor_sync_info(state, &addr, now) {
-                match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
-                    Ok(payload) => {
-                        send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
-                    }
-                    Err(e) => {
-                        warn!(peer = %addr, error = %e, "failed to serialize SyncInfo; skipping send")
-                    }
-                }
-            }
-            state.coordinator.sync_state_mut().mark_sync_sent(addr, now);
+            super::sync_helpers::send_initial_sync_info(state, &addr, sync_version, now);
 
             // Sync-S4: request the peer's known addresses so the dial
             // pool can fill beyond the CLI-seeded peer(s) over time.
@@ -740,6 +742,7 @@ fn inject_local_full_block(
             | HeaderProcessError::EpochContextIncomplete { .. }
             | HeaderProcessError::EpochHeaderMissing { .. }
             | HeaderProcessError::CheckpointMismatch { .. }
+            | HeaderProcessError::GenesisIdMismatch { .. }
             | HeaderProcessError::Validation(_)),
         ) => {
             return Err(SubmitError {

@@ -385,14 +385,18 @@ impl<'a> VlqReader<'a> {
     /// Consume `n` raw bytes and return them as a borrowed slice.
     pub fn get_bytes(&mut self, n: usize) -> Result<&'a [u8], ReadError> {
         self.check_position_limit()?;
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n).ok_or(ReadError::UnexpectedEnd {
+            pos: self.pos,
+            needed: n,
+        })?;
+        if end > self.data.len() {
             return Err(ReadError::UnexpectedEnd {
                 pos: self.pos,
                 needed: n,
             });
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 

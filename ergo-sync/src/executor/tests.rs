@@ -726,6 +726,77 @@ fn far_ahead_orphan_after_header_sync_is_buffered_for_fork_recovery() {
 }
 
 #[test]
+fn batch_validation_rolls_back_hash_matching_malformed_headers() {
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut store = ergo_state::StateBackendKind::Utxo(
+        StateStore::open(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("state.redb")
+                .as_path(),
+        )
+        .unwrap(),
+    );
+    let mut coordinator = SyncCoordinator::new(0);
+    let p = peer(9030);
+    let now = Instant::now();
+    let first_bytes = vec![1];
+    let second_bytes = vec![2];
+    let first_id = *blake2b256(&first_bytes).as_bytes();
+    let second_id = *blake2b256(&second_bytes).as_bytes();
+    assert_ne!(first_id, second_id);
+    coordinator.delivery_mut_for_test().request(
+        p,
+        ergo_p2p::types::ModifierTypeId::Header.as_byte(),
+        &[first_id, second_id],
+        now,
+    );
+    coordinator.delivery_mut_for_test().mark_received(&first_id);
+    coordinator
+        .delivery_mut_for_test()
+        .mark_received(&second_id);
+
+    let actions = executor.execute_all(
+        vec![
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id: first_id,
+                header_bytes: first_bytes,
+            },
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id: second_id,
+                header_bytes: second_bytes,
+            },
+        ],
+        &mut store,
+        &mut coordinator,
+        now,
+        None,
+    );
+
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Penalize { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        coordinator.delivery().status(&first_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert_eq!(
+        coordinator.delivery().status(&second_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+}
+
+#[test]
 fn execute_penalize_returns_penalty() {
     let mut executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),

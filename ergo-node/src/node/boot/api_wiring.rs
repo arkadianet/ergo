@@ -325,6 +325,7 @@ pub(super) async fn bind(
         network: api_info.network.clone(),
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
+        min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
     };
     let scala_compat_bridge_arc = Arc::new(ScalaCompatBridge::new(
         snapshot_publisher.handle(),

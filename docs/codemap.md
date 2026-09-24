@@ -1,6 +1,6 @@
 # Codebase map
 
-A landmark map of the 18-crate workspace (~197K lines of Rust code). Every crate
+A landmark map of the 19-crate workspace (~221K lines of Rust code). Every crate
 has a detailed page under [`codemap/`](./codemap/) — purpose, module-by-module
 responsibilities, key public types/traits/functions, owned invariants, and a
 "start here." This index is the front door: find the crate, then open its page.
@@ -21,6 +21,7 @@ universal edges are omitted below and in the graph for clarity.
 | **L2** Chain & crypto | [ergo-chain-spec](./codemap/ergo-chain-spec.md) | 1.1K | Per-network params: magic, address prefix, difficulty/voting/monetary/reemission schedules, genesis identity, seed peers. Constants + constructors only. |
 | **L2** | [ergo-crypto](./codemap/ergo-crypto.md) | 1.9K | Autolykos v1/v2 PoW verification, difficulty-retarget math (incl. EIP-37), Blake2b256 Merkle trees. No interpreter, no state. |
 | **L3** Interpreter | [ergo-sigma](./codemap/ergo-sigma.md) | 15K | AST-walking ErgoTree evaluator + sigma-protocol verifier (Schnorr DLog, ProveDHTuple, CAND/COR/threshold) with JIT cost. The "may this input be spent?" decision. |
+| **L3** | [ergo-compiler](./codemap/ergo-compiler.md) | 25K | ErgoScript source → ErgoTree compiler, byte-parity with Scala's `SigmaCompiler` (sigma-state 6.0.2): parse → bind → typecheck → emit → graph build → constant segregation → P2S/P2SH addresses. Not a consensus surface — but a wrong tree or address strands funds. |
 | **L4** Consensus rules | [ergo-validation](./codemap/ergo-validation.md) | 15K | Header/block/tx legality: structural/monetary/script/cost checks, voted-param epoch recomputation, NiPoPoW verify. Emits unforgeable `Checked*` proofs. No storage or fork-choice. |
 | **L5** State | [ergo-state](./codemap/ergo-state.md) | 33K | redb-backed authenticated UTXO state: in-memory AVL+ tree, atomic `apply_block`/`rollback_to` (delta-based reorg), header/section chain index, voted params, Mode 2/3 + Mode 5 digest backend. |
 | **L5** Wallet | [ergo-wallet](./codemap/ergo-wallet.md) | 8.9K | HD wallet: BIP39/BIP32, encrypted secret storage (Scala-compatible), native sigma-proof signing (single + multi-sig hints), tx building, box selection. Ships the `ergo-wallet` CLI. |
@@ -45,6 +46,7 @@ graph TD
   chainspec[ergo-chain-spec] --> ser[ergo-ser]
   crypto[ergo-crypto] --> chainspec
   sigma[ergo-sigma] --> crypto
+  compiler[ergo-compiler] --> crypto
   validation[ergo-validation] --> sigma
   validation --> chainspec
   state[ergo-state] --> validation
@@ -65,6 +67,7 @@ graph TD
   indexer --> indexertypes
   restjson[ergo-rest-json] --> ser
   api[ergo-api] --> restjson
+  api --> compiler
   api --> indexertypes
   node[ergo-node] --> api
   node --> sync
@@ -79,6 +82,7 @@ graph TD
 | I'm looking for… | Start in |
 |---|---|
 | A consensus ID or wire format (`header_id`, `tx_id`, `box_id`, `section_id`) | [ergo-ser](./codemap/ergo-ser.md) |
+| Compiling ErgoScript source to a tree / address | [ergo-compiler](./codemap/ergo-compiler.md) |
 | "Is this header / block / tx legal?" | [ergo-validation](./codemap/ergo-validation.md) (+ [ergo-sigma](./codemap/ergo-sigma.md) for the script verdict) |
 | The UTXO set, AVL+ tree, reorgs, persistence | [ergo-state](./codemap/ergo-state.md) |
 | Proof-of-work / difficulty | [ergo-crypto](./codemap/ergo-crypto.md) |

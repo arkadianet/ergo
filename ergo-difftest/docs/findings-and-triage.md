@@ -10,7 +10,7 @@ which-side-is-right call.
 ## What is PROVEN
 
 1. **Generator coverage.** The SER structure-aware generators reach 16/16 declared
-   adversarial features (`cargo test -p ergo-difftest --test gen_coverage`, 9/9),
+   adversarial features (`cargo test -p ergo-difftest --test it gen_coverage`, 9/9),
    honestly `intended_valid`-tagged.
 
 2. **Divergences are real and reproducible.** Re-injecting `relation2-0x85` (#12)

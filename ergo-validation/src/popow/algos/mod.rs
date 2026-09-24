@@ -25,10 +25,10 @@ pub use scoring::{best_arg, best_arg_from_levels, max_level_of, GENESIS_LEVEL};
 
 use ergo_ser::header::Header;
 
-/// Genesis predicate: parent_id is the zero-bytes 32-byte array.
-/// Matches Scala `Header.isGenesis` (`parentId.sameElements(GenesisParentId)`).
-pub(crate) fn is_genesis(header: &Header) -> bool {
-    *header.parent_id.as_bytes() == [0u8; 32]
+/// Genesis predicate: the header height is 1.
+/// Matches Scala `Header.isGenesis` (`height == 1`).
+pub fn is_genesis(header: &Header) -> bool {
+    header.height == 1
 }
 
 /// Header id: Blake2b256 of the canonical serialized bytes. We compute

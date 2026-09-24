@@ -166,6 +166,19 @@ impl Validator for ErgoValidator {
 
         // Resolve inputs against the pool overlay.
         let resolved_inputs = resolve_inputs(&tx, input_view)?;
+        // Scala #2555: only OUTPUTS are filtered. Reward distributions burn
+        // input re-emission tokens and must still reach normal validation.
+        // Emission transactions are assembled directly by miners, not relayed.
+        if cx.rules.reemission.is_some_and(|rules| {
+            tx.output_candidates.iter().any(|out| {
+                out.tokens
+                    .iter()
+                    .any(|token| token.token_id.as_bytes() == &rules.reemission_token_id)
+            })
+        }) {
+            return Err(ValidationErr::ReemissionPolicy);
+        }
+
         // Resolve data inputs against committed UTXO only — never the
         // pool overlay; data inputs cannot reference pending state.
         let resolved_data_inputs = resolve_data_inputs(&tx, data_input_view)?;
@@ -330,7 +343,7 @@ mod tests {
         }
     }
 
-    fn dummy_ctx() -> TransactionContext {
+    pub(super) fn dummy_ctx() -> TransactionContext {
         TransactionContext {
             height: 1000,
             miner_pubkey: [0u8; 33],
@@ -774,3 +787,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod reemission_tests;

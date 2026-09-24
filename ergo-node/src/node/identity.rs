@@ -146,10 +146,10 @@ pub enum NodeMode {
 /// `PartialHeaderSync` is classified but NOT a supported resume
 /// state today: the reducer's constructor at
 /// `ergo-sync/src/popow_bootstrap.rs` is contract-fresh-only, and
-/// `apply_popow_proof` returns `ApplyPopowProofWrongMode` on a
-/// non-fresh store. The boot path refuses to start on this row
+/// `apply_popow_proof` returns `ApplyPopowProofNotFresh` on a Dense
+/// store with an existing header tip. The boot path refuses to start on this row
 /// rather than arming a reducer whose proof apply would later
-/// trigger the sync-tick's terminal mark_applied. Lifting that
+/// abandon bootstrap because the store is not fresh. Lifting that
 /// restriction needs new reducer + apply-path machinery and is
 /// out of scope for the initial Mode 4 envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,11 +1,11 @@
 // Mining section: this node's mining state + the network mining landscape.
 // Always visible — the network panels are meaningful on any node; the
 // "Your node" panel shows an explicit disabled state when identity.mining
-// is false. Heavy series (minerStats / emission / current-epoch headers /
-// recent blocks) refetch only when the full-block tip advances.
+// is false. Network series follow the header tip; recently applied blocks
+// follow the local full-block tip independently while syncing.
 import { api } from './api-client.js';
 import { makeTable } from './table.js';
-import { erg, num, bytes, dur, truncMiddle } from './format.js';
+import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, poolLabel, fetchOwnPk, ownPkHex } from './miners.js';
 
 const EPOCH = 128; // EIP-37 difficulty-adjustment period (blocks)
@@ -21,9 +21,10 @@ let info = null;
 let tip = null;
 let stats = null; // minerStats for the selected window
 let emission = null;
-let diffPoints = null; // difficultyHistory over the current epoch window
 let recentRows = [];
 let lastFetchTip = 0;
+let lastRecentTip = 0;
+let nodeSyncState = null;
 let distWindow = 720;
 
 function el(tag, cls, text) {
@@ -62,6 +63,7 @@ export function mount(elRoot) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Mining</h1>
+        <p class="pg-description">Your mining readiness and the network seen through your node's headers.</p>
         <span class="pg-count micro-label" data-sub></span>
       </div>
     </div>
@@ -82,7 +84,7 @@ export function mount(elRoot) {
         <div class="panel__body" data-dist></div>
       </section>
       <section class="panel mn-full">
-        <div class="panel__head"><h2 class="panel__title">Recent blocks</h2></div>
+        <div class="panel__head"><h2 class="panel__title">Recently applied blocks · local chain</h2></div>
         <div class="panel__body" data-recent></div>
       </section>
     </div>`;
@@ -112,7 +114,7 @@ export function mount(elRoot) {
     els.recent,
     [
       { key: 'height', label: 'Height', width: 90, render: (b) => blockLink(b, num(b.height)), sort: (b) => b.height },
-      { key: 'age', label: 'Age', width: 80, align: 'right', render: (b) => dur(Math.max(0, Math.floor((Date.now() - b.ts_unix_ms) / 1000))), sort: (b) => -b.ts_unix_ms },
+      { key: 'age', label: 'Mined', width: 116, align: 'right', render: (b) => blockTime(b.ts_unix_ms), sort: (b) => -b.ts_unix_ms },
       { key: 'txs', label: 'Txs', width: 60, align: 'right', sort: (b) => b.txs },
       { key: 'size', label: 'Size', width: 80, align: 'right', render: (b) => bytes(b.size_bytes), sort: (b) => b.size_bytes },
       { key: 'miner', label: 'Miner', width: 150, render: (b) => minerNode(b.miner_address, b.miner_pk), sort: (b) => poolLabel(b.miner_address) || b.miner_address || '' },
@@ -165,33 +167,37 @@ export async function onSlow() {
     candidate = null;
   }
 
-  const tipH = tip?.best_full_block?.height ?? 0;
+  // Network statistics are header-based. A historical full-block tip would
+  // show an old block reward alongside today's difficulty while syncing.
+  const tipH = tip?.best_header?.height ?? 0;
   if (tipH && tipH !== lastFetchTip) {
-    lastFetchTip = tipH;
-    // Per-tip refetch: the fold, emission facts, the current epoch's
-    // header timestamps (retarget estimate), and the block list.
-    const epochLen = Math.max(2, (tipH % EPOCH) + 1);
     const w = distWindow;
-    const [s, em, ds, recent] = await Promise.all([
+    const [s, em] = await Promise.all([
       api.minerStats(w),
       api.emissionAt(tipH),
-      api.difficultyHistory(epochLen),
-      api.recentBlocks(32),
     ]);
     // Same window-race guard as refetchStats: don't let a stale-window
     // response (dispatched before a toggle) overwrite the fresh one.
     if (s && w === distWindow) stats = s;
     if (em) emission = em;
-    if (ds?.points) diffPoints = ds.points;
-    if (Array.isArray(recent)) recentRows = recent;
+    if (s && em) lastFetchTip = tipH;
+  }
+  const fullH = tip?.best_full_block?.height ?? 0;
+  if (fullH && fullH !== lastRecentTip) {
+    const recent = await api.recentBlocks(32);
+    if (Array.isArray(recent)) { recentRows = recent; lastRecentTip = fullH; }
   }
   render();
+}
+
+export function onFast({ status }) {
+  if (status) nodeSyncState = status.sync_state;
 }
 
 function render() {
   if (!els) return;
   els.sub.textContent = stats
-    ? `${stats.miners.length} miners · last ${num(stats.blocks)} blocks`
+    ? `${stats.miners.length} miners · ${num(stats.blocks)} headers through height ${num(stats.tip_height)}`
     : '';
 
   // ---- Your node ----
@@ -224,7 +230,12 @@ function render() {
         els.you.append(kvNode('miner pk', truncMiddle(candidate.pk, 10, 8), 'var(--tx3)'));
       }
     } else {
-      els.you.append(kvNode('work', 'no candidate available (node syncing?)', 'var(--yellow)'));
+      els.you.append(kvNode('Work status', nodeSyncState === 'syncing' ? 'Waiting for chain sync' : 'No candidate available', 'var(--yellow)'));
+      if (nodeSyncState === 'syncing') {
+        const syncLink = el('a', 'ex-link', 'View sync progress →');
+        syncLink.href = '#overview';
+        els.you.append(syncLink);
+      }
     }
     if (rewardAddr) {
       const a = el('a', 'ex-link', truncMiddle(rewardAddr, 10, 6));
@@ -255,29 +266,17 @@ function render() {
     // the verbatim string is one row above.
     els.net.append(kvNode('est. network hashrate', hashrate(Number(diffStr) / tgtS)));
   }
-  const tipH = tip?.best_full_block?.height ?? 0;
+  const tipH = tip?.best_header?.height ?? 0;
   if (tipH) {
     const toGo = EPOCH - (tipH % EPOCH);
-    let est = '';
-    if (diffPoints && diffPoints.length >= 2) {
-      // Naive estimate: current-epoch average interval vs target. The real
-      // EIP-37 recalc blends 8 epochs (predictive + classic); this is a
-      // direction/magnitude hint, labeled as an estimate.
-      const n = diffPoints.length;
-      const spanS = (diffPoints[n - 1].timestamp_unix_ms - diffPoints[0].timestamp_unix_ms) / 1000;
-      const avg = spanS / (n - 1);
-      if (avg > 0) {
-        const pct = Math.max(-67, Math.min(200, (tgtS / avg - 1) * 100));
-        est = ` · est. ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
-      }
-    }
-    els.net.append(kvNode('next retarget', `${num(toGo)} blocks (~${dur(Math.round(toGo * tgtS))})${est}`));
+    els.net.append(kvNode('Header height', num(tipH)));
+    els.net.append(kvNode('Next difficulty epoch', `${num(toGo)} blocks · ${dur(Math.round(toGo * tgtS))} at target pace`));
   }
   if (emission) {
     const base = Number(emission.minerReward) / 1e9;
     const re = Number(emission.reemitted || 0) / 1e9;
     els.net.append(
-      kvNode('block reward', re ? `${base} + ${re} ERG (re-emission)` : `${base} ERG`, 'var(--tx2)'),
+      kvNode('Reward at header height', re ? `${base} + ${re} ERG (re-emission)` : `${base} ERG`, 'var(--tx2)'),
     );
     const issued = Number(emission.totalCoinsIssued);
     const remain = Number(emission.totalRemainCoins);
@@ -304,7 +303,7 @@ function render() {
       const bar = el('div', 'mn-bar');
       const fill = el('div', 'mn-bar__fill');
       const pct = total ? (100 * m.count) / total : 0;
-      fill.style.width = `${Math.max(1, pct)}%`;
+      fill.style.width = `${pct}%`;
       bar.append(fill);
       row.append(label, bar, el('span', 'mn-row__count', `${num(m.count)} · ${pct.toFixed(1)}%`));
       els.dist.append(row);

@@ -644,7 +644,7 @@ impl MiningHandle {
 
     /// Borrow the configured mainnet/testnet DifficultyParams the handle
     /// was built with. Mining's submit path forwards this to
-    /// `process_header_cfg` so block-version-aware difficulty
+    /// `process_header_cfg_with_genesis` so block-version-aware difficulty
     /// validation runs against the right network (mainnet uses
     /// EIP-37 / 1024-block epochs, testnet uses 128-block epochs).
     pub fn chain_config(&self) -> &ergo_crypto::difficulty::DifficultyParams {

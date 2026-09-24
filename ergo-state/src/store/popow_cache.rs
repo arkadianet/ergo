@@ -623,14 +623,10 @@ impl StateStore {
 
         // Precondition: apply only runs in Dense mode (the apply
         // path is the WRITER for PoPowSparse — re-apply on an
-        // already-sparse store would clobber). We deliberately do NOT
-        // gate on `best_header_height == 0`: normal header sync may
-        // race ahead between boot and quorum-met, and the apply path
-        // must still run so the chain can jump to the proof's suffix
-        // tip. Any sub-suffix headers accepted by the racing normal
-        // sync are left in HEADERS/HEADER_META (content-addressed,
-        // harmless) but become unreachable via HEADER_CHAIN_INDEX
-        // after this apply rewrites the index to the sparse layout.
+        // already-sparse store would clobber). A Dense store is also
+        // fresh-only: any existing best-header tip is rejected before
+        // the write transaction is opened, so normal header sync racing
+        // ahead of bootstrap cannot be overwritten by the sparse writer.
         if !matches!(
             self.chain_state.header_availability,
             HeaderAvailability::Dense
@@ -660,6 +656,13 @@ impl StateStore {
         if self.chain_state.best_full_block_height > 0 {
             return Err(StateError::ApplyPopowProofRefused {
                 current_full_block_height: self.chain_state.best_full_block_height,
+            });
+        }
+
+        if self.chain_state.best_header_height != 0 {
+            return Err(StateError::ApplyPopowProofNotFresh {
+                current_header_id: self.chain_state.best_header_id,
+                current_header_height: self.chain_state.best_header_height,
             });
         }
 

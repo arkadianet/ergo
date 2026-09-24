@@ -490,3 +490,32 @@ async fn http_post_in_flight_during_shutdown_drains_gracefully() {
         .expect("shutdown task")
         .expect("clean shutdown");
 }
+
+#[tokio::test]
+async fn fee_recommendation_uses_configured_relay_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = make_test_config(tmp.path().to_path_buf());
+    config.mempool_config.min_relay_fee_nano_erg = 2_500_000;
+    let node = spawn_node(config).await;
+    let client = reqwest::Client::new();
+    for size in [0, 100, 250, 98_304] {
+        let fee = client
+            .get(format!(
+                "http://{}/transactions/getFee?waitTime=1&txSize={size}",
+                node.api_addr.unwrap()
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(
+            fee, 2_500_000,
+            "empty-pool estimate must use relay policy, size={size}"
+        );
+    }
+    node.shutdown().await.unwrap();
+}

@@ -126,53 +126,47 @@ fn serialize_nipopow_proof_cap_counts_prefix_and_pad() {
 }
 
 #[test]
-fn deserialize_modifiers_size_check_matches_serializer_accounting() {
-    // Regression for the +4 length-prefix accounting. The
-    // serializer counts `MODIFIER_ID_SIZE + 4 + obj_len` per
-    // entry (`message.rs:118-123`); the deserializer historically
-    // counted only `MODIFIER_ID_SIZE + obj_len`, leaving a
-    // 4-byte-per-entry undercount that let crafted multi-entry
-    // payloads slip past the `MAX_MODIFIER_WITH_RESERVE` guard.
-    //
-    // Directly craft a payload (bypassing the connection-layer
-    // `MAX_PAYLOAD_SIZE` check) with 250 000 zero-length entries
-    // so the corrected accounting (`5 + 250_000 * 36 = 9_000_005`)
-    // exceeds the reserve cap (`8_194_304`) and triggers
-    // `ModifiersTooLarge`. Under the buggy accounting
-    // (`5 + 250_000 * 32 = 8_000_005`) this fits and the payload
-    // would be accepted.
-    let n: u32 = 250_000;
+fn deserialize_modifiers_enforces_byte_reserve_before_reading_payload() {
     let mut w = VlqWriter::new();
     w.put_u8(101);
-    w.put_u32(n);
-    let mut payload = w.result();
-    for _ in 0..n {
-        payload.extend_from_slice(&[0u8; 32]); // id
-        payload.push(0); // VLQ-encoded obj_len = 0
+    w.put_u32(2);
+    w.put_bytes(&[0u8; 32]);
+    w.put_u32(0);
+    w.put_bytes(&[1u8; 32]);
+    w.put_u32((MAX_MODIFIER_WITH_RESERVE - 5 - 2 * MODIFIER_ID_SIZE) as u32);
+    let result = deserialize_modifiers(&w.result());
+    assert!(matches!(result, Err(MessageError::ModifiersTooLarge(_))));
+}
+
+#[test]
+fn deserialize_modifiers_count_boundary() {
+    let mut w = VlqWriter::new();
+    w.put_u8(101);
+    w.put_u32(MAX_MODIFIERS as u32);
+    for _ in 0..MAX_MODIFIERS {
+        w.put_bytes(&[0u8; 32]);
+        w.put_u32(0);
     }
-    let result = deserialize_modifiers(&payload);
-    assert!(
-        matches!(result, Err(MessageError::ModifiersTooLarge(_))),
-        "fixed accounting must reject 250k zero-payload entries, got {result:?}"
-    );
+    let parsed = deserialize_modifiers(&w.result()).unwrap();
+    assert_eq!(parsed.modifiers.len(), MAX_MODIFIERS);
+
+    let mut over = vec![101u8];
+    over.extend_from_slice(&ergo_primitives::vlq::encode_vlq(
+        (MAX_MODIFIERS + 1) as u64,
+    ));
+    assert!(matches!(
+        deserialize_modifiers(&over),
+        Err(MessageError::TooManyModifiers(401))
+    ));
 }
 
 #[test]
 fn deserialize_modifiers_huge_count_does_not_oom() {
-    // type_id (1B) + count = i32::MAX (VLQ) + no entries. Before the cap,
-    // `Vec::with_capacity(count)` reserved ~120 GiB and aborted; the
-    // `min(remaining / MIN_MODIFIER_ENTRY_BYTES)` bound reserves only what
-    // the payload can hold, so this returns a decode error. (The test
-    // reaching its assertion at all is the regression guard.)
-    let mut payload = vec![101u8]; // type_id
+    let mut payload = vec![101u8];
     payload.extend_from_slice(&ergo_primitives::vlq::encode_vlq(i32::MAX as u64));
-    // Pin the failure class to a byte-read error (the loop reached the first
-    // entry and ran out of bytes), NOT a semantic reject. An accidental
-    // "cap became a reject" regression would surface as a different
-    // `MessageError` variant and fail this match — where `is_err()` wouldn't.
     assert!(matches!(
         deserialize_modifiers(&payload),
-        Err(MessageError::Read(_))
+        Err(MessageError::TooManyModifiers(_))
     ));
 }
 

@@ -9,7 +9,7 @@
 use crate::compat::types::{
     ScalaBlacklistedPeers, ScalaBlockSection, ScalaBlockTransactions, ScalaFullBlock, ScalaHeader,
     ScalaInfo, ScalaMerkleProof, ScalaOutput, ScalaPeer, ScalaPeersStatus, ScalaSyncInfoEntry,
-    ScalaTrackInfo, ScalaTransaction,
+    ScalaTrackInfo, ScalaUnconfirmedTransaction,
 };
 use ergo_rest_json::types::{ScalaNipopowProof, ScalaPopowHeader};
 
@@ -317,14 +317,14 @@ pub trait NodeChainQuery: Send + Sync {
     /// honour the same ordering when wiring this trait method.
     /// Default returns empty so legacy bridges (only implementing
     /// `pool_tx_ids`) don't break their handlers.
-    fn pool_txs_paged(&self, _offset: u32, _limit: u32) -> Vec<ScalaTransaction> {
+    fn pool_txs_paged(&self, _offset: u32, _limit: u32) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
     /// `GET /transactions/unconfirmed/byTransactionId/{txId}` — full
     /// `ScalaTransaction` envelope for a single pooled tx. `None` →
     /// 404 with the standard `ApiError` envelope.
-    fn pool_tx_by_id(&self, _tx_id_hex: &str) -> Option<ScalaTransaction> {
+    fn pool_tx_by_id(&self, _tx_id_hex: &str) -> Option<ScalaUnconfirmedTransaction> {
         None
     }
 
@@ -333,7 +333,7 @@ pub trait NodeChainQuery: Send + Sync {
     /// `flatMap(getById)` semantics). Always 200 with a (possibly
     /// empty) JSON array; ids that don't resolve or fail hex parse
     /// are silently skipped.
-    fn pool_txs_by_ids(&self, _tx_ids_hex: &[String]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_ids(&self, _tx_ids_hex: &[String]) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
@@ -359,7 +359,7 @@ pub trait NodeChainQuery: Send + Sync {
     /// Always 200 with a (possibly empty) JSON array; no pagination
     /// (matches Scala's bare-list response for this endpoint). Order
     /// follows the mempool's priority iteration.
-    fn pool_txs_by_ergo_tree(&self, _tree_bytes: &[u8]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_ergo_tree(&self, _tree_bytes: &[u8]) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
@@ -374,7 +374,7 @@ pub trait NodeChainQuery: Send + Sync {
     /// and a caller looking for "this box's existence" would query
     /// `/utxo/byId/{boxId}` for confirmed state. Scala's mempool
     /// reader uses the same input-side scoping.
-    fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
@@ -385,7 +385,7 @@ pub trait NodeChainQuery: Send + Sync {
     /// input — too expensive for a pool overlay); the output-only
     /// match matches Scala's `MempoolReader.getTransactionsByTokenId`
     /// scope.
-    fn pool_txs_by_token_id(&self, _token_id: &[u8; 32]) -> Vec<ScalaTransaction> {
+    fn pool_txs_by_token_id(&self, _token_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
@@ -402,7 +402,7 @@ pub trait NodeChainQuery: Send + Sync {
     fn pool_txs_by_registers(
         &self,
         _registers: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<ScalaTransaction> {
+    ) -> Vec<ScalaUnconfirmedTransaction> {
         Vec::new()
     }
 
