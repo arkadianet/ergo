@@ -11,8 +11,7 @@ use super::super::NodeState;
 /// `ValidationError` / `WrongGenesis` (strong signals of malicious
 /// or misconfigured peers).
 ///
-/// No-op when `popow_bootstrap` is `None` (either feature disabled
-/// or already terminal). Silent drop on decode errors plus a
+/// No-op when bootstrap is disabled or the reducer is terminal. Silent drop on decode errors plus a
 /// telemetry warn; the wire codec is byte-strict, so a parse
 /// failure is either a malicious peer (penalize) or a peer running
 /// an incompatible protocol version (degrade).
@@ -23,7 +22,11 @@ pub(super) fn handle_inbound_popow_proof(
 ) -> Vec<Action> {
     use ergo_validation::popow::NipopowVerificationResult;
 
-    if state.popow_bootstrap.is_none() {
+    if state
+        .popow_bootstrap
+        .as_ref()
+        .is_none_or(|popow| popow.is_terminal())
+    {
         // Either NiPoPoW disabled or reducer already terminal —
         // silently drop. A peer responding late after we've already
         // applied a proof is not misbehavior.

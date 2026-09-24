@@ -7,11 +7,12 @@
 //! 3. Reports when quorum has been reached and the best proof is
 //!    ready to be applied to history.
 //! 4. Becomes terminal after the apply path runs (via
-//!    [`PopowBootstrap::mark_applied`]); subsequent ticks no-op.
+//!    [`PopowBootstrap::mark_applied`] or [`PopowBootstrap::mark_abandoned`]);
+//!    subsequent ticks no-op.
 //!
 //! Lifetime: constructed at node startup when
 //! `[node] nipopow_bootstrap = true` AND the store is fresh
-//! (`best_header_height == 0`). Terminal after `mark_applied` —
+//! (`best_header_height == 0`). Terminal after `mark_applied` or `mark_abandoned` —
 //! restart with a sparse store finds [`PopowBootstrap::is_active`]
 //! returns `false` immediately so the reducer doesn't re-fetch.
 //!
@@ -31,7 +32,7 @@ use ergo_ser::popow_proof::NipopowProof;
 use ergo_validation::popow::{NipopowVerificationResult, NipopowVerifier};
 
 /// State of the NiPoPoW bootstrap discovery + verification loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopowBootstrapState {
     /// Not started — no `GetNipopowProof` sent yet.
     Idle,
@@ -42,6 +43,8 @@ pub enum PopowBootstrapState {
     BestSelected,
     /// `apply_popow_proof` succeeded and committed. Terminal.
     Applied,
+    /// Proof application failed; ordinary header sync may proceed. Terminal.
+    Abandoned { reason: String },
 }
 
 /// State machine for the NiPoPoW bootstrap consume side.
@@ -103,23 +106,34 @@ impl PopowBootstrap {
     /// Current reducer state. Read-only — transitions happen via the
     /// other methods.
     pub fn state(&self) -> PopowBootstrapState {
-        self.state
+        self.state.clone()
     }
 
     /// Whether the reducer should still drive any work this tick.
-    /// Returns `false` once the apply path has completed AND on
+    /// Returns `false` after application or abandonment, and on
     /// restart against a non-empty history (because the persisted
     /// store already reflects the applied proof).
     pub fn is_active(&self, history_is_empty: bool) -> bool {
         if !history_is_empty {
             return false;
         }
-        !matches!(self.state, PopowBootstrapState::Applied)
+        !self.is_terminal()
+    }
+
+    /// Whether bootstrap has finished, successfully or otherwise.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            PopowBootstrapState::Applied | PopowBootstrapState::Abandoned { .. }
+        )
     }
 
     /// Filter `eligible_peers` down to those we have NOT yet sent
     /// `GetNipopowProof` to during this bootstrap.
     pub fn pending_request_peers(&self, eligible_peers: &[PeerId]) -> Vec<PeerId> {
+        if self.is_terminal() {
+            return Vec::new();
+        }
         eligible_peers
             .iter()
             .filter(|p| !self.requested_peers.contains(p))
@@ -130,6 +144,9 @@ impl PopowBootstrap {
     /// Record that we sent `GetNipopowProof` to `peer`. Caller
     /// invokes after a successful send.
     pub fn mark_requested(&mut self, peer: PeerId, now: Instant) {
+        if self.is_terminal() {
+            return;
+        }
         self.requested_peers.insert(peer);
         if self.started_at.is_none() {
             self.started_at = Some(now);
@@ -149,7 +166,8 @@ impl PopowBootstrap {
     /// Hand an inbound proof to the verifier. Returns `Some(result)` with
     /// the verification outcome so the caller can act on it (e.g., penalize
     /// on `ValidationError` or `WrongGenesis`), or `None` when the proof is
-    /// dropped before the verifier because `peer` already contributed one.
+    /// dropped before the verifier because bootstrap is terminal or `peer`
+    /// already contributed one.
     ///
     /// Per-peer dedup (Scala `ErgoNodeViewSynchronizer.scala:1066`): a peer
     /// may contribute at most one proof to the verifier. Without it the
@@ -165,6 +183,9 @@ impl PopowBootstrap {
         peer: PeerId,
         proof: NipopowProof,
     ) -> Option<NipopowVerificationResult> {
+        if self.is_terminal() {
+            return None;
+        }
         // `BTreeSet::insert` returns false when the peer was already present:
         // it has already contributed its one counted proof, so drop this one.
         if !self.seen_providers.insert(peer) {
@@ -225,6 +246,9 @@ impl PopowBootstrap {
     /// * The offending provider stays in `seen_providers`, so it cannot
     ///   re-supply a proof for this bootstrap.
     pub fn reject_best_proof(&mut self) -> Option<PeerId> {
+        if self.is_terminal() {
+            return None;
+        }
         self.verifier.reset();
         self.state = PopowBootstrapState::Requesting;
         self.best_proof_peer.take()
@@ -235,6 +259,11 @@ impl PopowBootstrap {
     /// [`Self::is_active`] returns `false`.
     pub fn mark_applied(&mut self) {
         self.state = PopowBootstrapState::Applied;
+    }
+
+    /// Stop bootstrap without claiming that a proof was applied.
+    pub fn mark_abandoned(&mut self, reason: String) {
+        self.state = PopowBootstrapState::Abandoned { reason };
     }
 
     /// Number of distinct peers that have responded with a proof so
@@ -493,6 +522,26 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn bootstrap_abandoned_preserves_reason_and_stops_work() {
+        let mut b = fresh_bootstrap(1);
+        b.mark_requested(peer(1), Instant::now());
+        b.on_proof_received(peer(1), valid_proof()).unwrap();
+        b.mark_abandoned("store is not fresh".into());
+        b.mark_requested(peer(2), Instant::now());
+        assert!(b.on_proof_received(peer(2), valid_proof()).is_none());
+        assert!(b.reject_best_proof().is_none());
+        assert!(b.pending_request_peers(&[peer(2)]).is_empty());
+        assert!(!b.is_active(true));
+        assert!(!b.quorum_reached());
+        assert_eq!(
+            b.state(),
+            PopowBootstrapState::Abandoned {
+                reason: "store is not fresh".into()
+            }
+        );
+    }
 
     /// Scala parity (ErgoNodeViewSynchronizer.scala:1066 + PopowProcessor
     /// .scala:141): a peer may contribute at most one proof to the verifier.

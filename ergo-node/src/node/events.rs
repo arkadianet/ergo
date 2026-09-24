@@ -448,26 +448,7 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
                 "peer connected",
             );
 
-            // Send initial SyncInfo immediately. Step C may swap our
-            // tip-tail for a single anchor ID for REST-capable peers
-            // (see `try_send_anchor_sync_info` for the eligibility
-            // gate); fall back to the standard payload otherwise.
-            // Mark sync_sent in either branch so Lever 1's per-peer
-            // throttle accounts for this send — without it, the next
-            // periodic dispatch would re-send a redundant SyncInfo
-            // ~1s later (the throttle would think no recent send had
-            // happened on this peer).
-            if !try_send_anchor_sync_info(state, &addr, now) {
-                match ergo_sync::coordinator::build_sync_info_payload(sync_version, &state.store) {
-                    Ok(payload) => {
-                        send_to_peer(state, &addr, message::CODE_SYNC_INFO, payload);
-                    }
-                    Err(e) => {
-                        warn!(peer = %addr, error = %e, "failed to serialize SyncInfo; skipping send")
-                    }
-                }
-            }
-            state.coordinator.sync_state_mut().mark_sync_sent(addr, now);
+            super::sync_helpers::send_initial_sync_info(state, &addr, sync_version, now);
 
             // Sync-S4: request the peer's known addresses so the dial
             // pool can fill beyond the CLI-seeded peer(s) over time.

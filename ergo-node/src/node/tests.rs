@@ -536,7 +536,7 @@ fn request_unknown_type_id_returns_no_action() {
 /// `send_to_peer` both see it. The returned receiver must be held for the
 /// duration of the test, otherwise the outbound channel reads as closed.
 #[must_use]
-fn connect_test_peer(
+pub(super) fn connect_test_peer(
     state: &mut NodeState,
     peer: SocketAddr,
     now: Instant,

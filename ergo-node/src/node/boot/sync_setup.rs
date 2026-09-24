@@ -507,8 +507,8 @@ pub(super) fn setup(
                 // progress needs new machinery on the reducer +
                 // apply path. Until that lands, refuse to boot
                 // rather than arm a reducer whose proof apply
-                // would later trigger sync_tick's terminal
-                // mark_applied and silently abort bootstrap.
+                // would later abandon bootstrap because the
+                // store is not fresh.
                 return Err(Box::new(std::io::Error::other(format!(
                     "boot: NiPoPoW bootstrap cannot resume from partial \
                          header progress (best_header_height = {}, \
