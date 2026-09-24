@@ -148,10 +148,18 @@ fn recover_interrupted_rescan(
     write.commit()
 }
 
+fn recover_wallet_for_boot(store: &dyn ergo_state::wallet::WalletStore) -> Result<(), NodeError> {
+    recover_interrupted_rescan(store)
+        .map_err(|error| format!("wallet boot: failed to mark interrupted rescan: {error}").into())
+}
+
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
-/// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
+/// starts serving. REST bind failure is logged-and-degraded, not fatal — REST is
 /// an operator surface, not a prerequisite for sync/validation availability.
+/// Wallet rescan-recovery failure is fatal: wallet tables share the node's
+/// database, and serving a partially rebuilt scan without durable invalidation
+/// would expose stale wallet data.
 ///
 /// Wallet hydration + the writer task + `live_wallet_hook` are built
 /// UNCONDITIONALLY, before the REST-bind checks below: the wallet apply
@@ -192,9 +200,7 @@ pub(super) async fn bind(
     let db_arc = store.db_arc();
     let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
         Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
-    if let Err(error) = recover_interrupted_rescan(wallet_store.as_ref()) {
-        tracing::warn!(%error, "wallet boot: failed to mark interrupted rescan");
-    }
+    recover_wallet_for_boot(wallet_store.as_ref())?;
     let is_pruned = config.blocks_to_keep != -1;
     // `ChainStateAccessorImpl::tip_height()` now reads the live committed
     // tip from redb per-call (no captured value), so no boot-time tip is
@@ -440,11 +446,57 @@ pub(super) async fn bind(
 
 #[cfg(test)]
 mod tests {
-    use super::recover_interrupted_rescan;
-    use ergo_state::wallet::{RedbWalletStore, RescanState, WalletStore};
+    use super::{recover_interrupted_rescan, recover_wallet_for_boot};
+    use ergo_state::wallet::{
+        RedbWalletStore, RescanState, WalletRead, WalletStore, WalletStoreError, WalletWrite,
+    };
     use std::sync::Arc;
 
+    // ----- helpers -----
+
+    struct WriteFailingStore(RedbWalletStore);
+
+    impl WalletStore for WriteFailingStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.0.begin_read()
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
+        }
+    }
+
     // ----- error paths -----
+
+    #[test]
+    fn wallet_rescan_recovery_failure_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        let store = WriteFailingStore(store);
+        let error = recover_wallet_for_boot(&store).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("wallet boot: failed to mark interrupted rescan"),
+            "{message}"
+        );
+        assert!(
+            message.contains("injected recovery write failure"),
+            "{message}"
+        );
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Running { from_height: 7 }
+        );
+        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
+    }
 
     #[test]
     fn recover_interrupted_rescan_marks_failed_and_invalidated() {
