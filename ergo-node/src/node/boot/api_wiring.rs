@@ -140,6 +140,7 @@ fn recover_interrupted_rescan(
         return Ok(());
     };
     let mut write = store.begin_write()?;
+    write.set_scan_invalidated(true)?;
     write.set_rescan_state(&ergo_state::wallet::RescanState::Failed {
         height: from_height,
         reason: "interrupted by restart".to_string(),
@@ -443,8 +444,10 @@ mod tests {
     use ergo_state::wallet::{RedbWalletStore, RescanState, WalletStore};
     use std::sync::Arc;
 
+    // ----- error paths -----
+
     #[test]
-    fn recover_interrupted_rescan_marks_failed() {
+    fn recover_interrupted_rescan_marks_failed_and_invalidated() {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbWalletStore::new(Arc::new(
             redb::Database::create(dir.path().join("state.redb")).unwrap(),
@@ -457,6 +460,7 @@ mod tests {
 
         recover_interrupted_rescan(&store).unwrap();
 
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
         assert_eq!(
             store.begin_read().unwrap().rescan_state().unwrap(),
             RescanState::Failed {

@@ -37,13 +37,18 @@ impl StateStore {
     /// with the chain-state rollback (both in the same
     /// `persist_rollback` txn). Pass `None, None` from test
     /// harnesses and library callers that do not manage wallet
-    /// state.
+    /// state. A wallet hook without a rescan guard is rejected before mutation.
     pub fn rollback_to(
         &mut self,
         target_height: u32,
         wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
         rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
     ) -> Result<(), StateError> {
+        if wallet_hook.is_some() && rescan_guard.is_none() {
+            return Err(StateError::InvalidPrecondition {
+                what: "wallet rollback requires a rescan guard",
+            });
+        }
         // Capture identity fields before any mutation so the
         // `_failed` event below carries the pre-attempt values,
         // never rebuilt-from-committed values. Depth is

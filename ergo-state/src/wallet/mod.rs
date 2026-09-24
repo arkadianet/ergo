@@ -85,7 +85,7 @@ pub(crate) fn migrate_schema(db: &Arc<Database>) -> Result<(), StateError> {
                 None
             }
             Ok(expected) => Some(expected),
-            Err(error) => {
+            Err(error @ StateError::DbCorruption { .. }) => {
                 tracing::warn!(
                     height,
                     %error,
@@ -94,6 +94,7 @@ pub(crate) fn migrate_schema(db: &Arc<Database>) -> Result<(), StateError> {
                 invalidate = true;
                 None
             }
+            Err(error) => return Err(error),
         },
     };
 
@@ -174,6 +175,9 @@ pub struct WalletWiring<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- happy path -----
+
     #[test]
     fn migrate_schema_fills_legacy_cursor_from_applied_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -212,6 +216,8 @@ mod tests {
             Some(header_id)
         );
     }
+
+    // ----- error paths -----
 
     #[test]
     fn migrate_schema_invalidates_legacy_cursor_without_chain_index() {
@@ -289,5 +295,100 @@ mod tests {
             .get(())
             .unwrap()
             .is_none());
+    }
+    #[test]
+    fn migrate_schema_unreadable_chain_index_preserves_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let wrong_type: redb::TableDefinition<u64, u64> = redb::TableDefinition::new("chain_index");
+        let txn = db.begin_write().unwrap();
+        txn.open_table(wrong_type).unwrap().insert(7, 42).unwrap();
+        txn.open_table(tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .insert((), 7)
+            .unwrap();
+        txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+            .unwrap()
+            .insert((), [0x42; 32])
+            .unwrap();
+        txn.open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), false)
+            .unwrap();
+        txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
+            .unwrap()
+            .insert((), 1)
+            .unwrap();
+        txn.commit().unwrap();
+
+        assert!(matches!(
+            migrate_schema(&db),
+            Err(StateError::TableError(_))
+        ));
+        let txn = db.begin_read().unwrap();
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCAN_HEIGHT)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            7
+        );
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            [0x42; 32]
+        );
+        assert!(!txn
+            .open_table(tables::WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value());
+        assert_eq!(
+            txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .unwrap()
+                .value(),
+            1
+        );
+    }
+
+    #[test]
+    fn migrate_schema_corrupt_chain_index_invalidates_cursor() {
+        // Absent table, absent row, and malformed row are recoverable corruption.
+        for row in [None, Some(Vec::new()), Some(vec![0x42; 31])] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+            let txn = db.begin_write().unwrap();
+            if let Some(bytes) = row {
+                let mut table = txn.open_table(CHAIN_INDEX).unwrap();
+                if !bytes.is_empty() {
+                    table.insert(7, bytes.as_slice()).unwrap();
+                }
+            }
+            txn.open_table(tables::WALLET_SCAN_HEIGHT)
+                .unwrap()
+                .insert((), 7)
+                .unwrap();
+            txn.open_table(tables::WALLET_SCAN_HEADER_ID)
+                .unwrap()
+                .insert((), [0x42; 32])
+                .unwrap();
+            txn.commit().unwrap();
+
+            migrate_schema(&db).unwrap();
+            let read = RedbWalletStore::new(db).begin_read().unwrap();
+            assert!(read.scan_invalidated().unwrap());
+            assert_eq!(read.scan_cursor().unwrap(), None);
+        }
     }
 }

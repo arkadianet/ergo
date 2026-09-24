@@ -246,8 +246,8 @@ impl WalletScanService {
                 let mut txs_tbl = txn.open_table(WALLET_TXS)?;
                 let to_remove: Vec<[u8; 36]> = txs_tbl
                     .iter()?
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                    .collect();
+                    .map(|entry| entry.map(|(k, _)| k.value()))
+                    .collect::<Result<_, _>>()?;
                 for k in to_remove {
                     txs_tbl.remove(k)?;
                 }
@@ -698,6 +698,44 @@ mod tests {
             .value()
     }
 
+    #[derive(Debug)]
+    struct ReadFaultBackend {
+        inner: redb::backends::FileBackend,
+        reads: Arc<std::sync::Mutex<Option<Vec<u64>>>>,
+        fail_offset: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl redb::StorageBackend for ReadFaultBackend {
+        fn len(&self) -> std::io::Result<u64> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+            use std::sync::atomic::Ordering;
+            if let Some(reads) = self.reads.lock().unwrap().as_mut() {
+                reads.push(offset);
+            }
+            if self
+                .fail_offset
+                .compare_exchange(offset, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(std::io::Error::other(
+                    "injected transaction-row read failure",
+                ));
+            }
+            self.inner.read(offset, len)
+        }
+        fn set_len(&self, len: u64) -> std::io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self, eventual: bool) -> std::io::Result<()> {
+            self.inner.sync_data(eventual)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            self.inner.write(offset, data)
+        }
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -728,6 +766,109 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn full_rebuild_unreadable_transaction_row_preserves_original_error() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rescan.redb");
+        let reads = Arc::new(std::sync::Mutex::new(None));
+        let fail_offset = Arc::new(AtomicU64::new(u64::MAX));
+        let db = Arc::new(
+            Database::builder()
+                .set_cache_size(0)
+                .create_with_backend(ReadFaultBackend {
+                    inner: redb::backends::FileBackend::new(
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                    reads: reads.clone(),
+                    fail_offset: fail_offset.clone(),
+                })
+                .unwrap(),
+        );
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(WALLET_TXS).unwrap();
+            for index in 0u32..512 {
+                let mut key = [0; 36];
+                key[..4].copy_from_slice(&index.to_be_bytes());
+                table.insert(key, vec![0; 128]).unwrap();
+            }
+        }
+        // A recovery rescan starts with durable invalidation already set.
+        txn.open_table(WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), true)
+            .unwrap();
+        set_scan_cursor(&txn, 7, Some(&[7; 32])).unwrap();
+        txn.commit().unwrap();
+
+        // Find a leaf-page read caused by advancing the iterator, after its
+        // construction has already loaded the first and last pages.
+        let offset = {
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(WALLET_TXS).unwrap();
+            let iter = table.iter().unwrap();
+            *reads.lock().unwrap() = Some(Vec::new());
+            let mut offset = None;
+            for entry in iter {
+                entry.unwrap();
+                if let Some(first) = reads.lock().unwrap().as_ref().unwrap().first() {
+                    offset = Some(*first);
+                    break;
+                }
+            }
+            *reads.lock().unwrap() = None;
+            offset.expect("transaction rows must span multiple leaf pages")
+        };
+        fail_offset.store(offset, Ordering::SeqCst);
+        let result = WalletScanService::rescan_full_rebuild(
+            &db,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            0,
+            1,
+            |_| Ok(Some(empty_block())),
+            || Ok(1),
+            || false,
+            None,
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(error, RescanError::Storage(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("injected transaction-row read failure"),
+            "{error}"
+        );
+        assert_eq!(
+            fail_offset.load(Ordering::SeqCst),
+            u64::MAX,
+            "fault must fire"
+        );
+        // redb poisons the handle on I/O failure. Reopen to inspect the last
+        // durable commit; the failed clear transaction must not publish rows.
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert!(invalidated(&db));
+        assert_eq!(WalletScanService::current_scan_height(&db).unwrap(), 7);
+        assert_eq!(
+            db.begin_read()
+                .unwrap()
+                .open_table(WALLET_TXS)
+                .unwrap()
+                .iter()
+                .unwrap()
+                .count(),
+            512
+        );
+    }
 
     #[test]
     fn rescan_mid_loop_cancellation_invalidates() {

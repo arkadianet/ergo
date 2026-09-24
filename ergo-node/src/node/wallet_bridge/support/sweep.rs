@@ -323,6 +323,7 @@ pub(crate) async fn retrieve_rewards_impl(
     }
 
     let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let build_tip = snapshot.tip();
 
     // 2. Breakdown via the SHARED obligation (cannot drift from the build below).
     //    Fee floor = max(protocol min, configured relay floor); a sweep below it
@@ -447,6 +448,11 @@ pub(crate) async fn retrieve_rewards_impl(
     // 5. Execute: sign (mandatory self-verify, incl. `verify_reemission_spending`)
     //    then submit.
     let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    if snapshot.tip() != build_tip {
+        return Err(WalletAdminError::StaleChainTip(
+            "committed chain tip changed during reward sweep construction".to_string(),
+        ));
+    }
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
@@ -493,6 +499,85 @@ pub(crate) async fn retrieve_rewards_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::node::wallet_bridge::{ChainSnapshot, ChainStateAccessorImpl, ChainStateError};
+    use ergo_primitives::{digest::ModifierId, reader::VlqReader};
+    use ergo_state::store::{StateError, StateStore};
+    use std::collections::VecDeque;
+
+    // ----- helpers -----
+
+    fn snapshot_store(path: &std::path::Path, height: u32, fork: bool) -> StateStore {
+        let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let mut store = StateStore::open(path).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        for h in 1..=height {
+            let bytes = hex::decode(headers[(h - 1) as usize]["bytes"].as_str().unwrap()).unwrap();
+            let mut header = ergo_ser::header::read_header(&mut VlqReader::new(&bytes)).unwrap();
+            if fork {
+                header.timestamp += 1;
+            }
+            let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+            store.store_header(id.as_bytes(), &bytes).unwrap();
+            let root = store.root_digest();
+            store
+                .apply_block_unchecked_for_test(h, id.as_bytes(), &root, &[])
+                .unwrap();
+        }
+        store
+    }
+
+    struct MovingSweepChain {
+        snapshots: std::sync::Mutex<VecDeque<ChainSnapshot>>,
+        input: ergo_ser::ergo_box::ErgoBox,
+    }
+
+    impl ChainStateAccessor for MovingSweepChain {
+        fn wallet_scan_height(&self) -> Result<u32, StateError> {
+            Ok(1)
+        }
+        fn tip_height(&self) -> Result<u32, StateError> {
+            Ok(1)
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(
+            &self,
+            _: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
+        }
+        fn lookup_utxo(&self, _: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
+            Some(self.input.clone())
+        }
+        fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+            Ok(self
+                .snapshots
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("two sweep snapshots"))
+        }
+    }
+
+    struct NoSubmit;
+
+    #[async_trait::async_trait]
+    impl TxSubmitter for NoSubmit {
+        async fn submit_transaction(
+            &self,
+            _: Vec<u8>,
+        ) -> Result<String, ergo_api::types::SubmitError> {
+            panic!("stale sweep must not be submitted");
+        }
+    }
 
     const REEM: [u8; 32] = [0x11; 32];
     const OTHER: [u8; 32] = [0x22; 32];
@@ -566,6 +651,93 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[tokio::test]
+    async fn sweep_execute_changed_build_tip_refuses_signing() {
+        use ergo_ser::address::NetworkPrefix;
+        use ergo_state::wallet::tables::WALLET_BOXES;
+        use ergo_wallet::{state::WalletState, storage::SecretStorage};
+        // Both a new block and a same-height fork must invalidate the breakdown.
+        for (signing_height, fork) in [(2, false), (1, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let first = snapshot_store(&dir.path().join("first.redb"), 1, false);
+            let second = snapshot_store(&dir.path().join("second.redb"), signing_height, fork);
+            let snapshots = [first, second]
+                .iter()
+                .map(|store| {
+                    ChainStateAccessorImpl::new(store.db_arc(), false, None)
+                        .chain_snapshot()
+                        .unwrap()
+                })
+                .collect();
+            let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+                "../../../../../test-vectors/mainnet/transactions_1_10.json"
+            ))
+            .unwrap();
+            let bytes = hex::decode(txs[0]["bytes"].as_str().unwrap()).unwrap();
+            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+            let input = ergo_ser::ergo_box::ErgoBox {
+                candidate: tx.output_candidates[1].clone(),
+                transaction_id: ModifierId::from_bytes(
+                    hex::decode(txs[0]["id"].as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                index: 1,
+            };
+            let mut reward = reward_box(input.candidate.value, vec![]);
+            reward.box_id = *input.box_id().unwrap().as_bytes();
+            let chain = MovingSweepChain {
+                snapshots: std::sync::Mutex::new(snapshots),
+                input,
+            };
+            let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+            let mut storage = SecretStorage::open(dir.path().join("secrets"));
+            storage
+                .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "test", "")
+                .unwrap();
+            let mut state = WalletState::empty(false);
+            crate::wallet_boot::WalletBootService::unlock_and_sync(
+                &mut storage,
+                &mut state,
+                &db,
+                NetworkPrefix::Mainnet,
+                "test",
+            )
+            .unwrap();
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(WALLET_BOXES)
+                .unwrap()
+                .insert(reward.box_id, bincode::serialize(&reward).unwrap())
+                .unwrap();
+            write.commit().unwrap();
+
+            let result = retrieve_rewards_impl(
+                None,
+                None,
+                MIN_FEE,
+                100_000,
+                None,
+                false,
+                &RwLock::new(storage),
+                &RwLock::new(state),
+                &db,
+                &chain,
+                &NoSubmit,
+                &ergo_api::NoopMempoolView::new(),
+                NetworkPrefix::Mainnet,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(WalletAdminError::StaleChainTip(_))),
+                "expected stale tip, got {:?}",
+                result.err()
+            );
+            assert!(chain.snapshots.lock().unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn insufficient_when_gross_below_fee_plus_reemission() {
