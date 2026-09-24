@@ -3595,7 +3595,11 @@ fn coalesced_over_throttle_header_is_penalized_without_validation() {
     let now = Instant::now();
     let _rx = connect_test_peer(&mut state, peer, now);
     let rejected_id = mid(1);
-    let admitted_id = mid(2);
+    // A real header: admission checks that the bytes hash to the requested
+    // id, and a header that then fails validation has its delivery rolled
+    // back, so only a genuine header stays `Received`.
+    let admitted_bytes = hex::decode(POPOW_GENESIS_HEX).unwrap();
+    let admitted_id = *ergo_primitives::digest::blake2b256(&admitted_bytes).as_bytes();
     let rejected_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::Header.as_byte(),
         modifiers: vec![(rejected_id, vec![0u8; 1024])],
@@ -3603,7 +3607,7 @@ fn coalesced_over_throttle_header_is_penalized_without_validation() {
     .unwrap();
     let admitted_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
         type_id: ModifierTypeId::Header.as_byte(),
-        modifiers: vec![(admitted_id, vec![0u8; 1])],
+        modifiers: vec![(admitted_id, admitted_bytes)],
     })
     .unwrap();
     let admitted_frame_bytes = (admitted_payload.len() + 9) as u64;
