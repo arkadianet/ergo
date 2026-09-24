@@ -2178,6 +2178,65 @@ mod tests {
     }
 
     #[test]
+    fn rescan_matcher_rejects_unparseable_box_and_invalidates_rescan() {
+        use ergo_state::wallet::scan::{
+            OwnedBlockOutput, RescanBlock, RescanTx, ScanRescanMatcher, WalletScanService,
+        };
+        use std::sync::Arc;
+
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let matcher = build_rescan_matcher(&db).unwrap().unwrap();
+        let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
+
+        assert!(matcher.match_boxes(&[bad]).is_err());
+
+        let block = RescanBlock {
+            block_id: [0xE1; 32],
+            txs: vec![RescanTx {
+                tx_id: [0x01; 32],
+                inputs: vec![],
+                outputs: vec![OwnedBlockOutput {
+                    box_id: [0xA1; 32],
+                    output_index: 0,
+                    ergo_tree_bytes: vec![0x00],
+                    value: 1_000_000,
+                    assets: vec![],
+                    miner_reward_pubkey: None,
+                    box_bytes: bad.to_vec(),
+                }],
+            }],
+        };
+        let db = Arc::new(db);
+        let read_block = move |h: u32| -> Result<
+            Option<RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > { Ok((h == 1).then_some(block.clone())) };
+
+        let result = WalletScanService::rescan_full_rebuild(
+            &db,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeMap::new(),
+            0,
+            1,
+            read_block,
+            || Ok(1),
+            || false,
+            Some(&matcher),
+        );
+
+        assert!(result.is_err());
+        let txn = db.begin_read().unwrap();
+        let table = txn
+            .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+            .unwrap();
+        assert_eq!(
+            table.get(()).unwrap().map(|value| value.value()),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn build_rescan_matcher_errors_on_unreadable_registry() {
         // A corrupt WALLET_SCANS row makes load_registry fail. build_rescan_matcher
         // must surface that as Err (not collapse to Ok(None)) so the rescan command

@@ -893,6 +893,7 @@ fn apply_one_block(
         parent,
         utxo: store,
         params,
+        rule_306_max_block_size: params.max_block_size,
         voting_length: 1024,
         votes_unknown_rule_disabled: false,
         parent_extension: None,

@@ -781,23 +781,6 @@ pub trait ChainStateAccessor: Send + Sync {
         Option<ergo_state::wallet::scan::RescanBlock>,
         ergo_state::wallet::scan::RescanReadError,
     >;
-    /// True when `read_block_at` can return real block data. Distinct from
-    /// `is_pruned()` (which gates `/wallet/restore`) — this gates
-    /// `/wallet/rescan`. When false, rescan is refused before touching any
-    /// wallet state, preventing the destructive clear-then-skip sequence.
-    /// Default impl treats a genesis-only tip as supported; otherwise it
-    /// probes height one. Overrides may avoid the probe for efficiency.
-    fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
-        match self.tip_height() {
-            Ok(0) => Ok(true),
-            Ok(_) => Ok(self.read_block_at(1)?.is_some()),
-            Err(error) => Err(ergo_state::wallet::scan::RescanReadError::Storage {
-                height: 0,
-                source: error,
-            }),
-        }
-    }
-
     fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
         Err(ChainStateError::Unsupported)
     }
@@ -820,7 +803,6 @@ pub trait ChainStateAccessor: Send + Sync {
             actual_id: hex::encode(actual.header_id),
         })
     }
-
     /// Build the blockchain state context needed for signing: last ≤10
     /// applied headers + candidate pre-header + previous state digest.
     /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
@@ -960,7 +942,6 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
                         value: o.value,
                         assets: o.assets,
                         miner_reward_pubkey: o.miner_reward_pubkey,
-                        // Carried for the rescan scan-matcher + ScanTrackedBox.
                         box_bytes: o.box_bytes,
                     })
                     .collect(),
@@ -1194,6 +1175,9 @@ pub async fn run_wallet_writer(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
+        let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
+            continue;
+        };
         match cmd {
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
@@ -1362,6 +1346,7 @@ pub async fn run_wallet_writer(
 // `commands::WriterContext` plus the per-command params +
 // reply oneshot.
 mod commands;
+mod scan_guard;
 
 mod support;
 #[cfg(test)]
@@ -1417,5 +1402,48 @@ mod scan_invalidation_tests {
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
         );
+    }
+
+    #[test]
+    fn chain_tip_no_committed_chain_returns_zero() {
+        let (_d, db) = temp_db();
+        let accessor = ChainStateAccessorImpl::new(db, false, None);
+        use tracing_subscriber::prelude::*;
+        struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(accessor.tip_height().unwrap(), 0);
+        });
+        assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn production_chain_access_propagates_database_errors() {
+        let (_d, db) = temp_db();
+        let state_meta: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_state_meta");
+        let chain_index: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_index");
+        {
+            let w = db.begin_write().unwrap();
+            w.open_table(state_meta).unwrap().insert(1, 1).unwrap();
+            w.open_table(chain_index).unwrap().insert(1, 1).unwrap();
+            w.commit().unwrap();
+        }
+        let accessor = ChainStateAccessorImpl::new(db, false, None);
+        assert!(accessor.tip_height().is_err());
+        assert!(accessor.read_block_at(1).is_err());
     }
 }

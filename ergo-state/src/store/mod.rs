@@ -1135,11 +1135,11 @@ impl StateStore {
     ///    `apply_popow_proof` writes; `HEADER_CHAIN_INDEX` would
     ///    miss the sparse prefix that real Mode 4 anchors fall
     ///    in).
-    /// 5. The reconstructed tree's root_label must equal the
-    ///    first 32 bytes of `expected_state_root` (defense-in-
+    /// 5. The reconstructed tree's full 33-byte ADDigest (root label
+    ///    plus height) must equal `expected_state_root` (defense-in-
     ///    depth — the 2g trust check already enforced this against
-    ///    the header chain, but a fresh check here protects
-    ///    against a state-machine bug between 2g and 2i).
+    ///    the header chain, but a fresh check here protects against a
+    ///    state-machine bug between 2g and 2i).
     ///
     /// Caller invariant NOT runtime-enforced (deferred to Phase 5
     /// boot-consistency check): `snapshot_height` must be aligned
@@ -1252,13 +1252,12 @@ impl StateStore {
         }
 
         // 2. Defense-in-depth root check.
-        let expected_root_prefix: [u8; 32] = expected_state_root.as_bytes()[..32]
-            .try_into()
-            .expect("ADDigest prefix is always 32 bytes");
-        if reconstructed.root_label.as_bytes() != &expected_root_prefix {
+        let reconstructed_state_root =
+            crate::avl::digest::root_digest(&reconstructed.root_label, reconstructed.tree_height);
+        if reconstructed_state_root != *expected_state_root {
             return Err(StateError::InstallSnapshotRootMismatch {
-                computed: hex::encode(reconstructed.root_label.as_bytes()),
-                expected: hex::encode(expected_root_prefix),
+                computed: hex::encode(reconstructed_state_root.as_bytes()),
+                expected: hex::encode(expected_state_root.as_bytes()),
             });
         }
 
@@ -2700,11 +2699,12 @@ impl StateStore {
     /// security argument lives one layer up.
     ///
     /// Precondition: the store is in `HeaderAvailability::Dense` mode
-    /// with `best_header_height == 0` (fresh node). Calling this on
-    /// a node that already has chain state returns
-    /// `StateError::ApplyPopowProofWrongMode` rather than
-    /// overwriting; the re-bootstrap case is operator-driven (wipe
-    /// data_dir).
+    /// with `best_header_height == 0` (fresh node). A Dense store with
+    /// an existing header tip returns `StateError::ApplyPopowProofNotFresh`;
+    /// a non-Dense store returns `StateError::ApplyPopowProofWrongMode`,
+    /// and a store with full-block state returns
+    /// `StateError::ApplyPopowProofRefused`. The re-bootstrap case is
+    /// operator-driven (wipe data_dir).
     ///
     /// Does NOT touch `CHAIN_INDEX` (full-block index) or
     /// `best_full_block_*`. The Mode 2 snapshot bootstrap remains

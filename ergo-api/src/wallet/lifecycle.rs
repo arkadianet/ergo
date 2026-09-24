@@ -35,6 +35,7 @@ pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_jso
         E::StaleChainTip(_) => (StatusCode::CONFLICT, "stale_chain_tip"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+        E::ScanInvalidated => (StatusCode::CONFLICT, "scan_invalidated"),
         // Native-only typed variants: never constructed on the Scala-compat path
         // (the compat bridge commands produce only the variants above). Handled
         // here solely to keep this match exhaustive — the native surface maps
@@ -228,5 +229,22 @@ mod tests {
         let (status, body) = map_err(E::Internal("writer task gone".into()));
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.0["reason"], "internal");
+    }
+
+    #[test]
+    fn wallet_scan_invalidated_maps_to_conflict_with_recovery_detail() {
+        let (status, axum::Json(body)) = map_err(crate::wallet::WalletAdminError::ScanInvalidated);
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body = serde_json::to_value(body).unwrap();
+        assert_eq!(body["reason"], "scan_invalidated");
+        assert!(body["detail"].as_str().unwrap().contains("fromHeight=0"));
+    }
+
+    #[test]
+    fn rescan_preflight_unavailable_maps_to_conflict() {
+        let (status, _) = map_err(crate::wallet::WalletAdminError::RescanUnavailable(
+            "chain block-read history is unavailable before height 1".to_string(),
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 }

@@ -492,6 +492,9 @@ pub enum WalletAdminError {
     /// Rescan requested on a backend that cannot replay blocks. Native 409.
     #[error("rescan unavailable: {0}")]
     RescanUnavailable(String),
+    /// Wallet history is incomplete; only a full replay can restore it.
+    #[error("wallet scan invalidated — run a full rescan (fromHeight=0)")]
+    ScanInvalidated,
     /// Sensitive op disabled by `[wallet] expose_private_keys = false`. Native 403.
     #[error("sensitive operation disabled")]
     SensitiveOpDisabled,

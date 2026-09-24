@@ -66,9 +66,13 @@ pub enum ManifestVerifyError {
         expected_manifest_id: [u8; 32],
         actual_state_root_prefix: [u8; 32],
     },
+    HeightMismatch {
+        manifest_height: u8,
+        state_root_height: u8,
+    },
 }
 
-/// Trust-check a `manifest_id` against a header's `state_root`.
+/// Trust-check a manifest root against a header's `state_root`.
 ///
 /// Contract: the header MUST have been fetched from the canonical
 /// best-header chain at the snapshot height (the caller is
@@ -76,24 +80,21 @@ pub enum ManifestVerifyError {
 /// the chain index). On a reorg between selection and verification
 /// the caller must re-fetch and re-verify.
 ///
-/// Comparison rule: `manifest_id == state_root.as_bytes()[..32]`.
-/// `ADDigest` is 33 bytes (32-byte AVL+ root label + 1-byte tree
-/// height); we compare only the first 32 against the snapshot
-/// codec's manifest_id (which is the root label by construction —
-/// see `SnapshotServer::build` in `ergo-state`).
-///
-/// **Oracle-pinned:** the prefix-32 rule is confirmed against a
-/// Scala-produced manifest + header pair
-/// (`test-vectors/testnet/utxo_snapshot_manifest_522239.json`, captured
-/// from a Scala 6.0.3 testnet node with
-/// `scripts/capture-utxo-manifest.sh`): the advertised `manifestId` is
-/// byte-for-byte the first 32 bytes of the header `stateRoot` at the
-/// same height. `manifest_prefix32_rule_matches_scala_manifest` in this
-/// module's oracle-parity section pins it.
+/// The 32-byte manifest ID is compared with the first 32 bytes of
+/// `state_root`, and the manifest-declared AVL+ height is compared
+/// with the trailing height byte of the 33-byte `ADDigest`.
 pub fn verify_manifest_against_state_root(
     manifest_id: &[u8; 32],
+    manifest_height: u8,
     state_root: &ADDigest,
 ) -> Result<(), ManifestVerifyError> {
+    let state_root_height = state_root.tree_height_byte();
+    if manifest_height != state_root_height {
+        return Err(ManifestVerifyError::HeightMismatch {
+            manifest_height,
+            state_root_height,
+        });
+    }
     let prefix = &state_root.as_bytes()[..32];
     if prefix == manifest_id {
         Ok(())

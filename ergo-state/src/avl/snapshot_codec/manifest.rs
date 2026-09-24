@@ -126,6 +126,10 @@ pub fn serialize_manifest(tree: &AvlTree, manifest_depth: u8) -> Result<Vec<u8>,
     Ok(out)
 }
 
+pub fn manifest_tree_height(manifest_bytes: &[u8]) -> Result<u8, StateError> {
+    Ok(parse_manifest_header(manifest_bytes)?.0)
+}
+
 /// Internal recursive walker for [`serialize_manifest`]. Caller is
 /// responsible for writing the rootHeight + manifestDepth header
 /// bytes; this function only writes node bodies.
@@ -446,7 +450,7 @@ pub fn reconstruct_tree(
         // that the chunk's internal metadata (separator keys, cached child
         // labels) is structurally faithful — a per-chunk failure gives a
         // precise error before the whole-tree pass below.
-        let (actual_label, _) = validate_and_recompute_label(&nodes, new_root_idx, 0)?;
+        let (actual_label, _, _) = validate_and_recompute_label(&nodes, new_root_idx, 0)?;
         if actual_label != subtree_id {
             return Err(StateError::Serialization(format!(
                 "snapshot codec: chunk for subtree {} has actual root label {} \
@@ -478,7 +482,13 @@ pub fn reconstruct_tree(
     // Final pass: recompute the root label from the fully-spliced arena and
     // validate every internal node's separator key + cached child labels
     // across the whole tree (covers manifest-level nodes and chunk internals).
-    let (root_label, _) = validate_and_recompute_label(&nodes, 0, 0)?;
+    let (root_label, _, computed_tree_height) = validate_and_recompute_label(&nodes, 0, 0)?;
+    if computed_tree_height != tree_height {
+        return Err(StateError::Serialization(format!(
+            "snapshot codec: computed graph height {computed_tree_height} does not match \
+             manifest-declared tree height {tree_height}"
+        )));
+    }
 
     Ok(ReconstructedTree {
         nodes,
@@ -718,8 +728,8 @@ fn parse_chunk_walk(
 }
 
 /// Recompute a subtree's label AND validate the structural metadata that
-/// the root label alone does not commit. Returns `(label, min_leaf_key)`
-/// where `min_leaf_key` is the leftmost leaf key of the subtree.
+/// the root label alone does not commit. Returns `(label, min_leaf_key,
+/// tree_height)`.
 ///
 /// The AVL+ root label is a Merkle hash over `balance` + child labels +
 /// leaf `(key, value, next_key)` — it does **not** depend on an internal
@@ -738,7 +748,7 @@ fn validate_and_recompute_label(
     nodes: &[ReconstructedNode],
     idx: usize,
     depth: usize,
-) -> Result<(Digest32, [u8; 32]), StateError> {
+) -> Result<(Digest32, [u8; 32], u8), StateError> {
     if depth > MAX_RECONSTRUCT_DEPTH {
         return Err(StateError::Serialization(format!(
             "snapshot codec: label-validation recursion exceeds maximum {MAX_RECONSTRUCT_DEPTH} \
@@ -755,7 +765,11 @@ fn validate_and_recompute_label(
             key,
             value,
             next_key,
-        } => Ok((crate::avl::digest::leaf_label(key, value, next_key), *key)),
+        } => Ok((
+            crate::avl::digest::leaf_label(key, value, next_key),
+            *key,
+            0,
+        )),
         ReconstructedNode::Internal {
             key,
             balance,
@@ -764,8 +778,9 @@ fn validate_and_recompute_label(
             left_label,
             right_label,
         } => {
-            let (l_label, l_min) = validate_and_recompute_label(nodes, *left, depth + 1)?;
-            let (r_label, r_min) = validate_and_recompute_label(nodes, *right, depth + 1)?;
+            let (l_label, l_min, l_height) = validate_and_recompute_label(nodes, *left, depth + 1)?;
+            let (r_label, r_min, r_height) =
+                validate_and_recompute_label(nodes, *right, depth + 1)?;
             // Cached child labels must equal the recomputed child labels.
             if &l_label != left_label {
                 return Err(StateError::Serialization(format!(
@@ -794,8 +809,10 @@ fn validate_and_recompute_label(
                 )));
             }
             let label = crate::avl::digest::internal_label(*balance, &l_label, &r_label);
-            // The subtree's minimum leaf key is the left subtree's minimum.
-            Ok((label, l_min))
+            let tree_height = l_height.max(r_height).checked_add(1).ok_or_else(|| {
+                StateError::Serialization("snapshot codec: computed graph height overflow".into())
+            })?;
+            Ok((label, l_min, tree_height))
         }
     }
 }
@@ -829,6 +846,6 @@ pub fn recompute_chunk_root_label(chunk_bytes: &[u8]) -> Result<Digest32, StateE
         ));
     }
     let (root_idx, nodes) = parse_chunk(chunk_bytes)?;
-    let (label, _) = validate_and_recompute_label(&nodes, root_idx, 0)?;
+    let (label, _, _) = validate_and_recompute_label(&nodes, root_idx, 0)?;
     Ok(label)
 }

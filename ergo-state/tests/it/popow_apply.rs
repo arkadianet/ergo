@@ -3,13 +3,18 @@
 //! only, prefix is witness-only), mode tag persistence, crash
 //! safety (reopen preserves state), and the precondition guard.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::{read_header, Header};
 use ergo_ser::popow_header::PoPowHeader;
 use ergo_ser::popow_proof::NipopowProof;
 use ergo_state::chain::HeaderAvailability;
-use ergo_state::store::StateStore;
+use ergo_state::store::{StateError, StateStore};
+use ergo_state::test_helpers::seed_dense_mainnet_headers;
+use redb::ReadableTable;
 use tempfile::TempDir;
 
 // ----- helpers -----
@@ -72,6 +77,65 @@ fn synthetic_proof_k4_over_1_to_8() -> NipopowProof {
         suffix_head: popow_hdr(suffix_head_h, vec![]),
         suffix_tail,
         continuous: true,
+    }
+}
+
+fn table_snapshot(path: &Path, name: &'static str) -> Option<BTreeMap<Vec<u8>, Vec<u8>>> {
+    let db = redb::Database::create(path).unwrap();
+    let txn = db.begin_read().unwrap();
+    match name {
+        "chain_state_meta" => {
+            let table = match txn.open_table(redb::TableDefinition::<&str, &[u8]>::new(name)) {
+                Ok(table) => table,
+                Err(redb::TableError::TableDoesNotExist(_)) => return None,
+                Err(err) => panic!("failed to open {name}: {err}"),
+            };
+            Some(
+                table
+                    .iter()
+                    .unwrap()
+                    .map(|entry| {
+                        let (key, value) = entry.unwrap();
+                        (key.value().as_bytes().to_vec(), value.value().to_vec())
+                    })
+                    .collect(),
+            )
+        }
+        "header_chain_index" | "headers_by_height" => {
+            let table = match txn.open_table(redb::TableDefinition::<u64, &[u8]>::new(name)) {
+                Ok(table) => table,
+                Err(redb::TableError::TableDoesNotExist(_)) => return None,
+                Err(err) => panic!("failed to open {name}: {err}"),
+            };
+            Some(
+                table
+                    .iter()
+                    .unwrap()
+                    .map(|entry| {
+                        let (key, value) = entry.unwrap();
+                        (key.value().to_be_bytes().to_vec(), value.value().to_vec())
+                    })
+                    .collect(),
+            )
+        }
+        "headers" | "header_meta" => {
+            let table = match txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new(name)) {
+                Ok(table) => table,
+                Err(redb::TableError::TableDoesNotExist(_)) => return None,
+                Err(err) => panic!("failed to open {name}: {err}"),
+            };
+            Some(
+                table
+                    .iter()
+                    .unwrap()
+                    .map(|entry| {
+                        let (key, value) = entry.unwrap();
+                        (key.value().to_vec(), value.value().to_vec())
+                    })
+                    .collect(),
+            )
+        }
+        _ => panic!("unsupported table {name}"),
     }
 }
 
@@ -190,6 +254,65 @@ fn apply_popow_proof_refuses_to_run_on_non_fresh_store() {
         }
         other => panic!("expected ApplyPopowProofWrongMode, got {other:?}"),
     }
+}
+
+#[test]
+fn apply_popow_proof_refuses_dense_tip_without_mutating_header_tables() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db");
+    let (tip_height, tip_id) = {
+        let mut store = StateStore::open(&db_path).unwrap();
+        let seeded = seed_dense_mainnet_headers(&mut store, 1).unwrap();
+        *seeded.last().unwrap()
+    };
+    {
+        let store = StateStore::open(&db_path).unwrap();
+        assert_eq!(store.chain_state().best_header_height, tip_height);
+        assert_eq!(store.chain_state().best_header_id, tip_id);
+    }
+
+    let table_names = [
+        "chain_state_meta",
+        "header_chain_index",
+        "headers_by_height",
+        "headers",
+        "header_meta",
+    ];
+    let before: Vec<_> = table_names
+        .iter()
+        .map(|name| (*name, table_snapshot(&db_path, name)))
+        .collect();
+    for (name, rows) in &before {
+        assert!(rows.is_some(), "missing {name}");
+    }
+
+    let mut store = StateStore::open(&db_path).unwrap();
+    let err = store
+        .apply_popow_proof(&synthetic_proof_k4_over_1_to_8())
+        .expect_err("Dense store with an existing header tip must be refused");
+    match err {
+        StateError::ApplyPopowProofNotFresh {
+            current_header_id,
+            current_header_height,
+        } => {
+            assert_eq!(current_header_id, tip_id);
+            assert_eq!(current_header_height, tip_height);
+        }
+        other => panic!("expected ApplyPopowProofNotFresh, got {other:?}"),
+    }
+    assert_eq!(store.chain_state().best_header_height, tip_height);
+    assert_eq!(store.chain_state().best_header_id, tip_id);
+    assert!(matches!(
+        store.chain_state().header_availability,
+        HeaderAvailability::Dense
+    ));
+    drop(store);
+
+    let after: Vec<_> = table_names
+        .iter()
+        .map(|name| (*name, table_snapshot(&db_path, name)))
+        .collect();
+    assert_eq!(after, before);
 }
 
 // ----- 14.10 serve-side cache -----

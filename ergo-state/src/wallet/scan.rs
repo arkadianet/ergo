@@ -121,14 +121,15 @@ impl WalletScanService {
     ///
     /// When `start_height == 0`: full rebuild — clears WALLET_BOXES,
     /// WALLET_BOXES_BY_TX, and WALLET_TXS, sets WALLET_SCAN_INVALIDATED=true,
-    /// resets WALLET_SCAN_HEIGHT=0, then replays all blocks in [0..=tip_height].
+    /// resets WALLET_SCAN_HEIGHT=0, then replays all blocks in [1..=tip_height].
     /// Clears WALLET_SCAN_INVALIDATED at the end.
     ///
     /// When `start_height > 0`: range-scoped rebuild — deletes rows whose
     /// recorded height >= start_height, rewinds surviving rows whose state
     /// changed at/above start_height back to their pre-start_height status,
     /// rewinds WALLET_SCAN_HEIGHT to start_height-1, then replays
-    /// [start_height..=tip_height]. Does NOT touch WALLET_SCAN_INVALIDATED.
+    /// [start_height..=tip_height]. Preserves WALLET_SCAN_INVALIDATED on success;
+    /// failure or cancellation sets it and requires a full rescan.
     ///
     /// After the main replay, a catch-up loop re-reads the tip and replays
     /// any blocks that arrived during the rebuild, until steady state.
@@ -163,6 +164,7 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
+        let mut invalidation_guard = InvalidateOnError::new(db);
         let result = Self::rescan_full_rebuild_inner(
             db,
             tracked_p2pk_trees,
@@ -174,10 +176,8 @@ impl WalletScanService {
             &mut is_cancelled,
             scan_matcher,
         );
-        if result.is_err() {
-            if let Err(error) = mark_scan_invalidated(db) {
-                tracing::error!(%error, "failed to persist wallet scan invalidation after rescan failure");
-            }
+        if result.is_ok() {
+            invalidation_guard.disarm();
         }
         result
     }
@@ -199,6 +199,11 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
+        if is_cancelled() {
+            return Err(RescanError::Cancelled {
+                height: start_height,
+            });
+        }
         // Registered-scan rebuild only on a full rebuild (scans have no
         // range-rewind path). `None` matcher = a node with no scans.
         let scan_rebuild = scan_matcher.is_some() && start_height == 0;
@@ -483,8 +488,7 @@ impl WalletScanService {
                     // Registered-scan rebuild, in the SAME per-block txn so
                     // chain + scan state regress together. The match pass was
                     // precomputed above (outside the txn); here we only persist
-                    // matches + spends. `None` = no rebuild active or a matcher
-                    // cardinality bug (already logged + rebuild marked incomplete).
+                    // matches + spends. `None` means no scan rebuild is active.
                     if let Some(records) = &scan_records {
                         // Privileged variant: the rescan runs WITH
                         // WALLET_SCAN_INVALIDATED set (it is the recovery path),
@@ -511,17 +515,24 @@ impl WalletScanService {
             current_target = new_target;
         }
 
-        // Clear the invalidated flag only after a full rebuild from height 0
-        // that fully reconstructed state. Partial rescans don't reconstruct
-        // state; a scan rebuild that skipped a block (matcher contract
-        // violation, `scan_rebuild_complete == false`) left the scan tables
-        // incomplete and must stay invalidated so the operator rescans again.
+        // Only a complete full rebuild repairs invalidated wallet state.
+        if is_cancelled() {
+            return Err(RescanError::Cancelled {
+                height: current_target,
+            });
+        }
         if start_height == 0 {
             let txn = crate::begin_write_qr(db)?;
+            // Rollback cancels while holding this writer lock. Recheck under
+            // the lock before clearing its durable invalidation.
+            if is_cancelled() {
+                return Err(RescanError::Cancelled {
+                    height: current_target,
+                });
+            }
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), false)?;
             txn.commit()?;
         }
-
         Ok(processed)
     }
 
@@ -538,7 +549,32 @@ impl WalletScanService {
     }
 }
 
-fn mark_scan_invalidated(db: &Arc<Database>) -> Result<(), redb::Error> {
+struct InvalidateOnError<'a> {
+    db: &'a Database,
+    armed: bool,
+}
+
+impl<'a> InvalidateOnError<'a> {
+    fn new(db: &'a Database) -> Self {
+        Self { db, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InvalidateOnError<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(e) = invalidate_scan(self.db) {
+                tracing::error!(error = %e, "wallet rescan: failed to persist scan invalidation");
+            }
+        }
+    }
+}
+
+fn invalidate_scan(db: &Database) -> Result<(), redb::Error> {
     let txn = crate::begin_write_qr(db)?;
     txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
     txn.commit()?;
@@ -629,4 +665,133 @@ pub struct OwnedBlockOutput {
     /// and persist `ScanTrackedBox.box_bytes`. Empty when scan rescan is
     /// not in play.
     pub box_bytes: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    // ----- helpers -----
+
+    fn database() -> (tempfile::TempDir, Arc<Database>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("rescan.redb")).unwrap());
+        (dir, db)
+    }
+
+    fn empty_block() -> RescanBlock {
+        RescanBlock {
+            block_id: [1; 32],
+            txs: vec![],
+        }
+    }
+
+    fn invalidated(db: &Database) -> bool {
+        db.begin_read()
+            .unwrap()
+            .open_table(WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .unwrap()
+            .value()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn partial_rescan_success_preserves_invalidation() {
+        for initial in [false, true] {
+            let (_dir, db) = database();
+            let txn = db.begin_write().unwrap();
+            txn.open_table(WALLET_SCAN_INVALIDATED)
+                .unwrap()
+                .insert((), initial)
+                .unwrap();
+            txn.commit().unwrap();
+            let processed = WalletScanService::rescan_full_rebuild(
+                &db,
+                BTreeSet::new(),
+                BTreeMap::new(),
+                1,
+                1,
+                |_| Ok(Some(empty_block())),
+                || Ok(1),
+                || false,
+                None,
+            )
+            .unwrap();
+            assert_eq!(processed, 1);
+            assert_eq!(invalidated(&db), initial);
+        }
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn rescan_mid_loop_cancellation_invalidates() {
+        let (_dir, db) = database();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(WALLET_SCAN_INVALIDATED)
+            .unwrap()
+            .insert((), false)
+            .unwrap();
+        txn.commit().unwrap();
+        let cancelled = Cell::new(false);
+        let result = WalletScanService::rescan_full_rebuild(
+            &db,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            1,
+            2,
+            |height| {
+                assert_eq!(height, 1);
+                cancelled.set(true);
+                Ok(Some(empty_block()))
+            },
+            || Ok(2),
+            || cancelled.get(),
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::Cancelled { .. })));
+        assert!(invalidated(&db));
+    }
+
+    #[test]
+    fn rescan_rollback_before_final_write_preserves_invalidation() {
+        let (_dir, db) = database();
+        let reached_tip = Cell::new(false);
+        let cancelled = Cell::new(false);
+        let result = WalletScanService::rescan_full_rebuild(
+            &db,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            0,
+            1,
+            |height| Ok((height == 1).then(empty_block)),
+            || {
+                reached_tip.set(true);
+                Ok(1)
+            },
+            || {
+                let observed = cancelled.get();
+                if reached_tip.get() && !observed {
+                    // Commit rollback invalidation after the last unlocked check
+                    // took its snapshot, before the rescan acquires the writer.
+                    let txn = db.begin_write().unwrap();
+                    cancelled.set(true);
+                    txn.open_table(WALLET_SCAN_INVALIDATED)
+                        .unwrap()
+                        .insert((), true)
+                        .unwrap();
+                    txn.commit().unwrap();
+                }
+                observed
+            },
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::Cancelled { .. })));
+        assert!(invalidated(&db));
+    }
 }

@@ -389,7 +389,14 @@ function paintSyncSummary(blkH, hdrH) {
   root.querySelector('.ov-sync').dataset.syncTone = kind;
   setText('[data-sync-label]', label);
   setText('[data-sync-title]', title);
-  setText('[data-sync-copy]', copy);
+  const popow = s?.bootstrap?.popow_phase;
+  if (state.reachable !== false && kind === 'bootstrap' && popow === 'abandoned') {
+    setText('[data-sync-label]', 'NiPoPoW abandoned');
+    setText('[data-sync-title]', 'Continuing with ordinary header sync');
+    setText('[data-sync-copy]', s.bootstrap.popow_abandon_reason || 'The bootstrap proof could not be applied.');
+  } else {
+    setText('[data-sync-copy]', copy);
+  }
   const pct = blkH != null && hdrH > 0 ? Math.max(0, Math.min(100, blkH / hdrH * 100)) : null;
   // Never round an incomplete chain up to 100%.
   const displayPct = pct == null ? null : Math.floor(pct * 100) / 100;
