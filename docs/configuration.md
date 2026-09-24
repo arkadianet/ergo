@@ -24,9 +24,14 @@ than booting into a misconfigured state.
 
 A ready-to-use default config ships at
 [`../ergo-node/ergo-node.toml`](../ergo-node/ergo-node.toml) — a mainnet
-full-archival node with the `/blockchain/*` extra-index enabled — and a
-fully-commented operator template lives next to it at
+full-archival node with the `/blockchain/*` extra-index enabled and the API
+disabled by default — and a fully-commented operator template lives next to
+it at
 [`../ergo-node/ergo-node.toml.example`](../ergo-node/ergo-node.toml.example).
+The loader's built-in `[api] disabled` default remains `false`; when the
+API is enabled, the loader still requires `api_key_hash`. The shipped
+ready-to-use template makes the safe choice explicitly and ships no
+credential.
 
 ### Unknown-key handling is per-section
 
@@ -126,7 +131,7 @@ beyond loopback.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
-| `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. |
+| `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. This is the loader default; the shipped ready-to-use template sets it to `true`. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
 | `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peer sockets no longer receive the v1 rate-limit exemption or admin loopback trust. Client identity still comes only from the peer socket; `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
@@ -199,10 +204,9 @@ printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 
 Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
 the hash above is what goes in `api_key_hash`. The shipped
-`ergo-node.toml` template ships with `api_key_hash` set to
-`Blake2b256("hello")` — the node's boot-warn fires for this value on
-every boot, loopback bind included, because anything with local shell
-access already has it. Rotate it before relying on the API for anything.
+`ergo-node.toml` template starts with the API disabled and contains no
+credential; to enable it, set `[api] disabled = false` and add the
+generated hash under `[api.security]`.
 
 ## `[mempool]`
 
@@ -396,7 +400,7 @@ checks and are enforced at load:
 
 ## Minimal example
 
-A minimal mainnet full-archive node with the operator API enabled:
+A minimal mainnet full-archive node with the operator API disabled:
 
 ```toml
 network = "mainnet"
@@ -406,11 +410,13 @@ network = "mainnet"
 known = ["213.239.193.208:9030", "159.65.11.55:9030"]
 
 [api]
+disabled = true
 bind = "127.0.0.1:9099"
 
-[api.security]
-# lowercase Base16 of Blake2b256(<your-secret>)
-api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+# To enable the API, generate a random secret and hash it as described
+# above, set disabled = false, and add the generated value here:
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
 ```
 
 For the full set of keys, comments, and a fast clean-database boot

@@ -115,15 +115,25 @@ download_window = 384
 # checkpoint = { height = 0, block_id = "" }
 
 [api]
-# Operator API is loopback-only by default.
+# API is disabled by default so no credential is required in the template.
+# To enable it, generate a random secret and hash it:
+#   secret=$(openssl rand -hex 32)
+#   printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+# Set disabled = false and add the generated value:
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
+disabled = true
 bind = "127.0.0.1:9099"
-disabled = false
 public_bind = false
 # local_reverse_proxy = false              # set true when a reverse proxy terminates here
 # allowed_hosts = ["my-node.example.com"]  # extra `Host` header values the
 # DNS-rebinding guard accepts (default []). Loopback binds always accept
 # localhost/127.0.0.1/::1/the literal bind IP regardless of this list; a
 # non-loopback bind only enforces the guard when this list is non-empty.
+# Submission routes (POST /api/v1/mempool/{submit,check},
+# POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always
+# mounted, matching Scala. Use [mempool] disabled = true to actively
+# reject tx admissions for archival or sync-test postures.
 
 [mempool]
 # disabled = false           # set true to skip tx relay (e.g. archival or sync-test runs)
@@ -160,12 +170,6 @@ public_bind = false
 # multiplier on the live max_block_cost. Txs not reached in a pass are
 # deferred to later blocks, oldest-checked first. Must be >= 1.
 # cleanup_cost_mult = 6
-
-[api]
-# Submission routes (POST /api/v1/mempool/{submit,check},
-# POST /transactions[/bytes][/check[Bytes]], POST /blocks) are always
-# mounted, matching Scala. Use [mempool] disabled = true to actively
-# reject tx admissions for archival or sync-test postures.
 
 [indexer]
 # Extra-index (/blockchain/*) — opt-in.

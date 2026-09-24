@@ -453,6 +453,28 @@ fn api_disabled_does_not_require_api_key_hash() {
 }
 
 #[test]
+fn shipped_ready_template_parses_without_api_credentials() {
+    let source = include_str!("../../ergo-node.toml");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(true));
+    assert!(cfg.api.security.is_none());
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+}
+
+#[test]
+fn shipped_example_template_parses_with_one_api_table() {
+    let source = include_str!("../../ergo-node.toml.example");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(true));
+    assert_eq!(
+        source.lines().filter(|line| line.trim() == "[api]").count(),
+        1
+    );
+    assert!(cfg.api.security.is_none());
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+}
+
+#[test]
 fn api_non_loopback_bind_allowed_with_public_bind() {
     let path = write_toml(
         "[api]\nbind = \"0.0.0.0:9090\"\npublic_bind = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n",
