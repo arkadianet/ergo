@@ -228,25 +228,11 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             // (best_full_block_height, assembly), per executor doc.
             //
             // M5 wallet-hook plumbing: build a `WalletWiring` (hook +
-            // rescan guard) and thread it through the executor so:
-            //   - synchronous-path forward apply commits chain +
-            //     wallet inside the same redb write_txn (truly
-            //     atomic).
-            //   - pipeline-path forward apply flushes the queued
-            //     chain batch (with fsync in IBD) BEFORE the wallet
-            //     write_txn — chain durable, then wallet. Still
-            //     two-commit, not atomic; closing this seam requires
-            //     pipeline-worker integration that does not yet exist.
-            //   - rollback path (executor →
-            //     rollback_full_chain_to_best_header → store
-            //     rollback_to) rolls back chain + wallet inside a
-            //     single write_txn; the rescan guard
-            //     unconditionally invalidates wallet scan state
-            //     when wallet history cannot be replayed (missing
-            //     section / read error), forcing a rescan on
-            //     restart.
-            // The prior post-apply hook fire on a separate write_txn
-            // is removed — it was the pre-M5 non-atomic seam.
+            // rescan guard) and thread it through the executor so chain +
+            // wallet writes commit in one redb transaction on both the
+            // synchronous and persist-pipeline paths. Rollback also rewinds
+            // wallet state atomically; missing required sections invalidate
+            // wallet scan state for a full rescan.
             let rescan_guard = crate::wallet_boot::ProdRescanGuard;
             let wallet_wiring =
                 state

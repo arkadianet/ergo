@@ -151,7 +151,7 @@ pub fn apply_block_to_wallet_rescan(
 /// the table doesn't exist yet (fresh wallet) or contains false.
 pub fn is_scan_invalidated(txn: &WriteTransaction) -> Result<bool, redb::Error> {
     match txn.open_table(WALLET_SCAN_INVALIDATED) {
-        Ok(t) => Ok(t.get(()).ok().flatten().map(|g| g.value()).unwrap_or(false)),
+        Ok(t) => Ok(t.get(())?.map(|g| g.value()).unwrap_or(false)),
         Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
         Err(e) => Err(e.into()),
     }

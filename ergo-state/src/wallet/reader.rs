@@ -78,7 +78,7 @@ impl<'tx> WalletReader<'tx> {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        Ok(tbl.get(()).ok().flatten().map(|g| g.value()))
+        Ok(tbl.get(())?.map(|g| g.value()))
     }
 
     /// All wallet boxes (any status). Returns an owned `Vec<WalletBox>`

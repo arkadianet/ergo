@@ -13,20 +13,26 @@ use ergo_node::node::wallet_bridge::{
 struct StubChainAccessor;
 
 impl ChainStateAccessor for StubChainAccessor {
-    fn wallet_scan_height(&self) -> u32 {
-        0
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
     }
 
-    fn tip_height(&self) -> u32 {
-        0
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
     }
 
     fn is_pruned(&self) -> bool {
         false
     }
 
-    fn read_block_at(&self, _height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
-        None
+    fn read_block_at(
+        &self,
+        _height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
     }
 }
 
@@ -35,20 +41,26 @@ impl ChainStateAccessor for StubChainAccessor {
 struct StubChainAccessorTip(u32);
 
 impl ChainStateAccessor for StubChainAccessorTip {
-    fn wallet_scan_height(&self) -> u32 {
-        self.0
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self.0)
     }
 
-    fn tip_height(&self) -> u32 {
-        self.0
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self.0)
     }
 
     fn is_pruned(&self) -> bool {
         false
     }
 
-    fn read_block_at(&self, _height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
-        None
+    fn read_block_at(
+        &self,
+        _height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
     }
 }
 
@@ -61,20 +73,26 @@ struct StubChainReemission {
 }
 
 impl ChainStateAccessor for StubChainReemission {
-    fn wallet_scan_height(&self) -> u32 {
-        self.tip
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self.tip)
     }
 
-    fn tip_height(&self) -> u32 {
-        self.tip
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self.tip)
     }
 
     fn is_pruned(&self) -> bool {
         false
     }
 
-    fn read_block_at(&self, _height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
-        None
+    fn read_block_at(
+        &self,
+        _height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok(None)
     }
 
     fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {

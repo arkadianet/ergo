@@ -755,9 +755,9 @@ impl WalletAdmin for NodeWalletAdmin {
 /// and (d) signing-context + UTXO lookup for send routes.
 pub trait ChainStateAccessor: Send + Sync {
     /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
-    fn wallet_scan_height(&self) -> u32;
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError>;
     /// Best full-block tip height. Used as the rescan upper bound.
-    fn tip_height(&self) -> u32;
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError>;
     /// True if the node is configured with `blocks_to_keep != -1`.
     /// `/wallet/restore` refuses on pruned nodes per Scala parity.
     fn is_pruned(&self) -> bool;
@@ -769,16 +769,22 @@ pub trait ChainStateAccessor: Send + Sync {
     fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
         None
     }
-    /// Fetch the block at `height` for rescan replay. Returns `None`
-    /// only if pruned past the requested height.
-    fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock>;
+    /// Fetch the block at `height` for rescan replay. `Ok(None)` means the
+    /// requested block is unavailable (pruned or not yet downloaded).
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    >;
     /// True when `read_block_at` can return real block data. Distinct from
     /// `is_pruned()` (which gates `/wallet/restore`) — this gates
     /// `/wallet/rescan`. When false, rescan is refused before touching any
     /// wallet state, preventing the destructive clear-then-skip sequence.
     /// Default impl probes `read_block_at(0)`; override for efficiency.
-    fn read_block_at_supported(&self) -> bool {
-        self.read_block_at(0).is_some()
+    fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
+        Ok(self.read_block_at(0)?.is_some())
     }
 
     /// Build the blockchain state context needed for signing: last ≤10
@@ -866,33 +872,18 @@ impl ChainStateAccessorImpl {
 }
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
-    fn wallet_scan_height(&self) -> u32 {
-        let Ok(read_txn) = self.db.begin_read() else {
-            return 0;
-        };
-        let Ok(tbl) = read_txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_HEIGHT) else {
-            return 0;
-        };
-        tbl.get(()).ok().flatten().map(|g| g.value()).unwrap_or(0)
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        let read_txn = self.db.begin_read()?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        Ok(reader.scan_height()?.unwrap_or(0))
     }
 
-    fn tip_height(&self) -> u32 {
-        // Live committed tip (best full-block height), read each call — NOT a
-        // value captured at construction. A node that boots below EIP-27
-        // activation and then syncs past it MUST observe the new tip, or the
-        // native `reserved`/`eip27Active` (candidate height `tip+1`) would stay
-        // wrong forever. Same `chain_state_meta` source the block
-        // validator's candidate height uses. `Ok(None)` = chain unstarted → 0; a
-        // read FAILURE is surfaced in the log (not silently downgraded to 0, which
-        // would mask an operational fault as "below activation").
-        match self.reader.committed_tip() {
-            Ok(Some((h, _))) => h,
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(error = %e, "wallet chain accessor: committed_tip read failed; reporting tip=0");
-                0
-            }
-        }
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self
+            .reader
+            .committed_tip()?
+            .map(|(height, _)| height)
+            .unwrap_or(0))
     }
 
     fn is_pruned(&self) -> bool {
@@ -903,26 +894,19 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         self.reemission.as_ref()
     }
 
-    fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
         use ergo_state::store::block_txs_for_wallet_at_height;
         use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx};
 
-        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return None,
-            Err(e) => {
-                // A DB read error here used to be swallowed as "no block at
-                // this height" (unwrap_or(None)), which on a wallet rescan
-                // would silently skip the height and could drop owned txs.
-                // Behaviour is unchanged (still None), but the fault is now
-                // visible instead of masquerading as an empty block.
-                tracing::warn!(
-                    height,
-                    error = %e,
-                    "wallet rescan: block_txs_for_wallet_at_height failed — skipping height"
-                );
-                return None;
-            }
+        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height)? {
+            Some(pair) => pair,
+            None => return Ok(None),
         };
 
         let txs = owned
@@ -947,7 +931,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
             })
             .collect();
 
-        Some(RescanBlock { block_id, txs })
+        Ok(Some(RescanBlock { block_id, txs }))
     }
 
     fn build_signing_context(

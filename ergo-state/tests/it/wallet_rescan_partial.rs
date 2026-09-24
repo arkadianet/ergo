@@ -2,7 +2,7 @@
 //! range-scoped clear + rewind + replay path in
 //! WalletScanService::rescan_full_rebuild for start_height > 0.
 
-#![allow(clippy::result_large_err)] // redb::Error is large; test closures can't avoid it
+#![allow(clippy::result_large_err)] // RescanReadError is large; test closures can't avoid it
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -11,7 +11,9 @@ use ergo_state::wallet::apply::{
     apply_block_to_wallet, BlockOutput, BlockTx, REWARD_MATURITY_MAINNET,
 };
 use ergo_state::wallet::maturity::promote_matured_boxes;
-use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx, WalletScanService};
+use ergo_state::wallet::scan::{
+    OwnedBlockOutput, RescanBlock, RescanReadError, RescanTx, WalletScanService,
+};
 use ergo_state::wallet::tables::WALLET_BOXES;
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
 use ergo_wallet::state::WalletState;
@@ -109,13 +111,13 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
 
     // Partial rescan from N=100. Empty blocks — spend tx is gone (reorg).
     let (trees, pks) = wallet_data(&wallet);
-    let read_block = |_h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+    let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(Some(RescanBlock {
             block_id: [0xEE; 32],
             txs: vec![],
         }))
     };
-    let read_tip = || -> Result<u32, redb::Error> { Ok(105) };
+    let read_tip = || -> Result<u32, RescanReadError> { Ok(105) };
     let is_cancelled = || false;
     WalletScanService::rescan_full_rebuild(
         &db,
@@ -188,13 +190,13 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
     // Rewind should downgrade box to Immature{820}; replay through 819 doesn't re-promote.
     {
         let (trees, pks) = wallet_data(&wallet);
-        let read_block = |_h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+        let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
             Ok(Some(RescanBlock {
                 block_id: [0xEE; 32],
                 txs: vec![],
             }))
         };
-        let read_tip = || -> Result<u32, redb::Error> { Ok(819) };
+        let read_tip = || -> Result<u32, RescanReadError> { Ok(819) };
         let is_cancelled = || false;
         WalletScanService::rescan_full_rebuild(
             &db,
@@ -228,13 +230,13 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
     // promote_matured_boxes_rescan inside the replay loop must re-promote.
     {
         let (trees, pks) = wallet_data(&wallet);
-        let read_block = |_h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+        let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
             Ok(Some(RescanBlock {
                 block_id: [0xEE; 32],
                 txs: vec![],
             }))
         };
-        let read_tip = || -> Result<u32, redb::Error> { Ok(820) };
+        let read_tip = || -> Result<u32, RescanReadError> { Ok(820) };
         let is_cancelled = || false;
         WalletScanService::rescan_full_rebuild(
             &db,
@@ -308,7 +310,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
     // Partial rescan from N=100 with read_block returning the spend tx at h=105.
     let (trees, pks) = wallet_data(&wallet);
     let spend_inputs_vec: Vec<[u8; 32]> = vec![box_id];
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(Some(RescanBlock {
             block_id: [0xEE; 32],
             txs: if h == 105 {
@@ -322,7 +324,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
             },
         }))
     };
-    let read_tip = || -> Result<u32, redb::Error> { Ok(105) };
+    let read_tip = || -> Result<u32, RescanReadError> { Ok(105) };
     let is_cancelled = || false;
     WalletScanService::rescan_full_rebuild(
         &db,

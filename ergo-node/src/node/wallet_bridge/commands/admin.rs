@@ -96,41 +96,47 @@ pub(crate) async fn status(
     ctx: &WriterContext<'_>,
     reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
 ) {
-    let storage = ctx.storage.read();
-    let state = ctx.state.read();
-    let change_address = if state.is_unlocked() {
-        state.change_address().unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
-    let error = {
-        match ctx.db.begin_read() {
-            Ok(read_txn) => {
-                let invalidated = read_txn
-                    .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-                    .ok()
-                    .and_then(|t| t.get(()).ok().flatten().map(|g| g.value()))
-                    .unwrap_or(false);
-                if invalidated {
-                    "scan_invalidated".to_string()
-                } else {
-                    String::new()
-                }
-            }
-            Err(_) => String::new(),
-        }
-    };
-    let resp = WalletStatus {
-        is_initialized: !matches!(
-            storage.lock_state(),
-            ergo_wallet::storage::LockState::Uninitialized
-        ),
-        is_unlocked: state.is_unlocked(),
-        change_address,
-        wallet_height: ctx.chain.wallet_scan_height(),
-        error,
-    };
-    let _ = reply.send(Ok(resp));
+    let result = (|| -> Result<WalletStatus, WalletAdminError> {
+        let storage = ctx.storage.read();
+        let state = ctx.state.read();
+        let change_address = if state.is_unlocked() {
+            state.change_address().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        let read_txn = ctx
+            .db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let invalidated =
+            match read_txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED) {
+                Ok(table) => table
+                    .get(())
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                    .map(|g| g.value())
+                    .unwrap_or(false),
+                Err(redb::TableError::TableDoesNotExist(_)) => false,
+                Err(e) => return Err(WalletAdminError::Internal(e.to_string())),
+            };
+        Ok(WalletStatus {
+            is_initialized: !matches!(
+                storage.lock_state(),
+                ergo_wallet::storage::LockState::Uninitialized
+            ),
+            is_unlocked: state.is_unlocked(),
+            change_address,
+            wallet_height: ctx
+                .chain
+                .wallet_scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+            error: if invalidated {
+                "scan_invalidated".to_string()
+            } else {
+                String::new()
+            },
+        })
+    })();
+    let _ = reply.send(result);
 }
 
 pub(crate) async fn init(
@@ -207,22 +213,20 @@ pub(crate) async fn restore(
     let _ = reply.send(result);
 }
 
-// redb::Error is large (~160 B); the background-rescan closures
-// can't avoid surfacing it as their `Err` type, so silence the
-// `result_large_err` lint at the handler scope.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn rescan(
     ctx: &WriterContext<'_>,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    // Block replay is not yet wired; refuse before touching any
-    // wallet state to prevent the destructive clear-then-skip
-    // sequence that would empty the wallet.
-    if !ctx.chain.read_block_at_supported() {
-        // Backend cannot replay blocks (e.g. digest/pruned). Typed so the native
-        // surface maps it to `rescan_unavailable(409)` (and the compat surface to
-        // 409 too) rather than an opaque 500.
+    let supported = match ctx.chain.read_block_at_supported() {
+        Ok(supported) => supported,
+        Err(e) => {
+            let _ = reply.send(Err(map_rescan_read_error(e)));
+            return;
+        }
+    };
+    if !supported {
         let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
             "chain block-read not available on this backend".to_string(),
         )));
@@ -232,29 +236,20 @@ pub(crate) async fn rescan(
         let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
         return;
     }
-    let tip_h = ctx.chain.tip_height();
+    let tip_h = match ctx.chain.tip_height() {
+        Ok(height) => height,
+        Err(e) => {
+            let _ = reply.send(Err(WalletAdminError::Internal(e.to_string())));
+            return;
+        }
+    };
     let start_h = from_height.min(tip_h);
-    // Snapshot the registered scans for the rebuild. Scan rebuild is a
-    // full-rebuild operation only (start_h == 0); a partial wallet rescan
-    // leaves the scan tables untouched. `None` when no scans are registered.
-    //
-    // Run this fallible preflight BEFORE arming RESCAN_IN_PROGRESS: it can
-    // refuse (unreadable registry), and once that flag is set the live apply
-    // hook returns empty tracked keys — a block committed in the refuse window
-    // would skip wallet classification with no rescan to backfill it.
     let scan_matcher = if start_h == 0 {
         match super::scan::build_rescan_matcher(ctx.db) {
-            Ok(m) => m,
+            Ok(matcher) => matcher,
             Err(e) => {
-                // The scan registry is unreadable, so this rescan can't rebuild
-                // scans. Refuse rather than run a rebuild that ends by clearing
-                // WALLET_SCAN_INVALIDATED and falsely reporting a healthy wallet
-                // while the registry is still corrupt. The flag stays set; the
-                // operator must repair / re-register the scans first. (No guard
-                // reset needed — RESCAN_IN_PROGRESS isn't armed yet.)
                 let _ = reply.send(Err(WalletAdminError::Internal(format!(
-                    "scan registry unreadable; cannot rebuild scans \
-                     (repair or re-register scans, then rescan): {e}"
+                    "scan registry unreadable; cannot rebuild scans (repair or re-register scans, then rescan): {e}"
                 ))));
                 return;
             }
@@ -262,73 +257,76 @@ pub(crate) async fn rescan(
     } else {
         None
     };
-    // Refuse if a rescan is already in flight; this also arms the live-apply
-    // guard (the hook returns empty tracked keys while it is set).
+
     if crate::wallet_boot::RESCAN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        // A concurrent rescan is a state precondition (409), not a 500.
         let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
             "rescan already in progress".to_string(),
         )));
         return;
     }
-    // Record the start height so native `/wallet/status` can surface
-    // `rescan: {type:"running", fromHeight}` while this rebuild is in flight.
     crate::wallet_boot::RESCAN_FROM_HEIGHT.store(start_h, Ordering::SeqCst);
-    // Snapshot trees + pubkeys AFTER arming the flag so a concurrent live apply
-    // (which returns empty during rescan) can't clobber the rebuild.
+    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(start_h == 0, Ordering::SeqCst);
+    let _flags = RescanFlagsGuard;
+
     let (trees, pks) = {
-        let s = ctx.state.read();
+        let state = ctx.state.read();
         (
-            s.tracked_p2pk_trees()
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>(),
-            s.cached_pubkeys().clone(),
+            state.tracked_p2pk_trees().iter().cloned().collect(),
+            state.cached_pubkeys().clone(),
         )
     };
-    // Quiesce live scan apply + reject scan mutations for the whole duration of
-    // ANY full rescan (start_h == 0), not only when scans exist at start. A full
-    // rescan sets WALLET_SCAN_INVALIDATED, which makes live apply_block_to_scans
-    // no-op; if a scan were registered mid-rescan (when start_h == 0 but no scans
-    // existed, so the matcher is None and won't rebuild them), its live matches
-    // would be dropped and never backfilled. Gating on start_h == 0 makes
-    // registered_scan_count return 0 (so apply_block_to_scans isn't called) and
-    // makes reject_during_scan_rebuild refuse /scan/register for the rescan's
-    // duration. Set BEFORE the spawn so it's active before the first clear;
-    // cleared at task end.
-    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(start_h == 0, Ordering::SeqCst);
-    let db_bg = ctx.db.clone();
-    let chain_bg = ctx.chain.clone();
-    tokio::spawn(async move {
-        let read_block =
-            |h: u32| -> Result<Option<ergo_state::wallet::scan::RescanBlock>, redb::Error> {
-                Ok(chain_bg.read_block_at(h))
-            };
-        let chain_tip = chain_bg.clone();
-        let read_tip = move || -> Result<u32, redb::Error> { Ok(chain_tip.tip_height()) };
-        let is_cancelled =
-            || -> bool { !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) };
-        let scan_matcher_dyn = scan_matcher
+
+    let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
+        ctx.db,
+        trees,
+        pks,
+        start_h,
+        tip_h,
+        |height| ctx.chain.read_block_at(height),
+        || {
+            ctx.chain
+                .tip_height()
+                .map_err(|e| ergo_state::wallet::scan::RescanReadError::Storage {
+                    height: 0,
+                    source: e,
+                })
+        },
+        || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst),
+        scan_matcher
             .as_ref()
-            .map(|m| m as &dyn ergo_state::wallet::scan::ScanRescanMatcher);
-        if let Err(e) = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
-            &db_bg,
-            trees,
-            pks,
-            start_h,
-            tip_h,
-            read_block,
-            read_tip,
-            is_cancelled,
-            scan_matcher_dyn,
-        ) {
-            tracing::error!("background rescan failed: {e}");
-        }
+            .map(|matcher| matcher as &dyn ergo_state::wallet::scan::ScanRescanMatcher),
+    );
+
+    let result = result.map(|_| ()).map_err(map_rescan_error);
+    let _ = reply.send(result);
+}
+
+struct RescanFlagsGuard;
+
+impl Drop for RescanFlagsGuard {
+    fn drop(&mut self) {
         crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-        // Resume live scan apply (no-op if it was never set).
         crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
-    });
-    let _ = reply.send(Ok(()));
+    }
+}
+
+fn map_rescan_read_error(error: ergo_state::wallet::scan::RescanReadError) -> WalletAdminError {
+    match error {
+        ergo_state::wallet::scan::RescanReadError::Missing { height } => {
+            WalletAdminError::RescanUnavailable(format!("block missing at height {height}"))
+        }
+        other => WalletAdminError::Internal(other.to_string()),
+    }
+}
+
+fn map_rescan_error(error: ergo_state::wallet::scan::RescanError) -> WalletAdminError {
+    match error {
+        ergo_state::wallet::scan::RescanError::Read(error) => map_rescan_read_error(error),
+        ergo_state::wallet::scan::RescanError::Cancelled { height } => {
+            WalletAdminError::RescanUnavailable(format!("rescan cancelled at height {height}"))
+        }
+        other => WalletAdminError::Internal(other.to_string()),
+    }
 }
 
 pub(crate) async fn unlock(
@@ -521,7 +519,10 @@ pub(crate) async fn balances(
                 })
                 .collect();
             Ok(WalletBalances {
-                height: ctx.chain.wallet_scan_height(),
+                height: ctx
+                    .chain
+                    .wallet_scan_height()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
                 balance: balance.confirmed_nano_ergs,
                 assets,
             })
@@ -609,7 +610,10 @@ pub(crate) async fn balances_with_unconfirmed(
 
             let (balance, assets) = overlay_unconfirmed_balance(&confirmed, &add, &subtract);
             Ok(WalletBalances {
-                height: ctx.chain.wallet_scan_height(),
+                height: ctx
+                    .chain
+                    .wallet_scan_height()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
                 balance,
                 assets,
             })
@@ -689,7 +693,11 @@ pub(crate) async fn native_balance(
             let mut reserved: u64 = 0;
             let mut reemission: Option<ReemissionInfoDto> = None;
             if let Some(rules) = ctx.cfg.reemission.as_ref() {
-                let candidate_height = ctx.chain.tip_height().saturating_add(1);
+                let candidate_height = ctx
+                    .chain
+                    .tip_height()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                    .saturating_add(1);
                 if candidate_height > rules.activation_height {
                     let token_id = rules.reemission_token_id;
                     let obl = ergo_validation::reemission_obligation_core(
@@ -1031,7 +1039,10 @@ pub(crate) async fn native_status(
                     )))
                 }
             };
-            let tip_height = ctx.chain.tip_height();
+            let tip_height = ctx
+                .chain
+                .tip_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let eip27_active = match &ctx.cfg.reemission {
                 Some(rules) => tip_height.saturating_add(1) > rules.activation_height,
                 None => false,

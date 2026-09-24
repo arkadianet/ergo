@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use redb::{Database, ReadableTable};
+use thiserror::Error;
 
+use crate::store::StateError;
 use crate::wallet::apply::{
     apply_block_to_scans_rescan, apply_block_to_wallet_rescan, clear_scan_tracking, BlockOutput,
     BlockTx,
@@ -36,8 +38,80 @@ pub trait ScanRescanMatcher {
     /// For each serialized output box (in block order, across all of the
     /// block's transactions), the ids of registered scans whose rule matches
     /// it. MUST return exactly one result per input box, in the same order.
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>>;
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String>;
 }
+
+/// A failure while reading the chain data required by a wallet rescan.
+#[derive(Debug, Error)]
+pub enum RescanReadError {
+    #[error("block data missing at height {height}")]
+    Missing { height: u32 },
+    #[error("block data corrupt at height {height}: {source}")]
+    Corrupt {
+        height: u32,
+        #[source]
+        source: StateError,
+    },
+    #[error("block data storage failure at height {height}: {source}")]
+    Storage {
+        height: u32,
+        #[source]
+        source: StateError,
+    },
+}
+
+impl RescanReadError {
+    pub fn from_state(height: u32, source: StateError) -> Self {
+        match source {
+            StateError::Serialization(_) | StateError::DbCorruption { .. } => {
+                Self::Corrupt { height, source }
+            }
+            other => Self::Storage {
+                height,
+                source: other,
+            },
+        }
+    }
+}
+
+/// A failure during a wallet rescan operation.
+#[derive(Debug, Error)]
+pub enum RescanError {
+    #[error(transparent)]
+    Read(#[from] RescanReadError),
+    #[error("rescan cancelled at height {height}")]
+    Cancelled { height: u32 },
+    #[error("scan matcher failed at height {height}: {reason}")]
+    Matcher { height: u32, reason: String },
+    #[error("rescan storage failure: {0}")]
+    Storage(#[source] redb::Error),
+}
+
+impl From<redb::Error> for RescanError {
+    fn from(error: redb::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+macro_rules! impl_rescan_error_from {
+    ($($error:ty),+ $(,)?) => {
+        $(
+            impl From<$error> for RescanError {
+                fn from(error: $error) -> Self {
+                    Self::Storage(error.into())
+                }
+            }
+        )+
+    };
+}
+
+impl_rescan_error_from!(
+    redb::StorageError,
+    redb::TableError,
+    redb::DatabaseError,
+    redb::TransactionError,
+    redb::CommitError,
+);
 
 /// Service that drives a rescan against a chain-state read interface.
 pub struct WalletScanService;
@@ -83,20 +157,51 @@ impl WalletScanService {
         mut read_tip: T,
         mut is_cancelled: C,
         scan_matcher: Option<&dyn ScanRescanMatcher>,
-    ) -> Result<u32, redb::Error>
+    ) -> Result<u32, RescanError>
     where
-        F: FnMut(u32) -> Result<Option<RescanBlock>, redb::Error>,
-        T: FnMut() -> Result<u32, redb::Error>,
+        F: FnMut(u32) -> Result<Option<RescanBlock>, RescanReadError>,
+        T: FnMut() -> Result<u32, RescanReadError>,
+        C: FnMut() -> bool,
+    {
+        let result = Self::rescan_full_rebuild_inner(
+            db,
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            start_height,
+            tip_height,
+            &mut read_block,
+            &mut read_tip,
+            &mut is_cancelled,
+            scan_matcher,
+        );
+        if result.is_err() {
+            if let Err(error) = mark_scan_invalidated(db) {
+                tracing::error!(%error, "failed to persist wallet scan invalidation after rescan failure");
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rescan_full_rebuild_inner<F, T, C>(
+        db: &Arc<Database>,
+        tracked_p2pk_trees: BTreeSet<Vec<u8>>,
+        cached_pubkeys: BTreeMap<u64, [u8; 33]>,
+        start_height: u32,
+        tip_height: u32,
+        read_block: &mut F,
+        read_tip: &mut T,
+        is_cancelled: &mut C,
+        scan_matcher: Option<&dyn ScanRescanMatcher>,
+    ) -> Result<u32, RescanError>
+    where
+        F: FnMut(u32) -> Result<Option<RescanBlock>, RescanReadError>,
+        T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
         // Registered-scan rebuild only on a full rebuild (scans have no
         // range-rewind path). `None` matcher = a node with no scans.
         let scan_rebuild = scan_matcher.is_some() && start_height == 0;
-        // Cleared if any block's scan apply had to be skipped (matcher
-        // contract violation). When false, the final WALLET_SCAN_INVALIDATED
-        // clear is skipped so the rebuild does not advertise a complete scan
-        // set it didn't actually produce.
-        let mut scan_rebuild_complete = true;
 
         if start_height == 0 {
             // Full rebuild: clear all chain-derived tables + mark invalidated.
@@ -115,8 +220,8 @@ impl WalletScanService {
                 let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
                 let to_remove: Vec<[u8; 32]> = boxes_tbl
                     .iter()?
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                    .collect();
+                    .map(|entry| entry.map(|(k, _)| k.value()))
+                    .collect::<Result<_, _>>()?;
                 for k in to_remove {
                     boxes_tbl.remove(k)?;
                     box_bytes_tbl.remove(k)?;
@@ -126,8 +231,8 @@ impl WalletScanService {
                 let mut by_tx = txn.open_table(WALLET_BOXES_BY_TX)?;
                 let to_remove: Vec<[u8; 34]> = by_tx
                     .iter()?
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                    .collect();
+                    .map(|entry| entry.map(|(k, _)| k.value()))
+                    .collect::<Result<_, _>>()?;
                 for k in to_remove {
                     by_tx.remove(k)?;
                 }
@@ -179,8 +284,8 @@ impl WalletScanService {
                 let mut by_tx = txn.open_table(WALLET_BOXES_BY_TX)?;
                 let existing_keys: Vec<[u8; 34]> = by_tx
                     .iter()?
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                    .collect();
+                    .map(|entry| entry.map(|(k, _)| k.value()))
+                    .collect::<Result<_, _>>()?;
                 for k in existing_keys {
                     by_tx.remove(k)?;
                 }
@@ -199,17 +304,13 @@ impl WalletScanService {
             {
                 let mut txs_tbl = txn.open_table(WALLET_TXS)?;
                 let start_be = start_height.to_be_bytes();
-                let to_remove: Vec<[u8; 36]> = txs_tbl
+                let keys = txs_tbl
                     .iter()?
-                    .filter_map(|e| e.ok())
-                    .filter_map(|(k, _)| {
-                        let key = k.value();
-                        if key[..4] >= start_be[..] {
-                            Some(key)
-                        } else {
-                            None
-                        }
-                    })
+                    .map(|entry| entry.map(|(k, _)| k.value()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let to_remove: Vec<[u8; 36]> = keys
+                    .into_iter()
+                    .filter(|key| key[..4] >= start_be[..])
                     .collect();
                 for k in to_remove {
                     txs_tbl.remove(k)?;
@@ -288,20 +389,14 @@ impl WalletScanService {
             for h in current_start..=current_target {
                 // Per-block cancellation check.
                 if is_cancelled() {
-                    return Ok(processed);
+                    return Err(RescanError::Cancelled { height: h });
                 }
                 let block = match read_block(h)? {
                     Some(b) => b,
-                    None => continue,
+                    None => {
+                        return Err(RescanError::Read(RescanReadError::Missing { height: h }));
+                    }
                 };
-                // Precompute registered-scan matches OUTSIDE the write txn: the
-                // predicate-match pass only READS block data, so running it here
-                // (instead of inside the per-block txn below) keeps the redb
-                // writer lock unheld during matching. Only `apply_block_to_scans`
-                // (inside the txn) mutates. `None` when no rebuild is active or
-                // the matcher returned the wrong cardinality (a matcher bug:
-                // skip scan apply for this block + mark the rebuild incomplete so
-                // the final WALLET_SCAN_INVALIDATED clear is suppressed).
                 let scan_records: Option<Vec<crate::store::ScanMatchRecord>> =
                     if let Some(matcher) = scan_matcher.filter(|_| scan_rebuild) {
                         let mut box_refs: Vec<&[u8]> = Vec::new();
@@ -312,35 +407,36 @@ impl WalletScanService {
                                 box_meta.push((o.box_id, o.output_index));
                             }
                         }
-                        let matches = matcher.match_boxes(&box_refs);
-                        if matches.len() == box_refs.len() {
-                            Some(
-                                box_meta
-                                    .into_iter()
-                                    .zip(matches)
-                                    .zip(box_refs)
-                                    .filter(|((_, scan_ids), _)| !scan_ids.is_empty())
-                                    .map(|(((box_id, out_idx), scan_ids), bytes)| {
-                                        crate::store::ScanMatchRecord {
-                                            box_id,
-                                            scan_ids,
-                                            box_bytes: bytes.to_vec(),
-                                            inclusion_height: h,
-                                            creation_out_index: out_idx,
-                                        }
-                                    })
-                                    .collect(),
-                            )
-                        } else {
-                            scan_rebuild_complete = false;
-                            tracing::error!(
-                                height = h,
-                                got = matches.len(),
-                                want = box_refs.len(),
-                                "scan rescan: matcher returned wrong result count; skipping block"
-                            );
-                            None
+                        let matches = matcher
+                            .match_boxes(&box_refs)
+                            .map_err(|reason| RescanError::Matcher { height: h, reason })?;
+                        if matches.len() != box_refs.len() {
+                            return Err(RescanError::Matcher {
+                                height: h,
+                                reason: format!(
+                                    "wrong result count: got {}, want {}",
+                                    matches.len(),
+                                    box_refs.len()
+                                ),
+                            });
                         }
+                        Some(
+                            box_meta
+                                .into_iter()
+                                .zip(matches)
+                                .zip(box_refs)
+                                .filter(|((_, scan_ids), _)| !scan_ids.is_empty())
+                                .map(|(((box_id, out_idx), scan_ids), bytes)| {
+                                    crate::store::ScanMatchRecord {
+                                        box_id,
+                                        scan_ids,
+                                        box_bytes: bytes.to_vec(),
+                                        inclusion_height: h,
+                                        creation_out_index: out_idx,
+                                    }
+                                })
+                                .collect(),
+                        )
                     } else {
                         None
                     };
@@ -408,10 +504,11 @@ impl WalletScanService {
 
             // Cancellation check at catch-up boundary.
             if is_cancelled() {
-                return Ok(processed);
+                return Err(RescanError::Cancelled {
+                    height: current_target,
+                });
             }
 
-            // Catch-up: did new blocks arrive during our replay?
             let new_target = read_tip()?;
             if new_target <= current_target {
                 break; // steady state
@@ -425,7 +522,7 @@ impl WalletScanService {
         // state; a scan rebuild that skipped a block (matcher contract
         // violation, `scan_rebuild_complete == false`) left the scan tables
         // incomplete and must stay invalidated so the operator rescans again.
-        if start_height == 0 && scan_rebuild_complete {
+        if start_height == 0 {
             let txn = crate::begin_write_qr(db)?;
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), false)?;
             txn.commit()?;
@@ -443,8 +540,15 @@ impl WalletScanService {
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
             Err(e) => return Err(e.into()),
         };
-        Ok(tbl.get(()).ok().flatten().map(|g| g.value()).unwrap_or(0))
+        Ok(tbl.get(())?.map(|g| g.value()).unwrap_or(0))
     }
+}
+
+fn mark_scan_invalidated(db: &Arc<Database>) -> Result<(), redb::Error> {
+    let txn = crate::begin_write_qr(db)?;
+    txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
+    txn.commit()?;
+    Ok(())
 }
 
 // --- internal helpers ---

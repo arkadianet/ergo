@@ -343,7 +343,9 @@ pub(crate) async fn retrieve_rewards_impl(
     } = sweep_breakdown(
         &reward_boxes,
         chain.reemission_rules(),
-        chain.tip_height(),
+        chain
+            .tip_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
         fee,
     )?;
     if other_tokens.len() > SWEEP_MAX_TOKENS_PER_BOX {

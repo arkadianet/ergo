@@ -198,7 +198,9 @@ pub(crate) async fn derive_key_impl(
     let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
         derivation_path: path.components().to_vec(),
         derivation_path_label: String::new(),
-        added_at_height: chain.tip_height(),
+        added_at_height: chain
+            .tip_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
     };
 
     // Persist atomically (WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES).
@@ -303,7 +305,9 @@ pub(crate) async fn derive_next_key_impl(
     let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
         derivation_path: path.components().to_vec(),
         derivation_path_label: String::new(),
-        added_at_height: chain.tip_height(),
+        added_at_height: chain
+            .tip_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
     };
 
     // Persist WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES, shared with

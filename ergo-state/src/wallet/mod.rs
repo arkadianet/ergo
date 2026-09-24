@@ -1,20 +1,10 @@
 //! Wallet persistence layer: tracked-pubkey/box/transaction storage
 //! that lives alongside chain state.
 //!
-//! Tables live in the SAME `state.redb` as chain state. Atomicity
-//! with chain mutations depends on the apply path:
-//!
-//! - **Synchronous forward apply**: wallet writes land inside the
-//!   same redb write_txn as AVL/undo/chain_index/state_meta in
-//!   `persist_apply`. Truly atomic.
-//! - **Pipeline forward apply**: chain is queued + drained durably,
-//!   then wallet commits on a separate write_txn. Two-commit;
-//!   failure mode "wallet behind chain" recoverable via rescan-on-
-//!   restart. Closing this seam so the pipeline worker consumes
-//!   wallet writes atomically too requires extending `PersistJob`,
-//!   which does not yet exist.
-//! - **Rollback (both paths)**: chain rollback + wallet rollback
-//!   share a single write_txn in `persist_rollback`. Atomic.
+//! Tables live in the SAME `state.redb` as chain state. Wallet writes,
+//! cursor updates, and scan-index updates are part of the same redb write
+//! transaction as the corresponding chain mutation on both the synchronous
+//! and persist-pipeline paths. Rollback uses the same atomic transaction.
 //!
 //! The `tables` submodule defines the redb `TableDefinition`
 //! constants; `types` defines the value structs; `apply` and

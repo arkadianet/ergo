@@ -63,21 +63,14 @@ pub(crate) struct RescanScanMatcher {
 }
 
 impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
         boxes
             .iter()
             .map(|bytes| {
                 let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-                match ergo_ser::ergo_box::read_ergo_box(&mut r) {
-                    Ok(b) => self.registry.matching_scan_ids(&b),
-                    // On-chain boxes were already validated, so a parse failure
-                    // here is a serializer fault, not bad input — surface it and
-                    // degrade that box to "no match" rather than abort the rescan.
-                    Err(e) => {
-                        tracing::error!(error = %e, "scan rescan: output box parse failed; no match");
-                        Vec::new()
-                    }
-                }
+                let b = ergo_ser::ergo_box::read_ergo_box(&mut r)
+                    .map_err(|e| format!("output box parse failed: {e}"))?;
+                Ok(self.registry.matching_scan_ids(&b))
             })
             .collect()
     }
@@ -2135,23 +2128,23 @@ mod tests {
         // the contract `rescan_full_rebuild` relies on.
         let hit = serialize_box_json(&box_json_with_asset(0x11));
         let miss = serialize_box_json(&box_json(5, 100, 0x77, 0));
-        let out = matcher.match_boxes(&[hit.as_slice(), miss.as_slice()]);
+        let out = matcher.match_boxes(&[hit.as_slice(), miss.as_slice()]).unwrap();
         assert_eq!(out, vec![vec![11u16], vec![]]);
     }
 
     #[test]
-    fn rescan_matcher_degrades_unparseable_box_to_no_match() {
+    fn rescan_matcher_errors_on_unparseable_box() {
         use ergo_state::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap();
         let matcher = build_rescan_matcher(&db).unwrap().unwrap();
 
-        // Garbage bytes can't be a box: degrade that slot to "no match" rather
-        // than abort the whole rescan. Result count still matches input count.
+        // Garbage bytes can't be a box: abort the rescan rather than silently
+        // dropping a scan match.
         let good = serialize_box_json(&box_json_with_asset(0x11));
         let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
         let out = matcher.match_boxes(&[bad, good.as_slice()]);
-        assert_eq!(out, vec![vec![], vec![11u16]]);
+        assert!(out.is_err());
     }
 
     #[test]

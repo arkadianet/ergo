@@ -4,16 +4,18 @@
 //! from the replayed blocks — mirroring the live block-apply path so a
 //! rescan reproduces exactly what live tracking would have produced.
 
-#![allow(clippy::result_large_err)] // redb::Error is large; test closures can't avoid it
+#![allow(clippy::result_large_err)] // RescanReadError is large; test closures can't avoid it
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use ergo_state::store::StateError;
 use ergo_state::wallet::scan::{
-    OwnedBlockOutput, RescanBlock, RescanTx, ScanRescanMatcher, WalletScanService,
+    OwnedBlockOutput, RescanBlock, RescanError, RescanReadError, RescanTx, ScanRescanMatcher,
+    WalletScanService,
 };
 use ergo_state::wallet::tables::{
-    scan_box_key, WALLET_SCAN_BOXES, WALLET_SCAN_INVALIDATED, WALLET_SCAN_TXS,
+    scan_box_key, WALLET_SCAN_BOXES, WALLET_SCAN_HEIGHT, WALLET_SCAN_INVALIDATED, WALLET_SCAN_TXS,
 };
 use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
 use redb::{Database, ReadableTable};
@@ -26,11 +28,11 @@ struct FakeMatcher {
 }
 
 impl ScanRescanMatcher for FakeMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        boxes
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
+        Ok(boxes
             .iter()
             .map(|b| self.by_box_bytes.get(*b).cloned().unwrap_or_default())
-            .collect()
+            .collect())
     }
 }
 
@@ -99,14 +101,18 @@ fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
         }],
     };
 
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
+            0 => Some(RescanBlock {
+                block_id: [0; 32],
+                txs: vec![],
+            }),
             1 => Some(block1.clone()),
             2 => Some(block2.clone()),
             _ => None,
         })
     };
-    let read_tip = || -> Result<u32, redb::Error> { Ok(2) };
+    let read_tip = || -> Result<u32, RescanReadError> { Ok(2) };
 
     WalletScanService::rescan_full_rebuild(
         &db,
@@ -189,8 +195,15 @@ fn full_rescan_clears_stale_scan_rows_before_rebuilding() {
             outputs: vec![out(0xA1, a_bytes)],
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            0 => Some(RescanBlock {
+                block_id: [0; 32],
+                txs: vec![],
+            }),
+            1 => Some(block1.clone()),
+            _ => None,
+        })
     };
 
     WalletScanService::rescan_full_rebuild(
@@ -229,8 +242,15 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
             outputs: vec![out(0xA1, vec![0xA1])],
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            0 => Some(RescanBlock {
+                block_id: [0; 32],
+                txs: vec![],
+            }),
+            1 => Some(block1.clone()),
+            _ => None,
+        })
     };
 
     // None matcher: the no-scans node path — scans never touched.
@@ -258,8 +278,8 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
 /// returns an empty Vec regardless of input count.
 struct BadCountMatcher;
 impl ScanRescanMatcher for BadCountMatcher {
-    fn match_boxes(&self, _boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        Vec::new() // wrong length whenever the block has ≥1 output box
+    fn match_boxes(&self, _boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -270,6 +290,87 @@ fn read_invalidated(db: &Database) -> Option<bool> {
         Err(_) => return None,
     };
     t.get(()).unwrap().map(|g| g.value())
+}
+
+fn read_scan_height(db: &Database) -> Option<u32> {
+    let txn = db.begin_read().unwrap();
+    let t = match txn.open_table(WALLET_SCAN_HEIGHT) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    t.get(()).unwrap().map(|g| g.value())
+}
+
+#[test]
+fn rescan_missing_block_stops_before_advancing_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        |height| {
+            if height == 0 {
+                Ok(Some(RescanBlock {
+                    block_id: [0; 32],
+                    txs: vec![],
+                }))
+            } else {
+                Ok(None)
+            }
+        },
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(matches!(
+        result,
+        Err(RescanError::Read(RescanReadError::Missing { height: 1 }))
+    ));
+    assert_eq!(read_scan_height(&db), Some(0));
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn rescan_storage_error_is_distinct_and_keeps_cursor_before_hole() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        |height| {
+            if height == 0 {
+                Ok(Some(RescanBlock {
+                    block_id: [0; 32],
+                    txs: vec![],
+                }))
+            } else {
+                Err(RescanReadError::Storage {
+                    height,
+                    source: StateError::Serialization("synthetic read failure".to_string()),
+                })
+            }
+        },
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(matches!(
+        result,
+        Err(RescanError::Read(RescanReadError::Storage {
+            height: 1,
+            ..
+        }))
+    ));
+    assert_eq!(read_scan_height(&db), Some(0));
+    assert_eq!(read_invalidated(&db), Some(true));
 }
 
 #[test]
@@ -290,11 +391,18 @@ fn count_mismatch_leaves_wallet_invalidated_not_falsely_complete() {
             outputs: vec![out(0xA1, vec![0xA1])], // 1 box; matcher returns 0 results
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            0 => Some(RescanBlock {
+                block_id: [0; 32],
+                txs: vec![],
+            }),
+            1 => Some(block1.clone()),
+            _ => None,
+        })
     };
 
-    WalletScanService::rescan_full_rebuild(
+    let result = WalletScanService::rescan_full_rebuild(
         &db,
         BTreeSet::new(),
         BTreeMap::new(),
@@ -304,8 +412,11 @@ fn count_mismatch_leaves_wallet_invalidated_not_falsely_complete() {
         || Ok(1),
         || false,
         Some(&BadCountMatcher),
-    )
-    .unwrap();
+    );
+    assert!(matches!(
+        result,
+        Err(RescanError::Matcher { height: 1, .. })
+    ));
 
     assert_eq!(
         read_invalidated(&db),
