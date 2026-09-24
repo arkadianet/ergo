@@ -32,7 +32,7 @@ class Role:
         self.kind = kind
         self.mines = mines
         # A `*_patched` role is the one `campaign.py --build` selects the
-        # build for; every other Scala role runs `stock`, so an ablation
+        # build for; every other Scala role runs `--base-build`, so an ablation
         # is always base+one-patch against base.
         self.patched = patched
         self.why = why

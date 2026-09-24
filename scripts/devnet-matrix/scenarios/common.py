@@ -1789,6 +1789,95 @@ def scala_accounting(lines):
     return _with_ratio(out)
 
 
+# The waitlist, per ordering block (REVIEW-2563 §3.3 item 6). At
+# a1bd938ef `InputBlocksProcessor.scala:901` logs INFO
+# `Put input block to disconnected queue: <id>` for every input block
+# whose parent the tree does not hold, and returns that parent for a
+# download (`ErgoNodeViewHolder` -> `DownloadInputBlock`, whose own line
+# is DEBUG) — so each insertion is one parent request as well: the
+# round-trip rebuild the pending store exists to remove. The synchronizer's
+# `+2` branch logs `On processing <id>, downloading its parent and
+# unknown ordering block <parent>` when it asks a peer for the ordering
+# block a root announcement names (`:1594`).
+WAITLIST_PHRASE = 'put input block to disconnected queue:'
+ROOT_PARENT_DOWNLOAD_PHRASE = 'downloading its parent and unknown ordering block'
+_WAITLIST_ID = re.compile(r'disconnected queue:\s*([0-9a-f]{2,64})')
+
+
+def scala_waitlist(lines):
+    """Waitlist insertions per ordering block, from one Scala log. Pure.
+
+    The Scala log carries no timestamps, so an insertion is attributed
+    to the ordering block whose announcement (the synchronizer's entry
+    line, first sighting of its id) precedes it in the log — the period
+    in which the node was assembling that block's successor tree.
+    Insertions before the first announcement in the window are counted
+    as `before_first_ordering_block`, not dropped.
+    """
+    periods, current, before = [], None, 0
+    seen_ordering = set()
+    insertions, distinct, root_parent_downloads = 0, set(), 0
+    entry = SCALA_PHRASES['entry_announcements']
+    for line in lines:
+        low = line.lower()
+        if entry in low:
+            match = _SCALA_ID.search(low)
+            key = match.group(1) if match else None
+            if key not in seen_ordering:
+                seen_ordering.add(key)
+                current = {'ordering': key, 'insertions': 0}
+                periods.append(current)
+            continue
+        if ROOT_PARENT_DOWNLOAD_PHRASE in low:
+            root_parent_downloads += 1
+            continue
+        if WAITLIST_PHRASE not in low:
+            continue
+        insertions += 1
+        match = _WAITLIST_ID.search(low)
+        if match:
+            distinct.add(match.group(1))
+        if current is None:
+            before += 1
+        else:
+            current['insertions'] += 1
+    per_block = sorted(p['insertions'] for p in periods)
+    return {
+        'source': 'scala log: InputBlocksProcessor "Put input block to '
+                  'disconnected queue" (INFO), split at each ordering-block '
+                  'announcement',
+        'insertions': insertions,
+        'distinct_input_blocks': len(distinct),
+        'ordering_blocks': len(periods),
+        'before_first_ordering_block': before,
+        'per_ordering_block': {
+            'p50': smoke.percentile(per_block, 50) if per_block else None,
+            'p95': smoke.percentile(per_block, 95) if per_block else None,
+            'max': per_block[-1] if per_block else None,
+            'mean': (round(sum(per_block) / len(per_block), 3)
+                     if per_block else None),
+            'blocks_with_any': sum(1 for n in per_block if n),
+        },
+        'root_parent_downloads': root_parent_downloads,
+    }
+
+
+def scala_root_announcements(lines):
+    """Root (`+2`) announcements a Scala follower saw, and how many later
+    became a valid sub-block on it (REVIEW-2563 §3.5 "root held vs
+    dropped"). Pure; `flood.evaluate_root_flood` with no adversary, so a
+    steady or restart run reads the same way a flood window does. On a
+    stock build a root that lands was fetched on demand; on a build with
+    the pending store it may have been replayed from it.
+    """
+    from . import flood
+    verdict = flood.evaluate_root_flood(lines, [], flood.ROOT_FLOOD_CAPS, ())
+    return {key: verdict[key] for key in (
+        'honest_roots', 'honest_roots_landed', 'honest_penalties',
+        'honest_misbehaviour_penalties',
+        'honest_misbehaviour_after_double_application')}
+
+
 def _with_ratio(out):
     """Add the derived ratio and the unaccounted remainder."""
     eligible = out['eligible_announcements']
@@ -1930,7 +2019,11 @@ def reconstruction_accounting(ctx):
                 entry['complete'] = None
         else:
             offset, end = _scala_window_bounds(ctx, node)
-            entry = scala_accounting(scala_window_lines(ctx, node))
+            window = scala_window_lines(ctx, node)
+            entry = scala_accounting(window)
+            # Over the same window as the five numbers.
+            entry['waitlist'] = scala_waitlist(window)
+            entry['root_announcements'] = scala_root_announcements(window)
             entry['from_line'] = offset
             entry['to_line'] = end
             entry['interval'] = (

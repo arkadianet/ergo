@@ -19,6 +19,7 @@ Afterwards the follower's `peers.redb` is purged: the harness binds each
 slot to its own `127.<k>.0.1` and those addresses poison the address
 book, starving the next run's dialer.
 """
+from pathlib import Path
 import re
 import subprocess
 import threading
@@ -79,14 +80,32 @@ def _adversary_binary():
     """The built harness. Not built here: a compile inside a running
     devnet competes with the node for the machine, and a scenario that
     silently rebuilt would measure a different binary than the campaign
-    reported."""
+    reported.
+
+    `P2P_ADVERSARY` names a prebuilt binary, the way `RUST_NODE` names the
+    node — for a checkout whose cargo target directory is not `target/`.
+    """
+    import os
+
     import lifecycle
-    target = smoke.ROOT / 'target' / 'release' / 'examples' / 'p2p_adversary'
+    explicit = os.environ.get('P2P_ADVERSARY')
+    target = (Path(explicit) if explicit else
+              smoke.ROOT / 'target' / 'release' / 'examples' / 'p2p_adversary')
     if not target.exists():
         raise RuntimeError(
             f'{target} not built; run `cargo build --release --example '
-            f'p2p_adversary -p ergo-node` (node binary: {lifecycle.node_binary()})')
+            f'p2p_adversary -p ergo-node` or set P2P_ADVERSARY '
+            f'(node binary: {lifecycle.node_binary()})')
     return target
+
+
+def _binary_provenance(path):
+    """Which adversary ran: path, sha256, mtime."""
+    import hashlib
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return {'path': str(path), 'sha256': digest,
+            'mtime': time.strftime('%Y-%m-%dT%H:%M:%S%z',
+                                   time.localtime(Path(path).stat().st_mtime))}
 
 
 # ----- the Scala-follower ROOT flood (plan 3 Task 7, F13) -----
@@ -100,16 +119,88 @@ def _adversary_binary():
 # saturated, (c) the honest peers are not punished for the flood, and
 # (d) the follower keeps applying blocks on time.
 #
-# The store's caps are F13's `reference.conf` defaults; the harness does
-# not override them, so the numbers here are the ones a node ships with.
+# The store's caps as #2563 ships them (`upstream/pending-root-announcement-
+# store` @ 3e20c270b, `matrix.pendingAnnouncements`); the harness does not
+# override them, so the numbers here are the ones a node ships with. The
+# early F13 build ran `perPeer = 32`; its flood runs are not evidence for
+# the shipped cap (REVIEW-2563 §3.1).
 ROOT_FLOOD_CAPS = {'maxEntries': 256, 'maxBytes': 4 * 1024 * 1024,
-                   'perPeer': 32, 'ttlMs': 120_000}
-# 10 fresh hosts per wave x 40 announcements: 10 x 32 admitted per wave
-# is past the 256-entry cap, so capacity eviction (and its fairness rule)
-# is exercised every wave. 12 waves 20 s apart keep it saturated for
-# about four ordering blocks; the hosts are 127.100.0.1 .. 127.219.0.1.
-ROOT_FLOOD = {'hosts': 10, 'per_host': 40, 'waves': 12, 'interval_ms': 20_000,
-              'first_octet': 100}
+                   'perPeer': 128, 'ttlMs': 120_000}
+# The two adversary shapes `--flood-mode` selects (REVIEW-2563 §3.3
+# items 4-5). They differ once the store drops a host's entries when its
+# connection closes and keeps an unknown-parent entry until the TTL: a
+# hit-and-run host's entries leave with it, a held host's stay.
+#
+# * `hit-and-run` (the default, the plan 3 shape): 10 FRESH hosts per
+#   wave x 40 announcements, each connection closed half a second after
+#   its last frame. 400 per wave is past the 256-entry cap, so capacity
+#   eviction and its fairness rule run every wave; 40 is under
+#   `perPeer = 128`, so the per-host cap is never reached. 12 waves 20 s
+#   apart keep it saturated for about four ordering blocks; the hosts
+#   are 127.100.0.1 .. 127.219.0.1.
+# * `held`: 10 hosts, each on ONE connection held open for the whole
+#   flood and 130 s (past `ttlMs`) after its last wave, every wave sent
+#   over it, 160 announcements per host per wave — past `perPeer`, so the
+#   per-host cap refuses the excess on every wave. The adversary drains
+#   what the node sends it and reports how many of its connections the
+#   node closed early. 10 held connections stay inside the Scala node's
+#   default `maxConnections = 30` beside its honest peers.
+ROOT_FLOOD_PLANS = {
+    'hit-and-run': {'hosts': 10, 'per_host': 40, 'waves': 12,
+                    'interval_ms': 20_000, 'first_octet': 100,
+                    'hold_ms': None},
+    'held': {'hosts': 10, 'per_host': 160, 'waves': 12,
+             'interval_ms': 20_000, 'first_octet': 100,
+             'hold_ms': 130_000},
+}
+# The default plan, under its old name.
+ROOT_FLOOD = ROOT_FLOOD_PLANS['hit-and-run']
+
+
+def root_flood_plan(mode):
+    """The adversary plan for one `--flood-mode`. Pure."""
+    if mode not in ROOT_FLOOD_PLANS:
+        raise ValueError(f'unknown flood mode {mode!r}; have '
+                         f'{sorted(ROOT_FLOOD_PLANS)}')
+    return dict(ROOT_FLOOD_PLANS[mode], mode=mode)
+
+
+def root_flood_command(binary, target, api, plan):
+    """The `p2p_adversary input_block_root_flood` argv for a plan. Pure.
+
+    A `held` plan adds the adversary's own `--hold-ms` flag; without it
+    the command is exactly the plan 3 one.
+    """
+    command = [str(binary), target, 'devnet', api, 'input_block_root_flood',
+               str(plan['hosts']), str(plan['per_host']), str(plan['waves']),
+               str(plan['interval_ms']), str(plan['first_octet'])]
+    if plan.get('hold_ms') is not None:
+        command += ['--hold-ms', str(plan['hold_ms'])]
+    return command
+
+
+def adversary_octets(plan):
+    """The second octets of every source host a plan uses. Pure.
+
+    Fresh hosts per wave (`hit-and-run`) use `hosts x waves` of them; a
+    `held` plan reuses its `hosts` on every wave.
+    """
+    count = plan['hosts'] * (1 if plan.get('hold_ms') is not None
+                             else plan['waves'])
+    return range(plan['first_octet'], plan['first_octet'] + count)
+
+
+def counters_between(first, last):
+    """How much each store counter moved between two `/info` readings.
+
+    Pure. Reads the pre-review single `drops` number and the per-reason
+    `drops` object alike (`smoke.flatten_counters`); a counter missing
+    from either reading is left out rather than read as zero.
+    """
+    a = smoke.flatten_counters(first or {})
+    b = smoke.flatten_counters(last or {})
+    return {key: b[key] - a[key] for key in sorted(set(a) & set(b))
+            if key not in smoke.PENDING_GAUGES}
 BLOCKS_BEFORE_ROOT_FLOOD = 4
 ROOT_FLOOD_PAYMENTS_PER_BLOCK = 3
 BLOCKS_AFTER_ROOT_FLOOD = 3
@@ -287,7 +378,8 @@ class _FollowerSampler:
                         sample.update(size=pending.get('size'),
                                       bytes=pending.get('bytes'),
                                       evictions=pending.get('evictions'),
-                                      drops=pending.get('drops'))
+                                      drops=pending.get('drops'),
+                                      pending=pending)
                 height = info.get('fullHeight')
                 sample[f'{node}_height'] = height
                 if height is not None:
@@ -319,10 +411,12 @@ def _run_against_scala_follower(ctx, target):
     common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
     smoke.assertion_1_peering(ctx.run, ctx.evidence)
     role = (ctx.roles or {}).get(target)
+    plan = root_flood_plan(getattr(ctx.args, 'flood_mode', None)
+                           or 'hit-and-run')
     ctx.note('flood_target', {'node': target, 'role': role,
                               'p2p': f'{lifecycle.P2P_HOST[target]}:'
                                      f'{lifecycle.P2P[target]}',
-                              'plan': ROOT_FLOOD, 'caps': ROOT_FLOOD_CAPS})
+                              'plan': plan, 'caps': ROOT_FLOOD_CAPS})
 
     # A WORKLOAD, as in `steady`: honest root (+2) announcements only
     # exist while the follower has not yet applied the miner's newest
@@ -346,13 +440,11 @@ def _run_against_scala_follower(ctx, target):
     log_from = len(common._scala_log_lines(target))
 
     binary = _adversary_binary()
-    command = [str(binary),
-               f'{lifecycle.P2P_HOST[target]}:{lifecycle.P2P[target]}', 'devnet',
-               f'127.0.0.1:{lifecycle.REST[target]}', 'input_block_root_flood',
-               str(ROOT_FLOOD['hosts']), str(ROOT_FLOOD['per_host']),
-               str(ROOT_FLOOD['waves']), str(ROOT_FLOOD['interval_ms']),
-               str(ROOT_FLOOD['first_octet'])]
+    command = root_flood_command(
+        binary, f'{lifecycle.P2P_HOST[target]}:{lifecycle.P2P[target]}',
+        f'127.0.0.1:{lifecycle.REST[target]}', plan)
     ctx.note('adversary_command', ' '.join(command))
+    ctx.note('adversary_binary', _binary_provenance(binary))
     sampler.phase = 'flood'
     started = time.monotonic()
     try:
@@ -392,9 +484,7 @@ def _run_against_scala_follower(ctx, target):
     window = lines[log_from:log_to]
     flood_samples = [dict(s, lines=s['lines'] - log_from)
                      for s in sampler.samples if s['phase'] in ('flood', 'drain')]
-    octets = range(ROOT_FLOOD['first_octet'],
-                   ROOT_FLOOD['first_octet']
-                   + ROOT_FLOOD['hosts'] * ROOT_FLOOD['waves'])
+    octets = adversary_octets(plan)
     verdict = evaluate_root_flood(window, flood_samples, ROOT_FLOOD_CAPS, octets)
     store_present = any(s.get('store_present') for s in sampler.samples)
     verdict['store_present'] = store_present
@@ -403,8 +493,13 @@ def _run_against_scala_follower(ctx, target):
     first = next((s for s in sampler.samples if 'evictions' in s), {})
     verdict['evictions_in_window'] = ((last.get('evictions') or 0)
                                       - (first.get('evictions') or 0))
-    verdict['drops_in_window'] = ((last.get('drops') or 0)
-                                  - (first.get('drops') or 0))
+    # Every store counter's movement over the flood: drops by reason
+    # (once the store splits them), admitted, replayed, invalid replays.
+    verdict['store_counters_in_window'] = counters_between(
+        first.get('pending'), last.get('pending'))
+    verdict['drops_in_window'] = {
+        key: value for key, value in verdict['store_counters_in_window'].items()
+        if key == 'drops' or key.startswith('drops.')}
     ctx.note('root_flood', verdict)
 
     # The same three counts BEFORE the flood, as the honest baseline the

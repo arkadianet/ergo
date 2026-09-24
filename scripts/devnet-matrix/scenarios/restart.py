@@ -20,7 +20,19 @@ that the follower is back on the miner's tip within 3 ordering blocks,
 and the reconstruct/fallback split is recorded as telemetry: either
 outcome passes. The `evict` scenario is where the fallback path is
 required to fire.
+
+`--restart-victim scala-followers` (REVIEW-2563 §3.3 item 2) kills the
+Scala reference followers instead — every one in the run, at the same
+instant — and leaves the Rust follower and the miner running. It is the
+only way to watch a Scala node restart: the #2563 pending store is in
+memory and comes back empty, and #2506's processed-tip replay acts on the
+reconnect. The bar is the same (each victim back on the miner's tip on a
+NEW ordering block within 3), and the telemetry is per victim: its
+reconstruction accounting and waitlist over the post-kill log, the time
+from respawn to the miner's tip, and its pending store's replay burst
+(`smoke.restart_recovery`).
 """
+import concurrent.futures
 import time
 
 import lifecycle
@@ -53,9 +65,44 @@ def lag_after(series, since_epoch_s):
     return dict(out, since_epoch_s=since_epoch_s, samples=len(after))
 
 
+def victims_for(restart_victim, running):
+    """The nodes one restart kills. Pure.
+
+    `rust` is the M3 scenario. `scala-followers` is every Scala
+    reference follower in the run — `scala2` (stock) and `scala3`
+    (patched), whichever `--reference-follower` started — so a stock and
+    a patched store restart under the same miner at the same moment.
+    """
+    if restart_victim == 'rust':
+        return ('rust',)
+    victims = tuple(n for n in SEEDED_NODES if n in running)
+    if not victims:
+        raise ValueError('--restart-victim scala-followers found no Scala '
+                         'follower in the run; add --reference-follower')
+    return victims
+
+
+def _respawn(ctx, campaign, lifecycle, node):
+    """Start a killed node again; one retry, as for the Rust victim."""
+    attempts = []
+    try:
+        lifecycle.spawn(node)
+    except RuntimeError as error:
+        attempts.append(str(error))
+        time.sleep(campaign.KILL_SETTLE_SECONDS * 2)
+        lifecycle.spawn(node)
+    ctx.run.started(node)
+    return attempts
+
+
 def run(ctx):
     import campaign
     import lifecycle
+
+    victim_mode = getattr(ctx.args, 'restart_victim', 'rust') or 'rust'
+    if victim_mode != 'rust':
+        _run_scala_victims(ctx, campaign, lifecycle)
+        return
 
     # A reference follower, if one was asked for, on the miner's chain
     # before anything is measured against it — and before peering is
@@ -109,6 +156,7 @@ def run(ctx):
         lifecycle.spawn('rust')
     ctx.note('respawn_attempts', attempts)
     ctx.run.started('rust')
+    respawned_at = time.time()
     lifecycle.wait_peered()
     restarted_at = time.monotonic()
 
@@ -212,3 +260,158 @@ def run(ctx):
 
     smoke.finalize_agreement(ctx.run, ctx.evidence)
     ctx.note('follower_lag_after_restart', lag_after(ctx.run.series, killed_at))
+    ctx.note('restart_recovery', {
+        'rust': smoke.restart_recovery(ctx.run.series, respawned_at, 'rust')})
+
+
+def _run_scala_victims(ctx, campaign, lifecycle):
+    """The Scala-follower restart. Same shape as the Rust one: a funded
+    pre-kill window, a simultaneous SIGKILL, convergence within 3
+    ordering blocks on a NEW block, a funded post-kill window."""
+    common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
+    smoke.assertion_1_peering(ctx.run, ctx.evidence)
+    victims = victims_for('scala-followers', lifecycle.NODES)
+    ctx.note('restart_victims', {
+        node: (ctx.roles or {}).get(node) for node in victims})
+
+    balance, address = common.fund_miner(ctx, 'scala')
+    sent, refused = [], []
+
+    def pump():
+        if balance and address:
+            common.pump_payments(ctx, address, sent, 'scala',
+                                 PAYMENTS_PER_BLOCK, rejected=refused)
+
+    if not balance:
+        ctx.fail('the miner was never funded, so the restart window carried no '
+                 'workload and the followers\' lag measured the quiet case',
+                 {'balance_nano': balance})
+    pre_blocks = ctx.args.ordering_blocks or BLOCKS_BEFORE_RESTART
+    pump()
+    common.wait_ordering_blocks(ctx, pre_blocks, 'pre_restart', on_block=pump)
+
+    restart_height = smoke.scala_height(ctx.run)
+    # Where each victim's log stood at the kill: the post-restart
+    # accounting reads from here (`spawn` appends to the same file).
+    log_at_kill = {node: len(common._scala_log_lines(node)) for node in victims}
+    before = {}
+    for node in victims:
+        try:
+            info = api(node, '/info') or {}
+        except Unavailable as error:
+            info = {'error': str(error)}
+        before[node] = {'fullHeight': info.get('fullHeight'),
+                        'pendingInputAnnouncements':
+                            info.get('pendingInputAnnouncements')}
+    ctx.note('victims_before_kill', before)
+
+    # The sampler keeps sampling the miner and the Rust follower while the
+    # victims are down; they read as down, not as a failed sweep.
+    ctx.run.expect_down(victims)
+    killed_at = time.time()
+    killed = campaign.kill_hard_many(victims)
+    ctx.note('killed', {'pids': killed, 'signal': 'SIGKILL',
+                        'at_ordering_height': restart_height,
+                        'at_epoch_s': killed_at})
+    # Respawned CONCURRENTLY, so the stock and the patched follower come
+    # back together as they died together: one after the other, the
+    # second waited out the first's JVM start (~5 s in the first
+    # validation run), and a paired comparison would carry that head start.
+    attempts, respawned_at = {}, {}
+
+    def respawn(node):
+        attempts[node] = _respawn(ctx, campaign, lifecycle, node)
+        respawned_at[node] = time.time()
+
+    with concurrent.futures.ThreadPoolExecutor(len(victims)) as pool:
+        for future in [pool.submit(respawn, node) for node in victims]:
+            future.result()
+    for node in victims:
+        # Its wallet is locked again after a restart. A follower does not
+        # mine, but it is brought back exactly as it was started.
+        lifecycle.init_wallet(node)
+    ctx.note('respawn_attempts', attempts)
+    ctx.note('respawned_at_epoch_s', respawned_at)
+    try:
+        lifecycle.wait_peered(names=list(lifecycle.NODES), timeout=120)
+        peered = True
+    except RuntimeError as error:
+        peered = str(error)
+    ctx.note('peered_after_respawn', peered)
+    restarted_at = time.monotonic()
+
+    # Convergence per victim: its full-block tip equal to the miner's at a
+    # height ABOVE the one it died at (a SIGKILL leaves the data directory
+    # intact, so agreement at the old height observes nothing).
+    target_height = restart_height + CONVERGENCE_ORDERING_BLOCKS
+    converged = {node: None for node in victims}
+    seconds = {node: None for node in victims}
+    pumped_at = restart_height
+    while time.monotonic() < ctx.run.deadline and None in converged.values():
+        try:
+            scala = api('scala', '/info') or {}
+        except Unavailable:
+            ctx.run.idle(0.5)
+            continue
+        if (scala.get('fullHeight') or 0) > pumped_at:
+            pumped_at = scala.get('fullHeight')
+            pump()
+        for node in victims:
+            if converged[node] is not None:
+                continue
+            try:
+                info = api(node, '/info') or {}
+            except Unavailable:
+                continue
+            height = info.get('fullHeight') or 0
+            if (info.get('bestFullHeaderId')
+                    and info.get('bestFullHeaderId') == scala.get('bestFullHeaderId')
+                    and height > restart_height):
+                converged[node] = height
+                seconds[node] = round(time.monotonic() - restarted_at, 1)
+        if (scala.get('fullHeight') or 0) > target_height:
+            break
+        ctx.run.idle(0.5)
+    ctx.note('convergence', {
+        'restart_height': restart_height,
+        'budget_ordering_blocks': CONVERGENCE_ORDERING_BLOCKS,
+        'converged_at_height': converged,
+        'seconds_after_peering': seconds,
+    })
+    for node in victims:
+        if converged[node] is None:
+            ctx.fail(f'{node} did not rejoin the miner\'s tip on a NEW ordering '
+                     f'block within {CONVERGENCE_ORDERING_BLOCKS} of a SIGKILL',
+                     {'restart_height': restart_height,
+                      'scala': api('scala', '/info'), node: api(node, '/info')})
+        elif converged[node] > target_height:
+            ctx.fail(f'{node} converged only at height {converged[node]}, past '
+                     f'the {CONVERGENCE_ORDERING_BLOCKS}-block budget from '
+                     f'{restart_height}', {'converged_at_height': converged[node]})
+
+    common.wait_ordering_blocks(ctx, BLOCKS_AFTER_RESTART, 'post_restart',
+                                on_block=pump)
+    ctx.note('workload', {'funded_balance_nano': balance,
+                          'pre_restart_ordering_blocks': pre_blocks,
+                          'payments_submitted': len(sent),
+                          'payments_refused': len(refused),
+                          'refusals': refused[:10]})
+
+    # Per victim, over its post-kill log only: what it decided about each
+    # ordering block after coming back, and how often it waitlisted.
+    post = {}
+    for node in victims:
+        window = common._scala_log_lines(node)[log_at_kill[node]:]
+        post[node] = {
+            'role': (ctx.roles or {}).get(node),
+            'from_line': log_at_kill[node],
+            'accounting': common.scala_accounting(window),
+            'waitlist': common.scala_waitlist(window),
+        }
+    ctx.note('post_restart_scala_outcomes', post)
+
+    smoke.finalize_agreement(ctx.run, ctx.evidence)
+    ctx.note('follower_lag_after_restart', lag_after(ctx.run.series, killed_at))
+    ctx.note('restart_recovery', {
+        node: smoke.restart_recovery(ctx.run.series, respawned_at[node], node)
+        for node in victims})

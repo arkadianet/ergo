@@ -261,8 +261,13 @@ what JOB it is doing.
 ### Builds
 
 `builds.toml` lists the provisioned Scala builds by the names
-`campaign.py --build` accepts — `stock`, `F16`, `F12F05`, `F14`, `F13`,
-`F04`, `F11`, `all` — and `builds.py` loads them. A build's identity is
+`campaign.py --build` / `--base-build` accept — `stock`, `F16`, `F12F05`,
+`F14`, `F13`, `F04`, `F11`, `all`, and the #2563 re-measure's `base` —
+and `builds.py` loads them. They live in the shared archive
+`../matrix-evidence/scala-builds` beside the checkouts. The M4 entries
+were moved there from a deleted worktree and their classpath files still
+name it, so they are refused until re-provisioned (see the file's
+header). A build's identity is
 its COMPILED OUTPUT as well as its source commit. Each entry's
 `ergo_ref` is a full commit id (a branch name is refused), and a build
 whose manifest records another `ergo_commit` is refused until it is
@@ -307,16 +312,52 @@ the campaign resolves roles before it sets them.
 ### `--build` and `--reference-follower`
 
 `--build <name>` (default `stock`) selects the build for every
-`*_patched` role; every other Scala role stays on `stock`. That is what
+`*_patched` role; every other Scala role runs `--base-build` (`stock` by default). That is what
 makes a run an ablation — base + one patch against base — rather than a
 comparison of two integration builds (spec §7a). An unknown build stops
 the run; a declared but unprovisioned one stops it with the
 `provision.py` command that would create it.
 
+`--base-build <name>` (default `stock`) is the build of every OTHER
+Scala role: the miner(s) and the stock reference follower. It moves the
+base under an ablation — the #2563 re-measure runs its miner and stock
+follower on `base` (weak-blocks @ a1bd938ef), and a sender-side change
+such as #2506 needs the MINER on it — and it applies to every scenario,
+including `fork` (both miners) and `reconstruct_rate` (miner and stock
+follower).
+
 `--reference-follower stock|patched|both` is accepted by `steady`,
 `restart`, `fork` and `reconstruct_rate`. `fork` and `rollback` spend the
 `scala2` slot on their second miner, so `stock` and `both` are REFUSED
 there with the reason rather than silently downgraded.
+
+### The #2563 re-measure (REVIEW-2563 §3.3)
+
+* `restart --restart-victim scala-followers` (needs
+  `--reference-follower`) SIGKILLs every Scala reference follower at the
+  same instant, respawns them, and leaves the miner and the Rust
+  follower running; the sampler records the victims as down instead of
+  losing the sweep. Per victim it reports convergence, the post-kill
+  reconstruction accounting and waitlist, and `restart_recovery`: seconds
+  from respawn to the miner's tip and the pending store's replay burst in
+  the 30 s after the first post-restart apply. `rust` (the default) is
+  the M3 scenario.
+* Every agreement-series sample carries each Scala node's
+  `/info.pendingInputAnnouncements` (`pending`), and every evidence file
+  summarises it per node (`pending_store`: peak entries and bytes, and
+  how much each counter — admitted, replayed, evictions, drops by reason
+  — grew, restarts folded in). A build without the store reads `absent`.
+* Every Scala role's reconstruction accounting carries `waitlist`
+  (`Put input block to disconnected queue` per ordering block — each is
+  also a parent download) and `root_announcements` (+2 roots seen and
+  later valid).
+* `flood` uses the shipped caps (`perPeer = 128`) and takes
+  `--flood-mode hit-and-run|held` against a Scala follower: fresh hosts
+  per wave closed at once (the default), or one connection per host held
+  past the TTL with 160 announcements per host per wave
+  (`p2p_adversary ... input_block_root_flood ... --hold-ms`).
+  `P2P_ADVERSARY` names a prebuilt adversary, as `RUST_NODE` names the
+  node.
 
 ### Reconstruction accounting
 
