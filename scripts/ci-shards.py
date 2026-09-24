@@ -31,7 +31,7 @@ GROUPS = {
         ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-api"),
         (
             "ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json",
-            "ergo-indexer", "ergo-sync",
+            "ergo-indexer", "ergo-sync", "ergo-api-core",
         ),
         (
             "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
@@ -49,7 +49,7 @@ GROUPS = {
         ),
         (
             "ergo-node --test it", "ergo-indexer", "ergo-api", "ergo-sync", "ergo-validation",
-            "ergo-ser", "ergo-difftest", "ergo-mempool", "ergo-crypto", "ergo-rest-json",
+            "ergo-ser", "ergo-difftest", "ergo-mempool", "ergo-crypto", "ergo-rest-json", "ergo-api-core",
         ),
     ),
 }
