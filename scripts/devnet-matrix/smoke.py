@@ -221,6 +221,16 @@ def rust_log_lines(match, limit=40):
     return [line for line in text.splitlines() if match in line][-limit:]
 
 
+def scala_log_lines(node='scala'):
+    """Every line of one Scala node's log in this run. Best effort: a
+    log that cannot be read is empty, and `mined_input_blocks` over it
+    then confirms nothing."""
+    try:
+        return (WORK / f'{node}.log').read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+
+
 def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
     """Every debug-log line the Rust node emitted around `unix_seconds`.
 
@@ -868,6 +878,9 @@ class Run:
             # `/info` read as the rest of this sample; `None` for a build
             # without the store. `pending_store_summary` reads it.
             'pending': pending_announcements(reading),
+            # Which PROCESS each node is (`/info.launchTime`), so a chain
+            # can be traced to a process that has since been restarted.
+            'launch': launch_times(reading),
             # Nodes sampled as deliberately down (killed, not respawned).
             'down': sorted(n for n, r in reading.items()
                            if isinstance(r, dict) and r.get('down')),
@@ -1139,9 +1152,30 @@ def pending_announcements(reading):
     return out
 
 
+def launch_times(reading):
+    """`{node: /info.launchTime}` for one sweep. Pure. A node sampled as
+    down, or one whose `/info` has no launch time, maps to `None`."""
+    return {node: ((value or {}).get('info') or {}).get('launchTime')
+            for node, value in sorted((reading or {}).items())
+            if isinstance(value, dict)}
+
+
 # The store's GAUGES: everything else it publishes that is a number is a
 # counter, monotonic within one process.
 PENDING_GAUGES = ('size', 'bytes')
+# The fixed #2563 store's counters, as ergoplatform/ergo#2563 13fc25df2
+# publishes them (`PendingInputAnnouncements.Stats` and the `NodeInfo`
+# schema in `openapi.yaml`): `drops` split by reason, with no `fairness`
+# reason (that refusal branch was unreachable and was removed) and the
+# replays that did not reach the view holder counted as
+# `replayNotForwarded`. The pre-review store published `size`, `bytes`,
+# `evictions` and ONE `drops` number.
+PENDING_COUNTERS = ('admitted', 'replayed', 'replayNotForwarded', 'evictions')
+PENDING_DROP_REASONS = ('duplicate', 'hostLimit', 'variantLimit', 'oversize',
+                        'expired', 'staleParent', 'disconnected')
+PENDING_FIXED_COUNTERS = PENDING_COUNTERS + tuple(
+    f'drops.{reason}' for reason in PENDING_DROP_REASONS)
+PENDING_FIXED_KEYS = PENDING_GAUGES + PENDING_FIXED_COUNTERS
 
 
 def flatten_counters(value, prefix=''):
@@ -1161,6 +1195,43 @@ def flatten_counters(value, prefix=''):
             out.update(flatten_counters(inner, f'{prefix}.{key}' if prefix
                                         else str(key)))
     return out
+
+
+def pending_telemetry(reading):
+    """The shape of one `/info.pendingInputAnnouncements` reading. Pure.
+
+    `old`: the pre-review store, whose `drops` is one number. `fixed`:
+    every key in `PENDING_FIXED_KEYS` is a number. `unrecognised`: a
+    store object that is neither, such as a reading with keys missing.
+    `None`: no store at all.
+    """
+    if not isinstance(reading, dict):
+        return None
+    drops = reading.get('drops')
+    if isinstance(drops, (int, float)) and not isinstance(drops, bool):
+        return 'old'
+    flat = flatten_counters(reading)
+    if all(key in flat for key in PENDING_FIXED_KEYS):
+        return 'fixed'
+    return 'unrecognised'
+
+
+def pending_telemetry_label(readings):
+    """One label for a node's readings over a window. Pure.
+
+    A single old reading makes the node's telemetry `old telemetry`: the
+    build is the pre-review store, whatever else was read. Only a window
+    whose every store reading is complete is `fixed telemetry`.
+    """
+    shapes = [shape for shape in map(pending_telemetry, readings)
+              if shape is not None]
+    if not shapes:
+        return 'missing'
+    if 'old' in shapes:
+        return 'old telemetry'
+    if all(shape == 'fixed' for shape in shapes):
+        return 'fixed telemetry'
+    return 'unrecognised telemetry'
 
 
 def counter_increase(values, restarts=None):
@@ -1215,7 +1286,13 @@ def pending_store_summary(samples, node):
         out['store'] = ('absent: no sample carried '
                         '/info.pendingInputAnnouncements for this node')
         return out
+    out['telemetry'] = pending_telemetry_label(r for _, r in present)
     flat = [flatten_counters(r) for _, r in present]
+    if out['telemetry'] != 'old telemetry':
+        # Which fixed-store keys some reading lacked, so an incomplete
+        # reading is named rather than summarised as a zero.
+        out['missing_fixed_keys'] = sorted(
+            {key for f in flat for key in PENDING_FIXED_KEYS if key not in f})
     for gauge in PENDING_GAUGES:
         values = [f[gauge] for f in flat if gauge in f]
         out[f'peak_{gauge}'] = max(values) if values else None
@@ -1245,9 +1322,10 @@ def restart_recovery(samples, since, node, window_s=30.0):
     * `first_apply_at`: the first sample after the respawn at which the
       node's ordering block differs from the one it came back on — the
       first block it applied after the restart;
-    * `replay_burst`: how much each `replayed*` counter of its pending
-      store grew in the `window_s` seconds from that first apply (the
-      store is in memory, so it starts empty and this is its refill).
+    * `replay_burst`: how much each replay counter of its pending store
+      (`replayed`, and `replayNotForwarded` on the fixed store) grew in
+      the `window_s` seconds from that first apply (the store is in
+      memory, so it starts empty and this is its refill).
     """
     tip_key, ordering_key = f'{node}_tip', f'{node}_ordering'
     after = [s for s in samples if (s.get('at') or 0) >= since]
@@ -1273,7 +1351,7 @@ def restart_recovery(samples, since, node, window_s=30.0):
               if isinstance((s.get('pending') or {}).get(node), dict)]
     if stores:
         keys = sorted({k for f in stores for k in f
-                       if k.split('.')[0].startswith('replayed')})
+                       if k.split('.')[0].startswith('replay')})
         out['replay_burst'] = {
             'window_s': window_s,
             **{k: counter_increase([f[k] for f in stores if k in f])[0]
@@ -1371,10 +1449,46 @@ def _coverage_violations(kept, lags, what):
     return out
 
 
-def evaluate_tip_consistency(samples):
+# The Scala miner's own log line for an input block it mined
+# (`CandidateGenerator`: "Input-block <id> mined @ height <h>!").
+MINED_INPUT_BLOCK = re.compile(r'Input-block ([0-9a-f]{64}) mined')
+
+
+def mined_input_blocks(lines):
+    """Every input block a Scala miner's log says it mined. Pure."""
+    return {match.group(1) for match in map(MINED_INPUT_BLOCK.search, lines)
+            if match}
+
+
+def rust_lead_mined(scala_chain, rust_chain, mined):
+    """How many blocks Rust's chain leads the miner's, when that lead is
+    the miner's own. Pure; 0 when it is not.
+
+    The miner is read first in every sweep and the follower after it, up
+    to seconds later under load, so Rust can hold input blocks the
+    miner's sampled chain does not list yet (FINDING-rust-fork-chain-
+    divergence-2026-09-25.md §3: leads of 1 to 4 blocks, every one in the
+    miner's own log). A lead counts only when the miner's sampled chain is
+    a strict prefix of Rust's read oldest-first, so the history is the
+    same, and EVERY block beyond it is one the single miner's log says it
+    mined. A different block at any position, or a block the miner never
+    mined, is not a lead.
+    """
+    scala_old, rust_old = list(reversed(scala_chain)), list(reversed(rust_chain))
+    if (len(rust_old) > len(scala_old) and rust_old[:len(scala_old)] == scala_old
+            and all(block in mined for block in rust_old[len(scala_old):])):
+        return len(rust_old) - len(scala_old)
+    return 0
+
+
+def evaluate_tip_consistency(samples, mined=None):
     """Assertion 2. Every Rust tip must be a block Scala had on its best
     chain for the same ordering block, the lag must stay inside the
-    bounds, and there must be enough qualifying samples to say so."""
+    bounds, and there must be enough qualifying samples to say so.
+
+    `mined` is the miner's own list of input blocks it mined: a tip that
+    leads the miner's sampled chain is confirmed by it only through
+    `rust_lead_mined`."""
     scala_seen = {}          # ordering -> set of every id Scala ever listed
     scala_later = {}         # ordering -> [ (index, ids) ], for "at or later"
     for i, s in enumerate(samples):
@@ -1386,6 +1500,7 @@ def evaluate_tip_consistency(samples):
 
     kept, excluded = qualifying_samples(samples)
     lags, unconfirmed, earlier_only, exact, compared = [], [], [], 0, 0
+    confirmed_by_miner_log = 0
     for i, s in kept:
         ordering, rust_tip = s['ordering'], s.get('rust_tip')
         if not rust_tip:
@@ -1398,6 +1513,17 @@ def evaluate_tip_consistency(samples):
         confirmed = any(rust_tip in ids
                         for j, ids in scala_later.get(ordering, ())
                         if j >= i)
+        # Rust's tip is read AFTER its chain in the same sweep, so it can
+        # be a block the chain read did not list yet
+        # (rm-B-reconstruct_rate-2562f-1, the last sample). Judged on the
+        # chain the two reads describe together.
+        rust_chain = list(s.get('rust_chain') or [])
+        if rust_tip not in rust_chain:
+            rust_chain = [rust_tip] + rust_chain
+        if (not confirmed and mined and rust_chain[0] == rust_tip
+                and rust_lead_mined(s.get('scala_chain') or [], rust_chain, mined)):
+            confirmed = True
+            confirmed_by_miner_log += 1
         if not confirmed:
             # Scala listed it, but only BEFORE this sample. Recorded in
             # its own bucket rather than waved through: it is how the
@@ -1446,6 +1572,7 @@ def evaluate_tip_consistency(samples):
         'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
         'exact_tip_matches': exact,
         'unconfirmed_count': len(unconfirmed),
+        'confirmed_by_miner_log': confirmed_by_miner_log,
         'unconfirmed_rust_tips_sample': unconfirmed[:10],
         'confirmed_only_earlier_count': len(earlier_only),
         'confirmed_only_earlier_sample': earlier_only[:10],
@@ -1453,7 +1580,7 @@ def evaluate_tip_consistency(samples):
     }
 
 
-def evaluate_chain_consistency(samples):
+def evaluate_chain_consistency(samples, mined=None):
     """Assertion 3, as amended by the controller after round 1.
 
     At every same-ordering-block sample Rust's chain must be a prefix of
@@ -1469,6 +1596,12 @@ def evaluate_chain_consistency(samples):
     moment later. Anything else fails: a different block at any
     position, a prefix by two or more, or a tip Scala never went on to
     confirm.
+
+    With `mined` (the miner's own log of the input blocks it mined), a
+    lead of any length is the miner's read window as well, when every
+    lead block is the miner's own (`rust_lead_mined`): the miner is read
+    first in a sweep and the follower later. Counted apart
+    (`allowed_ahead_by_miner_log`, with the longest lead), never silently.
 
     Counts are TOTALS; the recorded lists are samples of them.
     """
@@ -1487,6 +1620,7 @@ def evaluate_chain_consistency(samples):
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
+    allowed_by_log, longest_lead = 0, 0
     for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
@@ -1519,6 +1653,11 @@ def evaluate_chain_consistency(samples):
                         'scala_confirmed_at_sample': confirmed_at,
                     })
                 continue
+        lead = rust_lead_mined(scala_chain, rust_chain, mined or ())
+        if lead:
+            allowed_by_log += 1
+            longest_lead = max(longest_lead, lead)
+            continue
         violation_count += 1
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
@@ -1540,6 +1679,8 @@ def evaluate_chain_consistency(samples):
         'prefix_violations_sample': violations,
         'allowed_prefix_by_one_count': allowed_by_one,
         'allowed_prefix_by_one_sample': allowed_samples,
+        'allowed_ahead_by_miner_log': allowed_by_log,
+        'longest_lead_by_miner_log': longest_lead or None,
         'max_truncation_depth': max(depths) if depths else None,
         'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
@@ -1824,6 +1965,49 @@ def _self_test():
     ahead = ([sample(['b', 'a'], ['c', 'b', 'a'])]
              + series(['c', 'b', 'a'], ['c', 'b', 'a']))
     assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
+
+    # ----- leads the in-sweep read order produces (FINDING §3) -----
+    #
+    # The miner is read first and the follower up to seconds later, so a
+    # follower can hold blocks the miner's sampled chain does not list
+    # yet, and never lists under this ordering id if the next ordering
+    # block lands first. A lead counts only when every lead block is the
+    # miner's own, by its log.
+    skewed = ([sample(['b', 'a'], ['e', 'd', 'c', 'b', 'a'])]
+              + series(['b', 'a'], ['b', 'a']))
+    # Without the miner's log: the three-block lead and its tip fail.
+    assert evaluate_chain_consistency(skewed)['prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed)['unconfirmed_count'] == 1
+    mined = {'c', 'd', 'e'}
+    chain = evaluate_chain_consistency(skewed, mined)
+    assert chain['prefix_violation_count'] == 0, chain
+    assert chain['allowed_ahead_by_miner_log'] == 1, chain
+    assert chain['longest_lead_by_miner_log'] == 3, chain
+    tip = evaluate_tip_consistency(skewed, mined)
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    # One lead block the miner never mined fails the whole lead.
+    assert evaluate_chain_consistency(skewed, {'c', 'd'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed, {'c', 'd'})['unconfirmed_count'] == 1
+    # A different block at any position still fails, mined or not.
+    swapped = ([sample(['b', 'a'], ['e', 'x', 'a'])]
+               + series(['b', 'a'], ['b', 'a']))
+    assert evaluate_chain_consistency(swapped, {'e', 'x'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(swapped, {'e', 'x'})['unconfirmed_count'] == 1
+    assert mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
+        + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
+    # Rust's tip is read after its chain: at the series' last sample the
+    # tip can be a block its own chain read did not list yet, and no
+    # later sample lists it. The miner's log confirms it; nothing else.
+    torn = series(['b', 'a'], ['b', 'a'])
+    torn[-1] = dict(torn[-1], rust_tip='c')
+    assert evaluate_tip_consistency(torn)['unconfirmed_count'] == 1
+    tip = evaluate_tip_consistency(torn, {'c'})
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    assert evaluate_tip_consistency(torn, {'x'})['unconfirmed_count'] == 1
 
     # Lag past the bounds fails, even though every tip is consistent.
     deep = ['t%02d' % n for n in range(30, -1, -1)]
@@ -2736,6 +2920,11 @@ def _self_test_pending_and_restart():
     # A build without the store and a malformed value are both `None`,
     # never an empty store; the Rust node is not a Scala store.
     assert pending == {'scala': None, 'scala2': store, 'scala3': None}, pending
+    # Which process each node is, from the same `/info` read.
+    assert launch_times({'scala': {'info': {'launchTime': 1000}},
+                         'rust': {'info': {'launchTime': 2000}},
+                         'scala2': {'info': {}, 'down': True}}) == {
+        'rust': 2000, 'scala': 1000, 'scala2': None}
 
     # ----- counters: nested drops, restarts, gauges -----
     assert flatten_counters(store) == {
@@ -2787,12 +2976,48 @@ def _self_test_pending_and_restart():
     assert absent['samples_with_store'] == 0 and 'absent' in absent['store'], absent
     assert pending_store_summary(series, 'scala3')['samples'] == 0
 
+    # ----- which store a reading comes from -----
+    # Exactly what the fixed store's encoder emits (#2563 13fc25df2,
+    # `PendingInputAnnouncements.Stats.jsonEncoder`): all seven reasons.
+    fixed = {'size': 2, 'bytes': 700, 'admitted': 9, 'replayed': 4,
+             'replayNotForwarded': 1, 'evictions': 0,
+             'drops': {reason: 0 for reason in PENDING_DROP_REASONS}}
+    assert pending_telemetry(fixed) == 'fixed', fixed
+    assert 'fairness' not in PENDING_DROP_REASONS
+    assert pending_telemetry(
+        {'size': 1, 'bytes': 9, 'evictions': 0, 'drops': 4}) == 'old'
+    # A draft of the review's counters that never shipped: `replayInvalid`
+    # and a `fairness` reason, no `replayNotForwarded`.
+    draft = dict(fixed, replayInvalid=1,
+                 drops=dict(fixed['drops'], fairness=0))
+    del draft['replayNotForwarded']
+    assert pending_telemetry(draft) == 'unrecognised', draft
+    assert pending_telemetry(None) is None and pending_telemetry('x') is None
+    assert pending_telemetry_label([None, fixed, fixed]) == 'fixed telemetry'
+    assert pending_telemetry_label([fixed, {'drops': 4}]) == 'old telemetry'
+    assert pending_telemetry_label([fixed, draft]) == 'unrecognised telemetry'
+    assert pending_telemetry_label([None]) == 'missing'
+    fixed_summary = pending_store_summary(
+        [at(0, fixed), at(1, dict(fixed, replayNotForwarded=3))], 'scala2')
+    assert fixed_summary['telemetry'] == 'fixed telemetry', fixed_summary
+    assert fixed_summary['missing_fixed_keys'] == [], fixed_summary
+    assert fixed_summary['counters']['replayNotForwarded']['increase'] == 2
+    old_summary = pending_store_summary(
+        [at(0, {'size': 0, 'bytes': 0, 'evictions': 0, 'drops': 1})], 'scala2')
+    assert old_summary['telemetry'] == 'old telemetry', old_summary
+    assert 'missing_fixed_keys' not in old_summary, old_summary
+    # The synthetic series above lacks most fixed keys: each is named.
+    assert summary['telemetry'] == 'unrecognised telemetry', summary
+    assert 'drops.hostLimit' in summary['missing_fixed_keys'], summary
+
     # ----- restart recovery -----
-    def rs(t, tip, miner, ordering, replayed=None):
+    def rs(t, tip, miner, ordering, replayed=None, not_forwarded=None):
         entry = {'at': t, 'scala_tip': miner, 'scala2_tip': tip,
                  'scala2_ordering': ordering, 'pending': {}}
         if replayed is not None:
             entry['pending']['scala2'] = {'replayed': replayed}
+            if not_forwarded is not None:
+                entry['pending']['scala2']['replayNotForwarded'] = not_forwarded
         return entry
 
     recovery = restart_recovery([
@@ -2811,6 +3036,15 @@ def _self_test_pending_and_restart():
     never = restart_recovery([rs(12, 'a', 'm', 'O1')], since=10, node='scala2')
     assert never['seconds_to_miner_tip'] is None and \
         never['first_apply_at'] is None and never['replay_burst'] is None, never
+    # The fixed store's burst carries the replays it did not forward too.
+    burst = restart_recovery([
+        rs(10, None, 'm1', None),
+        rs(12, 'a', 'm2', 'O1', replayed=0, not_forwarded=0),
+        rs(20, 'c', 'm4', 'O2', replayed=3, not_forwarded=1),
+        rs(35, 'm5', 'm5', 'O2', replayed=9, not_forwarded=2),
+    ], since=10, node='scala2')
+    assert burst['replay_burst'] == {'window_s': 30.0, 'replayed': 6,
+                                     'replayNotForwarded': 1}, burst
 
     # ----- the sampler across a deliberately killed follower -----
     down_node = 'scala2'
@@ -2944,8 +3178,11 @@ def finalize_agreement(run, evidence):
     samples taken during funding, the workload and the restart are
     observations of the same two nodes and used to be discarded.
     """
-    tip = evaluate_tip_consistency(run.series)
-    chain = evaluate_chain_consistency(run.series)
+    # The miner's own record of what it mined, for leads the in-sweep
+    # read order produces (`rust_lead_mined`).
+    mined = mined_input_blocks(scala_log_lines('scala'))
+    tip = evaluate_tip_consistency(run.series, mined)
+    chain = evaluate_chain_consistency(run.series, mined)
     lags = [round(v, 3) for v in run.propagation_lags]
     evidence['2_best_input_block'] = {
         'definition': ("every Rust bestInputBlock must be a block Scala had on its "

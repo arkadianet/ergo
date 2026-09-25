@@ -318,7 +318,8 @@ def run(ctx):
         adjacent |= set(ids[:1])
     reconciliation = common.reconcile_outcomes(heights, window, announced=announced,
                                                unread_heights=unread_heights,
-                                               adjacent_headers=adjacent)
+                                               adjacent_headers=adjacent,
+                                               known_first=common.header_known_first(rust_log))
     ctx.note('outcome_reconciliation', reconciliation)
     if announced is None:
         ctx.fail('the follower log carries no announcement lines, so a block with no '

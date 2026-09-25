@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.error
 
 import smoke
 from smoke import Unavailable, api, api_retry
@@ -125,7 +126,10 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
 
     Miner 1 is stopped for the copy. A LevelDB copied out from under a
     live writer is not a database, and a scenario built on one would fail
-    for a reason that has nothing to do with input blocks.
+    for a reason that has nothing to do with input blocks. The Rust
+    follower is stopped with it, first, because the stop also discards
+    miner 1's in-memory input blocks; a snapshot of miner 1's chain and
+    process is taken just before (`reference_snapshots`).
 
     `nodes` (M4) is every Scala node to seed this way, so the same
     mechanism serves a reference FOLLOWER — the node's role decides
@@ -137,7 +141,18 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     nodes = tuple(n for n in nodes if n in lifecycle.NODES)
     if not nodes:
         return {}
-    lifecycle.stop(('scala',))
+    # What miner 1's process holds right before the stop, so a chain that
+    # only that process ever published can still be traced to it.
+    ctx.evidence.setdefault('reference_snapshots', []).append(
+        reference_snapshot('scala'))
+    # Miner 1's input-block tree lives only in memory (Scala
+    # `InputBlocksProcessor.inputBlockTrees`), so this stop forgets every
+    # input block it published under the current ordering block. A
+    # follower still running across it keeps them as its best chain: a
+    # history no running miner has and no sample can have recorded
+    # (rm-B-fork-stockctl-1). So the follower goes down WITH the miner,
+    # and first; `restart_follower` then finds it stopped.
+    lifecycle.stop(('rust', 'scala'))
     source = ctx.data_root / 'scala'
     targets = []
     for node in nodes:
@@ -209,6 +224,22 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
                  'the scenario is missing a node it was told to run',
                  {'heights': heights, 'seeded': list(nodes)})
     return heights
+
+
+def reference_snapshot(node):
+    """One node's input chain, ordering id and process, read now. Never
+    raises: a node that did not answer is recorded as such."""
+    snapshot = {'node': node, 'at': time.time()}
+    try:
+        info = api(node, '/info') or {}
+        chain = api(node, '/blocks/bestInputChain') or {}
+    except Unavailable as error:
+        snapshot['unavailable'] = str(error)
+        return snapshot
+    snapshot.update(launch=info.get('launchTime'),
+                    ordering=chain.get('bestOrdering') or None,
+                    chain=chain.get('bestInputBlocks') or [])
+    return snapshot
 
 
 def restart_follower(ctx, campaign, lifecycle):
@@ -382,6 +413,151 @@ def pump_payments(ctx, address, sent, node='scala', count=3,
     return sent
 
 
+def _post(node, path, body=None):
+    """`(status, payload)` for one POST (a GET without `body`), with an
+    HTTP error's body kept."""
+    try:
+        return smoke.request(node, path, body)
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode(errors='replace')[:300]
+        except OSError:
+            detail = ''
+        return error.code, detail
+    except (OSError, ValueError) as error:
+        return None, f'{type(error).__name__}: {error}'
+
+
+# The fee `/wallet/payment/send` adds to every payment (the Scala wallet's
+# `defaultTransactionFee`). `/wallet/transaction/generate` adds a fee
+# output only when the request names one (`RequestsHolder.withFee`), and a
+# payment without one is never mined.
+PAYMENT_FEE_NANOERG = 1_000_000
+
+
+# The fork window's payment POOL: boxes split off one matured coinbase and
+# confirmed BEFORE the second miner is seeded, so each lies in both miners'
+# history. Each payment spends one pool box, so it is valid on either
+# miner's chain whatever the other one did. The wallet's own box choice
+# is not: after the first reorg between the two miners it keeps spending
+# change that exists only in orphaned input blocks, and every later
+# payment is refused ("Every input of the transaction should be in
+# UTXO": 33 of 72 in rm-B-fork-2562f-3, 57 of 72 in rm-B-fork-stockctl-3).
+FANOUT_VALUE_NANOERG = 100_000_000
+# Pool boxes beyond one window's worth, for refused or lost payments.
+FANOUT_SPARE_BLOCKS = 10
+# Ordering blocks the split may take to confirm before the run gives up.
+FANOUT_CONFIRM_BLOCKS = 6
+
+
+def fan_out(ctx, address, node, count, value=FANOUT_VALUE_NANOERG,
+            fee=PAYMENT_FEE_NANOERG):
+    """Split `node`'s wallet into `count` boxes of `value` and wait until
+    the split is in its UTXO set. Returns the new boxes' ids (the pool),
+    or [] with the reason recorded as a failure."""
+    status, tx = _post(node, '/wallet/transaction/generate',
+                       {'requests': [{'address': address, 'value': value}] * count,
+                        'fee': fee})
+    if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
+        ctx.fail(f'the payment pool split could not be signed: HTTP {status}',
+                 {'answer': str(tx)[:500]})
+        return []
+    code, answer = _post(node, '/transactions', tx)
+    if code != 200:
+        ctx.fail(f'the payment pool split was refused: HTTP {code}',
+                 {'answer': str(answer)[:500]})
+        return []
+    boxes = [out['boxId'] for out in tx.get('outputs') or []
+             if out.get('value') == value][:count]
+    heights, confirmed = [], False
+    while time.monotonic() < ctx.run.deadline and boxes:
+        code, _ = _post(node, f'/utxo/byId/{boxes[0]}')
+        if code == 200:
+            confirmed = True
+            break
+        try:
+            heights.append((api(node, '/info') or {}).get('fullHeight') or 0)
+        except Unavailable:
+            pass
+        if len(set(heights)) > FANOUT_CONFIRM_BLOCKS:
+            break
+        ctx.run.idle(1)
+    ctx.note('payment_pool_split', {
+        'tx': tx['id'], 'boxes': len(boxes), 'value_nano': value,
+        'confirmed': confirmed, 'heights_waited': sorted(set(heights))})
+    if not confirmed:
+        ctx.fail('the payment pool split was not confirmed within '
+                 f'{FANOUT_CONFIRM_BLOCKS} ordering blocks', {'tx': tx['id']})
+        return []
+    return boxes
+
+
+def pump_payments_to_all(ctx, address, sent, nodes, count=3,
+                         value=PAYMENT_NANOERG, rejected=None, forwarded=None,
+                         fee=PAYMENT_FEE_NANOERG, pool=None):
+    """`pump_payments` for a run with more than one miner: every payment
+    reaches EVERY miner's mempool directly.
+
+    The first node's wallet signs each payment, with the same fee
+    `/wallet/payment/send` would add (`/wallet/transaction/generate`, which
+    does not submit it), and the same signed transaction is posted to
+    `/transactions` on every node in `nodes`, the signing node first so its
+    wallet sees the spend before it signs the next payment. Gossip does not
+    carry it between miners
+    reliably: a Scala node requests a transaction inv only while its
+    full-block height equals its header height and its best header is not
+    behind its peers' (`ErgoNodeViewSynchronizer.processInv`,
+    `txAcceptanceFilter`), which a miner racing another miner's chain
+    often is not. In rm-B-fork-stockctl-1 the second miner never held a
+    payment, won 22 of the window's 26 blocks, and the window carried no
+    transaction at all.
+
+    With a `pool` (`fan_out`), each payment spends exactly one pool box,
+    taken in order and never reused; a box the signing node no longer has
+    is skipped and recorded.
+
+    `sent` gets the ids the signing node accepted; `forwarded` counts,
+    per other node, how each post was answered.
+    """
+    for _ in range(count):
+        request = {'requests': [{'address': address, 'value': value}],
+                   'fee': fee}
+        if pool is not None:
+            raw = None
+            while pool and raw is None:
+                box = pool.pop(0)
+                code, answer = _post(nodes[0], f'/utxo/byIdBinary/{box}')
+                if code == 200 and isinstance(answer, dict) and answer.get('bytes'):
+                    raw = answer['bytes']
+                elif rejected is not None:
+                    rejected.append(f'pool box {box}: HTTP {code}')
+            if raw is None:
+                if rejected is not None:
+                    rejected.append('the payment pool is exhausted')
+                continue
+            request['inputsRaw'] = [raw]
+        status, tx = _post(nodes[0], '/wallet/transaction/generate', request)
+        if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
+            if rejected is not None:
+                rejected.append(f'generate: HTTP {status}: {str(tx)[:200]}')
+            continue
+        for index, node in enumerate(nodes):
+            code, answer = _post(node, '/transactions', tx)
+            if index == 0:
+                if code == 200:
+                    sent.append(tx['id'])
+                else:
+                    if rejected is not None:
+                        rejected.append(f'{node} /transactions: HTTP {code}: '
+                                        f'{str(answer)[:200]}')
+                    break
+            elif forwarded is not None:
+                outcome = 'accepted' if code == 200 else f'HTTP {code}'
+                counts = forwarded.setdefault(node, {})
+                counts[outcome] = counts.get(outcome, 0) + 1
+    return sent
+
+
 def scala_reference_nodes(role_map, role_table):
     """`(miner nodes, follower nodes)` for one resolved run.
 
@@ -550,6 +726,130 @@ def scala_blocks_by_height(ctx, low, high):
     return at, unread
 
 
+# The extension key under which an ordering block names the input block
+# its committed input chain ends at (weak-blocks `Extension.PrevInputBlockIdKey`,
+# `InputBlocksDataPrefix` 0x03 then 0x02). The committed chain is a
+# prefix, possibly empty, of the chain ending there.
+NAMED_INPUT_TIP_KEY = '0302'
+
+
+def ordering_blocks_between(node, low, high):
+    """Every ordering block `node` holds at heights `[low, high]`: its id,
+    parent, rank at its height (0 = best), the input tip it names and its
+    transaction count. Returns `(blocks, unread_heights)`.
+
+    Read while the nodes are up, because the named tip lives only in the
+    block's extension. A block whose body `node` cannot serve (a losing
+    fork's header) is kept with `unread`, never dropped.
+    """
+    blocks, unread = [], []
+    for height in range(low, high + 1):
+        try:
+            ids = api(node, f'/blocks/at/{height}') or []
+        except Unavailable:
+            unread.append(height)
+            continue
+        for rank, header_id in enumerate(ids):
+            try:
+                block = api(node, f'/blocks/{header_id}') or {}
+            except Unavailable as error:
+                blocks.append({'height': height, 'id': header_id,
+                               'rank': rank, 'unread': str(error)})
+                continue
+            fields = {k: v for k, v in
+                      (block.get('extension') or {}).get('fields') or []}
+            blocks.append({
+                'height': height, 'id': header_id, 'rank': rank,
+                'parent': (block.get('header') or {}).get('parentId'),
+                'named_input_tip': fields.get(NAMED_INPUT_TIP_KEY),
+                'transactions': len((block.get('blockTransactions') or {})
+                                    .get('transactions') or [])})
+    return blocks, unread
+
+
+NAMED_TIP_CLASSES = ('equal', 'held_more', 'held_less', 'other_branch',
+                     'held_nothing', 'names_nothing', 'not_sampled',
+                     'named_chain_unknown', 'unread')
+
+
+def named_tip_vs_held(ordering_blocks, series, followers):
+    """Per follower: how each ordering block's NAMED input tip compares
+    with the input chain the follower held under the block's parent. Pure.
+
+    The held chain is the follower's `<node>_chain` (newest first) at the
+    LAST sample in which its `<node>_ordering` was the block's parent. The
+    classes, one per (block, follower):
+
+    * `equal`: the follower's tip is the named tip;
+    * `held_more`: the named tip is `depth` >= 1 blocks below the
+      follower's tip, so the follower held input blocks this ordering
+      block did not commit (the #2562 case: a held chain that outruns the
+      commitment);
+    * `held_less`: the follower's tip is `depth` >= 1 blocks below the
+      named tip;
+    * `other_branch`: the two tips are on different branches;
+    * `held_nothing`: the follower held no chain under the parent;
+    * `names_nothing`: the block names no input tip;
+    * `not_sampled`: the follower was never sampled on the parent;
+    * `named_chain_unknown`: the named tip is not on the held chain, and
+      no sample of any node carried the chain below it;
+    * `unread`: the block's body could not be read.
+
+    It compares the NAMED tip only. A miner names its latest input block
+    but commits only the bodies it processed, so a block can commit fewer
+    blocks than it names; that is not visible here, and `held_more` is
+    therefore a LOWER bound on "committed a shorter prefix than held".
+    """
+    held, ancestry = {}, {}
+    for sample in series:
+        for key, chain in sample.items():
+            if not key.endswith('_chain') or not chain:
+                continue
+            for index, block in enumerate(chain):
+                # The longest chain seen below each block wins.
+                if len(chain) - index > len(ancestry.get(block, ())):
+                    ancestry[block] = chain[index:]
+        for node in followers:
+            ordering = sample.get(f'{node}_ordering')
+            if ordering:
+                held[(node, ordering)] = sample.get(f'{node}_chain') or []
+    out = {}
+    for node in followers:
+        counts = {cls: 0 for cls in NAMED_TIP_CLASSES}
+        rows = []
+        for block in ordering_blocks:
+            named = block.get('named_input_tip')
+            if block.get('unread'):
+                cls, depth = 'unread', None
+            elif not named:
+                cls, depth = 'names_nothing', None
+            elif (node, block.get('parent')) not in held:
+                cls, depth = 'not_sampled', None
+            else:
+                chain = held[(node, block['parent'])]
+                below_named = ancestry.get(named)
+                if not chain:
+                    cls, depth = 'held_nothing', None
+                elif chain[0] == named:
+                    cls, depth = 'equal', 0
+                elif named in chain:
+                    cls, depth = 'held_more', chain.index(named)
+                elif below_named is None:
+                    cls, depth = 'named_chain_unknown', None
+                elif chain[0] in below_named:
+                    cls, depth = 'held_less', below_named.index(chain[0])
+                else:
+                    cls, depth = 'other_branch', None
+            counts[cls] += 1
+            rows.append({'height': block.get('height'), 'id': block.get('id'),
+                         'rank': block.get('rank'), 'class': cls,
+                         'depth': depth})
+        depths = sorted(r['depth'] for r in rows if r['class'] == 'held_more')
+        out[node] = {'counts': counts, 'blocks': len(rows),
+                     'held_more_depths': depths, 'rows': rows}
+    return out
+
+
 # ----- fork-switch evaluation (pure) -----
 
 def fork_switches(series, side):
@@ -677,7 +977,149 @@ def _is_coherent_with(rust_chain, ref_chain):
     return (False, None)
 
 
-def evaluate_fork_coherence(series):
+def _millis(value):
+    return value if type(value) in (int, float) else None
+
+
+
+# The Scala nodes whose later chains can confirm a lead: the miners and
+# the Scala reference follower, which validated what it holds.
+SCALA_CHAIN_NODES = ('scala', 'scala2', 'scala3')
+
+
+# Every input block a Scala miner's log says it mined; one definition,
+# `smoke`'s, which the single-miner assertions use too.
+mined_input_blocks = smoke.mined_input_blocks
+
+
+def later_prefix_holder(chain, at, series):
+    """A Scala node that, at sample `at` or later inside the window, held
+    `chain` (newest first) as a prefix of its own chain, under ANY
+    ordering id, or None. Pure. Any ordering id, because a node's read
+    route can pair a new ordering id with the previous chain (F15/D8, the
+    scala3 stale read)."""
+    wanted = list(reversed(chain))
+    for j in range(at, min(len(series), at + LATER_CONFIRMATION_SAMPLES + 1)):
+        for node in SCALA_CHAIN_NODES:
+            held = list(reversed(series[j].get(f'{node}_chain') or []))
+            if wanted and held[:len(wanted)] == wanted:
+                return {'node': node, 'sample': j}
+    return None
+
+
+def miner_moved_on(series, miner, ordering, chain, at):
+    """How `miner` left the history `chain` (newest first) under
+    `ordering` at sample `at` or later inside the window, or None. Pure.
+
+    It LEFT the ordering block (its own ordering id changed), or it
+    SWITCHED forks under it: its chain there is neither a prefix of
+    `chain` nor extends it, read oldest-first. A chain that is still a
+    prefix of `chain` (a miner read before it processed the lead) is
+    neither.
+    """
+    wanted = list(reversed(chain))
+    for j in range(at, min(len(series), at + LATER_CONFIRMATION_SAMPLES + 1)):
+        sample = series[j]
+        now = sample.get(f'{miner}_ordering')
+        if now and now != ordering:
+            return {'how': 'left_ordering_block', 'sample': j, 'to': now}
+        held = list(reversed(sample.get(f'{miner}_chain') or []))
+        if (now == ordering and held and held[:len(wanted)] != wanted
+                and wanted[:len(held)] != held):
+            return {'how': 'switched_fork', 'sample': j}
+    return None
+
+
+def miner_held_tip(series, miner, ordering, tip, at):
+    """Was `miner` sampled holding a chain that ends at `tip` under
+    `ordering`, inside the window up to sample `at`? Pure. A miner mines
+    on its own tip, so this is what puts a block it mined on top of the
+    chain ending at `tip`."""
+    for j in range(max(0, at - LATER_CONFIRMATION_SAMPLES), at + 1):
+        sample = series[j]
+        if (sample.get(f'{miner}_ordering') == ordering
+                and (sample.get(f'{miner}_chain') or [None])[0] == tip):
+            return True
+    return False
+
+
+def lead_confirmation(node, ordering, chain, at, carried, series, evidence=None):
+    """Why the one-block lead `chain[0]` over reference `node`'s chain
+    (`chain` minus its tip) under `ordering` is a real block:
+    `(kind, detail)`, or None. Pure.
+
+    In order:
+
+    * `reference_later`: that reference lists it later under the same
+      ordering id;
+    * `later_prefix`: a miner or the Scala reference follower later holds
+      the whole of `chain` as a prefix, under any ordering id;
+    * `named_tip`: an ordering block whose parent is `ordering` names it
+      as its committed input tip (extension key `0302`);
+    * `orphaned_lead`: a miner's log says it mined it, and that miner then
+      left `ordering` or switched forks under it inside the window, so the
+      block was orphaned before any sample could list it. Reported as
+      such, never passed silently.
+
+    The last two prove the block is real but not that it sits on the
+    rest of `chain`, so both also require that the miner whose log says
+    it mined the block was sampled holding `chain[1:]`'s tip under
+    `ordering` (`miner_held_tip`). Without that, a chain stitching one
+    miner's real block onto the other's chain would pass.
+
+    `evidence` carries `named` (`{(parent, tip)}`) and `mined_by`
+    (`{block: miner node}`). A lead none of these confirms stays
+    unconfirmed (rm-B-fork-stockctl-4: one lead of each of the last two
+    kinds).
+    """
+    lead = chain[0]
+    if any(at < j <= at + LATER_CONFIRMATION_SAMPLES
+           for j in carried.get((node, ordering, lead), ())):
+        return ('reference_later', None)
+    holder = later_prefix_holder(chain, at, series)
+    if holder is not None:
+        return ('later_prefix', holder)
+    evidence = evidence or {}
+    miner = (evidence.get('mined_by') or {}).get(lead)
+    if (miner is None or len(chain) < 2
+            or not miner_held_tip(series, miner, ordering, chain[1], at)):
+        return None
+    if (ordering, lead) in (evidence.get('named') or ()):
+        return ('named_tip', {'miner': miner})
+    moved = miner_moved_on(series, miner, ordering, chain, at)
+    if moved is not None:
+        return ('orphaned_lead', dict(moved, miner=miner))
+    return None
+
+
+def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
+    """The snapshot a follower chain was held from, or None. Pure.
+
+    Only on positive evidence: a snapshot taken from a reference process
+    that has since been replaced (its `launchTime` in this sample differs
+    from the snapshot's) shows that process holding this history under
+    this ordering block, and the follower's own process is older than the
+    snapshot, so it could have received it from there. A reference that
+    restarts forgets its in-memory input blocks; a follower that kept
+    running holds them as its best chain (rm-B-fork-stockctl-1).
+    """
+    follower = _millis((launch or {}).get('rust'))
+    for snapshot in snapshots or ():
+        chain = snapshot.get('chain') or []
+        was, now = (_millis(snapshot.get('launch')),
+                    _millis((launch or {}).get(snapshot.get('node'))))
+        if (snapshot.get('ordering') != ordering or not chain or was is None
+                or now is None or now == was or follower is None
+                or follower > snapshot.get('at', 0) * 1000):
+            continue
+        coherent, lead = _is_coherent_with(rust_chain, chain)
+        if coherent and lead is None:
+            return {'node': snapshot['node'], 'snapshot_at': snapshot.get('at'),
+                    'snapshot_launch': was, 'launch_at_sample': now}
+    return None
+
+
+def evaluate_fork_coherence(series, snapshots=(), evidence=None):
     """Every Rust chain must be the same HISTORY as some reference's.
 
     Membership in a union is not the property. A follower chain built
@@ -694,6 +1136,17 @@ def evaluate_fork_coherence(series):
     reference inside the same bound. The window is not a loophole: a
     chain mixing two branches, or one carrying a block nobody published,
     matches nothing anywhere in it.
+
+    A chain that matches nothing in the series is still traced before it
+    is called incoherent: if `snapshots` (`reference_snapshots`, taken
+    just before the harness restarted a reference) show that a replaced
+    reference process held exactly this history, the sample is reported
+    under `held_from_restarted_reference` instead
+    (`held_from_restarted_reference()` states the rule). Nothing else is
+    exempt, and every incoherent sample names the references that
+    restarted after the follower started. A one-block lead is confirmed
+    only by evidence the block is real (`lead_confirmation()`), and the
+    evidence used is counted by kind.
     """
     # Where each reference published each block, per ordering id, so a
     # lead can be confirmed against the reference it led.
@@ -720,7 +1173,8 @@ def evaluate_fork_coherence(series):
             if ref_ordering is not None:
                 history.setdefault((node, ref_ordering), []).append((i, chain))
 
-    incoherent, unconfirmed_leads, judged = [], [], 0
+    incoherent, unconfirmed_leads, held, judged = [], [], [], 0
+    lead_confirmations, orphaned = {}, []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
         rust_chain = sample.get('rust_chain') or []
@@ -745,9 +1199,14 @@ def evaluate_fork_coherence(series):
             if lead is None:
                 matched = True
                 break
-            confirmations = [j for j in published.get((node, ordering, lead), ())
-                             if i < j <= i + LATER_CONFIRMATION_SAMPLES]
-            if confirmations:
+            confirmed = lead_confirmation(node, ordering, rust_chain, i,
+                                          published, series, evidence)
+            if confirmed is not None:
+                kind, detail = confirmed
+                lead_confirmations[kind] = lead_confirmations.get(kind, 0) + 1
+                if kind == 'orphaned_lead':
+                    orphaned.append({'sample': i, 'ordering': ordering,
+                                     'block': lead, 'reference': node, **detail})
                 matched = True
                 break
             lead_problem = {'sample': i, 'ordering': ordering, 'node': node,
@@ -760,23 +1219,42 @@ def evaluate_fork_coherence(series):
         else:
             at_sample = [(node, chain) for node, ref_ordering, chain
                          in reference_chains(sample) if ref_ordering == ordering]
-            incoherent.append({
+            entry = {
                 'sample': i, 'ordering': ordering,
                 'rust_chain': rust_chain[:8],
                 'references_at_this_sample': {node: chain[:8]
                                               for node, chain in at_sample},
                 'references_compared': len(peers),
                 'window': LATER_CONFIRMATION_SAMPLES,
-            })
+            }
+            launch = sample.get('launch') or {}
+            source = held_from_restarted_reference(rust_chain, ordering,
+                                                   launch, snapshots)
+            if source is not None:
+                # Attributed, and reported: the history is one a reference
+                # process demonstrably held before it was restarted.
+                held.append(dict(entry, held_from=source))
+                continue
+            follower = _millis(launch.get('rust'))
+            entry['references_restarted_since_follower_start'] = [
+                node for node in REFERENCE_NODES
+                if follower is not None and (_millis(launch.get(node)) or 0)
+                > follower]
+            incoherent.append(entry)
     return {
         'judged_samples': judged,
         'incoherent_samples': incoherent,
         'unconfirmed_one_block_leads': unconfirmed_leads,
+        'held_from_restarted_reference': held,
+        'lead_confirmations': lead_confirmations,
+        # Leads confirmed only because their miner then left the ordering
+        # block or switched forks: real blocks, orphaned. Listed, not hidden.
+        'orphaned_leads': orphaned,
         'later_confirmation_samples': LATER_CONFIRMATION_SAMPLES,
     }
 
 
-def compare_fork_switches(series):
+def compare_fork_switches(series, evidence=None):
     """Did each Rust fork switch land on a chain a reference actually has?
 
     Judged as EQUALITY, not inclusion. The previous rule asked whether
@@ -790,18 +1268,36 @@ def compare_fork_switches(series):
     A switch is matched when BOTH of these hold, against chains observed
     within `LATER_CONFIRMATION_SAMPLES` of it:
 
-    * the chain it left EQUALS a chain some reference published, and
-    * the chain it landed on EQUALS a chain some reference published.
+    * the chain it left matches a chain some reference published, and
+    * the chain it landed on matches a chain some reference published,
+
+    where "matches" is the history rule below.
 
     A transition to the EMPTY chain is reported separately, as a reset:
     no reference publishes an empty chain, so there is no transition to
     match it against, and a follower that has just restarted produces
     one legitimately. The caller says whether it caused the reset.
 
-    Equality is on the ordered list, so "the follower moved from one
-    miner's exact chain to another miner's exact chain" is the only
-    shape that passes — which is what a two-miner fork switch IS. A
-    follower that invented either end matches nothing.
+    Each end is matched on HISTORY by the coherence rule,
+    `_is_coherent_with`: it is a reference's chain, a prefix of one read
+    oldest-first, or one block ahead of one with that block confirmed by
+    the same reference within the window. So "the follower moved from one
+    miner's history to another miner's history" is the only shape that
+    passes, which is what a two-miner fork switch IS. A follower that
+    invented a block, or stitched two branches, matches nothing.
+
+    Not only the exact list, because the sampler cannot see every length
+    a chain passes through: a miner sealing an input block every half
+    second grows between two sweeps, and a follower read later in the
+    same sweep can hold a length the miner was never sampled at
+    (rm-B-fork-2562f-3: the follower left miner 1's 18-block chain, and
+    miner 1 was sampled at 17 and then 19). Each match says which kind it
+    was, the exact list preferred.
+
+    A transition that applies nothing (the new chain a strict prefix of
+    the old one) is a TRUNCATION, reported on its own: it is not a move
+    to another history, and a prefix of a published chain must not pass
+    as one.
     """
     # Every chain each reference published under each ordering id.
     seen = {}
@@ -810,17 +1306,43 @@ def compare_fork_switches(series):
             if ref_ordering is not None:
                 seen.setdefault(ref_ordering, []).append((i, node, list(chain)))
 
+    # Where each reference published each block, per ordering id, so a
+    # one-block lead can be confirmed by the reference it led.
+    carried = {}
+    for i, sample in enumerate(series):
+        for node, ref_ordering, chain in reference_chains(sample):
+            if ref_ordering is not None:
+                for block in chain:
+                    carried.setdefault((node, ref_ordering, block), []).append(i)
+
+    rank = {'exact': 0, 'prefix': 1, 'one_ahead_confirmed': 2}
+
     def published(ordering, chain, at):
-        """Which reference published exactly `chain`, near sample `at`."""
+        """How a reference published `chain` near sample `at`, by the
+        coherence rule (see above), or None."""
+        best = None
         for j, node, ref_chain in seen.get(ordering, ()):
-            if abs(j - at) > LATER_CONFIRMATION_SAMPLES:
+            if abs(j - at) > LATER_CONFIRMATION_SAMPLES or not chain:
                 continue
-            if ref_chain == list(chain):
-                return {'node': node, 'sample': j}
-        return None
+            coherent, lead = _is_coherent_with(chain, ref_chain)
+            if not coherent:
+                continue
+            if lead is None:
+                kind = 'exact' if ref_chain == list(chain) else 'prefix'
+            elif lead_confirmation(node, ordering, list(chain), at, carried,
+                                   series, evidence) is not None:
+                kind = 'one_ahead_confirmed'
+            else:
+                continue
+            if best is None or rank[kind] < rank[best['match']]:
+                best = {'node': node, 'sample': j, 'match': kind}
+                if kind == 'exact':
+                    return best
+        return best
 
     rust = fork_switches(series, 'rust')
-    unmatched, resets, rolled_back_still_held = [], [], []
+    unmatched, resets, rolled_back_still_held, matched = [], [], [], []
+    truncations = []
     for switch in rust:
         ordering = switch['ordering']
         before = switch.get('chain_before') or []
@@ -839,8 +1361,18 @@ def compare_fork_switches(series):
             # caused the reset itself; a reset it did not cause is still
             # a chain nobody has, and still has to be explained.
             resets.append(entry)
+        elif (not switch['applied'] and len(after) < len(before)
+              and list(reversed(before))[:len(after)] == list(reversed(after))):
+            # Rolled back, applied nothing: the chain it landed on is a
+            # strict prefix of the one it left. Not a move to another
+            # history, whatever a reference published.
+            truncations.append(entry)
         elif left is None or landed is None:
             unmatched.append(entry)
+        else:
+            matched.append({'index': switch['index'], 'ordering': ordering,
+                            'left_a_reference_chain': left,
+                            'landed_on_a_reference_chain': landed})
         # Telemetry: was it still on a reference's LAST chain for this
         # ordering id? Per node, so one miner's stale earlier reading
         # cannot answer for the other's current one.
@@ -860,6 +1392,10 @@ def compare_fork_switches(series):
         # THE guard: a switch whose BEFORE and AFTER chains are not both
         # chains a reference actually published.
         'switches_matching_no_reference': unmatched,
+        # Every other non-reset switch, with how each end matched.
+        'matched_switches': matched,
+        # Transitions that rolled back and applied nothing.
+        'truncations': truncations,
         # Transitions to the EMPTY chain, which no reference publishes.
         'resets_to_the_empty_chain': resets,
         # Telemetry with two miners that cannot peer with each other:
@@ -873,12 +1409,13 @@ def compare_fork_switches(series):
 def judge_fork_switches(comparison, restart_window):
     """The `fork` scenario's verdict over `compare_fork_switches`' output.
 
-    Pure, so the gate itself can be driven by a probe. Three rules:
+    Pure, so the gate itself can be driven by a probe. Four rules:
 
     * a reset to the empty chain OUTSIDE the restart the scenario
       performs fails — no miner publishes an empty chain;
     * a non-reset switch that is not a transition between two chains a
       reference published fails;
+    * a truncation (rolled back, applied nothing) fails;
     * a PASS requires at least one GENUINE switch — a non-empty chain
       replaced by a different non-empty chain. A reset is not a switch
       between competing histories, and counting it as one let a run whose
@@ -891,15 +1428,24 @@ def judge_fork_switches(comparison, restart_window):
     """
     resets = comparison['resets_to_the_empty_chain']
     reset_indices = {r['index'] for r in resets}
+    truncations = comparison.get('truncations') or []
+    truncated = {t['index'] for t in truncations}
     caused = [r for r in resets if r['index'] in restart_window]
     uncaused = [r for r in resets if r['index'] not in restart_window]
-    genuine = [s for s in comparison['rust_switches'] if s['index'] not in reset_indices]
+    genuine = [s for s in comparison['rust_switches']
+               if s['index'] not in reset_indices and s['index'] not in truncated]
     failures, qualifier = [], None
     if uncaused:
         failures.append((
             f'{len(uncaused)} times the follower emptied its input chain outside '
             'the restart this scenario performs — no miner publishes an empty '
             'chain, so that is a chain nobody has', {'sample': uncaused[:5]}))
+    if truncations:
+        failures.append((
+            f'{len(truncations)} times the follower truncated its input chain: '
+            'it rolled back blocks and applied none, so the chain it landed on '
+            'is a strict prefix of the one it left rather than another history',
+            {'sample': truncations[:5]}))
     unmatched = comparison['switches_matching_no_reference']
     if unmatched:
         failures.append((
@@ -1284,7 +1830,7 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
 
 
 def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(),
-                       adjacent_headers=()):
+                       adjacent_headers=(), known_first=()):
     """Every ordering block in the window must have exactly one outcome.
 
     By HEADER IDENTITY only. `ordering_blocks` maps height -> header id;
@@ -1308,6 +1854,12 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
       window's own header ids and the announcement set, never against an
       index built from the same events. Each is also marked with whether
       that header was ever announced. It FAILS.
+    * `known_before_announcement` — a window block with no outcome whose
+      announcement the follower dropped because it already held the
+      header (`known_first`, from `header_known_first`): by the same
+      rule, downloaded by ordinary sync with no decision to report. An
+      announced block without that drop and without an outcome is still
+      `missing`.
     * A height the reference could not be read for is `missing`.
     """
     kinds = ('ordering_reconstructed', 'ordering_reconstruct_fallback',
@@ -1328,7 +1880,8 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
                               'height': event.get('height'),
                               'announced': (None if announced is None
                                             else header in announced)})
-    missing, duplicated, not_announced = [], [], []
+    missing, duplicated, not_announced, known_before = [], [], [], []
+    known_first = set(known_first or ())
     for height in sorted(unread_heights):
         missing.append({'height': height, 'header': None,
                         'why': 'the reference could not be read at this height'})
@@ -1337,6 +1890,8 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
         if not outcomes:
             if announced is not None and header not in announced:
                 not_announced.append({'height': height, 'header': header})
+            elif header in known_first:
+                known_before.append({'height': height, 'header': header})
             else:
                 missing.append({'height': height, 'header': header})
         elif len(outcomes) > 1:
@@ -1347,6 +1902,7 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
             'with_an_outcome': sum(1 for h in window_headers if by_header.get(h)),
             'missing': missing, 'duplicated': duplicated,
             'not_announced': not_announced,
+            'known_before_announcement': known_before,
             'announcement_evidence': announced is not None,
             'unmatched': unmatched,
             'unmatched_events': len(unmatched),
@@ -1376,6 +1932,25 @@ def announced_headers(log_text):
         if i >= 0:
             ids.add(line[i + len(marker):i + len(marker) + 64])
     return ids if any_line else None
+
+
+HEADER_KNOWN_DROP = 'reason=OrderingHeaderKnown'
+
+
+def header_known_first(log_text):
+    """Ordering ids the follower dropped an announcement for because it
+    already held the header (`ergo-inputblocks` `DropReason::
+    OrderingHeaderKnown`, Scala parity: spec 9.3). Pure. Such a header
+    came by ordinary sync first, and no reconstruct-or-download decision
+    follows the announcement."""
+    ids = set()
+    for line in log_text.splitlines():
+        if HEADER_KNOWN_DROP not in line:
+            continue
+        i = line.find('dropped id=')
+        if i >= 0:
+            ids.add(line[i + len('dropped id='):i + len('dropped id=') + 64])
+    return ids
 
 
 # ----- evict: delivery and causality (pure, self-tested) -----

@@ -35,11 +35,12 @@ BUILDS_TOML = HERE / 'builds.toml'
 # The names `campaign.py --build` / `--base-build` accept. Fixed here
 # rather than taken from the file so a typo in `builds.toml` is an error
 # rather than a new build nobody provisions. `base` is the #2563
-# re-measure's base (weak-blocks @ a1bd938ef); the other re-measure
-# builds join this list when their commits are final (see the commented
-# entries at the end of `builds.toml`).
+# re-measure's base (weak-blocks @ a1bd938ef), `base+2506`, `2563f` and
+# `2563f+2506` are its two arms, `2562f` is the #2562 two-miner
+# reconstruction build, and `soak` is the integration build of every
+# patch we filed.
 BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all',
-               'base')
+               'base', 'base+2506', '2563f', '2563f+2506', '2562f', 'soak')
 
 # A registry entry's `ergo_ref`: a full commit id, never a branch name,
 # so a later branch move cannot change what a rerun provisions.
@@ -525,13 +526,25 @@ def _self_test():
             raise AssertionError('a branch name in the registry must be refused')
     assert list(known) == list(BUILD_NAMES), list(known)
     # The work directory each name resolves to. The pinned baselines are
-    # named by their commit; the M4 patch builds by their own name.
-    by_commit = {'stock': '.work-62c10315', 'base': '.work-a1bd938e'}
+    # named by their commit, the M4 patch builds by their own name, and a
+    # `+` in a name never reaches a path.
+    by_commit = {'stock': '.work-62c10315', 'base': '.work-a1bd938e',
+                 'base+2506': '.work-base-2506-f7cc55dd',
+                 '2563f+2506': '.work-2563f-plus-2506'}
     for name in BUILD_NAMES:
         assert known[name].work_dir.name == by_commit.get(
             name, f'.work-{name}'), known[name]
-    assert known['base'].declared['ergo_ref'] == \
-        'a1bd938effb7f5acabfe5230a5ef20fe0d50ae62', known['base'].declared
+        assert '+' not in known[name].work_dir.name, known[name]
+    # The re-measure's six builds, pinned at the commits their runs are
+    # attributed to (REVIEW-2563 §3.2 and the #2562 two-miner run).
+    for name, commit in (
+            ('base', 'a1bd938effb7f5acabfe5230a5ef20fe0d50ae62'),
+            ('base+2506', 'f7cc55dd29b3c0a06e4f7f3eafbe1bef4044081e'),
+            ('2563f', '13fc25df26f13b2f4ee6c38c87f5cb7d0765b71b'),
+            ('2563f+2506', 'd3d69c610d8a02b13971ac68b52978b5aeb87797'),
+            ('2562f', '0efc06fef33f79a6f2b73084681e69f132350aef'),
+            ('soak', 'abf02c053946ae780fabcf5ad48b2d1e5680e023')):
+        assert known[name].declared['ergo_ref'] == commit, known[name].declared
     # `root` is the shared archive, resolved against this worktree's repo
     # root, so every sibling checkout finds the same directories.
     # MATRIX_BUILDS_ROOT, when set, overrides that root.

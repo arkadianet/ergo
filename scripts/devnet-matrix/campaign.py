@@ -3895,9 +3895,16 @@ def _self_test_remeasure():
         {'drops': 6, 'evictions': 4}
     assert flood.counters_between(
         {'drops': {'duplicate': 1, 'hostLimit': 0}, 'replayed': 3},
-        {'drops': {'duplicate': 4, 'hostLimit': 7, 'fairness': 2},
+        {'drops': {'duplicate': 4, 'hostLimit': 7, 'staleParent': 2},
          'replayed': 3}) == {'drops.duplicate': 3, 'drops.hostLimit': 7,
                              'replayed': 0}
+    # A held-flood target must publish the fixed store's counters, and
+    # only those: `replayNotForwarded`, and `drops` by seven reasons.
+    assert flood.STORE_COUNTERS == (
+        'admitted', 'replayed', 'replayNotForwarded', 'evictions',
+        'drops.duplicate', 'drops.hostLimit', 'drops.variantLimit',
+        'drops.oversize', 'drops.expired', 'drops.staleParent',
+        'drops.disconnected'), flood.STORE_COUNTERS
     assert flood.counters_between(None, {'drops': 1}) == {}
     flood.self_test_held_evaluation()
     flood_conf = scala_override('flood', 'scala3', ('scala', 'scala3'), '/tmp/test')
@@ -3952,6 +3959,558 @@ def _self_test_remeasure():
         _roots
     assert "scala_root_announcements(window)" in inspect.getsource(
         common.reconstruction_accounting)
+    _self_test_fork_workload()
+
+
+def _self_test_fork_workload():
+    """The #2562 two-miner run (`fork`): a funded window with its own
+    measurement boundary, and each ordering block's named input tip
+    against what every follower held under its parent."""
+    import inspect
+
+    from scenarios import common, fork
+
+    # ----- the window is funded and bounded, in this order -----
+    _src = inspect.getsource(fork.run)
+    for _earlier, _later in (('fund_miner(', 'fan_out('),
+                             ('fan_out(', 'seed_second_miner('),
+                             ('fund_miner(', 'seed_second_miner('),
+                             ('seed_second_miner(', 'open_measurement_window('),
+                             ('open_measurement_window(', 'collector.poll()'),
+                             ('collector.poll()', 'close_measurement_window('),
+                             ('close_measurement_window(', 'ordering_blocks_between(')):
+        assert _src.index(_earlier) < _src.index(_later), (_earlier, _later)
+    assert 'pump()' in _src and 'named_tip_vs_held(' in _src, _src
+
+    # ----- each class, on a synthetic series -----
+    # Miner chains, newest first: P's tree a1 <- a2 <- a3, and a sibling
+    # branch b2 under a1. The follower `rust` is sampled on P twice (the
+    # LAST sample counts); `scala3` holds the sibling branch.
+    series = [
+        {'scala_ordering': 'P', 'scala_chain': ['a2', 'a1'],
+         'rust_ordering': 'P', 'rust_chain': ['a1'],
+         'scala3_ordering': 'P', 'scala3_chain': []},
+        {'scala_ordering': 'P', 'scala_chain': ['a3', 'a2', 'a1'],
+         'rust_ordering': 'P', 'rust_chain': ['a3', 'a2', 'a1'],
+         'scala3_ordering': 'P', 'scala3_chain': ['b2', 'a1'],
+         'scala2_chain': ['b2', 'a1']},
+        {'rust_ordering': 'Q', 'rust_chain': ['q1'],
+         'scala3_ordering': 'Q', 'scala3_chain': ['q1']},
+    ]
+    blocks = [
+        {'height': 5, 'id': 'B1', 'rank': 0, 'parent': 'P',
+         'named_input_tip': 'a3'},                 # rust equal, scala3 other
+        {'height': 5, 'id': 'B2', 'rank': 1, 'parent': 'P',
+         'named_input_tip': 'a1'},                 # both hold more
+        {'height': 6, 'id': 'B3', 'rank': 0, 'parent': 'Q',
+         'named_input_tip': 'q2'},                 # never sampled below q2
+        {'height': 6, 'id': 'B4', 'rank': 1, 'parent': 'P',
+         'named_input_tip': None},                 # names nothing
+        {'height': 7, 'id': 'B5', 'rank': 0, 'parent': 'R',
+         'named_input_tip': 'r1'},                 # parent never sampled
+        {'height': 7, 'id': 'B6', 'rank': 1, 'unread': 'HTTP 404'},
+    ]
+    result = common.named_tip_vs_held(blocks, series, ['rust', 'scala3'])
+    rust = {r['id']: (r['class'], r['depth']) for r in result['rust']['rows']}
+    assert rust == {'B1': ('equal', 0), 'B2': ('held_more', 2),
+                    'B3': ('named_chain_unknown', None),
+                    'B4': ('names_nothing', None),
+                    'B5': ('not_sampled', None), 'B6': ('unread', None)}, rust
+    assert result['rust']['held_more_depths'] == [2], result['rust']
+    scala3 = {r['id']: (r['class'], r['depth'])
+              for r in result['scala3']['rows']}
+    assert scala3['B1'] == ('other_branch', None), scala3
+    assert scala3['B2'] == ('held_more', 1), scala3
+    assert sum(result['scala3']['counts'].values()) == len(blocks), result
+    # A follower whose tip is BELOW the named tip holds less, and one that
+    # held nothing under the parent says so.
+    behind = common.named_tip_vs_held(
+        [{'id': 'B', 'parent': 'P', 'named_input_tip': 'a3'}],
+        [{'scala_chain': ['a3', 'a2', 'a1'], 'rust_ordering': 'P',
+          'rust_chain': ['a1']},
+         {'scala3_ordering': 'P', 'scala3_chain': []}], ['rust', 'scala3'])
+    assert behind['rust']['rows'][0]['class'] == 'held_less', behind
+    assert behind['rust']['rows'][0]['depth'] == 2, behind
+    assert behind['scala3']['rows'][0]['class'] == 'held_nothing', behind
+
+    # ----- the window's blocks are read from the node, never dropped -----
+    _pages = {
+        '/blocks/at/5': ['B1', 'B2'], '/blocks/at/6': [],
+        '/blocks/B1': {'header': {'parentId': 'P'},
+                       'extension': {'fields': [['0100', 'aa'],
+                                                ['0302', 'a3']]},
+                       'blockTransactions': {'transactions': [{}, {}, {}]}},
+    }
+
+    def _fake_api(node, path, *args, **kwargs):
+        if path == '/blocks/at/7':
+            raise common.Unavailable('down')
+        if path not in _pages:
+            raise common.Unavailable(f'{path}: 404')
+        return _pages[path]
+
+    _saved_api = common.api
+    try:
+        common.api = _fake_api
+        read, unread = common.ordering_blocks_between('scala', 5, 7)
+    finally:
+        common.api = _saved_api
+    assert unread == [7], unread
+    assert read[0] == {'height': 5, 'id': 'B1', 'rank': 0, 'parent': 'P',
+                       'named_input_tip': 'a3', 'transactions': 3}, read
+    assert read[1]['id'] == 'B2' and read[1]['rank'] == 1 and \
+        'unread' in read[1], read
+    assert len(read) == 2, read
+
+    # ----- every payment is posted to every miner, the signer first -----
+    import io
+    import urllib.error
+
+    import smoke
+    assert 'pump_payments_to_all(' in _src, 'fork pays both miners'
+    _calls = []
+    _generated = iter([(200, {'id': 't1'}), (400, 'not enough boxes'),
+                       (200, {'id': 't3'}), (200, {'id': 't4'})])
+
+    def _refuse(path, detail):
+        return urllib.error.HTTPError(path, 400, 'Bad Request', {},
+                                      io.BytesIO(detail.encode()))
+
+    def _fake_request(node, path, data=None, timeout=15):
+        _calls.append((node, path, data.get('id') if isinstance(data, dict)
+                       else None))
+        if path == '/wallet/transaction/generate':
+            # The fee `/wallet/payment/send` adds; without it the wallet
+            # signs a zero-fee payment that is never mined.
+            assert data['fee'] == common.PAYMENT_FEE_NANOERG == 1_000_000, data
+            status, body = next(_generated)
+            if status != 200:
+                raise _refuse(path, body)
+            return status, body
+        if (node, data['id']) in (('scala2', 't3'), ('scala', 't4')):
+            raise _refuse(path, 'double spending attempt')
+        return 200, data['id']
+
+    _saved_request = smoke.request
+    _sent, _refused, _forwarded = [], [], {}
+    try:
+        smoke.request = _fake_request
+        common.pump_payments_to_all(None, 'addr', _sent, ('scala', 'scala2'),
+                                    count=4, rejected=_refused,
+                                    forwarded=_forwarded)
+    finally:
+        smoke.request = _saved_request
+    assert _sent == ['t1', 't3'], _sent
+    assert _forwarded == {'scala2': {'accepted': 1, 'HTTP 400': 1}}, _forwarded
+    assert len(_refused) == 2 and 'not enough boxes' in _refused[0] and \
+        'double spending' in _refused[1], _refused
+    _posts = [(n, i) for n, p, i in _calls if p == '/transactions']
+    # Signed once, posted to the signer first; a payment its own node
+    # refused is never forwarded.
+    assert _posts == [('scala', 't1'), ('scala2', 't1'), ('scala', 't3'),
+                      ('scala2', 't3'), ('scala', 't4')], _posts
+    _self_test_seed_artifact()
+    _self_test_switch_granularity()
+    _self_test_payment_pool()
+    _self_test_lead_confirmation()
+    _self_test_header_known_first()
+
+
+def _self_test_header_known_first():
+    """An ordering block whose announcement the follower dropped because
+    it already held the header came by ordinary sync: no decision is
+    owed. Any other announced block without an outcome is still missing
+    (rm-B-reconstruct_rate-2562f-1: heights 44 and 57)."""
+    from scenarios import common
+
+    log = '\n'.join([
+        'TRACE x: input_blocks: raw announcement payload block=' + 'a' * 64 + ' payload=01',
+        'DEBUG x: input_blocks: dropped id=' + 'a' * 64 + ' reason=OrderingHeaderKnown',
+        'TRACE x: input_blocks: raw announcement payload block=' + 'b' * 64 + ' payload=01',
+        'DEBUG x: input_blocks: dropped id=' + 'c' * 64 + ' reason=OutsideHeightWindow'])
+    assert common.header_known_first(log) == {'a' * 64}
+    announced = common.announced_headers(log)
+    blocks = {44: 'a' * 64, 57: 'b' * 64}
+    loose = common.reconcile_outcomes(blocks, [], announced=announced,
+                                      known_first=common.header_known_first(log))
+    assert loose['known_before_announcement'] == [{'height': 44, 'header': 'a' * 64}]
+    assert loose['missing'] == [{'height': 57, 'header': 'b' * 64}], loose
+    strict = common.reconcile_outcomes(blocks, [], announced=announced)
+    assert len(strict['missing']) == 2 and not strict['known_before_announcement']
+
+
+def _self_test_lead_confirmation():
+    """A one-block lead is confirmed only by evidence the block is real
+    (`common.lead_confirmation`); the rm-B-fork-stockctl-4 shapes, an
+    input-chain switch and a stale read pass, and an invented tip and a
+    stitched chain still fail."""
+    from scenarios import common
+
+    def s(rust, s1, s2, o='O1', o2=None, s3=(), o3=None):
+        return {'ordering': o, 'rust_chain': list(rust),
+                'scala_chain': list(s1), 'scala_ordering': o,
+                'scala2_chain': list(s2), 'scala2_ordering': o2 or o,
+                'scala3_chain': list(s3), 'scala3_ordering': o3 or o}
+
+    def verdict(series, evidence=None):
+        return common.evaluate_fork_coherence(series, evidence=evidence)
+
+    # Shape 1 (7705e85e): miner 2 mines `lead` and moves to its own next
+    # ordering block, which names `lead` as its input tip, before any
+    # sample lists `lead` under O1.
+    turnover = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], [], o2='O2')]
+    strict = verdict(turnover)
+    assert len(strict['unconfirmed_one_block_leads']) == 2, strict
+    mined = {'lead': 'scala2'}
+    named = verdict(turnover, {'named': {('O1', 'lead')}, 'mined_by': mined})
+    assert not named['unconfirmed_one_block_leads'], named
+    assert named['lead_confirmations'] == {'named_tip': 2}, named
+    # A named tip alone proves the block is real, not that it sits on the
+    # rest of the chain: without its miner's record it confirms nothing.
+    assert len(verdict(turnover, {'named': {('O1', 'lead')}})[
+        'unconfirmed_one_block_leads']) == 2
+    # ...and the naming block's PARENT has to be the lead's ordering block
+    # (here the miner's departure still makes it an orphaned lead).
+    wrong_parent = verdict(turnover, {'named': {('O9', 'lead')}, 'mined_by': mined})
+    assert wrong_parent['lead_confirmations'] == {'orphaned_lead': 2}, wrong_parent
+    # Shape 2 (32d1d349): miner 2 mined it and left O1: an orphaned lead,
+    # confirmed and LISTED.
+    orphan = verdict(turnover, {'mined_by': {'lead': 'scala2'}})
+    assert not orphan['unconfirmed_one_block_leads'], orphan
+    assert orphan['lead_confirmations'] == {'orphaned_lead': 2}, orphan
+    assert orphan['orphaned_leads'][0]['how'] == 'left_ordering_block', orphan
+    assert orphan['orphaned_leads'][0]['miner'] == 'scala2', orphan
+    # A block orphaned by an input-chain switch: miner 2 moves to miner
+    # 1's fork under the SAME ordering block.
+    switched = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['m1', 'a'])]
+    by_switch = verdict(switched, {'mined_by': {'lead': 'scala2'}})
+    assert not by_switch['unconfirmed_one_block_leads'], by_switch
+    assert {o['how'] for o in by_switch['orphaned_leads']} == {'switched_fork'}
+    # The scala3 stale read: the Scala follower later holds the whole
+    # chain, reported under the next ordering id.
+    stale = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+             s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+             s(['lead', 't', 'a'], ['m1', 'a'], [], o2='O2',
+               s3=['lead', 't', 'a'], o3='O2')]
+    by_holder = verdict(stale)
+    assert not by_holder['unconfirmed_one_block_leads'], by_holder
+    assert set(by_holder['lead_confirmations']) == {'later_prefix'}, by_holder
+    # Still failing: an invented tip no miner mined, whatever else is
+    # known; a mined block whose miner never moved on; a stitched chain.
+    invented = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['zz', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['zz', 't', 'a'], ['m1', 'a'], [], o2='O2')]
+    assert len(verdict(invented, {'mined_by': {'lead': 'scala2'},
+                                  'named': {('O1', 'lead')}})[
+        'unconfirmed_one_block_leads']) == 2
+    stayed = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+              s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+              s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a'])]
+    assert len(verdict(stayed, {'mined_by': {'lead': 'scala2'}})[
+        'unconfirmed_one_block_leads']) == 2
+    # A stitched chain: miner 2's real block `t` (built on `a`) on top of
+    # miner 1's `m1`. `t` is mined, named, and its miner later moves away,
+    # and it still fails: miner 2 never held `m1`.
+    stitched = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['t', 'm1', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['t', 'm1', 'a'], ['m1', 'a'], [], o2='O2')]
+    stitched_verdict = verdict(stitched, {'mined_by': {'t': 'scala2'},
+                                          'named': {('O1', 't')}})
+    assert stitched_verdict['unconfirmed_one_block_leads'] or \
+        stitched_verdict['incoherent_samples'], stitched_verdict
+    assert not stitched_verdict['orphaned_leads'], stitched_verdict
+    assert 'named_tip' not in stitched_verdict['lead_confirmations'], stitched_verdict
+    # The miner log parser reads the miner's own line only.
+    assert common.mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
+        + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
+
+
+def _self_test_payment_pool():
+    """The fork window pays from a pool split off one coinbase before the
+    seed: each payment spends exactly one pool box, never the wallet's own
+    choice (which, after a reorg, is change that exists only in orphaned
+    input blocks)."""
+    import types
+
+    import smoke
+    from scenarios import common
+
+    calls = []
+    utxo = {'p1': 'b1', 'p3': 'b3'}      # p2 is spent: not in the UTXO set
+
+    def _fake_request(node, path, data=None, timeout=15):
+        calls.append((node, path, data))
+        if path.startswith('/utxo/byIdBinary/'):
+            box = path.rsplit('/', 1)[1]
+            if box in utxo:
+                return 200, {'boxId': box, 'bytes': utxo[box]}
+            raise urllib.error.HTTPError(path, 404, 'Not Found', {},
+                                         io.BytesIO(b'not found'))
+        if path == '/wallet/transaction/generate':
+            return 200, {'id': 'tx-' + data['inputsRaw'][0]}
+        return 200, data['id']
+
+    import io
+    import urllib.error
+    saved = smoke.request
+    pool, sent, refused = ['p1', 'p2', 'p3'], [], []
+    try:
+        smoke.request = _fake_request
+        common.pump_payments_to_all(None, 'addr', sent, ('scala', 'scala2'),
+                                    count=3, rejected=refused, pool=pool)
+    finally:
+        smoke.request = saved
+    # One pool box per payment, in order; the spent one is skipped and
+    # named; the third payment finds the pool empty.
+    assert sent == ['tx-b1', 'tx-b3'], sent
+    assert pool == [], pool
+    assert refused == ['pool box p2: HTTP 404',
+                       'the payment pool is exhausted'], refused
+    signed = [d for n, p, d in calls if p == '/wallet/transaction/generate']
+    assert [d['inputsRaw'] for d in signed] == [['b1'], ['b3']], signed
+    assert all(d['fee'] == common.PAYMENT_FEE_NANOERG for d in signed), signed
+
+    # ----- the split: count boxes of value, confirmed before it returns -----
+    calls.clear()
+    polls = iter([404, 404, 200])
+    split = {'id': 'split', 'outputs': [
+        {'boxId': f'f{i}', 'value': common.FANOUT_VALUE_NANOERG}
+        for i in range(4)] + [{'boxId': 'change', 'value': 5},
+                              {'boxId': 'fee', 'value': 1_000_000}]}
+
+    def _fake_split(node, path, data=None, timeout=15):
+        calls.append((node, path, data))
+        if path == '/wallet/transaction/generate':
+            return 200, split
+        if path == '/transactions':
+            return 200, 'split'
+        if path.startswith('/utxo/byId/'):
+            code = next(polls)
+            if code != 200:
+                raise urllib.error.HTTPError(path, code, 'x', {}, io.BytesIO(b''))
+            return 200, {'boxId': 'f0'}
+        raise AssertionError(path)
+
+    ctx = types.SimpleNamespace(evidence={}, failures=[], run=types.SimpleNamespace(
+        deadline=time.monotonic() + 30, idle=lambda s: None))
+    ctx.note = ctx.evidence.__setitem__
+    ctx.fail = lambda message, evidence=None, ids=None: ctx.failures.append(message)
+    saved_api = common.api
+    try:
+        smoke.request = _fake_split
+        common.api = lambda node, path, *a, **k: {'fullHeight': 20}
+        boxes = common.fan_out(ctx, 'addr', 'scala', 4)
+    finally:
+        smoke.request = saved
+        common.api = saved_api
+    assert boxes == ['f0', 'f1', 'f2', 'f3'], boxes
+    assert not ctx.failures, ctx.failures
+    request = next(d for n, p, d in calls if p == '/wallet/transaction/generate')
+    assert request['requests'] == [{'address': 'addr', 'value':
+                                    common.FANOUT_VALUE_NANOERG}] * 4, request
+    assert ctx.evidence['payment_pool_split']['confirmed'] is True, ctx.evidence
+    assert [p for n, p, d in calls].count('/utxo/byId/f0') == 3, calls
+
+
+def _self_test_switch_granularity():
+    """A fork switch is judged on HISTORY: either end may be a non-empty
+    prefix of a reference's sampled chain, never an invented or stitched
+    one (rm-B-fork-2562f-3)."""
+    from scenarios import common
+
+    def rs(o, rust, s1=(), s2=()):
+        return {'ordering': o, 'rust_chain': list(rust), 'scala_chain': list(s1),
+                'scala2_chain': list(s2), 'scala_ordering': o, 'scala2_ordering': o}
+
+    # The follower (read after the miner in the same sweep) leaves miner
+    # 1's chain at a length miner 1 was never sampled at: 1, then 3.
+    granular = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1c', 'm1b', 'm1a'], ['m2b', 'm2a'])])
+    assert granular['switches_matching_no_reference'] == [], granular
+    # ...and the match says which kind it was.
+    match = granular['matched_switches'][0]
+    assert match['left_a_reference_chain'] == {
+        'node': 'scala', 'sample': 1, 'match': 'prefix'}, match
+    assert match['landed_on_a_reference_chain']['match'] == 'exact', match
+    # A stitched chain (miner 2's block on miner 1's root) is a prefix of
+    # neither miner's chain, and still matches nothing.
+    stitched = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a'])])
+    assert stitched['switches_matching_no_reference'], stitched
+    unmatched = stitched['switches_matching_no_reference'][0]
+    assert unmatched['left_a_reference_chain']['match'] == 'exact', unmatched
+    assert unmatched['landed_on_a_reference_chain'] is None, unmatched
+    # A landing that is a strict prefix of the other miner's chain (the
+    # follower trailing it) is its history, and says so.
+    trailing = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2c', 'm2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2c', 'm2b', 'm2a'])])
+    assert trailing['switches_matching_no_reference'] == [], trailing
+    # A reset to the empty chain is still a reset, not a prefix match.
+    reset = common.compare_fork_switches(
+        [rs('O1', ['m1a'], ['m1a'], ['m2a']), rs('O1', [], ['m1a'], ['m2a'])])
+    assert reset['resets_to_the_empty_chain'] and \
+        not reset['switches_matching_no_reference'], reset
+    # A landing carrying a block no reference ever published matches
+    # nothing, whether it replaces a block or leads by one that is never
+    # confirmed.
+    for landing in (['q', 'm2a'], ['q', 'm2b', 'm2a']):
+        unpublished = common.compare_fork_switches(
+            [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+             rs('O1', landing, ['m1b', 'm1a'], ['m2b', 'm2a'])])
+        assert unpublished['switches_matching_no_reference'], (landing, unpublished)
+    # Rolling back and applying nothing is a truncation, and fails, even
+    # though the chain landed on is a prefix of the miner's.
+    truncated = common.compare_fork_switches(
+        [rs('O1', ['m1c', 'm1b', 'm1a'], ['m1c', 'm1b', 'm1a'], ['m2a']),
+         rs('O1', ['m1b', 'm1a'], ['m1c', 'm1b', 'm1a'], ['m2a'])])
+    assert truncated['truncations'] and \
+        not truncated['switches_matching_no_reference'] and \
+        not truncated['matched_switches'], truncated
+    judged = common.judge_fork_switches(truncated, range(0))
+    assert any('truncated' in m for m, _ in judged['failures']), judged
+    assert judged['genuine_switches'] == 0, judged
+    # And the observed pattern is a genuine switch the gate passes.
+    judged = common.judge_fork_switches(granular, range(0))
+    assert judged['failures'] == [] and judged['genuine_switches'] == 1, judged
+
+
+def _self_test_seed_artifact():
+    """The seed step must not leave a follower holding input blocks the
+    restarted miner has forgotten (rm-B-fork-stockctl-1), and the
+    coherence evaluator must trace such a chain only on evidence."""
+    import types
+
+    from scenarios import common
+
+    # ----- the seed stops the follower with miner 1, first -----
+    calls = []
+
+    class _Lifecycle:
+        NODES = ('scala', 'scala2', 'scala3', 'rust')
+
+        @staticmethod
+        def stop(names):
+            calls.append(('stop', tuple(names)))
+
+        @staticmethod
+        def spawn(name):
+            calls.append(('spawn', name))
+
+        @staticmethod
+        def init_wallet(name):
+            calls.append(('wallet', name))
+
+        @staticmethod
+        def wait_peered(names=None, timeout=180):
+            calls.append(('peered', tuple(names or ())))
+
+    class _Campaign:
+        @staticmethod
+        def ensure_data_dirs(root, nodes):
+            for node in nodes:
+                (root / node).mkdir(parents=True, exist_ok=True)
+
+        @staticmethod
+        def purge_address_book(root):
+            calls.append(('purge',))
+            return []
+
+    class _Run:
+        deadline = time.monotonic() + 30
+
+        def started(self, node):
+            calls.append(('started', node))
+
+        def idle(self, seconds):
+            pass
+
+    pages = {'/info': {'fullHeight': 11, 'launchTime': 1000},
+             '/blocks/bestInputChain': {'bestOrdering': 'O',
+                                        'bestInputBlocks': ['x']},
+             '/peers/connected': [1, 2, 3]}
+
+    def _fake_api(node, path, *args, **kwargs):
+        calls.append(('api', node, path))
+        return pages[path]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'scala').mkdir()
+        (root / 'scala' / 'marker').write_text('chain')
+        ctx = types.SimpleNamespace(data_root=root, run=_Run(), evidence={},
+                                    failures=[])
+        ctx.note = ctx.evidence.__setitem__
+        ctx.fail = lambda message, evidence=None, ids=None: \
+            ctx.failures.append(message)
+        saved_api = common.api
+        try:
+            common.api = _fake_api
+            common.seed_second_miner(ctx, _Campaign, _Lifecycle,
+                                     nodes=('scala2', 'scala3'))
+        finally:
+            common.api = saved_api
+        assert (root / 'scala3' / 'marker').exists(), 'the chain was copied'
+    assert not ctx.failures, ctx.failures
+    stops = [c for c in calls if c[0] == 'stop']
+    # One stop takes the follower and miner 1 down together, Rust first...
+    assert stops[0] == ('stop', ('rust', 'scala')), stops
+    first_stop = calls.index(stops[0])
+    # ...after miner 1's chain and process were snapshotted...
+    snapshot_reads = [i for i, c in enumerate(calls)
+                      if c[:2] == ('api', 'scala') and c[2] != '/peers/connected']
+    assert snapshot_reads and max(snapshot_reads[:2]) < first_stop, calls
+    snapshot = ctx.evidence['reference_snapshots'][0]
+    assert {k: snapshot[k] for k in ('node', 'launch', 'ordering', 'chain')} == {
+        'node': 'scala', 'launch': 1000, 'ordering': 'O', 'chain': ['x']}, snapshot
+    # ...and the follower comes back only after every seeded node is up.
+    spawns = [c[1] for c in calls if c[0] == 'spawn']
+    assert spawns.index('rust') > max(spawns.index('scala2'),
+                                      spawns.index('scala3')), spawns
+    assert spawns.index('scala') < spawns.index('scala2'), spawns
+
+    # ----- the evaluator stays strict, and traces only on evidence -----
+    series = [{'ordering': 'O', 'scala_ordering': 'O', 'scala2_ordering': 'O',
+               'rust_ordering': 'O', 'rust_chain': ['x'],
+               'scala_chain': [f'a{j}' for j in range(k + 1, 0, -1)],
+               'scala2_chain': [f'c{j}' for j in range(k + 1, 0, -1)],
+               'launch': {'scala': 2000, 'scala2': 3000, 'rust': 500}}
+              for k in range(9)]
+    strict = common.evaluate_fork_coherence(series)
+    assert len(strict['incoherent_samples']) == 9, strict
+    assert not strict['held_from_restarted_reference'], strict
+    assert strict['incoherent_samples'][0][
+        'references_restarted_since_follower_start'] == ['scala', 'scala2']
+    # miner 1's EARLIER process (launch 1000) held ['x'] just before the
+    # harness stopped it; the follower (launch 500) predates that.
+    snap = [{'node': 'scala', 'at': 1.5, 'launch': 1000, 'ordering': 'O',
+             'chain': ['x']}]
+    traced = common.evaluate_fork_coherence(series, snap)
+    assert not traced['incoherent_samples'], traced
+    assert len(traced['held_from_restarted_reference']) == 9, traced
+    assert traced['held_from_restarted_reference'][0]['held_from'] == {
+        'node': 'scala', 'snapshot_at': 1.5, 'snapshot_launch': 1000,
+        'launch_at_sample': 2000}, traced
+    # Strict otherwise: no restart since the snapshot, a follower that
+    # started after it, another history, another ordering block, or no
+    # launch times at all are all still incoherent.
+    for variant, bad_series in (
+            ([dict(snap[0], launch=2000)], series),
+            (snap, [dict(s, launch=dict(s['launch'], rust=5000)) for s in series]),
+            ([dict(snap[0], chain=['y'])], series),
+            ([dict(snap[0], ordering='P')], series),
+            (snap, [{k: v for k, v in s.items() if k != 'launch'} for s in series])):
+        verdict = common.evaluate_fork_coherence(bad_series, variant)
+        assert len(verdict['incoherent_samples']) == 9, (variant, verdict)
+        assert not verdict['held_from_restarted_reference'], variant
 
 
 def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
