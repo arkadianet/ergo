@@ -1795,6 +1795,7 @@ fn bridge_over_store(
             app_version: "test".into(),
             network: "mainnet".into(),
             launch_time_unix_ms: 0,
+            voting_length: ergo_chain_spec::ChainSpec::mainnet().voting.voting_length,
             rest_api_url: None,
             min_relay_fee_nano_erg: 1_000_000,
         },
