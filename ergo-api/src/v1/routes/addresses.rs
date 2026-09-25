@@ -16,6 +16,7 @@ use super::{offset_from_cursor, offset_page, parse_sort, V1State};
 use crate::blockchain::{
     address_to_tree_hash, build_indexed_tx_response, unconfirmed_balance_for_tree, BalanceInfoEntry,
 };
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::clamp_limit;
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::dto::V1AddressTxSummary;
@@ -69,45 +70,53 @@ fn balance_entry_from_info(e: BalanceInfoEntry) -> V1BalanceEntry {
         (status = 200, description = "Confirmed + unconfirmed balance", body = V1Balance),
         (status = 400, description = "Invalid address", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match address_to_tree_hash(&address, state.network) {
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
-    let confirmed = match idx.address_balance(&tree_hash) {
-        Some(dto) => V1BalanceEntry {
-            value: dto.nano_ergs.to_string(),
-            assets: dto
-                .tokens
-                .into_iter()
-                .map(|(id, amount)| V1Asset {
-                    token_id: hex::encode(id.as_bytes()),
-                    amount: amount.to_string(),
-                })
-                .collect(),
-        },
-        None => V1BalanceEntry {
-            value: "0".to_string(),
-            assets: Vec::new(),
-        },
-    };
-    let unconfirmed = balance_entry_from_info(unconfirmed_balance_for_tree(
-        state.mempool.as_ref(),
-        &tree_hash,
-    ));
-    Json(V1Balance {
-        address,
-        confirmed,
-        unconfirmed,
-    })
-    .into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            let confirmed = match idx.address_balance(&tree_hash) {
+                Some(dto) => V1BalanceEntry {
+                    value: dto.nano_ergs.to_string(),
+                    assets: dto
+                        .tokens
+                        .into_iter()
+                        .map(|(id, amount)| V1Asset {
+                            token_id: hex::encode(id.as_bytes()),
+                            amount: amount.to_string(),
+                        })
+                        .collect(),
+                },
+                None => V1BalanceEntry {
+                    value: "0".to_string(),
+                    assets: Vec::new(),
+                },
+            };
+            let unconfirmed = balance_entry_from_info(unconfirmed_balance_for_tree(
+                state.mempool.as_ref(),
+                &tree_hash,
+            ));
+            Json(V1Balance {
+                address,
+                confirmed,
+                unconfirmed,
+            })
+            .into_response()
+        })
+        .await
 }
 
 // ----- addresses/{address}/transactions -----------------------------------
@@ -127,8 +136,9 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
         (status = 200, description = "Address transaction history", body = Collection<V1AddressTxSummary>),
         (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 500, description = "Failed to assemble the address transaction summary", body = V1Error),
-        (status = 503, description = "Chain reader unavailable, or extra index syncing/halted", body = V1Error),
+        (status = 500, description = "Failed to assemble the address transaction summary; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn transactions(
@@ -137,7 +147,7 @@ pub async fn transactions(
     V1Query(q): V1Query<AddressTxQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match address_to_tree_hash(&address, state.network) {
@@ -153,40 +163,46 @@ pub async fn transactions(
         Err(e) => return *e,
     };
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);
-    let txs = idx.address_txs_paged(
-        &tree_hash,
-        IdxPage {
-            offset: start,
-            limit: limit + 1,
-        },
-        dir,
-    );
-    // Building tx summaries resolves inputs via the chain reader — but only when
-    // there ARE txs; an empty result is authoritative from the index and needs
-    // no chain. Guard the non-empty case so a missing reader is an honest
-    // `chain_reader_unavailable`, not a 500 from the downstream
-    // `build_indexed_tx_response`.
-    if !txs.is_empty() {
-        if let Err(e) = state.chain() {
-            return *e;
-        }
-    }
-    let bstate = state.blockchain_state(idx);
-    let built: Result<Vec<_>, String> = txs
-        .iter()
-        .map(|tx| build_indexed_tx_response(&bstate, tx))
-        .collect();
-    let resps = match built {
-        Ok(v) => v,
-        Err(d) => {
-            return v1_error(
-                Reason::InternalError,
-                "failed to assemble the address transaction summary",
-                d,
-            )
-        }
-    };
-    let items: Vec<_> = resps.iter().map(address_tx_summary_from_indexed).collect();
-    let (items, page) = offset_page(items, start, limit);
-    Json(Collection { items, page }).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let txs = idx.address_txs_paged(
+                &tree_hash,
+                IdxPage {
+                    offset: start,
+                    limit: limit + 1,
+                },
+                dir,
+            );
+            // Building tx summaries resolves inputs via the chain reader — but only when
+            // there ARE txs; an empty result is authoritative from the index and needs
+            // no chain. Guard the non-empty case so a missing reader is an honest
+            // `chain_reader_unavailable`, not a 500 from the downstream
+            // `build_indexed_tx_response`.
+            if !txs.is_empty() {
+                if let Err(e) = state.chain() {
+                    return *e;
+                }
+            }
+            let bstate = state.blockchain_state(&idx);
+            let built: Result<Vec<_>, String> = txs
+                .iter()
+                .map(|tx| build_indexed_tx_response(&bstate, tx))
+                .collect();
+            let resps = match built {
+                Ok(v) => v,
+                Err(d) => {
+                    return v1_error(
+                        Reason::InternalError,
+                        "failed to assemble the address transaction summary",
+                        d,
+                    )
+                }
+            };
+            let items: Vec<_> = resps.iter().map(address_tx_summary_from_indexed).collect();
+            let (items, page) = offset_page(items, start, limit);
+            Json(Collection { items, page }).into_response()
+        })
+        .await
 }

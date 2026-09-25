@@ -320,6 +320,49 @@ impl CommittedSnapshot {
             })
     }
 
+    /// The last up-to-10 applied-chain headers walked by parent id, tip-first.
+    pub fn last_ancestor_headers_window(&self) -> Result<Vec<Header>, StateError> {
+        let tip_height = self.chain_state.best_full_block_height;
+        let count = tip_height.min(10) as usize;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let first_height = tip_height + 1 - count as u32;
+        let headers_table = self.txn.open_table(HEADERS)?;
+        let mut current_id = self.chain_state.best_full_block_id;
+        let mut headers = Vec::with_capacity(count);
+        for expected_height in (first_height..=tip_height).rev() {
+            let bytes = headers_table.get(current_id.as_slice())?.ok_or_else(|| {
+                StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("missing ancestor header at h={expected_height}"),
+                }
+            })?;
+            let mut reader = VlqReader::new(bytes.value());
+            let header = ergo_ser::header::read_header(&mut reader).map_err(|error| {
+                StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("header decode at h={expected_height}: {error}"),
+                }
+            })?;
+            if header.height != expected_height {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!(
+                        "header height {} does not match expected {expected_height}",
+                        header.height
+                    ),
+                });
+            }
+            current_id = *header.parent_id.as_bytes();
+            headers.push(header);
+        }
+        Ok(headers)
+    }
+
     /// Active protocol parameters at the committed tip — the block version
     /// the candidate must carry. Read from `VOTED_PARAMS` in this
     /// transaction; the genesis row written by open's reconcile guarantees

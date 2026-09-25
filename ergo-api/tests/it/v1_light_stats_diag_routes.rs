@@ -299,7 +299,9 @@ impl NodeChainQuery for StubChain {
         if !self.slice {
             return Vec::new();
         }
-        (from_height..=to_height)
+        // Honour the trait contract: the lower bound is EXCLUSIVE (Scala
+        // `chainSlice` parity). An inclusive stub hid a v1 stats off-by-one.
+        (from_height.saturating_add(1)..=to_height)
             .filter(|h| *h <= SELF_HEIGHT)
             .map(scala_header)
             .collect()
@@ -363,6 +365,7 @@ fn app(deps: Deps) -> Router {
         e
     });
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read,
         chain,
         indexer: None,
@@ -649,6 +652,10 @@ async fn stats_difficulty_series_shape_with_hashrate() {
     assert_eq!(status, StatusCode::OK);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0]["height"], 1,
+        "the first requested height is included"
+    );
     assert!(items[0]["difficulty"].is_string());
     assert!(items[0]["hashrate"].is_string());
     assert!(items[0]["n_bits"].is_number());
@@ -831,6 +838,10 @@ async fn stats_fees_series_shape() {
     assert_eq!(status, StatusCode::OK);
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0]["height"], 1,
+        "the first requested height is included"
+    );
     assert_eq!(items[0]["tx_count"], 1);
     assert_eq!(items[0]["total_fee"], "1000000");
     // 1_000_000 / 200 bytes = 5000 nanoERG/byte across all percentiles.

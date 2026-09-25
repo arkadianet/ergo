@@ -6,6 +6,8 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
+use std::collections::HashSet;
+
 use crate::avl::digest::{internal_label, leaf_label};
 use crate::avl::node::AvlNode;
 use crate::avl::node::NodeId;
@@ -332,19 +334,39 @@ pub struct ReconstructedTree {
 /// authoritative set of chunks to fetch; in-flight bookkeeping
 /// keys off these ids.
 pub fn enumerate_expected_chunk_ids(manifest_bytes: &[u8]) -> Result<Vec<Digest32>, StateError> {
-    let (_, _, body) = parse_manifest_header(manifest_bytes)?;
-    let manifest_depth = manifest_bytes[1];
+    Ok(parse_manifest_commitment(manifest_bytes)?.1)
+}
+
+/// Authenticate the manifest subtree, using wire labels only at chunk boundaries.
+/// Scala: BatchAVLProverManifest.scala:18-25; ProxyInternalNode.scala:18-20.
+pub fn recompute_manifest_root_label(manifest_bytes: &[u8]) -> Result<Digest32, StateError> {
+    Ok(parse_manifest_commitment(manifest_bytes)?.0)
+}
+
+fn parse_manifest_commitment(
+    manifest_bytes: &[u8],
+) -> Result<(Digest32, Vec<Digest32>), StateError> {
+    let (_, manifest_depth, body) = parse_manifest_header(manifest_bytes)?;
 
     let mut cursor = 0usize;
     let mut expected = Vec::new();
-    enumerate_walk(body, &mut cursor, 1, manifest_depth, &mut expected)?;
+    let label = enumerate_walk(body, &mut cursor, 1, manifest_depth, &mut expected)?;
     if cursor != body.len() {
         return Err(StateError::Serialization(format!(
             "snapshot codec: manifest body has {} trailing bytes after walk",
             body.len() - cursor,
         )));
     }
-    Ok(expected)
+    let mut seen = HashSet::with_capacity(expected.len());
+    for id in &expected {
+        if !seen.insert(*id) {
+            return Err(StateError::Serialization(format!(
+                "snapshot codec: manifest declares duplicate expected chunk id {}",
+                hex::encode(id.as_bytes()),
+            )));
+        }
+    }
+    Ok((label, expected))
 }
 
 /// Reconstruct a tree from a manifest plus its chunks.
@@ -397,6 +419,17 @@ pub fn reconstruct_tree(
             "snapshot codec: manifest root index = {root_idx}, expected 0",
         )));
     }
+    let mut seen = HashSet::with_capacity(pending_chunks.len());
+    for (_, subtree_id, _) in &pending_chunks {
+        if !seen.insert(*subtree_id) {
+            return Err(StateError::Serialization(format!(
+                "snapshot codec: manifest declares duplicate expected chunk id {}",
+                hex::encode(subtree_id.as_bytes()),
+            )));
+        }
+    }
+
+    let manifest_node_count = nodes.len();
 
     // Second pass: for each pending chunk, parse the chunk bytes,
     // verify the subtree root label matches the requested id, then
@@ -450,7 +483,7 @@ pub fn reconstruct_tree(
         // that the chunk's internal metadata (separator keys, cached child
         // labels) is structurally faithful — a per-chunk failure gives a
         // precise error before the whole-tree pass below.
-        let (actual_label, _, _) = validate_and_recompute_label(&nodes, new_root_idx, 0)?;
+        let (actual_label, _, _) = validate_and_recompute_label(&nodes, new_root_idx, 0, 0)?;
         if actual_label != subtree_id {
             return Err(StateError::Serialization(format!(
                 "snapshot codec: chunk for subtree {} has actual root label {} \
@@ -482,9 +515,12 @@ pub fn reconstruct_tree(
     // Final pass: recompute the root label from the fully-spliced arena and
     // validate every internal node's separator key + cached child labels
     // across the whole tree (covers manifest-level nodes and chunk internals).
-    let (root_label, _, computed_tree_height) = validate_and_recompute_label(&nodes, 0, 0)?;
+    // Chunks were validated individually above. Any remaining structural
+    // mismatch belongs to the manifest's nodes or its chunk boundaries.
+    let (root_label, _, computed_tree_height) =
+        validate_and_recompute_label(&nodes, 0, 0, manifest_node_count)?;
     if computed_tree_height != tree_height {
-        return Err(StateError::Serialization(format!(
+        return Err(StateError::InvalidSnapshotManifest(format!(
             "snapshot codec: computed graph height {computed_tree_height} does not match \
              manifest-declared tree height {tree_height}"
         )));
@@ -534,31 +570,38 @@ fn enumerate_walk(
     level: u8,
     manifest_depth: u8,
     out: &mut Vec<Digest32>,
-) -> Result<(), StateError> {
-    let remaining = &body[*cursor..];
-    let (parsed, consumed) = parse_prover_node(remaining)?;
+) -> Result<Digest32, StateError> {
+    let (parsed, consumed) = parse_prover_node(&body[*cursor..])?;
     *cursor += consumed;
     match parsed {
-        ParsedProverNode::Leaf { .. } => {
-            // Leaves never reference chunks; nothing to enumerate.
-        }
+        ParsedProverNode::Leaf {
+            key,
+            value,
+            next_leaf_key,
+        } => Ok(leaf_label(&key, &value, &next_leaf_key)),
         ParsedProverNode::Internal {
+            balance,
             left_label,
             right_label,
             ..
         } => {
+            let left = Digest32::from_bytes(left_label);
+            let right = Digest32::from_bytes(right_label);
             if level < manifest_depth {
-                enumerate_walk(body, cursor, level + 1, manifest_depth, out)?;
-                enumerate_walk(body, cursor, level + 1, manifest_depth, out)?;
+                let actual_left = enumerate_walk(body, cursor, level + 1, manifest_depth, out)?;
+                let actual_right = enumerate_walk(body, cursor, level + 1, manifest_depth, out)?;
+                if actual_left != left || actual_right != right {
+                    return Err(StateError::Serialization(
+                        "snapshot codec: manifest child label mismatch".into(),
+                    ));
+                }
             } else {
-                // level == manifest_depth: this internal node's
-                // child labels are chunk subtree IDs.
-                out.push(Digest32::from_bytes(left_label));
-                out.push(Digest32::from_bytes(right_label));
+                out.push(left);
+                out.push(right);
             }
+            Ok(internal_label(balance, &left, &right))
         }
     }
-    Ok(())
 }
 
 /// Walk a manifest body DFS, building up the partial top-subtree
@@ -748,6 +791,7 @@ fn validate_and_recompute_label(
     nodes: &[ReconstructedNode],
     idx: usize,
     depth: usize,
+    manifest_node_count: usize,
 ) -> Result<(Digest32, [u8; 32], u8), StateError> {
     if depth > MAX_RECONSTRUCT_DEPTH {
         return Err(StateError::Serialization(format!(
@@ -760,6 +804,15 @@ fn validate_and_recompute_label(
             "snapshot codec: validate_and_recompute_label idx {idx} out of bounds",
         ))
     })?;
+    // Attribute wire metadata only to nodes parsed from the manifest. Arena
+    // bounds, recursion and chunk re-validation errors remain local failures.
+    let invalid_metadata = |message| {
+        if idx < manifest_node_count {
+            StateError::InvalidSnapshotManifest(message)
+        } else {
+            StateError::Serialization(message)
+        }
+    };
     match node {
         ReconstructedNode::Leaf {
             key,
@@ -778,12 +831,13 @@ fn validate_and_recompute_label(
             left_label,
             right_label,
         } => {
-            let (l_label, l_min, l_height) = validate_and_recompute_label(nodes, *left, depth + 1)?;
+            let (l_label, l_min, l_height) =
+                validate_and_recompute_label(nodes, *left, depth + 1, manifest_node_count)?;
             let (r_label, r_min, r_height) =
-                validate_and_recompute_label(nodes, *right, depth + 1)?;
+                validate_and_recompute_label(nodes, *right, depth + 1, manifest_node_count)?;
             // Cached child labels must equal the recomputed child labels.
             if &l_label != left_label {
-                return Err(StateError::Serialization(format!(
+                return Err(invalid_metadata(format!(
                     "snapshot codec: node {idx} stored left_label {} != recomputed {} \
                      (tampered cached label)",
                     hex::encode(left_label.as_bytes()),
@@ -791,7 +845,7 @@ fn validate_and_recompute_label(
                 )));
             }
             if &r_label != right_label {
-                return Err(StateError::Serialization(format!(
+                return Err(invalid_metadata(format!(
                     "snapshot codec: node {idx} stored right_label {} != recomputed {} \
                      (tampered cached label)",
                     hex::encode(right_label.as_bytes()),
@@ -801,7 +855,7 @@ fn validate_and_recompute_label(
             // Separator key must equal the right subtree's minimum key — the
             // AVL+ routing invariant the runtime `lookup_at` relies on.
             if key != &r_min {
-                return Err(StateError::Serialization(format!(
+                return Err(invalid_metadata(format!(
                     "snapshot codec: node {idx} separator key {} != right-subtree min key {} \
                      (tampered routing key)",
                     hex::encode(key),
@@ -846,6 +900,52 @@ pub fn recompute_chunk_root_label(chunk_bytes: &[u8]) -> Result<Digest32, StateE
         ));
     }
     let (root_idx, nodes) = parse_chunk(chunk_bytes)?;
-    let (label, _, _) = validate_and_recompute_label(&nodes, root_idx, 0)?;
+    let (label, _, _) = validate_and_recompute_label(&nodes, root_idx, 0, 0)?;
     Ok(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[test]
+    fn reconstruction_manifest_separator_mismatch_identifies_manifest() {
+        let mut tree = AvlTree::new();
+        for key in 1..=8 {
+            tree.insert([key; 32], vec![key]);
+        }
+        let server = super::super::SnapshotServer::build(&tree, 100, 1).unwrap();
+        let mut bytes = server.manifest_bytes.clone();
+        // Internal separators are not part of the AVL root commitment.
+        bytes[4] ^= 1;
+        assert!(recompute_manifest_root_label(&bytes).is_ok());
+        let chunks = server.chunks.into_iter().collect();
+        assert!(matches!(
+            reconstruct_tree(&bytes, &chunks),
+            Err(StateError::InvalidSnapshotManifest(_))
+        ));
+    }
+
+    #[test]
+    fn label_validation_invalid_arena_index_remains_local_error() {
+        assert!(matches!(
+            validate_and_recompute_label(&[], 0, 0, 1),
+            Err(StateError::Serialization(_))
+        ));
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn manifest_root_scala_testnet_fixture_matches_header() {
+        let bytes =
+            include_bytes!("../../../../test-vectors/testnet/utxo_snapshot_manifest_522239.bin");
+        let expected = "7858b36c8c7596da9999a013d91608a341583a0a1f5d4859c5d80e5d296e0fac";
+        assert_eq!(
+            hex::encode(recompute_manifest_root_label(bytes).unwrap().as_bytes()),
+            expected
+        );
+    }
 }

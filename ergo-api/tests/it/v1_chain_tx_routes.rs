@@ -8,6 +8,7 @@
 //! so every later group copies a verified template. Handlers are driven via
 //! `oneshot` over stub reader traits + `v1_router`.
 
+use ergo_api::compat::ChainReadError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -318,18 +319,21 @@ impl NodeChainQuery for UnserialisableChain {
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
         self.try_full_block_by_id(header_id_hex).ok().flatten()
     }
-    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+    fn try_full_block_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaFullBlock>, ChainReadError> {
         if header_id_hex == block_id() {
-            return Err(PARSE_FAILURE.to_string());
+            return Err(ChainReadError::Corrupt(PARSE_FAILURE.to_string()));
         }
         Ok(None)
     }
     fn try_block_transactions_by_id(
         &self,
         header_id_hex: &str,
-    ) -> Result<Option<ScalaBlockTransactions>, String> {
+    ) -> Result<Option<ScalaBlockTransactions>, ChainReadError> {
         if header_id_hex == block_id() {
-            return Err(PARSE_FAILURE.to_string());
+            return Err(ChainReadError::Corrupt(PARSE_FAILURE.to_string()));
         }
         Ok(None)
     }
@@ -344,6 +348,101 @@ fn unserialisable() -> Deps {
         chain: Some(Arc::new(UnserialisableChain)),
         ..Deps::default()
     }
+}
+
+const STORE_FAILURE: &str = "redb: private database path /node/chain.redb: I/O failure";
+
+struct UnreadableChain {
+    failing_height: Option<u32>,
+    transactions_readable: bool,
+}
+
+impl Default for UnreadableChain {
+    fn default() -> Self {
+        Self {
+            failing_height: Some(HEIGHT),
+            transactions_readable: false,
+        }
+    }
+}
+
+impl NodeChainQuery for UnreadableChain {
+    fn info(&self) -> ergo_api::compat::types::ScalaInfo {
+        unreachable!("chain.info() is not on the v1 read path")
+    }
+    fn header_ids_at_height(&self, height: u32) -> Vec<String> {
+        self.try_header_ids_at_height(height).unwrap_or_default()
+    }
+    fn try_header_ids_at_height(&self, height: u32) -> Result<Vec<String>, ChainReadError> {
+        if self.failing_height == Some(height) {
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(PrunedChain.header_ids_at_height(height))
+    }
+    fn full_block_by_id(&self, id: &str) -> Option<ScalaFullBlock> {
+        self.try_full_block_by_id(id).ok().flatten()
+    }
+    fn try_full_block_by_id(&self, id: &str) -> Result<Option<ScalaFullBlock>, ChainReadError> {
+        if id == block_id() {
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(None)
+    }
+    fn header_by_id(&self, id: &str) -> Option<ScalaHeader> {
+        self.try_header_by_id(id).ok().flatten()
+    }
+    fn try_header_by_id(&self, id: &str) -> Result<Option<ScalaHeader>, ChainReadError> {
+        if id == block_id() {
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(None)
+    }
+    fn try_block_transactions_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<ScalaBlockTransactions>, ChainReadError> {
+        if id == block_id() {
+            if self.transactions_readable {
+                return Ok(Some(scala_full_block(true).block_transactions));
+            }
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(None)
+    }
+    fn try_modifier_by_id(&self, id: &str) -> Result<Option<ScalaBlockSection>, ChainReadError> {
+        if id == block_id() {
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(None)
+    }
+    fn try_proof_for_tx(
+        &self,
+        header: &str,
+        tx: &str,
+    ) -> Result<Option<ScalaMerkleProof>, ChainReadError> {
+        if header == block_id() && tx == tx_id() {
+            return Err(ChainReadError::Unavailable(STORE_FAILURE.into()));
+        }
+        Ok(None)
+    }
+}
+
+fn unreadable(chain: UnreadableChain) -> Deps {
+    Deps {
+        chain: Some(Arc::new(chain)),
+        ..Deps::default()
+    }
+}
+
+async fn assert_unavailable(deps: Deps, uri: &str) {
+    let (status, body) = get(deps, uri).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri}: {body}");
+    assert_eq!(reason(&body), "chain_reader_unavailable");
+    assert_eq!(
+        body["error"]["message"],
+        "the chain store could not be read"
+    );
+    assert!(!body.to_string().contains("redb:"));
 }
 
 struct StubSubmit {
@@ -403,6 +502,7 @@ impl Default for Deps {
 fn app(deps: Deps) -> Router {
     let mempool: Arc<dyn MempoolView> = Arc::new(NoopMempoolView::new());
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read: deps.read,
         chain: deps.chain,
         indexer: deps.indexer,
@@ -1436,4 +1536,171 @@ async fn unknown_id_on_unserialisable_chain_is_still_block_not_found() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(reason(&body), "block_not_found");
+}
+
+#[tokio::test]
+async fn chain_blocks_list_unserialisable_block_is_internal_error_not_omitted() {
+    let (status, body) = get(unserialisable(), "/api/v1/chain/blocks").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason(&body), "internal_error");
+    assert_eq!(body["error"]["detail"], PARSE_FAILURE);
+}
+
+#[tokio::test]
+async fn chain_blocks_by_ids_unserialisable_block_is_internal_error_not_dropped() {
+    let (status, body) = send(
+        app(unserialisable()),
+        Method::POST,
+        "/api/v1/chain/blocks/by-ids",
+        Body::from(serde_json::to_vec(&vec![block_id()]).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reason(&body), "internal_error");
+    assert_eq!(body["error"]["detail"], PARSE_FAILURE);
+}
+
+#[tokio::test]
+async fn chain_header_by_id_store_read_failure_is_chain_reader_unavailable() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        &format!("/api/v1/chain/headers/{}", block_id()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_headers_list_store_read_failure_is_503_not_short_page() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        "/api/v1/chain/headers",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_blocks_at_height_store_read_failure_is_503_not_empty() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        &format!("/api/v1/chain/blocks/at-height/{HEIGHT}"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_modifier_by_id_store_read_failure_is_503_not_block_not_found() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        &format!("/api/v1/chain/modifiers/{}", block_id()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_proof_for_tx_store_read_failure_is_503_not_tx_not_in_block() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        &format!(
+            "/api/v1/chain/proofs/{}/transactions/{}",
+            block_id(),
+            tx_id()
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_block_by_id_store_read_failure_is_503_not_internal_error() {
+    assert_unavailable(
+        unreadable(UnreadableChain::default()),
+        &format!("/api/v1/chain/blocks/{}", block_id()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chain_store_read_failure_detail_does_not_echo_store_error() {
+    let (_, body) = get(
+        unreadable(UnreadableChain::default()),
+        &format!("/api/v1/chain/blocks/{}", block_id()),
+    )
+    .await;
+    assert!(!body.to_string().contains("redb:"), "{body}");
+}
+
+#[tokio::test]
+async fn chain_remaining_routes_store_read_failure_is_503() {
+    for uri in [
+        "/api/v1/chain/blocks".to_string(),
+        format!("/api/v1/chain/headers/at-height/{HEIGHT}"),
+        format!("/api/v1/chain/blocks/{}/transactions", block_id()),
+        format!("/api/v1/chain/proofs/{}", block_id()),
+        format!(
+            "/api/v1/light/membership-proof?header_id={}&tx_id={}",
+            block_id(),
+            tx_id()
+        ),
+    ] {
+        assert_unavailable(unreadable(UnreadableChain::default()), &uri).await;
+    }
+}
+
+#[tokio::test]
+async fn chain_blocks_by_ids_store_read_failure_is_503() {
+    let (status, body) = send(
+        app(unreadable(UnreadableChain::default())),
+        Method::POST,
+        "/api/v1/chain/blocks/by-ids",
+        Body::from(serde_json::to_vec(&vec![block_id()]).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(reason(&body), "chain_reader_unavailable");
+}
+
+#[tokio::test]
+async fn chain_lists_probe_store_read_failure_is_503_not_end_of_chain() {
+    for uri in [
+        "/api/v1/chain/headers?order=asc&limit=1",
+        "/api/v1/chain/blocks?order=asc&limit=1",
+    ] {
+        assert_unavailable(
+            unreadable(UnreadableChain {
+                failing_height: Some(2),
+                ..Default::default()
+            }),
+            uri,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn chain_lists_row_store_read_failure_is_503_not_omitted() {
+    for uri in [
+        "/api/v1/chain/headers",
+        "/api/v1/chain/blocks",
+        "/api/v1/chain/headers/at-height/5",
+    ] {
+        assert_unavailable(
+            unreadable(UnreadableChain {
+                failing_height: None,
+                ..Default::default()
+            }),
+            uri,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn chain_block_transactions_header_read_failure_is_503_not_null_height() {
+    assert_unavailable(
+        unreadable(UnreadableChain {
+            transactions_readable: true,
+            ..Default::default()
+        }),
+        &format!("/api/v1/chain/blocks/{}/transactions", block_id()),
+    )
+    .await;
 }

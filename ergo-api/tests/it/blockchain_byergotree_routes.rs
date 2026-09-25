@@ -558,6 +558,7 @@ fn build_app_with_mempool(
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: true,
+            local_reverse_proxy: false,
         },
         None, // admin — tests don't exercise the shutdown endpoint
     )

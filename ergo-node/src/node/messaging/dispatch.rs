@@ -530,8 +530,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_MANIFEST => match message::deserialize_manifest(payload) {
             Ok(manifest_bytes) => {
                 note_progress(state, &peer, now);
-                manifest::handle_inbound_manifest(state, peer, manifest_bytes);
-                Vec::new()
+                manifest::handle_inbound_manifest(state, peer, manifest_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Manifest");
@@ -544,8 +543,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_UTXO_CHUNK => match message::deserialize_utxo_chunk(payload) {
             Ok(chunk_bytes) => {
                 note_progress(state, &peer, now);
-                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes);
-                Vec::new()
+                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad UtxoSnapshotChunk");

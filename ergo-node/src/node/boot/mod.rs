@@ -1024,10 +1024,9 @@ async fn run_inner_with_backend(
         // authoritative gate — it matches the expression that determined whether
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
-        // Non-loopback `[api] bind` — only reachable with `public_bind =
-        // true` set (enforced at config load). See `NodeState::
-        // api_publicly_bound` for why this steers API-tx budget routing.
-        api_publicly_bound: config.api_bind.is_some_and(|addr| !addr.ip().is_loopback()),
+        // Non-loopback bind or a declared loopback reverse proxy means API
+        // submissions are not trusted-local and must use the public budget.
+        api_publicly_bound: api_publicly_bound(config.api_bind, config.api_local_reverse_proxy),
         api_weight_function,
         recent_blocks_cache: None,
         network: config.chain_spec.network_params.address_prefix,
@@ -1143,4 +1142,39 @@ async fn run_inner_with_backend(
         mining_engine_cancel_tx,
         shutdown_notify,
     })
+}
+
+/// API submissions share the public budget whenever a bind or declared
+/// reverse proxy exposes the API beyond trusted local tooling.
+fn api_publicly_bound(bind: Option<std::net::SocketAddr>, local_reverse_proxy: bool) -> bool {
+    local_reverse_proxy || bind.is_some_and(|addr| !addr.ip().is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_publicly_bound;
+
+    // ----- happy path -----
+
+    #[test]
+    fn api_publicly_bound_loopback_proxy_uses_public_budget() {
+        for bind in ["127.0.0.1:9099", "[::1]:9099"] {
+            let bind = Some(bind.parse().unwrap());
+            assert!(!api_publicly_bound(bind, false));
+            assert!(api_publicly_bound(bind, true));
+        }
+    }
+
+    #[test]
+    fn api_publicly_bound_remote_bind_uses_public_budget() {
+        let bind = Some("0.0.0.0:9099".parse().unwrap());
+        assert!(api_publicly_bound(bind, false));
+        assert!(api_publicly_bound(bind, true));
+    }
+
+    #[test]
+    fn api_publicly_bound_disabled_api_preserves_proxy_posture() {
+        assert!(!api_publicly_bound(None, false));
+        assert!(api_publicly_bound(None, true));
+    }
 }

@@ -255,11 +255,11 @@ impl WalletAdmin for ScanAdmin {
 
 fn app() -> axum::Router {
     let admin: Arc<dyn WalletAdmin> = Arc::new(ScanAdmin::default());
-    ergo_api::wallet::router_with_security(admin, None)
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 fn app_with(admin: Arc<dyn WalletAdmin>) -> axum::Router {
-    ergo_api::wallet::router_with_security(admin, None)
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 async fn json(
@@ -269,6 +269,7 @@ async fn json(
     body: &'static [u8],
 ) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
+        .header(ergo_api::auth::API_KEY_HEADER, "hello")
         .method(method)
         .uri(uri)
         .header("content-type", "application/json")

@@ -21,9 +21,9 @@ fn tracked_pk() -> [u8; 33] {
 
 /// No-op RescanGuard used by apply/maturity/rollback tests that
 /// don't exercise the rescan-abort interaction. Production code in
-/// `ergo-node/src/wallet_boot.rs` uses the real guard that flips
-/// `RESCAN_IN_PROGRESS = false` and writes `WALLET_SCAN_INVALIDATED
-/// = true` atomically.
+/// `ergo-node/src/wallet_boot.rs` uses the real guard that revokes
+/// the active rescan identity immediately and persists invalidation in the
+/// rollback transaction when a rescan was active.
 struct NoopRescanGuard;
 impl RescanGuard for NoopRescanGuard {
     fn abort_in_progress(&self, _txn: &redb::WriteTransaction) -> Result<(), redb::Error> {
