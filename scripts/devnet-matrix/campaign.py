@@ -4116,41 +4116,90 @@ def _self_test_fork_workload():
 
 
 def _self_test_lead_confirmation():
-    """A one-block lead is confirmed only by evidence the block is real:
-    the reference later, another Scala node's chain, an ordering block
-    naming it, or the reference's own mining log (rm-B-fork-stockctl-4)."""
+    """A one-block lead is confirmed only by evidence the block is real
+    (`common.lead_confirmation`); the rm-B-fork-stockctl-4 shapes, an
+    input-chain switch and a stale read pass, and an invented tip and a
+    stitched chain still fail."""
     from scenarios import common
 
-    def s(rust, s1, s2, o='O1', o2=None, s3=(), o3=None, **extra):
-        return dict({'ordering': o, 'rust_chain': list(rust),
-                     'scala_chain': list(s1), 'scala_ordering': o,
-                     'scala2_chain': list(s2), 'scala2_ordering': o2 or o,
-                     'scala3_chain': list(s3), 'scala3_ordering': o3 or o},
-                    **extra)
+    def s(rust, s1, s2, o='O1', o2=None, s3=(), o3=None):
+        return {'ordering': o, 'rust_chain': list(rust),
+                'scala_chain': list(s1), 'scala_ordering': o,
+                'scala2_chain': list(s2), 'scala2_ordering': o2 or o,
+                'scala3_chain': list(s3), 'scala3_ordering': o3 or o}
 
-    # Miner 2 mines `lead` on its tip and moves to its own new ordering
-    # block before any sample lists `lead` under O1.
+    def verdict(series, evidence=None):
+        return common.evaluate_fork_coherence(series, evidence=evidence)
+
+    # Shape 1 (7705e85e): miner 2 mines `lead` and moves to its own next
+    # ordering block, which names `lead` as its input tip, before any
+    # sample lists `lead` under O1.
     turnover = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
                 s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
                 s(['lead', 't', 'a'], ['m1', 'a'], [], o2='O2')]
-    strict = common.evaluate_fork_coherence(turnover)
+    strict = verdict(turnover)
     assert len(strict['unconfirmed_one_block_leads']) == 2, strict
-    logged = common.evaluate_fork_coherence(
-        turnover, confirmations={'lead': 'reference_log'})
-    assert not logged['unconfirmed_one_block_leads'], logged
-    assert logged['lead_confirmations'] == {'reference_log': 2}, logged
-    named = common.evaluate_fork_coherence(
-        turnover, confirmations={'lead': 'named_tip'})
+    mined = {'lead': 'scala2'}
+    named = verdict(turnover, {'named': {('O1', 'lead')}, 'mined_by': mined})
+    assert not named['unconfirmed_one_block_leads'], named
     assert named['lead_confirmations'] == {'named_tip': 2}, named
-    # The Scala reference follower validated it and was sampled holding it.
-    followed = [dict(sample, scala3_chain=['lead', 't', 'a'])
-                for sample in turnover]
-    by_follower = common.evaluate_fork_coherence(followed)
-    assert by_follower['lead_confirmations'] == {'scala_chain': 2}, by_follower
-    # Evidence about ANOTHER block confirms nothing.
-    other = common.evaluate_fork_coherence(
-        turnover, confirmations={'elsewhere': 'reference_log'})
-    assert len(other['unconfirmed_one_block_leads']) == 2, other
+    # A named tip alone proves the block is real, not that it sits on the
+    # rest of the chain: without its miner's record it confirms nothing.
+    assert len(verdict(turnover, {'named': {('O1', 'lead')}})[
+        'unconfirmed_one_block_leads']) == 2
+    # ...and the naming block's PARENT has to be the lead's ordering block
+    # (here the miner's departure still makes it an orphaned lead).
+    wrong_parent = verdict(turnover, {'named': {('O9', 'lead')}, 'mined_by': mined})
+    assert wrong_parent['lead_confirmations'] == {'orphaned_lead': 2}, wrong_parent
+    # Shape 2 (32d1d349): miner 2 mined it and left O1: an orphaned lead,
+    # confirmed and LISTED.
+    orphan = verdict(turnover, {'mined_by': {'lead': 'scala2'}})
+    assert not orphan['unconfirmed_one_block_leads'], orphan
+    assert orphan['lead_confirmations'] == {'orphaned_lead': 2}, orphan
+    assert orphan['orphaned_leads'][0]['how'] == 'left_ordering_block', orphan
+    assert orphan['orphaned_leads'][0]['miner'] == 'scala2', orphan
+    # A block orphaned by an input-chain switch: miner 2 moves to miner
+    # 1's fork under the SAME ordering block.
+    switched = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['m1', 'a'])]
+    by_switch = verdict(switched, {'mined_by': {'lead': 'scala2'}})
+    assert not by_switch['unconfirmed_one_block_leads'], by_switch
+    assert {o['how'] for o in by_switch['orphaned_leads']} == {'switched_fork'}
+    # The scala3 stale read: the Scala follower later holds the whole
+    # chain, reported under the next ordering id.
+    stale = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+             s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+             s(['lead', 't', 'a'], ['m1', 'a'], [], o2='O2',
+               s3=['lead', 't', 'a'], o3='O2')]
+    by_holder = verdict(stale)
+    assert not by_holder['unconfirmed_one_block_leads'], by_holder
+    assert set(by_holder['lead_confirmations']) == {'later_prefix'}, by_holder
+    # Still failing: an invented tip no miner mined, whatever else is
+    # known; a mined block whose miner never moved on; a stitched chain.
+    invented = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['zz', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['zz', 't', 'a'], ['m1', 'a'], [], o2='O2')]
+    assert len(verdict(invented, {'mined_by': {'lead': 'scala2'},
+                                  'named': {('O1', 'lead')}})[
+        'unconfirmed_one_block_leads']) == 2
+    stayed = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+              s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+              s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a'])]
+    assert len(verdict(stayed, {'mined_by': {'lead': 'scala2'}})[
+        'unconfirmed_one_block_leads']) == 2
+    # A stitched chain: miner 2's real block `t` (built on `a`) on top of
+    # miner 1's `m1`. `t` is mined, named, and its miner later moves away,
+    # and it still fails: miner 2 never held `m1`.
+    stitched = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['t', 'm1', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['t', 'm1', 'a'], ['m1', 'a'], [], o2='O2')]
+    stitched_verdict = verdict(stitched, {'mined_by': {'t': 'scala2'},
+                                          'named': {('O1', 't')}})
+    assert stitched_verdict['unconfirmed_one_block_leads'] or \
+        stitched_verdict['incoherent_samples'], stitched_verdict
+    assert not stitched_verdict['orphaned_leads'], stitched_verdict
+    assert 'named_tip' not in stitched_verdict['lead_confirmations'], stitched_verdict
     # The miner log parser reads the miner's own line only.
     assert common.mined_input_blocks([
         'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '

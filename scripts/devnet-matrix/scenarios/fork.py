@@ -220,16 +220,19 @@ def run(ctx):
     # EVERY sampled chain must be the same HISTORY as some reference's,
     # not merely built from blocks somebody published.
     # Evidence that a block a reference led with is real, beyond the
-    # reference listing it later: an ordering block naming it as its
-    # input tip, or the reference's own log saying it mined it.
-    confirmations = {}
+    # reference listing it later (`common.lead_confirmation`): the
+    # ordering blocks' named input tips, by parent, and which miner's own
+    # log says it mined each input block.
+    mined_by = {}
     for node, role in (ctx.roles or {}).items():
         if lifecycle.ROLES[role].mines:
             for block in common.mined_input_blocks(common._scala_log_lines(node)):
-                confirmations[block] = 'reference_log'
-    for block in ordering_blocks:
-        if block.get('named_input_tip'):
-            confirmations[block['named_input_tip']] = 'named_tip'
+                mined_by[block] = node
+    confirmations = {
+        'mined_by': mined_by,
+        'named': {(block['parent'], block['named_input_tip'])
+                  for block in ordering_blocks
+                  if block.get('parent') and block.get('named_input_tip')}}
     coherence = common.evaluate_fork_coherence(
         ctx.run.series, ctx.evidence.get('reference_snapshots') or (),
         confirmations)
@@ -240,6 +243,8 @@ def run(ctx):
         'held_from_restarted_reference': len(
             coherence['held_from_restarted_reference']),
         'lead_confirmations': coherence['lead_confirmations'],
+        'orphaned_leads': len(coherence['orphaned_leads']),
+        'orphaned_lead_sample': coherence['orphaned_leads'][:10],
         'later_confirmation_samples': coherence['later_confirmation_samples'],
         'incoherent_sample': coherence['incoherent_samples'][:5],
         'unconfirmed_sample': coherence['unconfirmed_one_block_leads'][:5],

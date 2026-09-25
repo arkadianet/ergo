@@ -982,8 +982,8 @@ def _millis(value):
 
 
 
-# The Scala nodes whose sampled chains prove an input block is real: the
-# references, and the Scala reference follower, which validated it.
+# The Scala nodes whose later chains can confirm a lead: the miners and
+# the Scala reference follower, which validated what it holds.
 SCALA_CHAIN_NODES = ('scala', 'scala2', 'scala3')
 
 
@@ -992,38 +992,104 @@ SCALA_CHAIN_NODES = ('scala', 'scala2', 'scala3')
 mined_input_blocks = smoke.mined_input_blocks
 
 
-def scala_chain_index(series):
-    """`{(ordering, block): [sample, ...]}` over every Scala node's chain,
-    each under that node's OWN ordering id. Pure."""
-    index = {}
-    for i, sample in enumerate(series):
+def later_prefix_holder(chain, at, series):
+    """A Scala node that, at sample `at` or later inside the window, held
+    `chain` (newest first) as a prefix of its own chain, under ANY
+    ordering id, or None. Pure. Any ordering id, because a node's read
+    route can pair a new ordering id with the previous chain (F15/D8, the
+    scala3 stale read)."""
+    wanted = list(reversed(chain))
+    for j in range(at, min(len(series), at + LATER_CONFIRMATION_SAMPLES + 1)):
         for node in SCALA_CHAIN_NODES:
-            ordering = sample.get(f'{node}_ordering')
-            for block in (sample.get(f'{node}_chain') or []) if ordering else ():
-                index.setdefault((ordering, block), []).append(i)
-    return index
+            held = list(reversed(series[j].get(f'{node}_chain') or []))
+            if wanted and held[:len(wanted)] == wanted:
+                return {'node': node, 'sample': j}
+    return None
 
 
-def lead_confirmation(node, ordering, lead, at, carried, scala_index,
-                      confirmations=None):
-    """Why a one-block lead is a real block, or None. Pure.
+def miner_moved_on(series, miner, ordering, chain, at):
+    """How `miner` left the history `chain` (newest first) under
+    `ordering` at sample `at` or later inside the window, or None. Pure.
 
-    In order: the reference it led listed it later under the same
-    ordering id (`reference_later`); any Scala node's sampled chain under
-    that ordering id carried it (`scala_chain`); or `confirmations` says
-    so (`named_tip`: an ordering block names it as its input tip;
-    `reference_log`: the reference's own log says it mined it). The last
-    two exist for the lead a reference mines just before an ordering
-    turnover: it moves to the new ordering block before any sample can
-    list the block under the old one (rm-B-fork-stockctl-4).
+    It LEFT the ordering block (its own ordering id changed), or it
+    SWITCHED forks under it: its chain there is neither a prefix of
+    `chain` nor extends it, read oldest-first. A chain that is still a
+    prefix of `chain` (a miner read before it processed the lead) is
+    neither.
     """
-    window = range(at - LATER_CONFIRMATION_SAMPLES, at + LATER_CONFIRMATION_SAMPLES + 1)
+    wanted = list(reversed(chain))
+    for j in range(at, min(len(series), at + LATER_CONFIRMATION_SAMPLES + 1)):
+        sample = series[j]
+        now = sample.get(f'{miner}_ordering')
+        if now and now != ordering:
+            return {'how': 'left_ordering_block', 'sample': j, 'to': now}
+        held = list(reversed(sample.get(f'{miner}_chain') or []))
+        if (now == ordering and held and held[:len(wanted)] != wanted
+                and wanted[:len(held)] != held):
+            return {'how': 'switched_fork', 'sample': j}
+    return None
+
+
+def miner_held_tip(series, miner, ordering, tip, at):
+    """Was `miner` sampled holding a chain that ends at `tip` under
+    `ordering`, inside the window up to sample `at`? Pure. A miner mines
+    on its own tip, so this is what puts a block it mined on top of the
+    chain ending at `tip`."""
+    for j in range(max(0, at - LATER_CONFIRMATION_SAMPLES), at + 1):
+        sample = series[j]
+        if (sample.get(f'{miner}_ordering') == ordering
+                and (sample.get(f'{miner}_chain') or [None])[0] == tip):
+            return True
+    return False
+
+
+def lead_confirmation(node, ordering, chain, at, carried, series, evidence=None):
+    """Why the one-block lead `chain[0]` over reference `node`'s chain
+    (`chain` minus its tip) under `ordering` is a real block:
+    `(kind, detail)`, or None. Pure.
+
+    In order:
+
+    * `reference_later`: that reference lists it later under the same
+      ordering id;
+    * `later_prefix`: a miner or the Scala reference follower later holds
+      the whole of `chain` as a prefix, under any ordering id;
+    * `named_tip`: an ordering block whose parent is `ordering` names it
+      as its committed input tip (extension key `0302`);
+    * `orphaned_lead`: a miner's log says it mined it, and that miner then
+      left `ordering` or switched forks under it inside the window, so the
+      block was orphaned before any sample could list it. Reported as
+      such, never passed silently.
+
+    The last two prove the block is real but not that it sits on the
+    rest of `chain`, so both also require that the miner whose log says
+    it mined the block was sampled holding `chain[1:]`'s tip under
+    `ordering` (`miner_held_tip`). Without that, a chain stitching one
+    miner's real block onto the other's chain would pass.
+
+    `evidence` carries `named` (`{(parent, tip)}`) and `mined_by`
+    (`{block: miner node}`). A lead none of these confirms stays
+    unconfirmed (rm-B-fork-stockctl-4: one lead of each of the last two
+    kinds).
+    """
+    lead = chain[0]
     if any(at < j <= at + LATER_CONFIRMATION_SAMPLES
            for j in carried.get((node, ordering, lead), ())):
-        return 'reference_later'
-    if any(j in window for j in scala_index.get((ordering, lead), ())):
-        return 'scala_chain'
-    return (confirmations or {}).get(lead)
+        return ('reference_later', None)
+    holder = later_prefix_holder(chain, at, series)
+    if holder is not None:
+        return ('later_prefix', holder)
+    evidence = evidence or {}
+    miner = (evidence.get('mined_by') or {}).get(lead)
+    if (miner is None or len(chain) < 2
+            or not miner_held_tip(series, miner, ordering, chain[1], at)):
+        return None
+    if (ordering, lead) in (evidence.get('named') or ()):
+        return ('named_tip', {'miner': miner})
+    moved = miner_moved_on(series, miner, ordering, chain, at)
+    if moved is not None:
+        return ('orphaned_lead', dict(moved, miner=miner))
+    return None
 
 
 def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
@@ -1053,7 +1119,7 @@ def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
     return None
 
 
-def evaluate_fork_coherence(series, snapshots=(), confirmations=None):
+def evaluate_fork_coherence(series, snapshots=(), evidence=None):
     """Every Rust chain must be the same HISTORY as some reference's.
 
     Membership in a union is not the property. A follower chain built
@@ -1108,8 +1174,7 @@ def evaluate_fork_coherence(series, snapshots=(), confirmations=None):
                 history.setdefault((node, ref_ordering), []).append((i, chain))
 
     incoherent, unconfirmed_leads, held, judged = [], [], [], 0
-    lead_confirmations = {}
-    scala_index = scala_chain_index(series)
+    lead_confirmations, orphaned = {}, []
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
         rust_chain = sample.get('rust_chain') or []
@@ -1134,11 +1199,14 @@ def evaluate_fork_coherence(series, snapshots=(), confirmations=None):
             if lead is None:
                 matched = True
                 break
-            confirmed_by = lead_confirmation(node, ordering, lead, i, published,
-                                             scala_index, confirmations)
-            if confirmed_by:
-                lead_confirmations[confirmed_by] = \
-                    lead_confirmations.get(confirmed_by, 0) + 1
+            confirmed = lead_confirmation(node, ordering, rust_chain, i,
+                                          published, series, evidence)
+            if confirmed is not None:
+                kind, detail = confirmed
+                lead_confirmations[kind] = lead_confirmations.get(kind, 0) + 1
+                if kind == 'orphaned_lead':
+                    orphaned.append({'sample': i, 'ordering': ordering,
+                                     'block': lead, 'reference': node, **detail})
                 matched = True
                 break
             lead_problem = {'sample': i, 'ordering': ordering, 'node': node,
@@ -1179,11 +1247,14 @@ def evaluate_fork_coherence(series, snapshots=(), confirmations=None):
         'unconfirmed_one_block_leads': unconfirmed_leads,
         'held_from_restarted_reference': held,
         'lead_confirmations': lead_confirmations,
+        # Leads confirmed only because their miner then left the ordering
+        # block or switched forks: real blocks, orphaned. Listed, not hidden.
+        'orphaned_leads': orphaned,
         'later_confirmation_samples': LATER_CONFIRMATION_SAMPLES,
     }
 
 
-def compare_fork_switches(series, confirmations=None):
+def compare_fork_switches(series, evidence=None):
     """Did each Rust fork switch land on a chain a reference actually has?
 
     Judged as EQUALITY, not inclusion. The previous rule asked whether
@@ -1245,7 +1316,6 @@ def compare_fork_switches(series, confirmations=None):
                     carried.setdefault((node, ref_ordering, block), []).append(i)
 
     rank = {'exact': 0, 'prefix': 1, 'one_ahead_confirmed': 2}
-    scala_index = scala_chain_index(series)
 
     def published(ordering, chain, at):
         """How a reference published `chain` near sample `at`, by the
@@ -1259,8 +1329,8 @@ def compare_fork_switches(series, confirmations=None):
                 continue
             if lead is None:
                 kind = 'exact' if ref_chain == list(chain) else 'prefix'
-            elif lead_confirmation(node, ordering, lead, at, carried,
-                                   scala_index, confirmations):
+            elif lead_confirmation(node, ordering, list(chain), at, carried,
+                                   series, evidence) is not None:
                 kind = 'one_ahead_confirmed'
             else:
                 continue
