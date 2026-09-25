@@ -114,11 +114,9 @@ fn process_header_modifier_batch(
     now: Instant,
 ) {
     let cs_before = state.store.chain_state_meta();
-    let bh_before = cs_before.best_header_height;
     let fb_before = cs_before.best_full_block_height;
 
     let mut batch_actions = Vec::new();
-    let mut contributing_peers: Vec<PeerId> = Vec::with_capacity(messages.len());
 
     for (peer, mods) in messages {
         // Same admission gates as handle_event Message path:
@@ -141,12 +139,23 @@ fn process_header_modifier_batch(
                     .on_modifier_received(peer, type_id, mod_id, data, now),
             );
         }
-        contributing_peers.push(peer);
     }
 
     if batch_actions.is_empty() {
         return;
     }
+
+    // Only accepted deliveries produce ValidateHeader, with ownership, type
+    // and claimed-ID checks already performed by the coordinator.
+    let requested_headers: Vec<_> = batch_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::ValidateHeader {
+                peer, modifier_id, ..
+            } => Some((*peer, *modifier_id)),
+            _ => None,
+        })
+        .collect();
 
     let rescan_guard = crate::wallet_boot::ProdRescanGuard;
     let wallet_wiring = state
@@ -185,43 +194,50 @@ fn process_header_modifier_batch(
     }
 
     // Per-peer immediate-SyncInfo dispatch — same as the per-message
-    // path's tail. Each contributing peer gets the next anchor (or
+    // path's tail. Each requested delivering peer gets the next anchor (or
     // tip-tail fallback). Dedup the peer list since two messages
     // from the same peer in this coalesce window only need one
     // SyncInfo response.
-    if bh > bh_before {
-        contributing_peers.sort();
-        contributing_peers.dedup();
-        for peer in contributing_peers {
-            if state.registry.peers.contains_key(&peer) {
-                if !try_send_anchor_sync_info(state, &peer, now) {
-                    if let Some(rt) = state.registry.peers.get(&peer) {
-                        let payload_res = match rt.sync_version {
-                            SyncVersion::V2 => {
-                                let headers = state.executor.cached_header_bytes(50);
-                                message::serialize_sync_info(&message::SyncInfo::V2 { headers })
-                            }
-                            SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
-                                rt.sync_version,
-                                &state.store,
-                            ),
-                        };
-                        match payload_res {
-                            Ok(payload) => all_actions.push(Action::SendToPeer {
-                                peer,
-                                code: message::CODE_SYNC_INFO,
-                                payload,
-                            }),
-                            Err(e) => warn!(
-                                peer = %peer,
-                                error = %e,
-                                "failed to serialize SyncInfo; skipping send"
-                            ),
+    // Match Scala's valid-header gate: rejected deliveries are forgotten by
+    // the executor; already-held headers remain eligible if requested.
+    let mut requested_peers: Vec<_> = requested_headers
+        .into_iter()
+        .filter(|(_, id)| {
+            state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+        })
+        .map(|(peer, _)| peer)
+        .collect();
+    requested_peers.sort();
+    requested_peers.dedup();
+    for peer in requested_peers {
+        if state.registry.peers.contains_key(&peer) {
+            if !try_send_anchor_sync_info(state, &peer, now) {
+                if let Some(rt) = state.registry.peers.get(&peer) {
+                    let payload_res = match rt.sync_version {
+                        SyncVersion::V2 => {
+                            let headers = state.executor.cached_header_bytes(50);
+                            message::serialize_sync_info(&message::SyncInfo::V2 { headers })
                         }
+                        SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
+                            rt.sync_version,
+                            &state.store,
+                        ),
+                    };
+                    match payload_res {
+                        Ok(payload) => all_actions.push(Action::SendToPeer {
+                            peer,
+                            code: message::CODE_SYNC_INFO,
+                            payload,
+                        }),
+                        Err(e) => warn!(
+                            peer = %peer,
+                            error = %e,
+                            "failed to serialize SyncInfo; skipping send"
+                        ),
                     }
                 }
-                state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
             }
+            state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
         }
     }
 

@@ -857,8 +857,20 @@ fn handle_modifier_batch(
                 .on_modifier_received(peer, type_id, mod_id, data, now),
         );
     }
+    // ValidateHeader is emitted only for a delivery accepted from its requested
+    // peer, after the coordinator's type and claimed-ID checks.
+    let requested_headers: Vec<_> = batch_actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::ValidateHeader {
+                peer: p,
+                modifier_id,
+                ..
+            } if *p == peer => Some(*modifier_id),
+            _ => None,
+        })
+        .collect();
     let cs_before = state.store.chain_state_meta();
-    let bh_before = cs_before.best_header_height;
     let fb_before = cs_before.best_full_block_height;
 
     let rescan_guard = crate::wallet_boot::ProdRescanGuard;
@@ -918,7 +930,12 @@ fn handle_modifier_batch(
     // anchored path keeps each peer on a disjoint chain
     // slice. mark_sync_sent fires either way so Lever 1's
     // throttle accounts for the dispatch.
-    if bh > bh_before && state.registry.peers.contains_key(&peer) {
+    // Scala sends only for valid requested headers. The executor forgets
+    // rejected deliveries, but retains AlreadyKnown and buffered headers.
+    let delivered_requested_header = requested_headers.iter().any(|id| {
+        state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
+    });
+    if delivered_requested_header && state.registry.peers.contains_key(&peer) {
         if !try_send_anchor_sync_info(state, &peer, now) {
             if let Some(rt) = state.registry.peers.get(&peer) {
                 let payload_res = match rt.sync_version {
