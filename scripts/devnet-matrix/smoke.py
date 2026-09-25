@@ -221,6 +221,16 @@ def rust_log_lines(match, limit=40):
     return [line for line in text.splitlines() if match in line][-limit:]
 
 
+def scala_log_lines(node='scala'):
+    """Every line of one Scala node's log in this run. Best effort: a
+    log that cannot be read is empty, and `mined_input_blocks` over it
+    then confirms nothing."""
+    try:
+        return (WORK / f'{node}.log').read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+
+
 def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
     """Every debug-log line the Rust node emitted around `unix_seconds`.
 
@@ -1439,10 +1449,46 @@ def _coverage_violations(kept, lags, what):
     return out
 
 
-def evaluate_tip_consistency(samples):
+# The Scala miner's own log line for an input block it mined
+# (`CandidateGenerator`: "Input-block <id> mined @ height <h>!").
+MINED_INPUT_BLOCK = re.compile(r'Input-block ([0-9a-f]{64}) mined')
+
+
+def mined_input_blocks(lines):
+    """Every input block a Scala miner's log says it mined. Pure."""
+    return {match.group(1) for match in map(MINED_INPUT_BLOCK.search, lines)
+            if match}
+
+
+def rust_lead_mined(scala_chain, rust_chain, mined):
+    """How many blocks Rust's chain leads the miner's, when that lead is
+    the miner's own. Pure; 0 when it is not.
+
+    The miner is read first in every sweep and the follower after it, up
+    to seconds later under load, so Rust can hold input blocks the
+    miner's sampled chain does not list yet (FINDING-rust-fork-chain-
+    divergence-2026-09-25.md §3: leads of 1 to 4 blocks, every one in the
+    miner's own log). A lead counts only when the miner's sampled chain is
+    a strict prefix of Rust's read oldest-first, so the history is the
+    same, and EVERY block beyond it is one the single miner's log says it
+    mined. A different block at any position, or a block the miner never
+    mined, is not a lead.
+    """
+    scala_old, rust_old = list(reversed(scala_chain)), list(reversed(rust_chain))
+    if (len(rust_old) > len(scala_old) and rust_old[:len(scala_old)] == scala_old
+            and all(block in mined for block in rust_old[len(scala_old):])):
+        return len(rust_old) - len(scala_old)
+    return 0
+
+
+def evaluate_tip_consistency(samples, mined=None):
     """Assertion 2. Every Rust tip must be a block Scala had on its best
     chain for the same ordering block, the lag must stay inside the
-    bounds, and there must be enough qualifying samples to say so."""
+    bounds, and there must be enough qualifying samples to say so.
+
+    `mined` is the miner's own list of input blocks it mined: a tip that
+    leads the miner's sampled chain is confirmed by it only through
+    `rust_lead_mined`."""
     scala_seen = {}          # ordering -> set of every id Scala ever listed
     scala_later = {}         # ordering -> [ (index, ids) ], for "at or later"
     for i, s in enumerate(samples):
@@ -1454,6 +1500,7 @@ def evaluate_tip_consistency(samples):
 
     kept, excluded = qualifying_samples(samples)
     lags, unconfirmed, earlier_only, exact, compared = [], [], [], 0, 0
+    confirmed_by_miner_log = 0
     for i, s in kept:
         ordering, rust_tip = s['ordering'], s.get('rust_tip')
         if not rust_tip:
@@ -1466,6 +1513,12 @@ def evaluate_tip_consistency(samples):
         confirmed = any(rust_tip in ids
                         for j, ids in scala_later.get(ordering, ())
                         if j >= i)
+        if (not confirmed and mined
+                and rust_lead_mined(s.get('scala_chain') or [],
+                                    s.get('rust_chain') or [], mined)
+                and (s.get('rust_chain') or [None])[0] == rust_tip):
+            confirmed = True
+            confirmed_by_miner_log += 1
         if not confirmed:
             # Scala listed it, but only BEFORE this sample. Recorded in
             # its own bucket rather than waved through: it is how the
@@ -1514,6 +1567,7 @@ def evaluate_tip_consistency(samples):
         'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
         'exact_tip_matches': exact,
         'unconfirmed_count': len(unconfirmed),
+        'confirmed_by_miner_log': confirmed_by_miner_log,
         'unconfirmed_rust_tips_sample': unconfirmed[:10],
         'confirmed_only_earlier_count': len(earlier_only),
         'confirmed_only_earlier_sample': earlier_only[:10],
@@ -1521,7 +1575,7 @@ def evaluate_tip_consistency(samples):
     }
 
 
-def evaluate_chain_consistency(samples):
+def evaluate_chain_consistency(samples, mined=None):
     """Assertion 3, as amended by the controller after round 1.
 
     At every same-ordering-block sample Rust's chain must be a prefix of
@@ -1537,6 +1591,12 @@ def evaluate_chain_consistency(samples):
     moment later. Anything else fails: a different block at any
     position, a prefix by two or more, or a tip Scala never went on to
     confirm.
+
+    With `mined` (the miner's own log of the input blocks it mined), a
+    lead of any length is the miner's read window as well, when every
+    lead block is the miner's own (`rust_lead_mined`): the miner is read
+    first in a sweep and the follower later. Counted apart
+    (`allowed_ahead_by_miner_log`, with the longest lead), never silently.
 
     Counts are TOTALS; the recorded lists are samples of them.
     """
@@ -1555,6 +1615,7 @@ def evaluate_chain_consistency(samples):
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
+    allowed_by_log, longest_lead = 0, 0
     for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
@@ -1587,6 +1648,11 @@ def evaluate_chain_consistency(samples):
                         'scala_confirmed_at_sample': confirmed_at,
                     })
                 continue
+        lead = rust_lead_mined(scala_chain, rust_chain, mined or ())
+        if lead:
+            allowed_by_log += 1
+            longest_lead = max(longest_lead, lead)
+            continue
         violation_count += 1
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
@@ -1608,6 +1674,8 @@ def evaluate_chain_consistency(samples):
         'prefix_violations_sample': violations,
         'allowed_prefix_by_one_count': allowed_by_one,
         'allowed_prefix_by_one_sample': allowed_samples,
+        'allowed_ahead_by_miner_log': allowed_by_log,
+        'longest_lead_by_miner_log': longest_lead or None,
         'max_truncation_depth': max(depths) if depths else None,
         'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
@@ -1892,6 +1960,40 @@ def _self_test():
     ahead = ([sample(['b', 'a'], ['c', 'b', 'a'])]
              + series(['c', 'b', 'a'], ['c', 'b', 'a']))
     assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
+
+    # ----- leads the in-sweep read order produces (FINDING §3) -----
+    #
+    # The miner is read first and the follower up to seconds later, so a
+    # follower can hold blocks the miner's sampled chain does not list
+    # yet, and never lists under this ordering id if the next ordering
+    # block lands first. A lead counts only when every lead block is the
+    # miner's own, by its log.
+    skewed = ([sample(['b', 'a'], ['e', 'd', 'c', 'b', 'a'])]
+              + series(['b', 'a'], ['b', 'a']))
+    # Without the miner's log: the three-block lead and its tip fail.
+    assert evaluate_chain_consistency(skewed)['prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed)['unconfirmed_count'] == 1
+    mined = {'c', 'd', 'e'}
+    chain = evaluate_chain_consistency(skewed, mined)
+    assert chain['prefix_violation_count'] == 0, chain
+    assert chain['allowed_ahead_by_miner_log'] == 1, chain
+    assert chain['longest_lead_by_miner_log'] == 3, chain
+    tip = evaluate_tip_consistency(skewed, mined)
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    # One lead block the miner never mined fails the whole lead.
+    assert evaluate_chain_consistency(skewed, {'c', 'd'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed, {'c', 'd'})['unconfirmed_count'] == 1
+    # A different block at any position still fails, mined or not.
+    swapped = ([sample(['b', 'a'], ['e', 'x', 'a'])]
+               + series(['b', 'a'], ['b', 'a']))
+    assert evaluate_chain_consistency(swapped, {'e', 'x'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(swapped, {'e', 'x'})['unconfirmed_count'] == 1
+    assert mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
+        + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
 
     # Lag past the bounds fails, even though every tip is consistent.
     deep = ['t%02d' % n for n in range(30, -1, -1)]
@@ -3062,8 +3164,11 @@ def finalize_agreement(run, evidence):
     samples taken during funding, the workload and the restart are
     observations of the same two nodes and used to be discarded.
     """
-    tip = evaluate_tip_consistency(run.series)
-    chain = evaluate_chain_consistency(run.series)
+    # The miner's own record of what it mined, for leads the in-sweep
+    # read order produces (`rust_lead_mined`).
+    mined = mined_input_blocks(scala_log_lines('scala'))
+    tip = evaluate_tip_consistency(run.series, mined)
+    chain = evaluate_chain_consistency(run.series, mined)
     lags = [round(v, 3) for v in run.propagation_lags]
     evidence['2_best_input_block'] = {
         'definition': ("every Rust bestInputBlock must be a block Scala had on its "

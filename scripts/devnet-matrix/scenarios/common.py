@@ -981,19 +981,15 @@ def _millis(value):
     return value if type(value) in (int, float) else None
 
 
-# A Scala miner's own line for an input block it mined
-# (`CandidateGenerator`: "Input-block <id> mined @ height <h>!").
-_MINED_INPUT_BLOCK = re.compile(r'Input-block ([0-9a-f]{64}) mined')
 
 # The Scala nodes whose sampled chains prove an input block is real: the
 # references, and the Scala reference follower, which validated it.
 SCALA_CHAIN_NODES = ('scala', 'scala2', 'scala3')
 
 
-def mined_input_blocks(lines):
-    """Every input block a Scala miner's log says it mined. Pure."""
-    return {match.group(1) for match in map(_MINED_INPUT_BLOCK.search, lines)
-            if match}
+# Every input block a Scala miner's log says it mined; one definition,
+# `smoke`'s, which the single-miner assertions use too.
+mined_input_blocks = smoke.mined_input_blocks
 
 
 def scala_chain_index(series):
