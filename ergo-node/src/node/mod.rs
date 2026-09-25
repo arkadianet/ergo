@@ -45,6 +45,7 @@ mod shadow_watch;
 mod snapshot_emit;
 mod snapshot_state;
 mod state;
+pub(crate) mod storage_probe;
 mod sync_helpers;
 mod sync_tick;
 pub(crate) mod telemetry;

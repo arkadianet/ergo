@@ -97,10 +97,13 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         std::time::Duration::from_secs(5),
     );
+    // Keep potentially blocking filesystem probes separate from wedge telemetry.
+    let live_storage =
+        crate::node::storage_probe::spawn(host_paths, std::time::Duration::from_secs(10));
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
-        host_paths,
+        live_storage,
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
         live_telemetry,
@@ -304,6 +307,7 @@ pub(super) async fn bind(
         name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
+        voting_length: config.chain_spec.voting.voting_length,
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
