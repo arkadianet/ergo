@@ -397,16 +397,25 @@ def _post(node, path, body):
         return None, f'{type(error).__name__}: {error}'
 
 
+# The fee `/wallet/payment/send` adds to every payment (the Scala wallet's
+# `defaultTransactionFee`). `/wallet/transaction/generate` adds a fee
+# output only when the request names one (`RequestsHolder.withFee`), and a
+# payment without one is never mined.
+PAYMENT_FEE_NANOERG = 1_000_000
+
+
 def pump_payments_to_all(ctx, address, sent, nodes, count=3,
-                         value=PAYMENT_NANOERG, rejected=None, forwarded=None):
+                         value=PAYMENT_NANOERG, rejected=None, forwarded=None,
+                         fee=PAYMENT_FEE_NANOERG):
     """`pump_payments` for a run with more than one miner: every payment
     reaches EVERY miner's mempool directly.
 
-    The first node's wallet signs each payment
-    (`/wallet/transaction/generate`, which does not submit it), and the
-    same signed transaction is posted to `/transactions` on every node in
-    `nodes`, the signing node first so its wallet sees the spend before it
-    signs the next payment. Gossip does not carry it between miners
+    The first node's wallet signs each payment, with the same fee
+    `/wallet/payment/send` would add (`/wallet/transaction/generate`, which
+    does not submit it), and the same signed transaction is posted to
+    `/transactions` on every node in `nodes`, the signing node first so its
+    wallet sees the spend before it signs the next payment. Gossip does not
+    carry it between miners
     reliably: a Scala node requests a transaction inv only while its
     full-block height equals its header height and its best header is not
     behind its peers' (`ErgoNodeViewSynchronizer.processInv`,
@@ -420,7 +429,8 @@ def pump_payments_to_all(ctx, address, sent, nodes, count=3,
     """
     for _ in range(count):
         status, tx = _post(nodes[0], '/wallet/transaction/generate',
-                           {'requests': [{'address': address, 'value': value}]})
+                           {'requests': [{'address': address, 'value': value}],
+                            'fee': fee})
         if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
             if rejected is not None:
                 rejected.append(f'generate: HTTP {status}: {str(tx)[:200]}')

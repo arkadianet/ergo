@@ -4078,6 +4078,9 @@ def _self_test_fork_workload():
         _calls.append((node, path, data.get('id') if isinstance(data, dict)
                        else None))
         if path == '/wallet/transaction/generate':
+            # The fee `/wallet/payment/send` adds; without it the wallet
+            # signs a zero-fee payment that is never mined.
+            assert data['fee'] == common.PAYMENT_FEE_NANOERG == 1_000_000, data
             status, body = next(_generated)
             if status != 200:
                 raise _refuse(path, body)
