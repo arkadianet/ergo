@@ -4152,6 +4152,28 @@ def _self_test_switch_granularity():
         [rs('O1', ['m1a'], ['m1a'], ['m2a']), rs('O1', [], ['m1a'], ['m2a'])])
     assert reset['resets_to_the_empty_chain'] and \
         not reset['switches_matching_no_reference'], reset
+    # A landing carrying a block no reference ever published matches
+    # nothing, whether it replaces a block or leads by one that is never
+    # confirmed.
+    for landing in (['q', 'm2a'], ['q', 'm2b', 'm2a']):
+        unpublished = common.compare_fork_switches(
+            [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+             rs('O1', landing, ['m1b', 'm1a'], ['m2b', 'm2a'])])
+        assert unpublished['switches_matching_no_reference'], (landing, unpublished)
+    # Rolling back and applying nothing is a truncation, and fails, even
+    # though the chain landed on is a prefix of the miner's.
+    truncated = common.compare_fork_switches(
+        [rs('O1', ['m1c', 'm1b', 'm1a'], ['m1c', 'm1b', 'm1a'], ['m2a']),
+         rs('O1', ['m1b', 'm1a'], ['m1c', 'm1b', 'm1a'], ['m2a'])])
+    assert truncated['truncations'] and \
+        not truncated['switches_matching_no_reference'] and \
+        not truncated['matched_switches'], truncated
+    judged = common.judge_fork_switches(truncated, range(0))
+    assert any('truncated' in m for m, _ in judged['failures']), judged
+    assert judged['genuine_switches'] == 0, judged
+    # And the observed pattern is a genuine switch the gate passes.
+    judged = common.judge_fork_switches(granular, range(0))
+    assert judged['failures'] == [] and judged['genuine_switches'] == 1, judged
 
 
 def _self_test_seed_artifact():

@@ -1069,27 +1069,36 @@ def compare_fork_switches(series):
     A switch is matched when BOTH of these hold, against chains observed
     within `LATER_CONFIRMATION_SAMPLES` of it:
 
-    * the chain it left EQUALS a chain some reference published, and
-    * the chain it landed on EQUALS a chain some reference published.
+    * the chain it left matches a chain some reference published, and
+    * the chain it landed on matches a chain some reference published,
+
+    where "matches" is the history rule below.
 
     A transition to the EMPTY chain is reported separately, as a reset:
     no reference publishes an empty chain, so there is no transition to
     match it against, and a follower that has just restarted produces
     one legitimately. The caller says whether it caused the reset.
 
-    Equality is on the ordered HISTORY: each end must be one reference's
-    chain, or a non-empty prefix of it read oldest-first, so "the
-    follower moved from one miner's history to another miner's history"
-    is the only shape that passes — which is what a two-miner fork switch
-    IS. A follower that invented a block, or stitched two branches, is a
-    prefix of no single reference's chain and matches nothing.
+    Each end is matched on HISTORY by the coherence rule,
+    `_is_coherent_with`: it is a reference's chain, a prefix of one read
+    oldest-first, or one block ahead of one with that block confirmed by
+    the same reference within the window. So "the follower moved from one
+    miner's history to another miner's history" is the only shape that
+    passes, which is what a two-miner fork switch IS. A follower that
+    invented a block, or stitched two branches, matches nothing.
 
-    A prefix, not only the exact list, because the sampler cannot see
-    every length a chain passes through: a miner sealing an input block
-    every half second grows between two sweeps, and a follower read later
-    in the same sweep can hold a length the miner was never sampled at
+    Not only the exact list, because the sampler cannot see every length
+    a chain passes through: a miner sealing an input block every half
+    second grows between two sweeps, and a follower read later in the
+    same sweep can hold a length the miner was never sampled at
     (rm-B-fork-2562f-3: the follower left miner 1's 18-block chain, and
-    miner 1 was sampled at 17 and then 19). Each match says which it was.
+    miner 1 was sampled at 17 and then 19). Each match says which kind it
+    was, the exact list preferred.
+
+    A transition that applies nothing (the new chain a strict prefix of
+    the old one) is a TRUNCATION, reported on its own: it is not a move
+    to another history, and a prefix of a published chain must not pass
+    as one.
     """
     # Every chain each reference published under each ordering id.
     seen = {}
@@ -1098,23 +1107,43 @@ def compare_fork_switches(series):
             if ref_ordering is not None:
                 seen.setdefault(ref_ordering, []).append((i, node, list(chain)))
 
+    # Where each reference published each block, per ordering id, so a
+    # one-block lead can be confirmed by the reference it led.
+    carried = {}
+    for i, sample in enumerate(series):
+        for node, ref_ordering, chain in reference_chains(sample):
+            if ref_ordering is not None:
+                for block in chain:
+                    carried.setdefault((node, ref_ordering, block), []).append(i)
+
+    rank = {'exact': 0, 'prefix': 1, 'one_ahead_confirmed': 2}
+
     def published(ordering, chain, at):
-        """Which reference published `chain` near sample `at`: exactly,
-        or as a prefix of a longer chain of its own (see above)."""
-        wanted = list(reversed(chain))
-        prefix = None
+        """How a reference published `chain` near sample `at`, by the
+        coherence rule (see above), or None."""
+        best = None
         for j, node, ref_chain in seen.get(ordering, ()):
-            if abs(j - at) > LATER_CONFIRMATION_SAMPLES:
+            if abs(j - at) > LATER_CONFIRMATION_SAMPLES or not chain:
                 continue
-            if ref_chain == list(chain):
-                return {'node': node, 'sample': j, 'match': 'exact'}
-            if (prefix is None and wanted
-                    and list(reversed(ref_chain))[:len(wanted)] == wanted):
-                prefix = {'node': node, 'sample': j, 'match': 'prefix'}
-        return prefix
+            coherent, lead = _is_coherent_with(chain, ref_chain)
+            if not coherent:
+                continue
+            if lead is None:
+                kind = 'exact' if ref_chain == list(chain) else 'prefix'
+            elif any(at < k <= at + LATER_CONFIRMATION_SAMPLES
+                     for k in carried.get((node, ordering, lead), ())):
+                kind = 'one_ahead_confirmed'
+            else:
+                continue
+            if best is None or rank[kind] < rank[best['match']]:
+                best = {'node': node, 'sample': j, 'match': kind}
+                if kind == 'exact':
+                    return best
+        return best
 
     rust = fork_switches(series, 'rust')
     unmatched, resets, rolled_back_still_held, matched = [], [], [], []
+    truncations = []
     for switch in rust:
         ordering = switch['ordering']
         before = switch.get('chain_before') or []
@@ -1133,6 +1162,12 @@ def compare_fork_switches(series):
             # caused the reset itself; a reset it did not cause is still
             # a chain nobody has, and still has to be explained.
             resets.append(entry)
+        elif (not switch['applied'] and len(after) < len(before)
+              and list(reversed(before))[:len(after)] == list(reversed(after))):
+            # Rolled back, applied nothing: the chain it landed on is a
+            # strict prefix of the one it left. Not a move to another
+            # history, whatever a reference published.
+            truncations.append(entry)
         elif left is None or landed is None:
             unmatched.append(entry)
         else:
@@ -1160,6 +1195,8 @@ def compare_fork_switches(series):
         'switches_matching_no_reference': unmatched,
         # Every other non-reset switch, with how each end matched.
         'matched_switches': matched,
+        # Transitions that rolled back and applied nothing.
+        'truncations': truncations,
         # Transitions to the EMPTY chain, which no reference publishes.
         'resets_to_the_empty_chain': resets,
         # Telemetry with two miners that cannot peer with each other:
@@ -1173,12 +1210,13 @@ def compare_fork_switches(series):
 def judge_fork_switches(comparison, restart_window):
     """The `fork` scenario's verdict over `compare_fork_switches`' output.
 
-    Pure, so the gate itself can be driven by a probe. Three rules:
+    Pure, so the gate itself can be driven by a probe. Four rules:
 
     * a reset to the empty chain OUTSIDE the restart the scenario
       performs fails — no miner publishes an empty chain;
     * a non-reset switch that is not a transition between two chains a
       reference published fails;
+    * a truncation (rolled back, applied nothing) fails;
     * a PASS requires at least one GENUINE switch — a non-empty chain
       replaced by a different non-empty chain. A reset is not a switch
       between competing histories, and counting it as one let a run whose
@@ -1191,15 +1229,24 @@ def judge_fork_switches(comparison, restart_window):
     """
     resets = comparison['resets_to_the_empty_chain']
     reset_indices = {r['index'] for r in resets}
+    truncations = comparison.get('truncations') or []
+    truncated = {t['index'] for t in truncations}
     caused = [r for r in resets if r['index'] in restart_window]
     uncaused = [r for r in resets if r['index'] not in restart_window]
-    genuine = [s for s in comparison['rust_switches'] if s['index'] not in reset_indices]
+    genuine = [s for s in comparison['rust_switches']
+               if s['index'] not in reset_indices and s['index'] not in truncated]
     failures, qualifier = [], None
     if uncaused:
         failures.append((
             f'{len(uncaused)} times the follower emptied its input chain outside '
             'the restart this scenario performs — no miner publishes an empty '
             'chain, so that is a chain nobody has', {'sample': uncaused[:5]}))
+    if truncations:
+        failures.append((
+            f'{len(truncations)} times the follower truncated its input chain: '
+            'it rolled back blocks and applied none, so the chain it landed on '
+            'is a strict prefix of the one it left rather than another history',
+            {'sample': truncations[:5]}))
     unmatched = comparison['switches_matching_no_reference']
     if unmatched:
         failures.append((
