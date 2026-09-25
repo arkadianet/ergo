@@ -206,14 +206,18 @@ def run(ctx):
 
     # EVERY sampled chain must be the same HISTORY as some reference's,
     # not merely built from blocks somebody published.
-    coherence = common.evaluate_fork_coherence(ctx.run.series)
+    coherence = common.evaluate_fork_coherence(
+        ctx.run.series, ctx.evidence.get('reference_snapshots') or ())
     ctx.note('chain_coherence', {
         'judged_samples': coherence['judged_samples'],
         'incoherent_samples': len(coherence['incoherent_samples']),
         'unconfirmed_one_block_leads': len(coherence['unconfirmed_one_block_leads']),
+        'held_from_restarted_reference': len(
+            coherence['held_from_restarted_reference']),
         'later_confirmation_samples': coherence['later_confirmation_samples'],
         'incoherent_sample': coherence['incoherent_samples'][:5],
         'unconfirmed_sample': coherence['unconfirmed_one_block_leads'][:5],
+        'held_sample': coherence['held_from_restarted_reference'][:5],
     })
     if coherence['incoherent_samples']:
         bad = coherence['incoherent_samples']

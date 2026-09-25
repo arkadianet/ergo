@@ -868,6 +868,9 @@ class Run:
             # `/info` read as the rest of this sample; `None` for a build
             # without the store. `pending_store_summary` reads it.
             'pending': pending_announcements(reading),
+            # Which PROCESS each node is (`/info.launchTime`), so a chain
+            # can be traced to a process that has since been restarted.
+            'launch': launch_times(reading),
             # Nodes sampled as deliberately down (killed, not respawned).
             'down': sorted(n for n, r in reading.items()
                            if isinstance(r, dict) and r.get('down')),
@@ -1137,6 +1140,14 @@ def pending_announcements(reading):
             'pendingInputAnnouncements')
         out[node] = pending if isinstance(pending, dict) else None
     return out
+
+
+def launch_times(reading):
+    """`{node: /info.launchTime}` for one sweep. Pure. A node sampled as
+    down, or one whose `/info` has no launch time, maps to `None`."""
+    return {node: ((value or {}).get('info') or {}).get('launchTime')
+            for node, value in sorted((reading or {}).items())
+            if isinstance(value, dict)}
 
 
 # The store's GAUGES: everything else it publishes that is a number is a
@@ -2793,6 +2804,11 @@ def _self_test_pending_and_restart():
     # A build without the store and a malformed value are both `None`,
     # never an empty store; the Rust node is not a Scala store.
     assert pending == {'scala': None, 'scala2': store, 'scala3': None}, pending
+    # Which process each node is, from the same `/info` read.
+    assert launch_times({'scala': {'info': {'launchTime': 1000}},
+                         'rust': {'info': {'launchTime': 2000}},
+                         'scala2': {'info': {}, 'down': True}}) == {
+        'rust': 2000, 'scala': 1000, 'scala2': None}
 
     # ----- counters: nested drops, restarts, gauges -----
     assert flatten_counters(store) == {

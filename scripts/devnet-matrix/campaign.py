@@ -4107,6 +4107,137 @@ def _self_test_fork_workload():
     # refused is never forwarded.
     assert _posts == [('scala', 't1'), ('scala2', 't1'), ('scala', 't3'),
                       ('scala2', 't3'), ('scala', 't4')], _posts
+    _self_test_seed_artifact()
+
+
+def _self_test_seed_artifact():
+    """The seed step must not leave a follower holding input blocks the
+    restarted miner has forgotten (rm-B-fork-stockctl-1), and the
+    coherence evaluator must trace such a chain only on evidence."""
+    import types
+
+    from scenarios import common
+
+    # ----- the seed stops the follower with miner 1, first -----
+    calls = []
+
+    class _Lifecycle:
+        NODES = ('scala', 'scala2', 'scala3', 'rust')
+
+        @staticmethod
+        def stop(names):
+            calls.append(('stop', tuple(names)))
+
+        @staticmethod
+        def spawn(name):
+            calls.append(('spawn', name))
+
+        @staticmethod
+        def init_wallet(name):
+            calls.append(('wallet', name))
+
+        @staticmethod
+        def wait_peered(names=None, timeout=180):
+            calls.append(('peered', tuple(names or ())))
+
+    class _Campaign:
+        @staticmethod
+        def ensure_data_dirs(root, nodes):
+            for node in nodes:
+                (root / node).mkdir(parents=True, exist_ok=True)
+
+        @staticmethod
+        def purge_address_book(root):
+            calls.append(('purge',))
+            return []
+
+    class _Run:
+        deadline = time.monotonic() + 30
+
+        def started(self, node):
+            calls.append(('started', node))
+
+        def idle(self, seconds):
+            pass
+
+    pages = {'/info': {'fullHeight': 11, 'launchTime': 1000},
+             '/blocks/bestInputChain': {'bestOrdering': 'O',
+                                        'bestInputBlocks': ['x']},
+             '/peers/connected': [1, 2, 3]}
+
+    def _fake_api(node, path, *args, **kwargs):
+        calls.append(('api', node, path))
+        return pages[path]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / 'scala').mkdir()
+        (root / 'scala' / 'marker').write_text('chain')
+        ctx = types.SimpleNamespace(data_root=root, run=_Run(), evidence={},
+                                    failures=[])
+        ctx.note = ctx.evidence.__setitem__
+        ctx.fail = lambda message, evidence=None, ids=None: \
+            ctx.failures.append(message)
+        saved_api = common.api
+        try:
+            common.api = _fake_api
+            common.seed_second_miner(ctx, _Campaign, _Lifecycle,
+                                     nodes=('scala2', 'scala3'))
+        finally:
+            common.api = saved_api
+        assert (root / 'scala3' / 'marker').exists(), 'the chain was copied'
+    assert not ctx.failures, ctx.failures
+    stops = [c for c in calls if c[0] == 'stop']
+    # One stop takes the follower and miner 1 down together, Rust first...
+    assert stops[0] == ('stop', ('rust', 'scala')), stops
+    first_stop = calls.index(stops[0])
+    # ...after miner 1's chain and process were snapshotted...
+    snapshot_reads = [i for i, c in enumerate(calls)
+                      if c[:2] == ('api', 'scala') and c[2] != '/peers/connected']
+    assert snapshot_reads and max(snapshot_reads[:2]) < first_stop, calls
+    snapshot = ctx.evidence['reference_snapshots'][0]
+    assert {k: snapshot[k] for k in ('node', 'launch', 'ordering', 'chain')} == {
+        'node': 'scala', 'launch': 1000, 'ordering': 'O', 'chain': ['x']}, snapshot
+    # ...and the follower comes back only after every seeded node is up.
+    spawns = [c[1] for c in calls if c[0] == 'spawn']
+    assert spawns.index('rust') > max(spawns.index('scala2'),
+                                      spawns.index('scala3')), spawns
+    assert spawns.index('scala') < spawns.index('scala2'), spawns
+
+    # ----- the evaluator stays strict, and traces only on evidence -----
+    series = [{'ordering': 'O', 'scala_ordering': 'O', 'scala2_ordering': 'O',
+               'rust_ordering': 'O', 'rust_chain': ['x'],
+               'scala_chain': [f'a{j}' for j in range(k + 1, 0, -1)],
+               'scala2_chain': [f'c{j}' for j in range(k + 1, 0, -1)],
+               'launch': {'scala': 2000, 'scala2': 3000, 'rust': 500}}
+              for k in range(9)]
+    strict = common.evaluate_fork_coherence(series)
+    assert len(strict['incoherent_samples']) == 9, strict
+    assert not strict['held_from_restarted_reference'], strict
+    assert strict['incoherent_samples'][0][
+        'references_restarted_since_follower_start'] == ['scala', 'scala2']
+    # miner 1's EARLIER process (launch 1000) held ['x'] just before the
+    # harness stopped it; the follower (launch 500) predates that.
+    snap = [{'node': 'scala', 'at': 1.5, 'launch': 1000, 'ordering': 'O',
+             'chain': ['x']}]
+    traced = common.evaluate_fork_coherence(series, snap)
+    assert not traced['incoherent_samples'], traced
+    assert len(traced['held_from_restarted_reference']) == 9, traced
+    assert traced['held_from_restarted_reference'][0]['held_from'] == {
+        'node': 'scala', 'snapshot_at': 1.5, 'snapshot_launch': 1000,
+        'launch_at_sample': 2000}, traced
+    # Strict otherwise: no restart since the snapshot, a follower that
+    # started after it, another history, another ordering block, or no
+    # launch times at all are all still incoherent.
+    for variant, bad_series in (
+            ([dict(snap[0], launch=2000)], series),
+            (snap, [dict(s, launch=dict(s['launch'], rust=5000)) for s in series]),
+            ([dict(snap[0], chain=['y'])], series),
+            ([dict(snap[0], ordering='P')], series),
+            (snap, [{k: v for k, v in s.items() if k != 'launch'} for s in series])):
+        verdict = common.evaluate_fork_coherence(bad_series, variant)
+        assert len(verdict['incoherent_samples']) == 9, (variant, verdict)
+        assert not verdict['held_from_restarted_reference'], variant
 
 
 def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):

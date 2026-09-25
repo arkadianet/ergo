@@ -126,7 +126,10 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
 
     Miner 1 is stopped for the copy. A LevelDB copied out from under a
     live writer is not a database, and a scenario built on one would fail
-    for a reason that has nothing to do with input blocks.
+    for a reason that has nothing to do with input blocks. The Rust
+    follower is stopped with it, first, because the stop also discards
+    miner 1's in-memory input blocks; a snapshot of miner 1's chain and
+    process is taken just before (`reference_snapshots`).
 
     `nodes` (M4) is every Scala node to seed this way, so the same
     mechanism serves a reference FOLLOWER — the node's role decides
@@ -138,7 +141,18 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
     nodes = tuple(n for n in nodes if n in lifecycle.NODES)
     if not nodes:
         return {}
-    lifecycle.stop(('scala',))
+    # What miner 1's process holds right before the stop, so a chain that
+    # only that process ever published can still be traced to it.
+    ctx.evidence.setdefault('reference_snapshots', []).append(
+        reference_snapshot('scala'))
+    # Miner 1's input-block tree lives only in memory (Scala
+    # `InputBlocksProcessor.inputBlockTrees`), so this stop forgets every
+    # input block it published under the current ordering block. A
+    # follower still running across it keeps them as its best chain: a
+    # history no running miner has and no sample can have recorded
+    # (rm-B-fork-stockctl-1). So the follower goes down WITH the miner,
+    # and first; `restart_follower` then finds it stopped.
+    lifecycle.stop(('rust', 'scala'))
     source = ctx.data_root / 'scala'
     targets = []
     for node in nodes:
@@ -210,6 +224,22 @@ def seed_second_miner(ctx, campaign, lifecycle, nodes=('scala2',)):
                  'the scenario is missing a node it was told to run',
                  {'heights': heights, 'seeded': list(nodes)})
     return heights
+
+
+def reference_snapshot(node):
+    """One node's input chain, ordering id and process, read now. Never
+    raises: a node that did not answer is recorded as such."""
+    snapshot = {'node': node, 'at': time.time()}
+    try:
+        info = api(node, '/info') or {}
+        chain = api(node, '/blocks/bestInputChain') or {}
+    except Unavailable as error:
+        snapshot['unavailable'] = str(error)
+        return snapshot
+    snapshot.update(launch=info.get('launchTime'),
+                    ordering=chain.get('bestOrdering') or None,
+                    chain=chain.get('bestInputBlocks') or [])
+    return snapshot
 
 
 def restart_follower(ctx, campaign, lifecycle):
@@ -871,7 +901,38 @@ def _is_coherent_with(rust_chain, ref_chain):
     return (False, None)
 
 
-def evaluate_fork_coherence(series):
+def _millis(value):
+    return value if type(value) in (int, float) else None
+
+
+def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
+    """The snapshot a follower chain was held from, or None. Pure.
+
+    Only on positive evidence: a snapshot taken from a reference process
+    that has since been replaced (its `launchTime` in this sample differs
+    from the snapshot's) shows that process holding this history under
+    this ordering block, and the follower's own process is older than the
+    snapshot, so it could have received it from there. A reference that
+    restarts forgets its in-memory input blocks; a follower that kept
+    running holds them as its best chain (rm-B-fork-stockctl-1).
+    """
+    follower = _millis((launch or {}).get('rust'))
+    for snapshot in snapshots or ():
+        chain = snapshot.get('chain') or []
+        was, now = (_millis(snapshot.get('launch')),
+                    _millis((launch or {}).get(snapshot.get('node'))))
+        if (snapshot.get('ordering') != ordering or not chain or was is None
+                or now is None or now == was or follower is None
+                or follower > snapshot.get('at', 0) * 1000):
+            continue
+        coherent, lead = _is_coherent_with(rust_chain, chain)
+        if coherent and lead is None:
+            return {'node': snapshot['node'], 'snapshot_at': snapshot.get('at'),
+                    'snapshot_launch': was, 'launch_at_sample': now}
+    return None
+
+
+def evaluate_fork_coherence(series, snapshots=()):
     """Every Rust chain must be the same HISTORY as some reference's.
 
     Membership in a union is not the property. A follower chain built
@@ -888,6 +949,15 @@ def evaluate_fork_coherence(series):
     reference inside the same bound. The window is not a loophole: a
     chain mixing two branches, or one carrying a block nobody published,
     matches nothing anywhere in it.
+
+    A chain that matches nothing in the series is still traced before it
+    is called incoherent: if `snapshots` (`reference_snapshots`, taken
+    just before the harness restarted a reference) show that a replaced
+    reference process held exactly this history, the sample is reported
+    under `held_from_restarted_reference` instead
+    (`held_from_restarted_reference()` states the rule). Nothing else is
+    exempt, and every incoherent sample names the references that
+    restarted after the follower started.
     """
     # Where each reference published each block, per ordering id, so a
     # lead can be confirmed against the reference it led.
@@ -914,7 +984,7 @@ def evaluate_fork_coherence(series):
             if ref_ordering is not None:
                 history.setdefault((node, ref_ordering), []).append((i, chain))
 
-    incoherent, unconfirmed_leads, judged = [], [], 0
+    incoherent, unconfirmed_leads, held, judged = [], [], [], 0
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
         rust_chain = sample.get('rust_chain') or []
@@ -954,18 +1024,33 @@ def evaluate_fork_coherence(series):
         else:
             at_sample = [(node, chain) for node, ref_ordering, chain
                          in reference_chains(sample) if ref_ordering == ordering]
-            incoherent.append({
+            entry = {
                 'sample': i, 'ordering': ordering,
                 'rust_chain': rust_chain[:8],
                 'references_at_this_sample': {node: chain[:8]
                                               for node, chain in at_sample},
                 'references_compared': len(peers),
                 'window': LATER_CONFIRMATION_SAMPLES,
-            })
+            }
+            launch = sample.get('launch') or {}
+            source = held_from_restarted_reference(rust_chain, ordering,
+                                                   launch, snapshots)
+            if source is not None:
+                # Attributed, and reported: the history is one a reference
+                # process demonstrably held before it was restarted.
+                held.append(dict(entry, held_from=source))
+                continue
+            follower = _millis(launch.get('rust'))
+            entry['references_restarted_since_follower_start'] = [
+                node for node in REFERENCE_NODES
+                if follower is not None and (_millis(launch.get(node)) or 0)
+                > follower]
+            incoherent.append(entry)
     return {
         'judged_samples': judged,
         'incoherent_samples': incoherent,
         'unconfirmed_one_block_leads': unconfirmed_leads,
+        'held_from_restarted_reference': held,
         'later_confirmation_samples': LATER_CONFIRMATION_SAMPLES,
     }
 
