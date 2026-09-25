@@ -313,6 +313,64 @@ def resolve_roles(scenario, reference_follower=None):
     return tuple(roles)
 
 
+# `restart --restart-victim`: which process the scenario SIGKILLs.
+# `rust` (the default) is the M3 scenario. `scala-followers` kills every
+# Scala reference follower in the run at the same instant and respawns
+# them, which is the only way to watch a Scala node's in-memory pending
+# store start empty (#2563) and a sender-side tip replay (#2506) act on
+# the reconnect.
+RESTART_VICTIMS = ('rust', 'scala-followers')
+# `flood --flood-mode`: how the root-flood adversary uses its hosts.
+# `hit-and-run` (the default) is the plan 3 shape: fresh hosts every
+# wave, each connection closed half a second after its last frame.
+# `held` keeps ONE connection per host open for the whole flood and past
+# the store's TTL, sending every wave over it, with more announcements
+# per host than the per-host cap: once a store drops a host's entries on
+# disconnect, only a connection that stays up keeps them held.
+FLOOD_MODES = ('hit-and-run', 'held')
+
+
+def check_scenario_knobs(scenario, reference_follower=None,
+                         restart_victim='rust', flood_mode='hit-and-run',
+                         post_ordering_blocks=None):
+    """Refuse a scenario knob the scenario would silently ignore.
+
+    Pure, so `--self-test` pins it. A run that accepted
+    `--restart-victim scala-followers` and killed the Rust node anyway
+    would be reported as the Scala-follower restart it never was.
+    """
+    if restart_victim not in RESTART_VICTIMS:
+        raise SystemExit(f'--restart-victim must be one of {RESTART_VICTIMS}')
+    if flood_mode not in FLOOD_MODES:
+        raise SystemExit(f'--flood-mode must be one of {FLOOD_MODES}')
+    if restart_victim != 'rust':
+        if scenario != 'restart':
+            raise SystemExit(
+                f'--restart-victim {restart_victim} applies to restart only, '
+                f'not {scenario}')
+        if reference_follower is None:
+            raise SystemExit(
+                '--restart-victim scala-followers needs a Scala follower to '
+                'kill; add --reference-follower stock|patched|both')
+    if post_ordering_blocks is not None:
+        if scenario != 'restart':
+            raise SystemExit(
+                f'--post-ordering-blocks applies to restart only, not {scenario}')
+        if post_ordering_blocks < 1:
+            raise SystemExit('--post-ordering-blocks must be at least 1')
+    if flood_mode != 'hit-and-run':
+        if scenario != 'flood':
+            raise SystemExit(
+                f'--flood-mode {flood_mode} applies to flood only, not '
+                f'{scenario}')
+        if reference_follower is None:
+            raise SystemExit(
+                '--flood-mode held is the ROOT flood against a Scala '
+                'follower; add --reference-follower stock|patched (the Rust '
+                'follower\'s flood has no connection-hold mode)')
+    return None
+
+
 def lifecycle_roles():
     """The role table.
 
@@ -331,6 +389,34 @@ def nodes_for_roles(role_set):
     sys.path.insert(0, str(HERE))
     import roles
     return roles.nodes_for_roles(role_set)
+
+
+def builds_in_use(names, reference_follower, build, base_build):
+    """The builds these scenarios' Scala roles would run, in role order. Pure.
+
+    `--build` reaches only the patched roles and `--base-build` every
+    other Scala role, so a build that no role runs is not checked: a run
+    with no patched role must not be refused over an unprovisioned
+    `--build`. An unknown scenario, or one that refuses its knobs during
+    role resolution, is skipped here; its own run refuses it with the
+    reason.
+    """
+    used = []
+    for name in names:
+        if name not in SCENARIO_ROLES:
+            continue
+        try:
+            role_set = resolve_roles(name, reference_follower)
+        except SystemExit:
+            continue
+        for role in role_set:
+            spec = lifecycle_roles()[role]
+            if spec.kind != 'scala':
+                continue
+            chosen = build if spec.patched else base_build
+            if chosen not in used:
+                used.append(chosen)
+    return used
 
 
 # Ports this harness must never bind, whatever the environment says:
@@ -364,7 +450,8 @@ def check_band(p2p, rest):
     return None
 
 
-def configure_environment(scenario, nodes, roles=(), build='stock'):
+def configure_environment(scenario, nodes, roles=(), build='stock',
+                          base_build='stock'):
     """Point `lifecycle` at this campaign's ports, configs, dirs and builds."""
     os.environ['MATRIX_NODES'] = ','.join(nodes)
     for name in nodes:
@@ -372,15 +459,20 @@ def configure_environment(scenario, nodes, roles=(), build='stock'):
         os.environ[f'MATRIX_REST_{name.upper()}'] = str(CAMPAIGN_REST[name])
         os.environ[f'MATRIX_P2P_HOST_{name.upper()}'] = CAMPAIGN_P2P_HOST[name]
     # `--build` selects the build for the PATCHED roles only. Every
-    # other Scala role stays on `stock`, which is what makes a run an
-    # ablation (base + one patch vs base) rather than a comparison of
-    # two integration builds (spec §7a).
+    # other Scala role — the miner(s) and the stock follower — runs
+    # `--base-build` (`stock` unless told otherwise), which is what makes
+    # a run an ablation (base + one patch vs base) rather than a
+    # comparison of two integration builds (spec §7a). The base is a
+    # knob because the base moves: the #2563 re-measure runs its miner
+    # and stock follower on weak-blocks @ a1bd938ef (and on a1bd938ef +
+    # #2506, a SENDER-side change the miner has to carry), not on the
+    # M4 pin.
     for role in roles:
         spec = lifecycle_roles()[role]
         if spec.kind != 'scala':
             continue
         os.environ[f'MATRIX_BUILD_{spec.node.upper()}'] = (
-            build if spec.patched else 'stock')
+            build if spec.patched else base_build)
 
 
 # ----- config rendering -----
@@ -397,6 +489,12 @@ def scala_override(scenario, node, nodes, data_dir, extra=''):
     known = [f'"{CAMPAIGN_P2P_HOST[n]}:{CAMPAIGN_P2P[n]}"'
              for n in nodes if n != node]
     listen = f'{CAMPAIGN_P2P_HOST[node]}:{CAMPAIGN_P2P[node]}'
+    pending = ''
+    if scenario == 'flood':
+        from scenarios.flood import ROOT_FLOOD_CAPS
+        # The fixed store reads this under ergo.node; stock builds ignore it.
+        pending = ''.join(f'ergo.node.matrix.pendingAnnouncements.{key} = {value}\n'
+                          for key, value in ROOT_FLOOD_CAPS.items())
     return (
         f'include file("{base}")\n'
         f'ergo.directory = "{data_dir}"\n'
@@ -405,7 +503,7 @@ def scala_override(scenario, node, nodes, data_dir, extra=''):
         f'scorex.network.declaredAddress = "{listen}"\n'
         f'scorex.network.knownPeers = [{", ".join(known)}]\n'
         f'scorex.restApi.bindAddress = "127.0.0.1:{CAMPAIGN_REST[node]}"\n'
-        f'{extra}'
+        f'{pending}{extra}'
     )
 
 
@@ -812,27 +910,45 @@ def _holds_resources(pid):
 
 
 def kill_hard(name):
-    """SIGKILL one node this recipe started, by PID, after checking the
-    process is still the one we launched.
+    """SIGKILL one node this recipe started. See `kill_hard_many`."""
+    return kill_hard_many([name])[name]
 
-    Returns only once the PID is GONE from the process table, not merely
-    unrecognizable: the data directory's lock is held until then, and the
-    replacement node refuses to open a database that is still open.
+
+def kill_hard_many(names):
+    """SIGKILL nodes this recipe started, by PID, at the SAME instant,
+    after checking every process is still the one we launched.
+
+    Every PID is checked before any is signalled, so a refusal kills
+    nothing; then the signals go out back to back, so two followers die
+    together rather than one a teardown apart from the other.
+
+    Returns `{name: pid}` only once every PID is GONE from the process
+    table, not merely unrecognizable: the data directory's lock is held
+    until then, and the replacement node refuses to open a database that
+    is still open.
     """
     import lifecycle
-    pid = node_pid(name)
-    config = (WORK / (name + '.config'))
-    configs = [config.read_text().strip()] if config.exists() else None
-    if pid is None or not lifecycle.owned(pid, configs):
-        raise Divergence(f'{name} is not running under this recipe; refusing to kill')
-    os.kill(pid, signal.SIGKILL)
+    targets = {}
+    for name in names:
+        pid = node_pid(name)
+        config = (WORK / (name + '.config'))
+        configs = [config.read_text().strip()] if config.exists() else None
+        if pid is None or not lifecycle.owned(pid, configs):
+            raise Divergence(
+                f'{name} is not running under this recipe; refusing to kill')
+        targets[name] = (pid, config)
+    for name, (pid, _config) in targets.items():
+        os.kill(pid, signal.SIGKILL)
     deadline = time.monotonic() + 60
-    while _holds_resources(pid) and time.monotonic() < deadline:
+    while (any(_holds_resources(pid) for pid, _ in targets.values())
+           and time.monotonic() < deadline):
         time.sleep(0.2)
-    if _holds_resources(pid):
-        raise Divergence(
-            f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to start a '
-            'replacement over a data directory the old process still holds')
+    for name, (pid, _config) in targets.items():
+        if _holds_resources(pid):
+            raise Divergence(
+                f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to '
+                'start a replacement over a data directory the old process '
+                'still holds')
     # The PID being gone is necessary and, measurably, not sufficient:
     # the replacement started 60 ms later still lost the race for the
     # data directory's redb lock ("Database already open. Cannot acquire
@@ -840,9 +956,10 @@ def kill_hard(name):
     # down, and the teardown outlives the PID's visibility. A real
     # operator restart has a gap too; this one is explicit and short.
     time.sleep(KILL_SETTLE_SECONDS)
-    (WORK / (name + '.pid')).unlink(missing_ok=True)
-    config.unlink(missing_ok=True)
-    return pid
+    for name, (pid, config) in targets.items():
+        (WORK / (name + '.pid')).unlink(missing_ok=True)
+        config.unlink(missing_ok=True)
+    return {name: pid for name, (pid, _config) in targets.items()}
 
 
 def purge_address_book(data_root):
@@ -1217,6 +1334,13 @@ def run_scenario(name, args):
         'roles': {node: role for node, role in by_node.items()},
         'reference_follower': args.reference_follower,
         'build': args.build,
+        # The build every NON-patched Scala role ran (miner(s), stock
+        # follower). `builds` below is the per-role identity; this is the
+        # knob that chose it.
+        'base_build': getattr(args, 'base_build', 'stock'),
+        'restart_victim': getattr(args, 'restart_victim', 'rust'),
+        'flood_mode': getattr(args, 'flood_mode', 'hit-and-run'),
+        'post_ordering_blocks': getattr(args, 'post_ordering_blocks', None),
         # The IDENTITY of every Scala build this run used, per role
         # (spec §7a "build identity"): source commit, sigma jars and the
         # sha256 of the compiled class output the node was launched
@@ -1954,6 +2078,33 @@ def _self_test():
         assert os.environ['MATRIX_BUILD_SCALA'] == 'stock', os.environ
         assert os.environ['MATRIX_BUILD_SCALA2'] == 'stock', os.environ
         assert os.environ['MATRIX_BUILD_SCALA3'] == 'F13', os.environ
+        # `--base-build` moves EVERY non-patched Scala role — both
+        # miners here — and nothing else.
+        configure_environment('fork', nodes_for_roles(_fork_roles),
+                              _fork_roles, 'F13', 'base')
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'base', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA2'] == 'base', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA3'] == 'F13', os.environ
+        # ...the reconstruction measurement's miner AND stock follower...
+        _rr_roles = resolve_roles('reconstruct_rate', 'both')
+        configure_environment('reconstruct_rate', nodes_for_roles(_rr_roles),
+                              _rr_roles, 'F13', 'base')
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'base', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA2'] == 'base', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA3'] == 'F13', os.environ
+        # ...and a miner-under-test role is PATCHED, so it follows
+        # `--build`, never the base.
+        configure_environment('miner_self_reject',
+                              nodes_for_roles(SCENARIO_ROLES['miner_self_reject']),
+                              SCENARIO_ROLES['miner_self_reject'], 'F11', 'base')
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'F11', os.environ
+        # The default is still the M4 pin.
+        _steady_roles = resolve_roles('steady', 'both')
+        configure_environment('steady', nodes_for_roles(_steady_roles),
+                              _steady_roles, 'F13')
+        assert os.environ['MATRIX_BUILD_SCALA'] == 'stock', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA2'] == 'stock', os.environ
+        assert os.environ['MATRIX_BUILD_SCALA3'] == 'F13', os.environ
     finally:
         for key in [k for k in os.environ if k.startswith('MATRIX_BUILD_')]:
             del os.environ[key]
@@ -1982,15 +2133,47 @@ def _self_test():
                 'an unprovisioned build must stop the run, not fall back')
     # The stock build is the one every baseline is measured on: it has
     # to be present and to still match its recorded compiled output.
-    _stock = check_build('stock')
-    assert _stock.summary()['ergo_commit'].startswith('62c10315'), \
-        _stock.summary()
-    assert _stock.app_version() == '6.0.6-493-62c10315-SNAPSHOT', \
-        _stock.app_version()
+    # A LIVE build is one this host can verify right now. The M4 `stock`
+    # pin moved to the shared archive from a worktree that was deleted,
+    # and its classpath still names that tree, so until it is
+    # re-provisioned it is REFUSED — with the reason — rather than
+    # launched. The re-measure base is checked the same way. At least one
+    # of the two has to be live, or nothing below exercises a real build.
+    _pins = {'stock': ('62c10315', '6.0.6-493-62c10315-SNAPSHOT'),
+             'base': ('a1bd938e', None)}
+    _live = []
+    for _name, (_commit, _version) in _pins.items():
+        _entry = _builds.registry()[_name]
+        if not _entry.available:
+            continue
+        try:
+            _checked = check_build(_name)
+        except SystemExit as error:
+            # Refused, and the refusal says what to do about it.
+            assert 're-provision' in str(error).lower(), str(error)
+            continue
+        assert _checked.summary()['ergo_commit'].startswith(_commit), \
+            _checked.summary()
+        if _version:
+            assert _checked.app_version() == _version, _checked.app_version()
+        _live.append(_name)
+    assert _live, ('neither the stock pin nor the re-measure base is a '
+                   'provisioned, verifiable build on this host; provision '
+                   'base (builds.toml) before running the self-test')
     # The manifest a scenario records names the build AND its compiled
-    # output, per role.
-    _manifests = build_manifests({'scala': 'scala_miner', 'rust': 'rust_follower'})
+    # output, per role — here for the base-build knob's slot, the miner.
+    _saved_build = os.environ.get('MATRIX_BUILD_SCALA')
+    os.environ['MATRIX_BUILD_SCALA'] = _live[0]
+    try:
+        _manifests = build_manifests(
+            {'scala': 'scala_miner', 'rust': 'rust_follower'})
+    finally:
+        if _saved_build is None:
+            os.environ.pop('MATRIX_BUILD_SCALA', None)
+        else:
+            os.environ['MATRIX_BUILD_SCALA'] = _saved_build
     assert set(_manifests) == {'scala_miner'}, _manifests
+    assert _manifests['scala_miner']['build'] == _live[0], _manifests
     assert len(_manifests['scala_miner']['class_dir_sha256']) == 64, _manifests
     # The evidence names the classpath the node was LAUNCHED from, and
     # it is the registered build's own — not a file that happened to sit
@@ -3509,8 +3692,266 @@ def _self_test():
                 _name, 'a measurement scenario has to say whether it measured')
     _self_test_driver()
     _self_test_round_2()
+    _self_test_remeasure()
 
     print('campaign self-test OK: rendering, ports and the scenario set')
+
+
+def _self_test_remeasure():
+    """The #2563 re-measure's knobs (REVIEW-2563 §3.3), through the
+    production code: the base build, the Scala-follower restart, the
+    flood modes at the shipped caps, the waitlist counter, and a
+    simultaneous kill that refuses before it signals anything."""
+    import inspect
+    import types
+
+    from scenarios import common, flood, restart
+
+    # ----- knobs are refused where they would be ignored -----
+    for _scenario in ORDER:
+        check_scenario_knobs(_scenario)            # the defaults: always fine
+    check_scenario_knobs('restart', 'both', 'scala-followers')
+    check_scenario_knobs('restart', 'patched', 'scala-followers')
+    check_scenario_knobs('flood', 'patched', flood_mode='held')
+    check_scenario_knobs('flood', 'stock', flood_mode='held')
+    check_scenario_knobs('restart', 'both', 'scala-followers',
+                         post_ordering_blocks=10)
+    _post = types.SimpleNamespace(args=types.SimpleNamespace(
+        post_ordering_blocks=None))
+    assert restart.post_restart_blocks(_post) == restart.BLOCKS_AFTER_RESTART
+    _post.args.post_ordering_blocks = 10
+    assert restart.post_restart_blocks(_post) == 10
+    for _bad, _why in (
+            (('restart', None, 'scala-followers'), 'needs a Scala follower'),
+            (('steady', 'both', 'scala-followers'), 'applies to restart only'),
+            (('flood', None, 'rust', 'held'), 'ROOT flood'),
+            (('steady', 'both', 'rust', 'held'), 'applies to flood only'),
+            (('restart', 'both', 'miner'), '--restart-victim must be'),
+            (('flood', 'stock', 'rust', 'sometimes'), '--flood-mode must be'),
+            (('steady', None, 'rust', 'hit-and-run', 10), 'restart only'),
+            (('restart', None, 'rust', 'hit-and-run', 0), 'at least 1')):
+        try:
+            check_scenario_knobs(*_bad)
+        except SystemExit as error:
+            assert _why in str(error), (_bad, str(error))
+        else:
+            raise AssertionError(f'{_bad} must be refused')
+    # ...and refused by the CLI before any build is checked or node started.
+    _cli = subprocess.run(
+        [sys.executable, str(HERE / 'campaign.py'), '--scenario', 'restart',
+         '--restart-victim', 'scala-followers'],
+        capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert _cli.returncode != 0 and 'needs a Scala follower' in _cli.stderr, \
+        (_cli.returncode, _cli.stdout, _cli.stderr)
+
+    # ----- the Rust node has no Scala build to verify -----
+    # Its launch resolved a classpath too, verifying `stock` by default,
+    # so with every build unverifiable the follower refused to start in a
+    # run that asked for no stock role (the first `--base-build base`
+    # validation run).
+    with tempfile.TemporaryDirectory() as _empty:
+        _rust = subprocess.run(
+            [sys.executable, '-c',
+             'import sys\n'
+             'sys.path.insert(0, %r)\n'
+             'import lifecycle\n'
+             'print(lifecycle._command("rust")[0])\n' % str(HERE)],
+            capture_output=True, text=True, cwd=ROOT,
+            env={**os.environ, 'MATRIX_BUILDS_ROOT': _empty,
+                 'RUST_NODE': sys.executable})
+        assert _rust.returncode == 0 and sys.executable in _rust.stdout, \
+            (_rust.stdout, _rust.stderr)
+
+    # ----- `--scenario all` forwards each knob to its own scenario -----
+    _args = types.SimpleNamespace(
+        timeout=60, build='F13', base_build='base', reference_follower='both',
+        restart_victim='scala-followers', flood_mode='held', fresh=True,
+        force_attempt=False, post_ordering_blocks=10, ordering_blocks=7)
+    _restart = child_argv('restart', _args)
+    assert _restart[_restart.index('--base-build') + 1] == 'base', _restart
+    assert _restart[_restart.index('--build') + 1] == 'F13', _restart
+    assert '--restart-victim' in _restart and '--flood-mode' not in _restart
+    assert _restart[_restart.index('--post-ordering-blocks') + 1] == '10'
+    _flood = child_argv('flood', _args)
+    assert '--flood-mode' in _flood and '--restart-victim' not in _flood, _flood
+    assert '--post-ordering-blocks' not in _flood, _flood
+    _steady = child_argv('steady', _args)
+    assert '--flood-mode' not in _steady and '--restart-victim' not in _steady
+    # The campaign-wide block count reaches every child.
+    for _child in (_restart, _flood, _steady):
+        assert _child[_child.index('--ordering-blocks') + 1] == '7', _child
+    # An explicit zero post-kill window is forwarded (and refused there),
+    # an absent one is not forwarded at all.
+    _args.post_ordering_blocks, _args.ordering_blocks = 0, None
+    _zero = child_argv('restart', _args)
+    assert _zero[_zero.index('--post-ordering-blocks') + 1] == '0', _zero
+    assert '--ordering-blocks' not in _zero, _zero
+    _args.post_ordering_blocks = None
+    assert '--post-ordering-blocks' not in child_argv('restart', _args)
+    assert '--base-build' in _steady and '--fresh' in _steady, _steady
+
+    # ----- which builds a run checks before starting -----
+    # No patched role: `--build` is not checked, whatever it names.
+    assert builds_in_use(['steady'], None, 'soak', 'base') == ['base']
+    assert builds_in_use(['steady'], 'patched', 'soak', 'base') == \
+        ['base', 'soak']
+    # A patched miner needs `--build` even with no reference follower.
+    assert builds_in_use(['miner_self_reject'], None, 'soak', 'base') == \
+        ['soak']
+    # Refused during role resolution, or unknown: skipped, refused later.
+    assert builds_in_use(['flood'], 'both', 'soak', 'base') == []
+    assert builds_in_use(['nonesuch'], None, 'soak', 'base') == []
+    # `all` checks the union once, in first-use order.
+    assert builds_in_use(list(ORDER), None, 'soak', 'base') == ['base', 'soak']
+
+    # ----- restart: who dies -----
+    assert restart.victims_for('rust', ('scala', 'scala2', 'rust')) == ('rust',)
+    assert restart.victims_for(
+        'scala-followers', ('scala', 'scala2', 'scala3', 'rust')) == \
+        ('scala2', 'scala3')
+    assert restart.victims_for('scala-followers', ('scala', 'scala3', 'rust')) \
+        == ('scala3',)
+    try:
+        restart.victims_for('scala-followers', ('scala', 'rust'))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a Scala-follower restart with no follower must stop')
+    _src = inspect.getsource(restart._run_scala_victims)
+    # One simultaneous kill, and the sampler told the victims are down on
+    # purpose — so the miner and the Rust follower stay sampled.
+    assert 'kill_hard_many(victims)' in _src and 'expect_down(victims)' in _src
+    assert 'restart_recovery' in _src and 'scala_waitlist' in _src
+    # ...and they come back together, not one JVM start apart.
+    assert 'ThreadPoolExecutor' in _src, 'the victims respawn concurrently'
+
+    # ----- a simultaneous kill refuses BEFORE it signals anything -----
+    global WORK, KILL_SETTLE_SECONDS
+    _saved_work, _saved_settle = WORK, KILL_SETTLE_SECONDS
+    _procs = []
+    with tempfile.TemporaryDirectory() as _tmp:
+        try:
+            WORK, KILL_SETTLE_SECONDS = Path(_tmp), 0.0
+            for _name in ('victim_a', 'victim_b'):
+                _proc = subprocess.Popen(['sleep', '300'], cwd=ROOT)
+                _procs.append(_proc)
+                (WORK / f'{_name}.pid').write_text(str(_proc.pid))
+                (WORK / f'{_name}.config').write_text('sleep 300')
+            try:
+                kill_hard_many(['victim_a', 'victim_b', 'not_running'])
+            except Divergence as error:
+                assert 'not_running' in str(error), str(error)
+            else:
+                raise AssertionError('a victim we did not start must stop the kill')
+            assert all(_p.poll() is None for _p in _procs), \
+                'a refused kill must not have signalled anyone'
+            _killed = kill_hard_many(['victim_a', 'victim_b'])
+            assert _killed == {'victim_a': _procs[0].pid,
+                               'victim_b': _procs[1].pid}, _killed
+            # Gone, and reaped by the kill itself (it waits for the
+            # teardown), so no status is left for `Popen` to read.
+            assert not any(Path(f'/proc/{_p.pid}').exists() for _p in _procs)
+            assert not list(WORK.glob('victim_*')), sorted(WORK.iterdir())
+        finally:
+            WORK, KILL_SETTLE_SECONDS = _saved_work, _saved_settle
+            for _p in _procs:
+                if _p.poll() is None:
+                    _p.kill()
+                    _p.wait(timeout=10)
+
+    # ----- flood: the shipped caps and the two adversary shapes -----
+    assert flood.ROOT_FLOOD_CAPS == {'maxEntries': 256, 'maxBytes': 4194304,
+                                     'perPeer': 128, 'ttlMs': 120000, 'replayPerParent': 64}, \
+        flood.ROOT_FLOOD_CAPS
+    _hit = flood.root_flood_plan('hit-and-run')
+    _held = flood.root_flood_plan('held')
+    # The default is the plan 3 flood, byte for byte on the command line.
+    assert flood.root_flood_command('/b', 't:1', 'a:2', _hit) == [
+        '/b', 't:1', 'devnet', 'a:2', 'input_block_root_flood',
+        '10', '40', '12', '20000', '100'], flood.root_flood_command(
+            '/b', 't:1', 'a:2', _hit)
+    assert flood.root_flood_command('/b', 't:1', 'a:2', _held)[-2:] == \
+        ['--hold-ms', '130000']
+    # Each mode tests what it is for: hit-and-run saturates the entry cap
+    # every wave; held exceeds the per-host cap every wave and holds past
+    # the TTL, on few enough connections for Scala's maxConnections (30).
+    assert _hit['hosts'] * _hit['per_host'] > flood.ROOT_FLOOD_CAPS['maxEntries']
+    assert _held['per_host'] >= 160 > flood.ROOT_FLOOD_CAPS['perPeer']
+    assert _held['hold_ms'] > flood.ROOT_FLOOD_CAPS['ttlMs']
+    assert _held['hosts'] <= 25, _held
+    assert list(flood.adversary_octets(_hit)) == list(range(100, 220))
+    assert list(flood.adversary_octets(_held)) == list(range(100, 110))
+    try:
+        flood.root_flood_plan('slow')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('an unknown flood mode must be refused')
+    # Store counters move by reason once the store splits them, and the
+    # old single `drops` number still reads.
+    assert flood.counters_between(
+        {'size': 9, 'evictions': 1, 'drops': 4},
+        {'size': 2, 'evictions': 5, 'drops': 10}) == \
+        {'drops': 6, 'evictions': 4}
+    assert flood.counters_between(
+        {'drops': {'duplicate': 1, 'hostLimit': 0}, 'replayed': 3},
+        {'drops': {'duplicate': 4, 'hostLimit': 7, 'fairness': 2},
+         'replayed': 3}) == {'drops.duplicate': 3, 'drops.hostLimit': 7,
+                             'replayed': 0}
+    assert flood.counters_between(None, {'drops': 1}) == {}
+    flood.self_test_held_evaluation()
+    flood_conf = scala_override('flood', 'scala3', ('scala', 'scala3'), '/tmp/test')
+    for key, value in flood.ROOT_FLOOD_CAPS.items():
+        assert f'ergo.node.matrix.pendingAnnouncements.{key} = {value}' in flood_conf
+    assert 'pendingAnnouncements' not in scala_override(
+        'steady', 'scala3', ('scala', 'scala3'), '/tmp/test')
+    _flood_src = inspect.getsource(flood._run_against_scala_follower)
+    assert 'root_flood_command(' in _flood_src and \
+        'adversary_octets(plan)' in _flood_src, 'the scenario uses the plan'
+
+    # ----- the waitlist counter, per ordering block -----
+    def _entry(block):
+        return ('INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - '
+                f'Processing ordering block announcement for {block}')
+
+    def _put(block):
+        return ('INFO org.ergoplatform.nodeView.history.ErgoHistory - '
+                f'Put input block to disconnected queue: {block}')
+    _wait = common.scala_waitlist([
+        _put('00'),                           # before any ordering block
+        _entry('a1'), _put('11'), _put('12'), _put('11'),
+        _entry('a1'),                         # the same announcement again
+        _put('13'),
+        _entry('b2'),
+        'INFO x - On processing 99, downloading its parent and unknown '
+        'ordering block b2 from ConnectedPeer(...)',
+        _entry('c3'), _put('31'),
+    ])
+    assert _wait['insertions'] == 6 and _wait['distinct_input_blocks'] == 5, _wait
+    assert _wait['ordering_blocks'] == 3, _wait
+    assert _wait['before_first_ordering_block'] == 1, _wait
+    assert _wait['per_ordering_block']['max'] == 4, _wait     # a1: 11 12 11 13
+    assert _wait['per_ordering_block']['blocks_with_any'] == 2, _wait
+    assert _wait['root_parent_downloads'] == 1, _wait
+    _none = common.scala_waitlist([])
+    assert _none['insertions'] == 0 and _none['ordering_blocks'] == 0 and \
+        _none['per_ordering_block']['p50'] is None, _none
+    assert "entry['waitlist'] = scala_waitlist(window)" in inspect.getsource(
+        common.reconstruction_accounting), 'every Scala role carries it'
+    # Root announcements seen vs landed, per Scala follower, outside a flood.
+    _roots = common.scala_root_announcements([
+        'INFO x - On processing a1, downloading its parent and unknown '
+        'ordering block ff from ConnectedPeer(connection: ConnectionId('
+        'remote=/127.0.0.1:19570, local=/127.0.0.2:1, direction=Outgoing))',
+        'INFO x - On processing a2, downloading its parent and unknown '
+        'ordering block ff from ConnectedPeer(connection: ConnectionId('
+        'remote=/127.0.0.1:19570, local=/127.0.0.2:1, direction=Outgoing))',
+        'INFO x - Processing valid sub-block a1 with parent sub-block None '
+        'and parent block ff'])
+    assert _roots['honest_roots'] == 2 and _roots['honest_roots_landed'] == 1, \
+        _roots
+    assert "scala_root_announcements(window)" in inspect.getsource(
+        common.reconstruction_accounting)
 
 
 def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
@@ -4085,6 +4526,32 @@ def _self_test_round_3():
     assert edge['unmatched'] == [] and edge['outcomes_for_adjacent_blocks'] == 1, edge
 
 
+def child_argv(name, args):
+    """The per-scenario command `--scenario all` re-execs. Pure.
+
+    Every campaign-wide knob is forwarded; a scenario-specific one only
+    to its own scenario, whose child refuses it otherwise.
+    """
+    return ([sys.executable, str(HERE / 'campaign.py'), '--scenario', name,
+             '--timeout', str(args.timeout)]
+            + ['--build', args.build, '--base-build', args.base_build]
+            + (['--reference-follower', args.reference_follower]
+               if args.reference_follower else [])
+            + (['--ordering-blocks', str(args.ordering_blocks)]
+               if args.ordering_blocks is not None else [])
+            + (['--restart-victim', args.restart_victim]
+               if name == 'restart' else [])
+            # `is not None`, not truthiness: an explicit 0 must reach the
+            # child, which refuses it.
+            + (['--post-ordering-blocks', str(args.post_ordering_blocks)]
+               if name == 'restart' and args.post_ordering_blocks is not None
+               else [])
+            + (['--flood-mode', args.flood_mode]
+               if name == 'flood' else [])
+            + (['--fresh'] if args.fresh else [])
+            + (['--force-attempt'] if args.force_attempt else []))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scenario', help='one scenario name, or "all"')
@@ -4103,8 +4570,26 @@ def main():
     parser.add_argument('--build', default='stock',
                         help='the provisioned Scala build every *_patched '
                              'role runs (scripts/devnet-matrix/builds.toml); '
-                             'every other Scala role stays on stock, so a run '
+                             'every other Scala role runs --base-build, so a run '
                              'is base+one-patch vs base')
+    parser.add_argument('--base-build', default='stock',
+                        help='the provisioned Scala build every NON-patched '
+                             'Scala role runs: the miner(s) and the stock '
+                             'reference follower (default stock, the M4 pin)')
+    parser.add_argument('--restart-victim', default='rust',
+                        choices=RESTART_VICTIMS,
+                        help='restart only: SIGKILL the Rust follower (default) '
+                             'or every Scala reference follower at once '
+                             '(needs --reference-follower)')
+    parser.add_argument('--post-ordering-blocks', type=int, default=None,
+                        help='restart only: funded ordering blocks observed '
+                             'after convergence (default 5)')
+    parser.add_argument('--flood-mode', default='hit-and-run',
+                        choices=FLOOD_MODES,
+                        help='flood against a Scala follower only: fresh hosts '
+                             'per wave, closed at once (default), or one held '
+                             'connection per host past the store TTL with more '
+                             'announcements per host than the per-host cap')
     parser.add_argument('--reference-follower', default=None,
                         choices=('stock', 'patched', 'both'),
                         help='which Scala reference follower(s) to run beside '
@@ -4118,6 +4603,13 @@ def main():
         return 0
     if not args.scenario:
         parser.error('--scenario is required (or --self-test)')
+    # A knob the scenario would ignore is refused before anything is
+    # checked or started. `all` routes each knob to its own scenario,
+    # whose child process checks it.
+    if args.scenario != 'all':
+        check_scenario_knobs(args.scenario, args.reference_follower,
+                             args.restart_victim, args.flood_mode,
+                             args.post_ordering_blocks)
 
     sys.path.insert(0, str(HERE))
     # Refused HERE rather than at the first spawn: an unknown build must
@@ -4128,22 +4620,17 @@ def main():
     # A hand-set classpath would bypass `Build.verify()` for the node it
     # names, and the run would still record `--build` in its evidence.
     check_no_classpath_override(os.environ)
-    check_build(args.build)
     names = list(ORDER) if args.scenario == 'all' else [args.scenario]
+    for used_build in builds_in_use(names, args.reference_follower,
+                                    args.build, args.base_build):
+        check_build(used_build)
     # The node set is fixed for the whole process: `lifecycle.REST` and
     # `smoke.URLS` are read at import time, so one process drives one
     # node set. `--scenario all` therefore re-execs itself per scenario.
     if len(names) > 1:
         failures = []
         for name in names:
-            result = subprocess.run(
-                [sys.executable, str(HERE / 'campaign.py'), '--scenario', name,
-                 '--timeout', str(args.timeout)]
-                + ['--build', args.build]
-                + (['--reference-follower', args.reference_follower]
-                   if args.reference_follower else [])
-                + (['--fresh'] if args.fresh else [])
-                + (['--force-attempt'] if args.force_attempt else []), cwd=ROOT)
+            result = subprocess.run(child_argv(name, args), cwd=ROOT)
             if result.returncode != 0:
                 failures.append(name)
         print('campaign:', 'FAIL ' + ','.join(failures) if failures else 'PASS')
@@ -4155,7 +4642,8 @@ def main():
     # BEFORE the scenario module — and therefore before `smoke` — is
     # imported: `smoke.URLS` is frozen at its import.
     role_set = resolve_roles(name, args.reference_follower)
-    configure_environment(name, nodes_for_roles(role_set), role_set, args.build)
+    configure_environment(name, nodes_for_roles(role_set), role_set, args.build,
+                          args.base_build)
     # Enforced BEFORE anything is started: a refused attempt must not
     # leave a devnet running or overwrite the canonical evidence.
     args.attempt = check_attempt_cap(name, force=args.force_attempt)

@@ -431,6 +431,13 @@ class Run:
         self.penalty_observations = []
         self.peer_states = set()
         self.node_started_at = {}
+        # Nodes a scenario has killed ON PURPOSE and not yet respawned
+        # (`restart --restart-victim scala-followers`). A sweep that
+        # cannot reach one of them records it as down instead of
+        # discarding the whole sweep, so the miner and the Rust follower
+        # stay sampled across the outage. Every other unreachable node
+        # still makes the sweep unavailable.
+        self.expected_down = set()
 
         # Assertions 2 and 3: the raw series the evaluators run over.
         # Kept so a run's verdict can be recomputed from its evidence
@@ -664,6 +671,19 @@ class Run:
 
     def started(self, node):
         self.node_started_at[node] = time.monotonic()
+        self.expected_down.discard(node)
+
+    def expect_down(self, nodes):
+        """Mark nodes the scenario is about to kill; `started` clears one.
+
+        The miner and the Rust follower are never accepted here: every
+        verdict in the run is drawn against them, and a sweep without
+        them is not a sample.
+        """
+        refused = sorted(set(nodes) & {'scala', 'rust'})
+        if refused:
+            raise ValueError(f'{refused} cannot be sampled as down')
+        self.expected_down.update(nodes)
 
     def in_grace(self, node):
         started = self.node_started_at.get(node)
@@ -676,13 +696,20 @@ class Run:
         call failed — a miss is counted, never turned into a value."""
         now = time.time()
         reading = {}
+        down = set(self.expected_down)
         try:
             for node in URLS:
-                reading[node] = {
-                    'info': api(node, '/info'),
-                    'chain': api(node, '/blocks/bestInputChain'),
-                    'best': api(node, '/blocks/bestInputBlock'),
-                }
+                try:
+                    reading[node] = {
+                        'info': api(node, '/info'),
+                        'chain': api(node, '/blocks/bestInputChain'),
+                        'best': api(node, '/blocks/bestInputBlock'),
+                    }
+                except Unavailable:
+                    if node not in down:
+                        raise
+                    reading[node] = {'info': {}, 'chain': {}, 'best': {},
+                                     'down': True}
             status = api('rust', '/api/v1/status')
             peers = api('rust', '/api/v1/peers')
             # Assertion 6's pool observation belongs to THIS sweep, not
@@ -836,6 +863,14 @@ class Run:
                              .get('bestInputBlocks') or []),
             'scala3_ordering': (reading.get('scala3', {}).get('chain', {})
                                 .get('bestOrdering') or None),
+            # Every Scala node's `/info.pendingInputAnnouncements` (the
+            # #2563 store's size, bytes and counters), from the same
+            # `/info` read as the rest of this sample; `None` for a build
+            # without the store. `pending_store_summary` reads it.
+            'pending': pending_announcements(reading),
+            # Nodes sampled as deliberately down (killed, not respawned).
+            'down': sorted(n for n, r in reading.items()
+                           if isinstance(r, dict) and r.get('down')),
         }
         # EVERY sample is retained and streamed to disk as it is taken:
         # the evaluators run over the whole run at finalization, and a
@@ -1088,6 +1123,164 @@ def follower_qualifying_samples(samples, ordering_key,
     return kept, excluded
 
 
+def pending_announcements(reading):
+    """`{scala node: /info.pendingInputAnnouncements}` for one sweep. Pure.
+
+    A node whose build has no store maps to `None`, and so does a node
+    sampled as down, so an absent store is never read as an empty one.
+    """
+    out = {}
+    for node, value in sorted((reading or {}).items()):
+        if not node.startswith('scala'):
+            continue
+        pending = ((value or {}).get('info') or {}).get(
+            'pendingInputAnnouncements')
+        out[node] = pending if isinstance(pending, dict) else None
+    return out
+
+
+# The store's GAUGES: everything else it publishes that is a number is a
+# counter, monotonic within one process.
+PENDING_GAUGES = ('size', 'bytes')
+
+
+def flatten_counters(value, prefix=''):
+    """Numeric leaves of a nested dict, by dotted path. Pure.
+
+    The store's counters grow nested (`drops.duplicate`, ...) as the
+    #2563 review splits one drop counter by reason; flattening reads the
+    old single `drops` number and the new per-reason object alike.
+    """
+    out = {}
+    if isinstance(value, bool):
+        return out
+    if isinstance(value, (int, float)):
+        return {prefix: value}
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            out.update(flatten_counters(inner, f'{prefix}.{key}' if prefix
+                                        else str(key)))
+    return out
+
+
+def counter_increase(values, restarts=None):
+    """How much a per-process counter grew over a sequence of readings.
+
+    A reading LOWER than the previous one is a new process (a restart
+    resets the in-memory store), whose count grew from zero to that
+    reading. So is a reading marked in `restarts` (booleans parallel to
+    `values`: the process was seen down since the previous reading), even
+    when it is higher: a new process can count past the old reading
+    before the next sample. Returns `(increase, resets)`; the first
+    reading is the baseline, never counted. Pure.
+    """
+    increase, resets, previous = 0, 0, None
+    for i, value in enumerate(values):
+        restarted = bool(restarts[i]) if restarts is not None else False
+        if previous is not None:
+            if restarted or value < previous:
+                resets += 1
+                increase += value
+            else:
+                increase += value - previous
+        previous = value
+    return increase, resets
+
+
+def pending_store_summary(samples, node):
+    """What one node's pending store did over a series. Pure.
+
+    Peak entries and bytes (the gauges) and, per counter, how much it
+    grew inside the sampled window — restarts folded in — plus the
+    reading at the first sample, so counts from before the window are
+    visible rather than silently included or dropped.
+    """
+    readings, restarted, seen_down = [], [], False
+    for s in samples:
+        # A sample that lists the node as down marks its next present
+        # reading as a new process, whatever that reading's value.
+        if node in (s.get('down') or ()):
+            seen_down = True
+        if node not in (s.get('pending') or {}):
+            continue
+        reading = s['pending'][node]
+        readings.append((s.get('at'), reading))
+        if isinstance(reading, dict):
+            restarted.append(seen_down)
+            seen_down = False
+    present = [(at, r) for at, r in readings if isinstance(r, dict)]
+    out = {'node': node, 'samples': len(readings),
+           'samples_with_store': len(present)}
+    if not present:
+        out['store'] = ('absent: no sample carried '
+                        '/info.pendingInputAnnouncements for this node')
+        return out
+    flat = [flatten_counters(r) for _, r in present]
+    for gauge in PENDING_GAUGES:
+        values = [f[gauge] for f in flat if gauge in f]
+        out[f'peak_{gauge}'] = max(values) if values else None
+    counters = sorted({k for f in flat for k in f} - set(PENDING_GAUGES))
+    out['counters'] = {}
+    for key in counters:
+        values, marks, carried = [], [], False
+        for f, mark in zip(flat, restarted):
+            # A restart marker on a reading without this key applies to
+            # the key's next reading.
+            carried = carried or mark
+            if key in f:
+                values.append(f[key])
+                marks.append(carried)
+                carried = False
+        increase, resets = counter_increase(values, marks)
+        out['counters'][key] = {'at_first_sample': values[0],
+                                'increase': increase, 'resets': resets}
+    return out
+
+
+def restart_recovery(samples, since, node, window_s=30.0):
+    """How one restarted follower came back, from the series. Pure.
+
+    * `seconds_to_miner_tip`: from `since` (the respawn) to the first
+      sample whose tip for `node` is the miner's own tip;
+    * `first_apply_at`: the first sample after the respawn at which the
+      node's ordering block differs from the one it came back on — the
+      first block it applied after the restart;
+    * `replay_burst`: how much each `replayed*` counter of its pending
+      store grew in the `window_s` seconds from that first apply (the
+      store is in memory, so it starts empty and this is its refill).
+    """
+    tip_key, ordering_key = f'{node}_tip', f'{node}_ordering'
+    after = [s for s in samples if (s.get('at') or 0) >= since]
+    out = {'node': node, 'since_epoch_s': since, 'samples': len(after),
+           'seconds_to_miner_tip': None, 'first_apply_at': None,
+           'replay_burst': None}
+    for s in after:
+        if s.get(tip_key) and s.get(tip_key) == s.get('scala_tip'):
+            out['seconds_to_miner_tip'] = round(s['at'] - since, 2)
+            break
+    came_back_on = next((s.get(ordering_key) for s in after
+                         if s.get(ordering_key)), None)
+    applied = next((s for s in after if s.get(ordering_key)
+                    and s.get(ordering_key) != came_back_on), None)
+    if applied is None:
+        return out
+    out['first_apply_at'] = applied['at']
+    out['seconds_to_first_apply'] = round(applied['at'] - since, 2)
+    window = [s for s in after
+              if applied['at'] <= s['at'] <= applied['at'] + window_s]
+    stores = [flatten_counters((s.get('pending') or {}).get(node))
+              for s in window
+              if isinstance((s.get('pending') or {}).get(node), dict)]
+    if stores:
+        keys = sorted({k for f in stores for k in f
+                       if k.split('.')[0].startswith('replayed')})
+        out['replay_burst'] = {
+            'window_s': window_s,
+            **{k: counter_increase([f[k] for f in stores if k in f])[0]
+               for k in keys}}
+    return out
+
+
 def lag_distribution(samples, tip_key, chain_key='scala_chain',
                      ordering_key=None):
     """How far ONE follower's input tip trails the miner's chain.
@@ -1134,6 +1327,10 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain',
         'lag_samples': len(lags),
         'no_tip': no_tip,
         'not_on_miner_chain': off_chain,
+        # The share of qualifying samples in which this follower held an
+        # input chain at all (had a tip), beside the lag it had when it did.
+        'holding_chain_share': (round((len(kept) - no_tip) / len(kept), 4)
+                                if kept else None),
         'p50': percentile(lags, 50),
         'p95': percentile(lags, 95),
         'max': max(lags) if lags else None,
@@ -2519,7 +2716,152 @@ def _self_test():
     assert any('replaced at their own height' in m
                for m, _ in rebuilt_twice['failures']), rebuilt_twice
 
+    _self_test_pending_and_restart()
+
     print('self-test OK: evaluators behave as the round-5 definitions require')
+
+
+def _self_test_pending_and_restart():
+    """The #2563 re-measure's sampling: the pending store in the series,
+    a sweep that survives a deliberately killed follower, and the
+    restart-recovery reading. Red-first like the rest."""
+    # ----- /info.pendingInputAnnouncements per Scala node -----
+    store = {'size': 3, 'bytes': 900, 'admitted': 5, 'replayed': 2,
+             'drops': {'duplicate': 1, 'staleParent': 0}}
+    reading = {'scala': {'info': {'fullHeight': 5}},
+               'scala2': {'info': {'pendingInputAnnouncements': store}},
+               'scala3': {'info': {'pendingInputAnnouncements': 'garbage'}},
+               'rust': {'info': {'pendingInputAnnouncements': store}}}
+    pending = pending_announcements(reading)
+    # A build without the store and a malformed value are both `None`,
+    # never an empty store; the Rust node is not a Scala store.
+    assert pending == {'scala': None, 'scala2': store, 'scala3': None}, pending
+
+    # ----- counters: nested drops, restarts, gauges -----
+    assert flatten_counters(store) == {
+        'size': 3, 'bytes': 900, 'admitted': 5, 'replayed': 2,
+        'drops.duplicate': 1, 'drops.staleParent': 0}, flatten_counters(store)
+    # The pre-review single `drops` number reads the same way.
+    assert flatten_counters({'drops': 4, 'ok': True}) == {'drops': 4}
+    assert counter_increase([]) == (0, 0)
+    assert counter_increase([3, 5, 9]) == (6, 0)
+    # 9 -> 2 is a new process that counted 2 from zero.
+    assert counter_increase([3, 9, 2, 4]) == (6 + 2 + 2, 1)
+
+    def at(t, node_store, **extra):
+        return dict({'at': t, 'pending': {'scala2': node_store}}, **extra)
+
+    series = [at(0, None), at(1, {'size': 1, 'bytes': 10, 'replayed': 0,
+                                  'drops': {'expired': 0}}),
+              at(2, {'size': 40, 'bytes': 4000, 'replayed': 7,
+                     'drops': {'expired': 2}}),
+              # restarted: in-memory store starts empty
+              at(3, {'size': 0, 'bytes': 0, 'replayed': 1,
+                     'drops': {'expired': 0}})]
+    summary = pending_store_summary(series, 'scala2')
+    assert summary['samples'] == 4 and summary['samples_with_store'] == 3, summary
+    assert summary['peak_size'] == 40 and summary['peak_bytes'] == 4000, summary
+    assert summary['counters']['replayed'] == {
+        'at_first_sample': 0, 'increase': 8, 'resets': 1}, summary
+    assert summary['counters']['drops.expired']['increase'] == 2, summary
+    assert 'size' not in summary['counters'], 'a gauge is not a counter'
+    # A restart seen only through `down`: the new process counted past
+    # the old reading before it was sampled (3, down, 5): +5, one reset.
+    assert counter_increase([3, 5], [False, True]) == (5, 1)
+    series_up = [at(0, {'size': 0, 'bytes': 0, 'replayed': 3,
+                        'drops': {'expired': 0}}),
+                 at(1, None, down=['scala2']),
+                 at(2, {'size': 1, 'bytes': 9, 'replayed': 5,
+                        'drops': {'expired': 1}})]
+    up = pending_store_summary(series_up, 'scala2')
+    assert up['counters']['replayed'] == {
+        'at_first_sample': 3, 'increase': 5, 'resets': 1}, up
+    assert up['counters']['drops.expired'] == {
+        'at_first_sample': 0, 'increase': 1, 'resets': 1}, up
+    # Another node's downtime is not this node's restart.
+    other = [dict(r, down=['scala3']) if r.get('down') else r
+             for r in series_up]
+    assert pending_store_summary(other, 'scala2')['counters']['replayed'] == {
+        'at_first_sample': 3, 'increase': 2, 'resets': 0}
+    absent = pending_store_summary([at(0, None)], 'scala2')
+    assert absent['samples_with_store'] == 0 and 'absent' in absent['store'], absent
+    assert pending_store_summary(series, 'scala3')['samples'] == 0
+
+    # ----- restart recovery -----
+    def rs(t, tip, miner, ordering, replayed=None):
+        entry = {'at': t, 'scala_tip': miner, 'scala2_tip': tip,
+                 'scala2_ordering': ordering, 'pending': {}}
+        if replayed is not None:
+            entry['pending']['scala2'] = {'replayed': replayed}
+        return entry
+
+    recovery = restart_recovery([
+        rs(5, 'x', 'x', 'O0'),                    # before the respawn
+        rs(10, None, 'm1', None),                 # down
+        rs(12, 'a', 'm2', 'O1', replayed=0),      # came back on O1
+        rs(14, 'b', 'm3', 'O1', replayed=0),
+        rs(20, 'c', 'm4', 'O2', replayed=3),      # first apply after it
+        rs(35, 'm5', 'm5', 'O2', replayed=9),     # on the miner's tip
+        rs(60, 'm6', 'm6', 'O3', replayed=40),    # past the 30 s window
+    ], since=10, node='scala2')
+    assert recovery['seconds_to_miner_tip'] == 25, recovery
+    assert recovery['first_apply_at'] == 20, recovery
+    assert recovery['seconds_to_first_apply'] == 10, recovery
+    assert recovery['replay_burst'] == {'window_s': 30.0, 'replayed': 6}, recovery
+    never = restart_recovery([rs(12, 'a', 'm', 'O1')], since=10, node='scala2')
+    assert never['seconds_to_miner_tip'] is None and \
+        never['first_apply_at'] is None and never['replay_burst'] is None, never
+
+    # ----- the sampler across a deliberately killed follower -----
+    down_node = 'scala2'
+    calls = []
+
+    def fake_api(node, path, data=None, timeout=15):
+        calls.append((node, path))
+        if node == down_node:
+            raise Unavailable(f'{node} is down')
+        if path == '/info':
+            return {'fullHeight': 7, 'bestFullHeaderId': 'H7',
+                    'pendingInputAnnouncements': None}
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'O', 'bestInputBlocks': []}
+        if path == '/blocks/bestInputBlock':
+            return {'bestInputBlock': None}
+        if path == '/transactions/unconfirmed':
+            return []
+        return {}
+
+    saved = dict(URLS)
+    real_api, globals()['api'] = api, fake_api
+    URLS[down_node] = 'http://127.0.0.1:1'
+    try:
+        r = Run.__new__(Run)
+        Run.__init__(r, deadline=time.monotonic() + 30)
+        r._series_file = None
+        # Not expected down: the unreachable follower makes the sweep
+        # unavailable, as before.
+        assert r.sweep() is None and r.unavailable_samples == 1
+        # Expected down: the sweep is taken, the node recorded as down.
+        r.expect_down([down_node])
+        taken = r.sweep()
+        assert taken is not None and taken[down_node]['down'], taken
+        assert r.series[-1]['down'] == [down_node], r.series[-1]
+        assert r.series[-1]['scala2_tip'] is None, r.series[-1]
+        # Respawned: `started` clears it, and it is required again.
+        r.started(down_node)
+        assert r.sweep() is None and r.unavailable_samples == 2
+        # The miner and the Rust follower are never sampled as down.
+        for essential in ('scala', 'rust'):
+            try:
+                r.expect_down([essential])
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'{essential} may not be sampled as down')
+    finally:
+        globals()['api'] = real_api
+        URLS.clear()
+        URLS.update(saved)
 
 
 # ----- assertion drivers -----
@@ -2634,6 +2976,14 @@ def finalize_agreement(run, evidence):
         role: lag_distribution(run.series, key) for role, key in
         (('rust_follower', 'rust_tip'), ('scala_follower', 'scala2_tip'),
          ('scala_follower_patched', 'scala3_tip'))}
+    # Each Scala node's pending store over the run, by NODE (the role a
+    # node plays is in the evidence's `roles`): peaks against the caps,
+    # and how much every counter grew — admitted, replayed, evictions,
+    # drops by reason — with process restarts folded in.
+    evidence['pending_store'] = {
+        node: pending_store_summary(run.series, node)
+        for node in sorted({n for s in run.series
+                            for n in (s.get('pending') or {})})}
     if tip['violations']:
         run.fail('2_best_input_block', '; '.join(tip['violations']),
                  {'lag_p95': tip['lag_p95'], 'lag_max': tip['lag_max'],

@@ -73,3 +73,10 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+# The adversary is a test tool with parsing worth pinning: its unit tests
+# (the root flood's `--hold-ms` mode) run only if the example is a test
+# target, so `cargo test` / nextest build it with the test harness.
+[[example]]
+name = "p2p_adversary"
+test = true

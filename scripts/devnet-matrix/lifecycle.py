@@ -328,16 +328,20 @@ def node_binary_provenance() -> dict:
 
 
 def _command(name):
+    # Only a Scala node has a build. Resolving one for the Rust node
+    # verified whatever `node_build('rust')` defaulted to (`stock`), so a
+    # run that used no stock role at all still refused to start the
+    # follower once the stock build could not be verified.
+    if not name.startswith('scala'):
+        return [node_binary(), '--config', _config_path(name)]
     cp = classpath_file(name)
     if not cp.exists():
         raise SystemExit(
             f'Scala weak-blocks classpath for {name} not found at {cp}; '
             f'provision the build or set MATRIX_CLASSPATH_{name.upper()}')
-    if name.startswith('scala'):
-        return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
-                '-cp', cp.read_text().strip(), 'org.ergoplatform.ErgoApp',
-                '--config', _config_path(name)]
-    return [node_binary(), '--config', _config_path(name)]
+    return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
+            '-cp', cp.read_text().strip(), 'org.ergoplatform.ErgoApp',
+            '--config', _config_path(name)]
 
 
 def _config_path(name):

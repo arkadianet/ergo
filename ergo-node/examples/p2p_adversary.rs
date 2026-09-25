@@ -96,6 +96,19 @@
 //!                         --reference-follower patched`, which reads the
 //!                         store's caps off `/info` and the honest root
 //!                         announcements off the follower's log.
+//!
+//!                         `--hold-ms <ms>` (after the positionals) is the
+//!                         HELD-connection mode: one connection per host,
+//!                         opened once and kept for the whole flood, every
+//!                         wave sent over it, then held `ms` past the last
+//!                         wave while draining whatever the node sends. A
+//!                         store that drops a host's entries on disconnect
+//!                         keeps them only while the connection stays up,
+//!                         so this is the shape that tests its caps for a
+//!                         full TTL. Only `hosts` addresses are used (not
+//!                         `hosts x waves`). The report says how many
+//!                         connections the node closed before the hold
+//!                         ended.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -475,7 +488,10 @@ fn json_first_hex_id(body: &str) -> Option<[u8; 32]> {
 }
 
 async fn height(api: &str) -> Option<u64> {
-    let (_, body) = api_get(api, "/info").await.ok()?;
+    let (_, body) = tokio::time::timeout(Duration::from_secs(10), api_get(api, "/info"))
+        .await
+        .ok()?
+        .ok()?;
     json_u64(&body, "fullHeight")
 }
 
@@ -942,89 +958,376 @@ async fn input_block_flood(ctx: &Ctx, announcements: u32, deliveries: u32) -> bo
     ok
 }
 
-/// The ROOT-announcement flood: waves of announcements at height + 2, each
-/// wave from `hosts` source addresses nobody has used before.
-///
-/// Like `input_block_flood` the verdict is narrow — the traffic was
-/// delivered — and the store's caps, the honest roots and the honest
-/// peers are judged by the campaign from the follower's own `/info` and
-/// log.
-async fn input_block_root_flood(
-    ctx: &Ctx,
+/// `input_block_root_flood`'s arguments: five positionals, each with the
+/// default it has always had, and the optional `--hold-ms` flag that
+/// selects the held-connection mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootFloodArgs {
     hosts: u8,
     per_host: u32,
     waves: u8,
     interval: Duration,
     first: u8,
-) -> bool {
-    let needed = u32::from(hosts) * u32::from(waves);
-    if u32::from(first) + needed > 255 {
-        println!(
-            "FAIL input_block_root_flood: {hosts} hosts x {waves} waves from 127.{first}.0.1 \
-             runs past 127.255.0.1"
-        );
-        return false;
-    }
-    let seed = 0x4d61_7472_6978_0002; // "Matrix" + the root-flood tag.
-    let mut sent_total = 0u32;
-    let mut refused_hosts = 0u32;
-    for wave in 0..waves {
-        let Some(height) = height(&ctx.api).await else {
-            println!("[root_flood] wave {wave}: node height unreadable, wave skipped");
-            tokio::time::sleep(interval).await;
-            continue;
+    /// `Some` = held connections, kept this long past the last wave.
+    hold: Option<Duration>,
+}
+
+impl RootFloodArgs {
+    fn parse(rest: &[String]) -> Result<Self, String> {
+        let mut positional = Vec::new();
+        let mut hold = None;
+        let mut it = rest.iter();
+        while let Some(arg) = it.next() {
+            if arg == "--hold-ms" {
+                let value = it.next().ok_or("--hold-ms needs a value")?;
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|e| format!("--hold-ms {value}: {e}"))?;
+                if ms == 0 {
+                    return Err("--hold-ms must be positive".into());
+                }
+                hold = Some(Duration::from_millis(ms));
+            } else {
+                positional.push(arg.as_str());
+            }
+        }
+        if positional.len() > 5 {
+            return Err(format!("unexpected arguments: {:?}", &positional[5..]));
+        }
+        fn field<T: std::str::FromStr>(
+            values: &[&str],
+            i: usize,
+            name: &str,
+            default: T,
+        ) -> Result<T, String>
+        where
+            T::Err: std::fmt::Display,
+        {
+            values.get(i).map_or(Ok(default), |v| {
+                v.parse().map_err(|e| format!("{name} {v}: {e}"))
+            })
+        }
+        let args = Self {
+            hosts: field(&positional, 0, "hosts", 10)?,
+            per_host: field(&positional, 1, "per_host", 40)?,
+            waves: field(&positional, 2, "waves", 10)?,
+            interval: Duration::from_millis(field(&positional, 3, "interval_ms", 15_000)?),
+            first: field(&positional, 4, "first", 100)?,
+            hold,
         };
-        let flood_height = height as u32 + 2;
-        let started = Instant::now();
-        let mut conns = Vec::new();
-        let mut sent_wave = 0u32;
-        for h in 0..hosts {
-            let k = first + wave * hosts + h;
-            let mut conn =
-                match Conn::open_as(src(k), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        refused_hosts += 1;
-                        println!("[root_flood] wave {wave}: {} refused: {e}", src(k));
-                        continue;
-                    }
-                };
-            for i in 0..per_host {
-                let n = (u32::from(k) << 16) | i;
-                let payload = bogus_announcement(seed, n, flood_height, draw(seed, 9, n));
-                let frame = full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload);
-                if conn.stream.write_all(&frame).await.is_err() {
+        if args.hold.is_some() && args.per_host.saturating_mul(u32::from(args.waves)) > 0xffff {
+            // The held mode numbers a host's announcements across waves in
+            // the low 16 bits of the draw index; past that they repeat.
+            return Err(format!(
+                "--hold-ms: per_host x waves = {} exceeds 65535 distinct announcements per host",
+                u64::from(args.per_host) * u64::from(args.waves)
+            ));
+        }
+        if args.hosts == 0 || args.per_host == 0 || args.waves == 0 {
+            return Err("hosts, per_host and waves must be positive".into());
+        }
+        if u32::from(args.first) + args.hosts_needed() > 256 {
+            return Err("source address range exceeds 127.255.0.1".into());
+        }
+        Ok(args)
+    }
+
+    /// How many distinct `127.<k>.0.1` sources the flood uses: fresh
+    /// hosts every wave, or the same `hosts` held for all of them.
+    fn hosts_needed(&self) -> u32 {
+        let per_wave = u32::from(self.hosts);
+        if self.hold.is_some() {
+            per_wave
+        } else {
+            per_wave * u32::from(self.waves)
+        }
+    }
+
+    /// The draw index of announcement `i` of `wave` from source octet
+    /// `k`: distinct per announcement across the whole flood. A fresh
+    /// host sends one wave, so its index is `i`; a held host sends every
+    /// wave, so its index runs on across them.
+    fn announcement_index(&self, k: u8, wave: u8, i: u32) -> u32 {
+        let within = if self.hold.is_some() {
+            u32::from(wave) * self.per_host + i
+        } else {
+            i
+        };
+        (u32::from(k) << 16) | within
+    }
+}
+
+/// Closure times are observation times, not an attribution to the remote node.
+struct HeldConn {
+    conn: Conn,
+    closure: Option<serde_json::Value>,
+}
+
+impl HeldConn {
+    fn close(&mut self, kind: &str, error: Option<String>, started: Instant) {
+        if self.closure.is_none() {
+            self.closure = Some(serde_json::json!({
+                "kind": kind, "error": error, "observed_ms": started.elapsed().as_millis()
+            }));
+        }
+    }
+}
+
+/// Bound each socket's work so continuous traffic cannot monopolize a pass.
+fn drain_pass(conns: &mut [HeldConn], end: Instant, started: Instant) {
+    let mut buf = [0u8; 65536];
+    for held in conns.iter_mut().filter(|h| h.closure.is_none()) {
+        for _ in 0..8 {
+            if Instant::now() >= end {
+                return;
+            }
+            match held.conn.stream.try_read(&mut buf) {
+                Ok(0) => {
+                    held.close("eof", None, started);
                     break;
                 }
-                sent_wave += 1;
+                Ok(_) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => {
+                    held.close("io_error", Some(e.to_string()), started);
+                    break;
+                }
             }
-            conns.push(conn);
         }
-        // Held open briefly so the node reads every frame before the
-        // sockets close; the entries it admitted outlive the connection.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        drop(conns);
-        sent_total += sent_wave;
-        println!(
-            "[root_flood] wave {wave}: {sent_wave} announcements at height {flood_height} \
-             from {hosts} hosts in {:?}",
-            started.elapsed()
-        );
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        tokio::time::sleep(interval).await;
     }
+}
+
+async fn drain_held(conns: &mut [HeldConn], end: Instant, started: Instant) {
+    while Instant::now() < end {
+        drain_pass(conns, end, started);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            end.min(Instant::now() + Duration::from_millis(5)),
+        ))
+        .await;
+    }
+}
+
+/// Nonblocking writes advance every connection while reads keep draining.
+/// The deadline bounds a whole wave, including peers that never read.
+async fn send_held(
+    conns: &mut [HeldConn],
+    frames: &[Vec<Vec<u8>>],
+    timeout: Duration,
+    started: Instant,
+) -> (u32, u32, Option<Instant>) {
+    let end = Instant::now() + timeout;
+    let mut positions = vec![(0usize, 0usize); conns.len()];
+    let (mut sent, mut errors, mut last_send) = (0, 0, None);
+    loop {
+        drain_pass(conns, end, started);
+        let mut pending = false;
+        for (index, held) in conns.iter_mut().enumerate() {
+            let (frame, offset) = &mut positions[index];
+            if *frame == frames[index].len() || held.closure.is_some() {
+                continue;
+            }
+            if Instant::now() >= end {
+                held.close("io_error", Some("wave write timed out".into()), started);
+                errors += 1;
+                continue;
+            }
+            pending = true;
+            for _ in 0..8 {
+                if *frame == frames[index].len() || Instant::now() >= end {
+                    break;
+                }
+                match held
+                    .conn
+                    .stream
+                    .try_write(&frames[index][*frame][*offset..])
+                {
+                    Ok(0) => {
+                        held.close("io_error", Some("write returned zero".into()), started);
+                        errors += 1;
+                        break;
+                    }
+                    Ok(n) => {
+                        *offset += n;
+                        if *offset == frames[index][*frame].len() {
+                            *frame += 1;
+                            *offset = 0;
+                            sent += 1;
+                            last_send = Some(Instant::now());
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        held.close("io_error", Some(e.to_string()), started);
+                        errors += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if !pending {
+            return (sent, errors, last_send);
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn input_block_root_flood(ctx: &Ctx, args: &RootFloodArgs) -> bool {
+    let seed = 0x4d61_7472_6978_0002;
+    let started = Instant::now();
+    let started_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut sockets_open_ms = None;
+    let mut conns = Vec::new();
+    let mut connections = Vec::new();
+    let mut wave_results = Vec::new();
+    let mut last_send = None;
+    let mut hold_end = None;
+    for wave in 0..args.waves {
+        if wave == 0 || args.hold.is_none() {
+            for h in 0..args.hosts {
+                let k = (u32::from(args.first)
+                    + u32::from(h)
+                    + if args.hold.is_none() {
+                        u32::from(wave) * u32::from(args.hosts)
+                    } else {
+                        0
+                    }) as u8;
+                let opening = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    Conn::open_as(src(k), ctx.target, ctx.magic, SUBBLOCKS_PEER_VERSION),
+                );
+                tokio::pin!(opening);
+                let opened = loop {
+                    tokio::select! {
+                        result = &mut opening => break result.unwrap_or_else(|_| {
+                            Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                                "connect/handshake timed out"))
+                        }),
+                        _ = drain_held(&mut conns, Instant::now() + Duration::from_millis(10), started) => (),
+                    }
+                };
+                match opened {
+                    Ok(conn) => conns.push(HeldConn {
+                        conn,
+                        closure: None,
+                    }),
+                    Err(e) => connections.push(serde_json::json!({
+                        "source": src(k).to_string(), "opened": false, "survived": false,
+                        "closure": {"kind": "open_error", "error": e.to_string(),
+                                    "observed_ms": started.elapsed().as_millis()}
+                    })),
+                }
+            }
+        }
+        if wave == 0 {
+            sockets_open_ms = Some(started.elapsed().as_millis());
+        }
+        // Height lookups must not stop the readers either.
+        let height_read = height(&ctx.api);
+        tokio::pin!(height_read);
+        let current_height = loop {
+            tokio::select! {
+                value = &mut height_read => break value,
+                _ = drain_held(&mut conns, Instant::now() + Duration::from_millis(10), started) => (),
+            }
+        };
+        let (sent, write_errors, sent_at) = if let Some(height) = current_height {
+            let frames: Vec<Vec<Vec<u8>>> = conns
+                .iter()
+                .map(|held| {
+                    (0..args.per_host)
+                        .map(|i| {
+                            let n = args.announcement_index(held.conn.src.octets()[1], wave, i);
+                            let payload =
+                                bogus_announcement(seed, n, height as u32 + 2, draw(seed, 9, n));
+                            full_frame(&ctx.magic, CODE_INPUT_BLOCK, &payload)
+                        })
+                        .collect()
+                })
+                .collect();
+            // Send a host's full burst before the next host so the per-host
+            // cap is exercised before global fairness redistributes capacity.
+            // Reads on ALL sockets still progress during each bounded write.
+            let mut sent = 0;
+            let mut errors = 0;
+            let mut last = None;
+            for (index, host_frames) in frames.into_iter().enumerate() {
+                let mut batch = vec![Vec::new(); conns.len()];
+                batch[index] = host_frames;
+                let (n, e, at) =
+                    send_held(&mut conns, &batch, Duration::from_secs(5), started).await;
+                sent += n;
+                errors += e;
+                if at.is_some() {
+                    last = at;
+                }
+            }
+            (sent, errors, last)
+        } else {
+            (0, 0, None)
+        };
+        if sent_at.is_some() {
+            last_send = sent_at;
+        }
+        wave_results.push(serde_json::json!({"wave": wave, "sent": sent,
+            "write_errors": write_errors, "height_observed": current_height.is_some()}));
+        if args.hold.is_none() {
+            drain_held(
+                &mut conns,
+                Instant::now() + Duration::from_millis(500),
+                started,
+            )
+            .await;
+            record_connections(&mut conns, &mut connections);
+        }
+        if wave + 1 < args.waves {
+            drain_held(&mut conns, Instant::now() + args.interval, started).await;
+        }
+    }
+    if let (Some(hold), Some(last)) = (args.hold, last_send) {
+        let end = last + hold;
+        drain_held(&mut conns, end, started).await;
+        hold_end = Some(end.duration_since(started).as_millis());
+    }
+    record_connections(&mut conns, &mut connections);
     let after = height(&ctx.api).await;
+    // No early closures are allowed: rejection is evidence, but cannot prove
+    // a store was exercised by the configured sustained held experiment.
+    let ok = after.is_some()
+        && wave_results
+            .iter()
+            .all(|w| w["sent"] == u32::from(args.hosts) * args.per_host && w["write_errors"] == 0)
+        && connections
+            .iter()
+            .all(|c| c["opened"] == true && (args.hold.is_none() || c["survived"] == true));
+    let counts = serde_json::json!({
+        "opened": connections.iter().filter(|c| c["opened"] == true).count(),
+        "survived": connections.iter().filter(|c| c["survived"] == true).count(),
+        "eof": connections.iter().filter(|c| c["closure"]["kind"] == "eof").count(),
+        "io_error": connections.iter().filter(|c| c["closure"]["kind"] == "io_error").count(),
+        "open_error": connections.iter().filter(|c| c["closure"]["kind"] == "open_error").count(),
+    });
     println!(
-        "[root_flood] sent {sent_total} announcements in {waves} waves, {refused_hosts} hosts \
-         refused; node fullHeight after: {after:?}"
-    );
-    let ok = sent_total > 0 && after.is_some();
-    println!(
-        "{} input_block_root_flood: node still answering REST after the flood",
-        if ok { "PASS" } else { "FAIL" }
+        "ROOT_FLOOD_RESULT {}",
+        serde_json::json!({
+            "ok": ok, "waves": wave_results, "connections": connections, "connection_counts": counts,
+            "started_unix_ms": started_unix_ms, "sockets_open_ms": sockets_open_ms,
+            "last_send_ms": last_send.map(|t| t.duration_since(started).as_millis()),
+            "hold_end_ms": hold_end,
+            "finished_ms": started.elapsed().as_millis(),
+            "started_monotonic_note": "all milliseconds relative to adversary start"
+        })
     );
     ok
+}
+
+fn record_connections(conns: &mut Vec<HeldConn>, results: &mut Vec<serde_json::Value>) {
+    for held in conns.drain(..) {
+        results.push(serde_json::json!({"source": held.conn.src.to_string(),
+            "opened": true, "survived": held.closure.is_none(), "closure": held.closure}));
+    }
 }
 
 /// Header-only frames declaring MAX_PAYLOAD_SIZE: each must be cut at
@@ -1560,22 +1863,13 @@ async fn main() {
             let d: u32 = rest.get(1).map_or(1_000, |s| s.parse().unwrap());
             input_block_flood(&ctx, a, d).await
         }
-        "input_block_root_flood" => {
-            let hosts: u8 = rest.first().map_or(10, |s| s.parse().unwrap());
-            let per_host: u32 = rest.get(1).map_or(40, |s| s.parse().unwrap());
-            let waves: u8 = rest.get(2).map_or(10, |s| s.parse().unwrap());
-            let interval_ms: u64 = rest.get(3).map_or(15_000, |s| s.parse().unwrap());
-            let first: u8 = rest.get(4).map_or(100, |s| s.parse().unwrap());
-            input_block_root_flood(
-                &ctx,
-                hosts,
-                per_host,
-                waves,
-                Duration::from_millis(interval_ms),
-                first,
-            )
-            .await
-        }
+        "input_block_root_flood" => match RootFloodArgs::parse(rest) {
+            Ok(args) => input_block_root_flood(&ctx, &args).await,
+            Err(e) => {
+                eprintln!("input_block_root_flood: {e}");
+                std::process::exit(2);
+            }
+        },
         other => {
             eprintln!("unknown scenario: {other}");
             std::process::exit(2);
@@ -1585,4 +1879,226 @@ async fn main() {
     let h_after = height(&ctx.api).await;
     println!("[node] fullHeight after: {h_after:?}");
     println!("[result] {scenario}: {}", if ok { "PASS" } else { "FAIL" });
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- helpers -----
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    async fn socket_pair() -> (HeldConn, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+        (
+            HeldConn {
+                conn: Conn {
+                    stream: client,
+                    magic: [0; 4],
+                    buf: Vec::new(),
+                    src: Ipv4Addr::LOCALHOST,
+                },
+                closure: None,
+            },
+            peer,
+        )
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn root_flood_args_positionals_only_keep_the_hit_and_run_defaults() {
+        let parsed = RootFloodArgs::parse(&args(&["10", "40", "12", "20000", "100"])).unwrap();
+        assert_eq!(
+            parsed,
+            RootFloodArgs {
+                hosts: 10,
+                per_host: 40,
+                waves: 12,
+                interval: Duration::from_millis(20_000),
+                first: 100,
+                hold: None,
+            }
+        );
+        assert_eq!(parsed.hosts_needed(), 120);
+        let defaults = RootFloodArgs::parse(&[]).unwrap();
+        assert_eq!(
+            (
+                defaults.hosts,
+                defaults.per_host,
+                defaults.waves,
+                defaults.first
+            ),
+            (10, 40, 10, 100)
+        );
+        assert_eq!(defaults.interval, Duration::from_millis(15_000));
+        assert_eq!(defaults.hold, None);
+    }
+
+    #[test]
+    fn root_flood_args_hold_ms_selects_held_mode_with_one_host_set() {
+        let parsed = RootFloodArgs::parse(&args(&[
+            "10",
+            "160",
+            "12",
+            "20000",
+            "100",
+            "--hold-ms",
+            "130000",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.hold, Some(Duration::from_millis(130_000)));
+        assert_eq!(parsed.per_host, 160);
+        // The same ten hosts carry every wave.
+        assert_eq!(parsed.hosts_needed(), 10);
+        // The flag may also precede the positionals.
+        let early = RootFloodArgs::parse(&args(&["--hold-ms", "5", "3"])).unwrap();
+        assert_eq!(early.hold, Some(Duration::from_millis(5)));
+        assert_eq!(early.hosts, 3);
+    }
+
+    #[test]
+    fn root_flood_announcement_index_held_host_never_repeats_across_waves() {
+        let held =
+            RootFloodArgs::parse(&args(&["2", "160", "12", "1", "100", "--hold-ms", "1"])).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for wave in 0..12 {
+            for i in 0..160 {
+                assert!(seen.insert(held.announcement_index(100, wave, i)));
+            }
+        }
+        // Another host's indices are disjoint from this one's.
+        assert!(!seen.contains(&held.announcement_index(101, 0, 0)));
+        // Hit-and-run keeps the index it always had: `(k << 16) | i`.
+        let fresh = RootFloodArgs::parse(&args(&["2", "40", "3"])).unwrap();
+        assert_eq!(fresh.announcement_index(105, 2, 7), (105 << 16) | 7);
+    }
+
+    #[test]
+    fn root_flood_address_last_valid_accepts_and_counts_validate() {
+        assert!(RootFloodArgs::parse(&args(&["1", "1", "1", "0", "255"])).is_ok());
+        assert!(
+            RootFloodArgs::parse(&args(&["1", "1", "1", "0", "255", "--hold-ms", "1"])).is_ok()
+        );
+        assert!(RootFloodArgs::parse(&args(&["2", "1", "1", "0", "255"])).is_err());
+        for invalid in [&["0"][..], &["1", "0"], &["1", "1", "0"]] {
+            assert!(RootFloodArgs::parse(&args(invalid)).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn held_continuous_input_other_eof_observed_within_deadline() {
+        let (busy, mut producer) = socket_pair().await;
+        let (quiet, peer) = socket_pair().await;
+        let task = tokio::spawn(async move {
+            let buf = [1u8; 65536];
+            while producer.write_all(&buf).await.is_ok() {}
+        });
+        drop(peer);
+        let mut conns = vec![busy, quiet];
+        let start = Instant::now();
+        drain_held(&mut conns, start + Duration::from_millis(80), start).await;
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(conns[1].closure.as_ref().unwrap()["kind"], "eof");
+        task.abort();
+        let _ = task.await;
+    }
+
+    // The premise is that a peer which never reads eventually fills the
+    // kernel's socket buffers and blocks the writer. Windows loopback
+    // accepts the whole 32 MiB write at once, so the timeout path is not
+    // reachable there; the devnet harness runs this tool on Linux only.
+    #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows loopback buffers the whole write, so a non-reading peer cannot block it"
+    )]
+    async fn held_nonreading_peer_write_times_out_other_socket_progresses() {
+        let (blocked, _peer) = socket_pair().await;
+        let (other, mut reader) = socket_pair().await;
+        let read = tokio::spawn(async move {
+            let mut byte = [0u8; 1];
+            reader.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, [42]);
+        });
+        let mut conns = vec![blocked, other];
+        let frames = vec![vec![vec![1; 32 * 1024 * 1024]], vec![vec![42]]];
+        let start = Instant::now();
+        let (sent, errors, _) =
+            send_held(&mut conns, &frames, Duration::from_millis(100), start).await;
+        assert_eq!((sent, errors), (1, 1));
+        assert_eq!(conns[1].closure.as_ref().unwrap()["kind"], "eof");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            conns[0].closure.as_ref().unwrap()["error"],
+            "wave write timed out"
+        );
+        tokio::time::timeout(Duration::from_secs(1), read)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn held_absolute_deadline_does_not_restart_hold_or_count_late_close() {
+        let (held, peer) = socket_pair().await;
+        let mut conns = vec![held];
+        let last_send = Instant::now();
+        let deadline = last_send + Duration::from_millis(150);
+        // Work after the last send consumes hold time; it does not extend it.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        drain_held(&mut conns, deadline, last_send).await;
+        assert!(Instant::now() >= deadline);
+        assert!(last_send.elapsed() < Duration::from_millis(200));
+        assert!(conns[0].closure.is_none());
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            deadline + Duration::from_millis(30),
+        ))
+        .await;
+        drop(peer);
+        // Even when invoked again, an expired deadline never reads a late EOF.
+        drain_held(&mut conns, deadline, last_send).await;
+        assert!(conns[0].closure.is_none());
+        drain_held(
+            &mut conns,
+            Instant::now() + Duration::from_millis(30),
+            last_send,
+        )
+        .await;
+        assert_eq!(conns[0].closure.as_ref().unwrap()["kind"], "eof");
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn root_flood_args_bad_hold_ms_errors() {
+        for bad in [
+            &["--hold-ms"][..],
+            &["--hold-ms", "soon"][..],
+            &["--hold-ms", "0"][..],
+        ] {
+            assert!(RootFloodArgs::parse(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn root_flood_args_extra_or_malformed_positionals_error() {
+        assert!(RootFloodArgs::parse(&args(&["1", "2", "3", "4", "5", "6"])).is_err());
+        assert!(RootFloodArgs::parse(&args(&["300"])).is_err());
+        // A held host's announcements must stay distinct across waves.
+        assert!(
+            RootFloodArgs::parse(&args(&["1", "10000", "7", "1", "100", "--hold-ms", "1"]))
+                .is_err()
+        );
+    }
 }
