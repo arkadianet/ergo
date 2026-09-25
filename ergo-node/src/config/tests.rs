@@ -15,7 +15,7 @@ fn parse(toml_str: &str) -> TomlConfig {
 /// Blake2b256("hello") — same `(secret, hash)` pair used by the
 /// Scala node at `reference/ergo/src/main/resources/*.conf` and
 /// by the Scala IT client at `NodeApi.scala:52`. Lets `load()`
-/// pass the mandatory-hash gate without making every test fixture
+/// exercise configured-key behavior without making every test fixture
 /// restate it. Tests that exercise the validation paths write
 /// their own TOMLs and assert the rejection.
 ///
@@ -40,9 +40,7 @@ fn temp_toml(body: &str) -> tempfile::NamedTempFile {
     file
 }
 
-/// Default per-test TOML carrying only the mandatory api_key_hash, so
-/// tests that don't care about TOML structure still satisfy `load()`'s
-/// hash gate. Bind the returned guard for the test's lifetime.
+/// Default per-test TOML carrying an explicit API key hash. Bind the returned guard for the test's lifetime.
 fn default_toml() -> tempfile::NamedTempFile {
     temp_toml(&format!(
         "[api.security]\napi_key_hash = \"{TEST_DEFAULT_API_KEY_HASH}\"\n"
@@ -68,7 +66,7 @@ fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     }
 }
 
-/// Auto-appends the mandatory api_key_hash unless the caller's TOML
+/// Auto-appends the configured-key fixture unless the caller's TOML
 /// already pins one (tests that assert on hash-validation errors set
 /// their own). Returns the temp-file guard; bind it for the test's
 /// lifetime — the file is removed on drop.
@@ -307,6 +305,23 @@ fn default_api_bind_is_loopback() {
 }
 
 #[test]
+fn api_local_reverse_proxy_defaults_false() {
+    let toml = default_toml();
+    let cli = minimal_cli(Some(&toml));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(!cfg.api_local_reverse_proxy);
+}
+
+#[test]
+fn api_local_reverse_proxy_explicit_true() {
+    let path =
+        write_toml("[api]\nlocal_reverse_proxy = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cli = minimal_cli(Some(&path));
+    let cfg = NodeConfig::load(cli).expect("load");
+    assert!(cfg.api_local_reverse_proxy);
+}
+
+#[test]
 fn api_disabled_yields_none() {
     let path = write_toml("[api]\ndisabled = true\n\n[peers]\nknown = [\"127.0.0.1:9030\"]\n");
     let cli = minimal_cli(Some(&path));
@@ -368,19 +383,11 @@ fn wallet_section_unknown_field_rejected() {
 }
 
 #[test]
-fn api_enabled_requires_api_key_hash() {
-    // Scala-parity boot rule (ErgoApp.scala:40-43). Without the
-    // hash, `load()` must refuse to return Ok rather than silently
-    // mounting `/wallet/*` ungated. Note: minimal_cli's default
-    // TOML provides the hash, so this test writes its own TOML
-    // *without* the hash to exercise the rejection path.
-    let path = temp_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
-    let cli = minimal_cli(Some(&path));
-    let err = NodeConfig::load(cli).expect_err("must refuse missing hash");
-    assert!(
-        err.contains("api_key_hash is required"),
-        "error must cite the missing hash: {err}"
-    );
+fn api_enabled_absent_api_key_hash_loads() {
+    let path = temp_toml("[api]\ndisabled = false\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("keyless API loads");
+    assert!(cfg.api_bind.unwrap().ip().is_loopback());
+    assert!(cfg.api_key_hash.is_none());
 }
 
 #[test]
@@ -424,6 +431,18 @@ fn api_key_hash_non_hex_rejected() {
 }
 
 #[test]
+fn api_key_hash_non_hex_rejected_even_when_disabled() {
+    for disabled in [false, true] {
+        let path = temp_toml(&format!(
+            "[api]\ndisabled = {disabled}\n[api.security]\napi_key_hash = \"{}\"\n",
+            "z".repeat(64)
+        ));
+        let err = NodeConfig::load(minimal_cli(Some(&path))).expect_err("invalid supplied hash");
+        assert!(err.contains("lowercase hex"), "{err}");
+    }
+}
+
+#[test]
 fn api_disabled_does_not_require_api_key_hash() {
     // Counterpart to `api_enabled_requires_api_key_hash`: when the
     // operator turns off the API server entirely, there's no
@@ -433,6 +452,36 @@ fn api_disabled_does_not_require_api_key_hash() {
     let cfg = NodeConfig::load(cli).expect("api disabled should load without hash");
     assert!(cfg.api_bind.is_none());
     assert!(cfg.api_key_hash.is_none());
+}
+
+#[test]
+fn shipped_ready_template_parses_without_api_credentials() {
+    let source = include_str!("../../ergo-node.toml");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(false));
+    assert!(cfg.api.security.is_none());
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+    let path = temp_toml(source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");
+    assert!(resolved.api_bind.unwrap().ip().is_loopback());
+    assert!(resolved.api_key_hash.is_none());
+}
+
+#[test]
+fn shipped_example_template_parses_with_one_api_table() {
+    let source = include_str!("../../ergo-node.toml.example");
+    let cfg = parse(source);
+    assert_eq!(cfg.api.disabled, Some(false));
+    assert_eq!(
+        source.lines().filter(|line| line.trim() == "[api]").count(),
+        1
+    );
+    assert!(cfg.api.security.is_none());
+    assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
+    let path = temp_toml(source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");
+    assert!(resolved.api_bind.unwrap().ip().is_loopback());
+    assert!(resolved.api_key_hash.is_none());
 }
 
 #[test]

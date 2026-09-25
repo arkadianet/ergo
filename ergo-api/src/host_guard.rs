@@ -11,9 +11,9 @@
 //! `/blocks/*`, `/peers/*`, …) — the request looks locally-sourced to
 //! the node.
 //!
-//! Key-gated routes (`/wallet/*`, `/node/shutdown`) are unaffected: the
-//! `api_key` header can't be forged from a browser context. This guard
-//! closes the read path for everything else by checking the request's
+//! A rebinding page can also send an `api_key` header under the same-origin
+//! hostname. Privileged routes require an operator-configured secret; the
+//! Host guard protects public reads and adds defense in depth by checking
 //! host identity against an allowlist *before* any routing happens.
 //!
 //! Mounted with `Router::layer` (not `route_layer`) around the fully

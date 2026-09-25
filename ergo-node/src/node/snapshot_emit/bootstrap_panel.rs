@@ -37,6 +37,7 @@ fn select_bootstrap_phase(
         return ApiBootstrapPhase::PostInstallCatchup;
     }
     match reducer_state {
+        BootstrapState::Halted => ApiBootstrapPhase::Halted,
         BootstrapState::Idle | BootstrapState::Querying | BootstrapState::Selected { .. } => {
             ApiBootstrapPhase::Discovery
         }
@@ -135,7 +136,9 @@ pub(super) fn build_bootstrap_status(
         }
     } else {
         match reducer_state {
-            BootstrapState::Idle | BootstrapState::Querying => (0, None, false),
+            BootstrapState::Halted | BootstrapState::Idle | BootstrapState::Querying => {
+                (0, None, false)
+            }
             BootstrapState::Selected {
                 height,
                 manifest_id,
@@ -361,6 +364,19 @@ mod tests {
         assert_eq!(
             select_bootstrap_phase(&verified, &phase_inputs(false, true, false, false)),
             ergo_api::types::ApiBootstrapPhase::Installing
+        );
+    }
+    #[test]
+    fn bootstrap_phase_local_failure_reports_halted() {
+        let inputs = BootstrapPhaseInputs {
+            in_catchup: false,
+            has_reconstructed_tree: false,
+            chunk_assembly_complete: false,
+            has_chunk_assembly: false,
+        };
+        assert_eq!(
+            select_bootstrap_phase(&BootstrapState::Halted, &inputs),
+            ergo_api::types::ApiBootstrapPhase::Halted
         );
     }
 }

@@ -228,6 +228,7 @@ fn app() -> Router {
     let chain: Option<Arc<dyn NodeChainQuery>> = Some(Arc::new(StubChain));
     let mempool: Arc<dyn MempoolView> = Arc::new(NoopMempoolView::new());
     let state = V1State {
+        blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
         read,
         chain,
         indexer: None,

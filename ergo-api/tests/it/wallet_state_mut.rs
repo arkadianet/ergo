@@ -162,10 +162,11 @@ impl WalletAdmin for StubAdmin {
 #[tokio::test]
 async fn rescan_returns_200() {
     let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin);
-    let app = ergo_api::wallet::router_with_security(admin, None);
+    let app = ergo_api::wallet::router_with_security(admin, Some(super::auth::security()));
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/rescan")
                 .body(Body::empty())
@@ -181,12 +182,13 @@ async fn rescan_returns_200() {
 #[tokio::test]
 async fn update_change_address_with_untracked_returns_400_with_reason() {
     let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin);
-    let app = ergo_api::wallet::router_with_security(admin, None);
+    let app = ergo_api::wallet::router_with_security(admin, Some(super::auth::security()));
     let body =
         serde_json::json!({ "address": "9eYMpbGgBf42bCcnB2nG3wQdqPzpCCw5eB1YaWUUen9uCaW3wwm" });
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/updateChangeAddress")
                 .header("content-type", "application/json")

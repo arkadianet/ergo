@@ -153,7 +153,7 @@ impl WalletAdmin for MinimalAdmin {
 
 fn app() -> axum::Router {
     let admin: Arc<dyn WalletAdmin> = Arc::new(MinimalAdmin);
-    ergo_api::wallet::router_with_security(admin, None)
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 /// Assert that a route is a live handler (returns 400 wallet_uninitialized
@@ -161,6 +161,7 @@ fn app() -> axum::Router {
 /// `raw_body` is the JSON bytes to send (use `b"{}"` for object bodies, `b"[]"` for arrays).
 async fn assert_live_handler_mounted(uri: &str, raw_body: &'static [u8]) {
     let req = Request::builder()
+        .header(ergo_api::auth::API_KEY_HEADER, "hello")
         .method(Method::POST)
         .uri(uri)
         .header("content-type", "application/json")
@@ -187,6 +188,7 @@ async fn balances_with_unconfirmed_handler_mounted() {
     // GET with no body — MinimalAdmin returns Uninitialized → 400, proving
     // the route is the real overlay handler (not the old 501 stub).
     let req = Request::builder()
+        .header(ergo_api::auth::API_KEY_HEADER, "hello")
         .method(Method::GET)
         .uri("/wallet/balances/withUnconfirmed")
         .body(Body::empty())
@@ -282,6 +284,7 @@ async fn derive_next_key_stub() {
     let resp = app()
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/deriveNextKey")
                 .body(Body::empty())

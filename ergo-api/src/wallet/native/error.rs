@@ -58,6 +58,7 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
         E::RestorePruningUnsupported => (StatusCode::CONFLICT, "pruning_unsupported"),
         E::ChangeAddressUntracked => (StatusCode::UNPROCESSABLE_ENTITY, "change_address_untracked"),
         E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+        E::StaleChainTip(_) => (StatusCode::CONFLICT, "stale_chain_tip"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         // Legacy compat-only `Forbidden` (getPrivateKey) maps to the same
         // sensitive-disabled reason as the native `SensitiveOpDisabled`.
@@ -91,6 +92,7 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
     // leaking storage internals through a generic Display).
     let detail = match &e {
         E::BadRequest(d)
+        | E::StaleChainTip(d)
         | E::Internal(d)
         | E::Forbidden(d)
         | E::RescanUnavailable(d)
@@ -129,6 +131,14 @@ mod tests {
         let (s, b) = mapped(E::Uninitialized);
         assert_eq!(s, StatusCode::CONFLICT);
         assert_eq!(b.reason, "wallet_uninitialized");
+    }
+
+    #[test]
+    fn stale_chain_tip_maps_to_conflict() {
+        let (s, b) = mapped(E::StaleChainTip("tip moved".to_string()));
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert_eq!(b.reason, "stale_chain_tip");
+        assert_eq!(b.detail.as_deref(), Some("tip moved"));
     }
 
     #[test]

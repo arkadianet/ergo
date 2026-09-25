@@ -16,9 +16,9 @@ use tracing::{info, warn};
 use super::meta::StateMeta;
 use super::undo::undo_log_key;
 use super::{
-    build_wallet_block_txs_from_sections, node_to_bytes, owned_to_block_txs, StateError,
-    StateStore, UndoEntry, AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, NODE_FORMAT_V2,
-    NODE_FORMAT_VERSION_KEY, STATE_META, UNDO_LOG,
+    build_wallet_block_txs_from_sections, node_to_bytes, StateError, StateStore, UndoEntry,
+    AVL_NODES, CHAIN_INDEX, CHAIN_STATE_META, NODE_FORMAT_V2, NODE_FORMAT_VERSION_KEY, STATE_META,
+    UNDO_LOG,
 };
 
 impl StateStore {
@@ -37,13 +37,18 @@ impl StateStore {
     /// with the chain-state rollback (both in the same
     /// `persist_rollback` txn). Pass `None, None` from test
     /// harnesses and library callers that do not manage wallet
-    /// state.
+    /// state. A wallet hook without a rescan guard is rejected before mutation.
     pub fn rollback_to(
         &mut self,
         target_height: u32,
         wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
         rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
     ) -> Result<(), StateError> {
+        if wallet_hook.is_some() && rescan_guard.is_none() {
+            return Err(StateError::InvalidPrecondition {
+                what: "wallet rollback requires a rescan guard",
+            });
+        }
         // Capture identity fields before any mutation so the
         // `_failed` event below carries the pre-attempt values,
         // never rebuilt-from-committed values. Depth is
@@ -444,33 +449,26 @@ impl StateStore {
                 // Re-read block transactions from BLOCK_SECTIONS.
                 match build_wallet_block_txs_from_sections(&self.db, hid) {
                     Ok(Some(owned)) => {
-                        let bound = owned_to_block_txs(&owned);
-                        let btxs = bound.as_block_txs();
-                        crate::wallet::apply::rollback_block_from_wallet(
-                            &write_txn, h, &btxs, guard,
+                        guard.abort_in_progress(&write_txn).map_err(|e| {
+                            StateError::WalletApply {
+                                what: "abort_in_progress",
+                                height: h,
+                                source: Box::new(e),
+                            }
+                        })?;
+                        let mut wallet_store =
+                            crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
+                        crate::wallet::WalletWrite::rollback_block(
+                            &mut wallet_store,
+                            h,
+                            &owned,
+                            false,
                         )
                         .map_err(|e| StateError::WalletApply {
                             what: "rollback",
                             height: h,
-                            source: Box::new(e),
+                            source: Box::new(e.into()),
                         })?;
-                        crate::wallet::maturity::unpromote_matured_boxes(
-                            &write_txn,
-                            h.saturating_sub(1),
-                        )
-                        .map_err(|e| StateError::WalletApply {
-                            what: "maturity unpromote",
-                            height: h,
-                            source: Box::new(e),
-                        })?;
-                        // Scan tracking rolls back in the same write-txn. No-op
-                        // when no scan rows exist for this block's boxes.
-                        crate::wallet::apply::rollback_scans_from_block(&write_txn, &btxs, h)
-                            .map_err(|e| StateError::WalletApply {
-                                what: "scan rollback",
-                                height: h,
-                                source: Box::new(e),
-                            })?;
                     }
                     Ok(None) => {
                         // Block section not available (pruned / not yet downloaded).
@@ -526,6 +524,18 @@ impl StateStore {
                     }
                 }
             }
+        }
+        if wallet_hook.is_some() {
+            crate::wallet::apply::rewind_scan_cursor(
+                &write_txn,
+                target_height,
+                (target_height > 0).then_some(&new_tip_id),
+            )
+            .map_err(|e| StateError::WalletApply {
+                what: "cursor rewind",
+                height: target_height,
+                source: Box::new(e),
+            })?;
         }
 
         write_txn.commit()?;

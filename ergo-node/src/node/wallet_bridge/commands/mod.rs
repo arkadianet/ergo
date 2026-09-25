@@ -62,6 +62,7 @@ pub(super) struct WriterContext<'a> {
     pub storage: &'a Arc<RwLock<SecretStorage>>,
     pub state: &'a Arc<RwLock<WalletState>>,
     pub db: &'a Arc<redb::Database>,
+    pub store: &'a Arc<dyn ergo_state::wallet::WalletStore>,
     pub chain: &'a Arc<dyn ChainStateAccessor>,
     pub cfg: &'a WriterConfig,
     pub submit_handle: &'a Arc<dyn TxSubmitter>,

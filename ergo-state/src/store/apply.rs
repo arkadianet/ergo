@@ -359,6 +359,44 @@ impl StateStore {
         )
     }
 
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn apply_block_unchecked_with_wallet_for_test(
+        &mut self,
+        height: u32,
+        header_id: &[u8; 32],
+        expected_state_root: &ADDigest,
+        transactions: &[Transaction],
+        wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
+    ) -> Result<(), StateError> {
+        if !self.genesis_committed {
+            return Err(StateError::InvalidPrecondition {
+                what: "apply_block called before initialize_genesis",
+            });
+        }
+        let txs: Vec<&Transaction> = transactions.iter().collect();
+        let (to_remove, to_insert) = Self::build_utxo_changes_raw(&txs)?;
+        let emission = super::emission::EmissionTransition::prepare(
+            self.chain_state.best_full_block_id,
+            height,
+            transactions.iter(),
+        )?;
+        let wallet_payload = wallet_hook.map(|hook| crate::store::WalletApplyPayload {
+            tracked_p2pk_trees: hook.tracked_p2pk_trees(),
+            cached_pubkeys: hook.cached_pubkeys(),
+            block_txs_owned: Vec::new(),
+            scan_matches: Vec::new(),
+            has_registered_scans: hook.registered_scan_count() > 0,
+        });
+        self.apply_utxo_changes(
+            height,
+            header_id,
+            expected_state_root,
+            (to_remove, to_insert, emission),
+            None,
+            wallet_payload.as_ref(),
+        )
+    }
+
     /// Test-only: same as `apply_block_unchecked` but lets the caller
     /// supply a `voted_params_row` to exercise the voted-params
     /// storage path on synthetic epoch-boundary blocks. The lifecycle
