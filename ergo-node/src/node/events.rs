@@ -24,7 +24,7 @@ use crate::peer_loop::{self, PeerEvent};
 
 use super::{
     admit_frame, cleanup_disconnected_peer, flush_actions, handle_message, penalize_peer,
-    send_to_peer, try_send_anchor_sync_info, NodeState, PeerRuntime,
+    send_post_header_sync_info, send_to_peer, NodeState, PeerRuntime,
 };
 
 /// events flow through `handle_event` individually as before.
@@ -210,35 +210,7 @@ fn process_header_modifier_batch(
     requested_peers.sort();
     requested_peers.dedup();
     for peer in requested_peers {
-        if state.registry.peers.contains_key(&peer) {
-            if !try_send_anchor_sync_info(state, &peer, now) {
-                if let Some(rt) = state.registry.peers.get(&peer) {
-                    let payload_res = match rt.sync_version {
-                        SyncVersion::V2 => {
-                            let headers = state.executor.cached_header_bytes(50);
-                            message::serialize_sync_info(&message::SyncInfo::V2 { headers })
-                        }
-                        SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
-                            rt.sync_version,
-                            &state.store,
-                        ),
-                    };
-                    match payload_res {
-                        Ok(payload) => all_actions.push(Action::SendToPeer {
-                            peer,
-                            code: message::CODE_SYNC_INFO,
-                            payload,
-                        }),
-                        Err(e) => warn!(
-                            peer = %peer,
-                            error = %e,
-                            "failed to serialize SyncInfo; skipping send"
-                        ),
-                    }
-                }
-            }
-            state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
-        }
+        send_post_header_sync_info(state, peer, now, &mut all_actions);
     }
 
     if bh.is_multiple_of(500) && bh > 0 {

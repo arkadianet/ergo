@@ -48,7 +48,7 @@ use ergo_sync::coordinator::Action;
 use tracing::{debug, info, warn};
 
 use super::super::{
-    admit_transaction, hedge_request_modifiers, send_to_peer, try_send_anchor_sync_info, NodeState,
+    admit_transaction, hedge_request_modifiers, send_post_header_sync_info, send_to_peer, NodeState,
 };
 use super::{manifest, popow, utxo_chunk};
 
@@ -920,49 +920,16 @@ fn handle_modifier_batch(
     // Without this, the next SyncInfo waits for the sync_tick timer,
     // throttling header throughput to batch_size/sync_tick.
     //
-    // Step C+D: when the scheduler is enabled, route this
-    // through the same anchor path as the periodic dispatch.
-    // Sending tip-tail here causes massive Inv duplication —
-    // peer A's tip-tail response overlaps with peer B's
-    // anchored response, the on_inv filter rejects 87-99% of
-    // incoming IDs as "already received", and effective
-    // throughput collapses (instrumentation 2026-05-05). The
-    // anchored path keeps each peer on a disjoint chain
-    // slice. mark_sync_sent fires either way so Lever 1's
-    // throttle accounts for the dispatch.
+    // Step C+D: when the scheduler is enabled, this goes through the same
+    // anchor path as the periodic dispatch (see
+    // `send_post_header_sync_info` for why tip-tail is not sent here).
     // Scala sends only for valid requested headers. The executor forgets
     // rejected deliveries, but retains AlreadyKnown and buffered headers.
     let delivered_requested_header = requested_headers.iter().any(|id| {
         state.coordinator.delivery().status(id) == ergo_p2p::delivery::ModifierStatus::Received
     });
-    if delivered_requested_header && state.registry.peers.contains_key(&peer) {
-        if !try_send_anchor_sync_info(state, &peer, now) {
-            if let Some(rt) = state.registry.peers.get(&peer) {
-                let payload_res = match rt.sync_version {
-                    SyncVersion::V2 => {
-                        let headers = state.executor.cached_header_bytes(50);
-                        message::serialize_sync_info(&message::SyncInfo::V2 { headers })
-                    }
-                    SyncVersion::V1 => ergo_sync::coordinator::build_sync_info_payload(
-                        rt.sync_version,
-                        &state.store,
-                    ),
-                };
-                match payload_res {
-                    Ok(payload) => all_actions.push(Action::SendToPeer {
-                        peer,
-                        code: message::CODE_SYNC_INFO,
-                        payload,
-                    }),
-                    Err(e) => warn!(
-                        peer = %peer,
-                        error = %e,
-                        "failed to serialize SyncInfo; skipping send"
-                    ),
-                }
-            }
-        }
-        state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
+    if delivered_requested_header {
+        send_post_header_sync_info(state, peer, now, &mut all_actions);
     }
 
     // Log progress periodically

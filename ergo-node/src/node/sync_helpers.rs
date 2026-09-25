@@ -14,11 +14,11 @@
 //!   download window.
 
 use ergo_p2p::message;
-use ergo_p2p::peer::PeerId;
+use ergo_p2p::peer::{PeerId, SyncVersion};
 use ergo_state::{ChainStateRead, StateBackendKind};
 use ergo_sync::coordinator::Action;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{send_to_peer, NodeState};
 
@@ -161,6 +161,52 @@ pub(super) fn try_send_anchor_sync_info(
         }
         Err(_) => false,
     }
+}
+
+/// Post-header SyncInfo for a peer that delivered a header we requested.
+///
+/// Sends the next anchor when the anchored scheduler has one for this
+/// peer, otherwise the tip-tail SyncInfo in the peer's version. Sending
+/// tip-tail to every peer instead causes massive Inv duplication (one
+/// peer's tip-tail response overlaps another's anchored response), so the
+/// anchored path is tried first. `mark_sync_sent` fires either way so the
+/// sync throttle accounts for the dispatch. A peer that is no longer
+/// registered gets nothing.
+pub(super) fn send_post_header_sync_info(
+    state: &mut NodeState,
+    peer: PeerId,
+    now: Instant,
+    out: &mut Vec<Action>,
+) {
+    if !state.registry.peers.contains_key(&peer) {
+        return;
+    }
+    if !try_send_anchor_sync_info(state, &peer, now) {
+        if let Some(rt) = state.registry.peers.get(&peer) {
+            let payload_res = match rt.sync_version {
+                SyncVersion::V2 => {
+                    let headers = state.executor.cached_header_bytes(50);
+                    message::serialize_sync_info(&message::SyncInfo::V2 { headers })
+                }
+                SyncVersion::V1 => {
+                    ergo_sync::coordinator::build_sync_info_payload(rt.sync_version, &state.store)
+                }
+            };
+            match payload_res {
+                Ok(payload) => out.push(Action::SendToPeer {
+                    peer,
+                    code: message::CODE_SYNC_INFO,
+                    payload,
+                }),
+                Err(e) => warn!(
+                    peer = %peer,
+                    error = %e,
+                    "failed to serialize SyncInfo; skipping send"
+                ),
+            }
+        }
+    }
+    state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
 }
 
 /// Hedge `RequestModifier` dispatch. After `on_inv` registers
