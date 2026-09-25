@@ -195,6 +195,63 @@ jobs:
       - name: cargo clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # Deliberately NOT part of the `check` matrix. The shadow scenarios are
+  # `#[ignore]`d in `ergo-walletd/tests/it/shadow.rs` so the default nextest
+  # job never pays for them, and this job is what runs them. It stays a separate
+  # job on purpose: the sweep is a thousand real block applications, a thousand
+  # real HTTP sync passes and a thousand full state comparisons, which is
+  # minutes of a single-core runner, and folding that into the shard ledger
+  # would change `scripts/ci-shards.py`'s per-shard cost model for every OS.
+  wallet-shadow:
+    name: wallet shadow (embedded vs daemon)
+    runs-on: ubuntu-latest
+    # Bounded on purpose: a hung shadow run is a harness bug, and the runner
+    # must not sit on it. The budget is dominated by the cold build — a
+    # multi-GB debug build of ergo-node + ergo-api + ergo-state plus their test
+    # binaries — and the sweep now compares the two sides at *every* height, so
+    # even the warm-cache figure is minutes, not seconds. 60 leaves room for a
+    # cold run without letting a genuinely hung one sit for hours.
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+      # Must be set HERE, above `Swatinem/rust-cache`, and to exactly what
+      # scripts/shadow-compare.sh would have chosen on its own
+      # (`$REPO_ROOT/.shadow-target/target`). The script only claims
+      # CARGO_TARGET_DIR when the caller left it unset, so this value is the one
+      # it actually builds in — and rust-cache keys, restores and saves on the
+      # target dir cargo really used. Setting it in the run step instead would
+      # warm the default ./target and then build in `.shadow-target/`, which is
+      # a cache that can never hit: every run pays a cold build.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.shadow-target/target
+      # The script removes `.shadow-target/` on success, which would delete the
+      # target dir before rust-cache's post step could save it. Retain the tree
+      # so the run that just built it is the run the next one restores.
+      SHADOW_KEEP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own key: the shadow harness links the ergo-node + ergo-api +
+          # ergo-state test binary, which the `check` matrix does not build.
+          key: wallet-shadow
+
+      # scripts/shadow-compare.sh runs the cheap negative controls first (the
+      # comparator has to be provably able to fail on every run) and then the
+      # five `#[ignore]`d scenarios. TMPDIR is deliberately left to the script
+      # rather than set here: it has no bearing on what rust-cache keys or
+      # restores, and a job-level TMPDIR would point at a directory that does
+      # not exist until the script creates it — which checkout and the actions
+      # above would trip over first.
+      - name: shadow comparison (all scenarios)
+        run: ./scripts/shadow-compare.sh --all
+
   audit:
     name: cargo-audit (security advisories)
     runs-on: ubuntu-latest
