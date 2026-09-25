@@ -8,8 +8,9 @@ a block Rust applied that Scala never had under the same ordering id is
 a chain Scala lacks — the D3 sibling-completion guard — and a block Rust
 rolled back that Scala kept is a switch Scala never made.
 
-The two-miner window is FUNDED: miner 1's wallet matures before the
-second miner is seeded, and on every ordering block it signs payments
+The two-miner window is FUNDED: miner 1's wallet matures and splits a
+coinbase into a pool of boxes before the second miner is seeded, and on
+every ordering block it signs payments, each spending its own pool box,
 that are posted to BOTH miners' mempools, so both competing input chains
 carry transactions whichever miner wins. That is what makes the
 followers' reconstruction accounting over the window (the #2562
@@ -74,20 +75,31 @@ def run(ctx):
     # Miner 1 is funded BEFORE the second miner is seeded, so every block
     # of the window can carry payments, and each payment is posted to both
     # miners: posted to miner 1 alone, it never reached a miner 2 that was
-    # winning the race (`pump_payments_to_all`).
+    # winning the race (`pump_payments_to_all`). Each payment spends its
+    # own box from a pool split off one coinbase and confirmed before the
+    # seed, so it is valid on either miner's chain (`fan_out`).
     balance, address = common.fund_miner(ctx, 'scala')
     ctx.note('funding', {'balance_nano': balance, 'address': address})
     if not balance or not address:
         ctx.fail('no spendable coin on miner 1, so the two-miner window seals '
                  'empty input blocks and any prefix of them rebuilds the same '
                  'root', {'balance_nano': balance, 'address': address})
+    blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
+    pool = []
+    if balance and address:
+        pool = common.fan_out(
+            ctx, address, 'scala',
+            PAYMENTS_PER_BLOCK * (blocks + common.FANOUT_SPARE_BLOCKS))
+        # One block deeper, so the split is not the tip the seed copies.
+        common.wait_ordering_blocks(ctx, 1, 'payment_pool_depth')
+    pool_size = len(pool)
     sent, refused, forwarded = [], [], {}
 
     def pump():
-        if balance and address:
+        if pool:
             common.pump_payments_to_all(ctx, address, sent, MINERS,
                                         PAYMENTS_PER_BLOCK, rejected=refused,
-                                        forwarded=forwarded)
+                                        forwarded=forwarded, pool=pool)
 
     # The seed restarts the follower, which empties its input chain. The
     # sample range that covers is recorded so the reset it causes is not
@@ -116,7 +128,6 @@ def run(ctx):
     # scenario that only read it at the end would usually read 1.
     fork_counts, fork_samples = [], []
     peers_seen = ctx.evidence.get('follower_peers_after_seed') or 0
-    blocks = ctx.args.ordering_blocks or ORDERING_BLOCKS
     start = smoke.scala_height(ctx.run)
     target = start + blocks
     reached = start
@@ -153,6 +164,8 @@ def run(ctx):
                  'follower\'s reconstruction outcomes in the window are '
                  'incomplete', {'collection': collector.summary(watermark)})
     ctx.note('workload', {'funded_balance_nano': balance,
+                          'payment_pool_boxes': pool_size,
+                          'payment_pool_left': len(pool),
                           'payments_submitted': len(sent),
                           'payments_refused': len(refused),
                           'refusals': refused[:10],

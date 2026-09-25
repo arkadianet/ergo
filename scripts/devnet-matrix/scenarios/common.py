@@ -413,8 +413,9 @@ def pump_payments(ctx, address, sent, node='scala', count=3,
     return sent
 
 
-def _post(node, path, body):
-    """`(status, payload)` for one POST, with an HTTP error's body kept."""
+def _post(node, path, body=None):
+    """`(status, payload)` for one POST (a GET without `body`), with an
+    HTTP error's body kept."""
     try:
         return smoke.request(node, path, body)
     except urllib.error.HTTPError as error:
@@ -434,9 +435,66 @@ def _post(node, path, body):
 PAYMENT_FEE_NANOERG = 1_000_000
 
 
+# The fork window's payment POOL: boxes split off one matured coinbase and
+# confirmed BEFORE the second miner is seeded, so each lies in both miners'
+# history. Each payment spends one pool box, so it is valid on either
+# miner's chain whatever the other one did. The wallet's own box choice
+# is not: after the first reorg between the two miners it keeps spending
+# change that exists only in orphaned input blocks, and every later
+# payment is refused ("Every input of the transaction should be in
+# UTXO": 33 of 72 in rm-B-fork-2562f-3, 57 of 72 in rm-B-fork-stockctl-3).
+FANOUT_VALUE_NANOERG = 100_000_000
+# Pool boxes beyond one window's worth, for refused or lost payments.
+FANOUT_SPARE_BLOCKS = 10
+# Ordering blocks the split may take to confirm before the run gives up.
+FANOUT_CONFIRM_BLOCKS = 6
+
+
+def fan_out(ctx, address, node, count, value=FANOUT_VALUE_NANOERG,
+            fee=PAYMENT_FEE_NANOERG):
+    """Split `node`'s wallet into `count` boxes of `value` and wait until
+    the split is in its UTXO set. Returns the new boxes' ids (the pool),
+    or [] with the reason recorded as a failure."""
+    status, tx = _post(node, '/wallet/transaction/generate',
+                       {'requests': [{'address': address, 'value': value}] * count,
+                        'fee': fee})
+    if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
+        ctx.fail(f'the payment pool split could not be signed: HTTP {status}',
+                 {'answer': str(tx)[:500]})
+        return []
+    code, answer = _post(node, '/transactions', tx)
+    if code != 200:
+        ctx.fail(f'the payment pool split was refused: HTTP {code}',
+                 {'answer': str(answer)[:500]})
+        return []
+    boxes = [out['boxId'] for out in tx.get('outputs') or []
+             if out.get('value') == value][:count]
+    heights, confirmed = [], False
+    while time.monotonic() < ctx.run.deadline and boxes:
+        code, _ = _post(node, f'/utxo/byId/{boxes[0]}')
+        if code == 200:
+            confirmed = True
+            break
+        try:
+            heights.append((api(node, '/info') or {}).get('fullHeight') or 0)
+        except Unavailable:
+            pass
+        if len(set(heights)) > FANOUT_CONFIRM_BLOCKS:
+            break
+        ctx.run.idle(1)
+    ctx.note('payment_pool_split', {
+        'tx': tx['id'], 'boxes': len(boxes), 'value_nano': value,
+        'confirmed': confirmed, 'heights_waited': sorted(set(heights))})
+    if not confirmed:
+        ctx.fail('the payment pool split was not confirmed within '
+                 f'{FANOUT_CONFIRM_BLOCKS} ordering blocks', {'tx': tx['id']})
+        return []
+    return boxes
+
+
 def pump_payments_to_all(ctx, address, sent, nodes, count=3,
                          value=PAYMENT_NANOERG, rejected=None, forwarded=None,
-                         fee=PAYMENT_FEE_NANOERG):
+                         fee=PAYMENT_FEE_NANOERG, pool=None):
     """`pump_payments` for a run with more than one miner: every payment
     reaches EVERY miner's mempool directly.
 
@@ -454,13 +512,31 @@ def pump_payments_to_all(ctx, address, sent, nodes, count=3,
     payment, won 22 of the window's 26 blocks, and the window carried no
     transaction at all.
 
+    With a `pool` (`fan_out`), each payment spends exactly one pool box,
+    taken in order and never reused; a box the signing node no longer has
+    is skipped and recorded.
+
     `sent` gets the ids the signing node accepted; `forwarded` counts,
     per other node, how each post was answered.
     """
     for _ in range(count):
-        status, tx = _post(nodes[0], '/wallet/transaction/generate',
-                           {'requests': [{'address': address, 'value': value}],
-                            'fee': fee})
+        request = {'requests': [{'address': address, 'value': value}],
+                   'fee': fee}
+        if pool is not None:
+            raw = None
+            while pool and raw is None:
+                box = pool.pop(0)
+                code, answer = _post(nodes[0], f'/utxo/byIdBinary/{box}')
+                if code == 200 and isinstance(answer, dict) and answer.get('bytes'):
+                    raw = answer['bytes']
+                elif rejected is not None:
+                    rejected.append(f'pool box {box}: HTTP {code}')
+            if raw is None:
+                if rejected is not None:
+                    rejected.append('the payment pool is exhausted')
+                continue
+            request['inputsRaw'] = [raw]
+        status, tx = _post(nodes[0], '/wallet/transaction/generate', request)
         if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
             if rejected is not None:
                 rejected.append(f'generate: HTTP {status}: {str(tx)[:200]}')

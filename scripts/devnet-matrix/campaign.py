@@ -3972,7 +3972,9 @@ def _self_test_fork_workload():
 
     # ----- the window is funded and bounded, in this order -----
     _src = inspect.getsource(fork.run)
-    for _earlier, _later in (('fund_miner(', 'seed_second_miner('),
+    for _earlier, _later in (('fund_miner(', 'fan_out('),
+                             ('fan_out(', 'seed_second_miner('),
+                             ('fund_miner(', 'seed_second_miner('),
                              ('seed_second_miner(', 'open_measurement_window('),
                              ('open_measurement_window(', 'collector.poll()'),
                              ('collector.poll()', 'close_measurement_window('),
@@ -4109,6 +4111,94 @@ def _self_test_fork_workload():
                       ('scala2', 't3'), ('scala', 't4')], _posts
     _self_test_seed_artifact()
     _self_test_switch_granularity()
+    _self_test_payment_pool()
+
+
+def _self_test_payment_pool():
+    """The fork window pays from a pool split off one coinbase before the
+    seed: each payment spends exactly one pool box, never the wallet's own
+    choice (which, after a reorg, is change that exists only in orphaned
+    input blocks)."""
+    import types
+
+    import smoke
+    from scenarios import common
+
+    calls = []
+    utxo = {'p1': 'b1', 'p3': 'b3'}      # p2 is spent: not in the UTXO set
+
+    def _fake_request(node, path, data=None, timeout=15):
+        calls.append((node, path, data))
+        if path.startswith('/utxo/byIdBinary/'):
+            box = path.rsplit('/', 1)[1]
+            if box in utxo:
+                return 200, {'boxId': box, 'bytes': utxo[box]}
+            raise urllib.error.HTTPError(path, 404, 'Not Found', {},
+                                         io.BytesIO(b'not found'))
+        if path == '/wallet/transaction/generate':
+            return 200, {'id': 'tx-' + data['inputsRaw'][0]}
+        return 200, data['id']
+
+    import io
+    import urllib.error
+    saved = smoke.request
+    pool, sent, refused = ['p1', 'p2', 'p3'], [], []
+    try:
+        smoke.request = _fake_request
+        common.pump_payments_to_all(None, 'addr', sent, ('scala', 'scala2'),
+                                    count=3, rejected=refused, pool=pool)
+    finally:
+        smoke.request = saved
+    # One pool box per payment, in order; the spent one is skipped and
+    # named; the third payment finds the pool empty.
+    assert sent == ['tx-b1', 'tx-b3'], sent
+    assert pool == [], pool
+    assert refused == ['pool box p2: HTTP 404',
+                       'the payment pool is exhausted'], refused
+    signed = [d for n, p, d in calls if p == '/wallet/transaction/generate']
+    assert [d['inputsRaw'] for d in signed] == [['b1'], ['b3']], signed
+    assert all(d['fee'] == common.PAYMENT_FEE_NANOERG for d in signed), signed
+
+    # ----- the split: count boxes of value, confirmed before it returns -----
+    calls.clear()
+    polls = iter([404, 404, 200])
+    split = {'id': 'split', 'outputs': [
+        {'boxId': f'f{i}', 'value': common.FANOUT_VALUE_NANOERG}
+        for i in range(4)] + [{'boxId': 'change', 'value': 5},
+                              {'boxId': 'fee', 'value': 1_000_000}]}
+
+    def _fake_split(node, path, data=None, timeout=15):
+        calls.append((node, path, data))
+        if path == '/wallet/transaction/generate':
+            return 200, split
+        if path == '/transactions':
+            return 200, 'split'
+        if path.startswith('/utxo/byId/'):
+            code = next(polls)
+            if code != 200:
+                raise urllib.error.HTTPError(path, code, 'x', {}, io.BytesIO(b''))
+            return 200, {'boxId': 'f0'}
+        raise AssertionError(path)
+
+    ctx = types.SimpleNamespace(evidence={}, failures=[], run=types.SimpleNamespace(
+        deadline=time.monotonic() + 30, idle=lambda s: None))
+    ctx.note = ctx.evidence.__setitem__
+    ctx.fail = lambda message, evidence=None, ids=None: ctx.failures.append(message)
+    saved_api = common.api
+    try:
+        smoke.request = _fake_split
+        common.api = lambda node, path, *a, **k: {'fullHeight': 20}
+        boxes = common.fan_out(ctx, 'addr', 'scala', 4)
+    finally:
+        smoke.request = saved
+        common.api = saved_api
+    assert boxes == ['f0', 'f1', 'f2', 'f3'], boxes
+    assert not ctx.failures, ctx.failures
+    request = next(d for n, p, d in calls if p == '/wallet/transaction/generate')
+    assert request['requests'] == [{'address': 'addr', 'value':
+                                    common.FANOUT_VALUE_NANOERG}] * 4, request
+    assert ctx.evidence['payment_pool_split']['confirmed'] is True, ctx.evidence
+    assert [p for n, p, d in calls].count('/utxo/byId/f0') == 3, calls
 
 
 def _self_test_switch_granularity():
