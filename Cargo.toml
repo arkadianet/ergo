@@ -53,6 +53,10 @@ ergo-indexer-types = { path = "ergo-indexer-types" }
 ergo-indexer       = { path = "ergo-indexer" }
 ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
+# Only ever pulled in as a dev-dependency (ergo-walletd's real-node
+# integration test). It is the workspace binary crate, so it is not referenced
+# by any member's normal `[dependencies]`.
+ergo-node          = { path = "ergo-node" }
 
 # Cryptography
 aes-gcm  = "0.10"
@@ -69,6 +73,7 @@ hmac     = "0.12"
 num-bigint  = "0.4"
 num-integer = "0.1"
 num-traits  = "0.2"
+libc        = "0.2"
 
 # Encoding / parsing
 flate2 = "1"

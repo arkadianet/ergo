@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use ergo_ser::address::NetworkPrefix;
 use ergo_wallet::address::pubkey_to_p2pk_address;
-use ergo_wallet_service::{TrackedPubkeyMeta, WalletStore, WalletStoreError};
+use ergo_wallet_service::{RescanState, TrackedPubkeyMeta, WalletStore, WalletStoreError};
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::config::Network;
 
 const MAX_DESCRIPTOR_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -59,7 +60,12 @@ struct RawFile {
     keys: Option<Vec<RawEntry>>,
 }
 
-pub fn parse_file(path: &Path) -> Result<Vec<DescriptorEntry>, DescriptorError> {
+/// Read and validate a descriptor file for `network`.
+///
+/// The descriptor file is the daemon's no-secret boundary: it carries only
+/// compressed public keys, derivation paths, and labels. Anything resembling a
+/// secret key is rejected outright by the strict schema.
+pub fn parse_file(path: &Path, network: Network) -> Result<Vec<DescriptorEntry>, DescriptorError> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(DescriptorError::Invalid(format!(
@@ -73,10 +79,10 @@ pub fn parse_file(path: &Path) -> Result<Vec<DescriptorEntry>, DescriptorError> 
     let bytes = fs::read(path)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| DescriptorError::Invalid("file is not UTF-8".to_string()))?;
-    parse_text(text)
+    parse_text(text, network)
 }
 
-pub fn parse_text(text: &str) -> Result<Vec<DescriptorEntry>, DescriptorError> {
+pub fn parse_text(text: &str, network: Network) -> Result<Vec<DescriptorEntry>, DescriptorError> {
     let raw_entries = if let Ok(file) = serde_json::from_str::<RawFile>(text) {
         entries_from_file(file)?
     } else if let Ok(entries) = serde_json::from_str::<Vec<RawEntry>>(text) {
@@ -86,7 +92,7 @@ pub fn parse_text(text: &str) -> Result<Vec<DescriptorEntry>, DescriptorError> {
             toml::from_str(text).map_err(|error| DescriptorError::Invalid(error.to_string()))?;
         entries_from_file(file)?
     };
-    validate_entries(raw_entries)
+    validate_entries(raw_entries, network)
 }
 
 fn entries_from_file(file: RawFile) -> Result<Vec<RawEntry>, DescriptorError> {
@@ -107,7 +113,10 @@ fn entries_from_file(file: RawFile) -> Result<Vec<RawEntry>, DescriptorError> {
     }
 }
 
-fn validate_entries(entries: Vec<RawEntry>) -> Result<Vec<DescriptorEntry>, DescriptorError> {
+fn validate_entries(
+    entries: Vec<RawEntry>,
+    network: Network,
+) -> Result<Vec<DescriptorEntry>, DescriptorError> {
     if entries.is_empty() {
         return Err(DescriptorError::Invalid(
             "descriptor file must contain at least one key".to_string(),
@@ -132,7 +141,11 @@ fn validate_entries(entries: Vec<RawEntry>) -> Result<Vec<DescriptorEntry>, Desc
         }
         let path = parse_path(&path_text)?;
         let public_key = parse_public_key(&key_text)?;
-        pubkey_to_p2pk_address(&public_key, NetworkPrefix::Mainnet).map_err(|_| {
+        // Point validation is network-independent, but encoding the address
+        // for the configured network is what the API will later hand out, so a
+        // key that cannot be rendered for `network` is rejected here rather
+        // than failing on a read route.
+        pubkey_to_p2pk_address(&public_key, network.prefix()).map_err(|_| {
             DescriptorError::Invalid(format!("entry {index} is not a valid curve point"))
         })?;
         if !paths.insert(path.clone()) {
@@ -302,6 +315,12 @@ pub fn import(
         next_index = next_index.saturating_add(1);
     }
     write.rebuild_visible_addresses()?;
+    // New tracking keys invalidate every historical classification. Reset the
+    // wallet cursor and rebuild flag in the SAME transaction as the key rows:
+    // a crash can therefore expose either the old wallet or a clearly
+    // invalidated empty rebuild target, never new keys beside a clean cursor.
+    write.prepare_rescan(0, true)?;
+    write.set_rescan_state(&RescanState::Idle)?;
     write.commit()?;
     Ok(ImportReport { added, unchanged })
 }
@@ -309,38 +328,36 @@ pub fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ergo_wallet::address::pubkey_to_p2pk_address;
     use ergo_wallet_service::RedbWalletStore;
 
     const KEY: &str = "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2";
 
-    #[test]
-    fn accepts_public_descriptor_records_and_rejects_secrets() {
-        let text = format!(
+    fn document() -> String {
+        format!(
             r#"version = 1
 [[keys]]
 path = "m/44'/429'/0'/0/0"
 public_key = "{KEY}"
 "#
-        );
-        let entries = parse_text(&text).unwrap();
+        )
+    }
+
+    #[test]
+    fn accepts_public_descriptor_records_and_rejects_secrets() {
+        let entries = parse_text(&document(), Network::Mainnet).unwrap();
         assert_eq!(entries.len(), 1);
-        assert!(parse_text(&format!(
-            r#"version=1
-[[keys]]
-path="m/0"
-public_key="{KEY}"
-private_key="secret"
-"#
-        ))
+        let text = document();
+        assert!(parse_text(
+            &text.replace("public_key", "private_key = \"x\"\npublic_key"),
+            Network::Mainnet
+        )
         .is_err());
-        assert!(parse_text(&format!(
-            r#"version=1
-[[keys]]
-path="m/0"
-public_key="{KEY}"
-curve="ed25519"
-"#
-        ))
+        let text = document();
+        assert!(parse_text(
+            &text.replace("[[keys]]", "curve = \"ed25519\"\n[[keys]]"),
+            Network::Mainnet
+        )
         .is_err());
     }
 
@@ -355,29 +372,49 @@ path="m/0"
 public_key="{KEY}"
 "#
         );
-        assert!(parse_text(&duplicate).is_err());
-        assert!(parse_text(&format!(
+        assert!(parse_text(&duplicate, Network::Mainnet).is_err());
+        let shared_key = format!(
             r#"keys=[{{path="m/0",public_key="{KEY}"}},{{path="m/1",public_key="{KEY}"}}]"#
-        ))
-        .is_err());
-        assert!(parse_text(&format!(r#"keys=[{{path="m/0/01",public_key="{KEY}"}}]"#)).is_err());
-        assert!(parse_text(&format!(
-            r#"keys=[{{path="m/0",public_key="{}"}}]"#,
-            "04".repeat(33)
-        ))
-        .is_err());
+        );
+        assert!(parse_text(&shared_key, Network::Mainnet).is_err());
+        let padded = format!(r#"keys=[{{path="m/0/01",public_key="{KEY}"}}]"#);
+        assert!(parse_text(&padded, Network::Mainnet).is_err());
+        let uncompressed = format!(r#"keys=[{{path="m/0",public_key="{}"}}]"#, "04".repeat(33));
+        assert!(parse_text(&uncompressed, Network::Mainnet).is_err());
+    }
+
+    /// The configured network decides the rendered address, so the same
+    /// descriptor file yields a different address per network and the daemon
+    /// must not silently hand out mainnet addresses on testnet.
+    #[test]
+    fn descriptor_validation_renders_for_the_configured_network() {
+        let entries = parse_text(&document(), Network::Testnet).unwrap();
+        assert_eq!(entries.len(), 1);
+        let testnet = pubkey_to_p2pk_address(&entries[0].public_key, Network::Testnet.prefix())
+            .expect("testnet render");
+        let mainnet = pubkey_to_p2pk_address(&entries[0].public_key, Network::Mainnet.prefix())
+            .expect("mainnet render");
+        assert_ne!(testnet, mainnet);
+        assert!(testnet.starts_with('3'), "testnet P2PK prefix: {testnet}");
+        assert!(mainnet.starts_with('9'), "mainnet P2PK prefix: {mainnet}");
+        // The stored descriptor keeps raw pubkey bytes, so switching networks
+        // changes only rendering, never the tracked key.
+        let mainnet_entries = parse_text(&document(), Network::Mainnet).unwrap();
+        assert_eq!(mainnet_entries[0].public_key, entries[0].public_key);
     }
 
     #[test]
     fn import_is_idempotent_and_reopenable() {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
-        let entries = parse_text(&format!(
-            r#"keys=[{{path="m/44'/429'/0'/0/0",public_key="{KEY}"}}]"#
-        ))
-        .unwrap();
+        let entries = parse_text(&document(), Network::Mainnet).unwrap();
         let report = import(&store, &entries).unwrap();
         assert_eq!(report.added, 1);
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        assert_eq!(
+            store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+            0
+        );
         assert_eq!(import(&store, &entries).unwrap().added, 0);
         drop(store);
         let reopened = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();

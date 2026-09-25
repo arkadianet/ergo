@@ -14,7 +14,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 
 ```text
 .
-├── Cargo.toml                         workspace manifest (21 members, resolver v2)
+├── Cargo.toml                         workspace manifest (22 members, resolver v2)
 ├── rust-toolchain.toml                pinned toolchain (1.95.0, rustfmt + clippy)
 ├── deny.toml                          cargo-deny policy
 ├── ARCHITECTURE.md                    cross-crate architecture spec
@@ -22,12 +22,13 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 ├── CONTRIBUTING.md                    contribution guide, test conventions, audit tooling
 ├── SECURITY.md                        scope + disclosure process
 ├── CODE_OF_CONDUCT.md                 community expectations
-├── ergo-{primitives,ser,…}/           21 workspace crates (see docs/codemap.md)
+├── ergo-{primitives,ser,…}/           22 workspace crates (see docs/codemap.md)
 ├── ergo-node/ergo-node.toml           default config (full archival + extra index)
 ├── ergo-node/ergo-node.toml.example   operator template
+├── ergo-walletd/ergo-walletd.toml     reference config for the watch-only daemon
 ├── docs/
 │   ├── overview.md                    this handbook
-│   ├── codemap.md + codemap/          per-crate codebase map (index + 21 pages)
+│   ├── codemap.md + codemap/          per-crate codebase map (index + 22 pages)
 │   ├── configuration.md               every config field, by type
 │   ├── operating.md                   running, modes, observability
 │   ├── compatibility.md               consensus-compatibility + versioning policy
@@ -49,7 +50,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 
 ## Crates and architecture
 
-The workspace is 21 crates in a strict, acyclic dependency DAG. Rather than
+The workspace is 22 crates in a strict, acyclic dependency DAG. Rather than
 duplicate per-crate descriptions here (which drift), see:
 
 - [`codemap.md`](./codemap.md) — the layered crate table, the dependency graph,
@@ -103,7 +104,7 @@ project:
   from a running Scala node, so drift introduced by a Scala upgrade is detectable
   by re-running them and diffing. (This requires a self-hosted, fully synced
   Scala node, so it is a manual/local step rather than hosted CI.)
-- **`ergo-difftest` differential / fuzz harness.** The 21st workspace crate
+- **`ergo-difftest` differential / fuzz harness.** This dev/test-only workspace crate
   (`ergo-difftest`) is a pure-testing crate: it runs structure-aware generators
   over every wire decoder in `ergo-ser`, checking no-panic, parse→serialize
   fixed-point, and (locally, with a JVM oracle) Rust-vs-Scala byte-exact parity.
@@ -125,9 +126,10 @@ automatically on first build.
 # Compile-check the whole workspace.
 cargo check --workspace --tests
 
-# Release builds of the two binaries.
+# Release builds of the binaries.
 cargo build --release -p ergo-node
 cargo build --release -p ergo-wallet
+cargo build --release -p ergo-walletd
 ```
 
 Optional build profiles:
@@ -219,6 +221,36 @@ flows:
 ```bash
 ./target/release/ergo-wallet --help
 ```
+
+## Running the watch-only wallet daemon
+
+`ergo-walletd` is a separate process from the node: it owns
+`<data_dir>/wallet.redb`, syncs by reading the node's `/api/v1/chain/*` API, and
+serves a **read-only** local API. It holds no signing key — there is no send,
+sign, or unlock route, and every balance, box, and transaction it reports comes
+from confirmed blocks it has applied.
+
+```bash
+# Start it against a local node with the bundled reference config.
+./target/release/ergo-walletd --config ergo-walletd/ergo-walletd.toml
+
+# Read it back over the owner-only socket (mode 0600).
+curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/status
+curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/balances
+curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/addresses
+```
+
+Every field is documented by type in
+[`configuration.md`](./configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon),
+and the crate page ([`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md))
+covers the descriptor format, the no-secret boundary, the read route
+inventory, socket ownership/permissions, the sync/reorg failure policy, the two
+sync budgets (`sync_batch` = blocks applied per pass, `blocks_page` = blocks
+requested per call), and — stated plainly, not buried — the two known
+deviations: a block's protocol id is checked for consistency but **not**
+recomputed from raw header bytes (the chain protocol carries none), and
+`/balance` / `/status` are confirmed-only values the daemon computes from
+applied blocks rather than the embedded wallet's embedded values re-served.
 
 ### Observability
 

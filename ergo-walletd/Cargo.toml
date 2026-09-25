@@ -19,6 +19,7 @@ path = "src/main.rs"
 ergo-wallet          = { workspace = true }
 ergo-wallet-protocol = { workspace = true }
 ergo-wallet-service  = { workspace = true }
+ergo-primitives      = { workspace = true }
 ergo-ser             = { workspace = true }
 axum                = { workspace = true }
 hyper               = { workspace = true }
@@ -26,6 +27,7 @@ hyper-util          = { workspace = true }
 tower                = { workspace = true }
 clap                = { workspace = true, features = ["derive"] }
 hex                 = { workspace = true }
+libc                = { workspace = true }
 reqwest             = { workspace = true, features = ["blocking", "rustls-tls"] }
 serde               = { workspace = true, features = ["derive"] }
 serde_json          = { workspace = true }
@@ -37,3 +39,20 @@ tracing-subscriber  = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# TEST-TARGET ONLY. The daemon's normal dependency boundary deliberately
+# excludes the node crates (it talks to a node over HTTP). The integration
+# test in `tests/it/node_api.rs` stands up the *real* `ergo-api` chain
+# routes on a loopback port, backed by a real seeded `ergo-state`
+# `StateStore` and the real `ergo-node` chain adapter, so the daemon's
+# `HttpChainClient` + sync path is exercised over real HTTP with the real
+# `api_key` gate instead of a hand-rolled stub. These are dev-only: they
+# never enter the released binary's dependency graph.
+ergo-api = { workspace = true }
+ergo-node = { workspace = true }
+ergo-state = { workspace = true, features = ["test-helpers"] }
+bincode = { workspace = true }
+redb = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

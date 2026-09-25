@@ -15,8 +15,28 @@ use redb::TableDefinition;
 pub(crate) const CHAIN_INDEX: TableDefinition<u64, &[u8]> = TableDefinition::new("chain_index");
 pub(crate) const CHAIN_STATE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("chain_state_meta");
+/// Applied-header index of the standalone wallet store, keyed by height.
+/// This is the *forward* direction (`height -> block id`); the reverse
+/// direction lives in [`WALLET_APPLIED_HEADER_IDS`]. The node's embedded
+/// wallet uses `CHAIN_INDEX` for the same forward lookup.
 pub(crate) const WALLET_APPLIED_HEADERS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("wallet_applied_headers");
+
+/// Reverse index of [`WALLET_APPLIED_HEADERS`], keyed by the 32-byte block id
+/// and holding the height it was applied at. Both tables are written, removed,
+/// and truncated inside the caller's single redb write transaction, so the two
+/// directions can never diverge across a crash: a row exists in one iff it
+/// exists in the other.
+///
+/// This exists so the standalone duplicate check — "has this block id already
+/// been applied at a different height?" — is a point lookup (O(log n) in the
+/// B-tree) instead of a full scan of every applied header. A full scan made
+/// the check O(n) *per applied block*, so a full rescan was quadratic in chain
+/// length. The table is derived state: if it is missing or out of step with
+/// the forward table (a store written by an older build), the schema
+/// migration rebuilds it from [`WALLET_APPLIED_HEADERS`] at open.
+pub(crate) const WALLET_APPLIED_HEADER_IDS: TableDefinition<[u8; 32], u64> =
+    TableDefinition::new("wallet_applied_header_ids");
 
 /// Best block height the wallet has scanned to (one row). When the
 /// wallet trails the chain (e.g., after restore-with-rescan), the

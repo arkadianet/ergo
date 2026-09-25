@@ -423,3 +423,186 @@ operator template at
 Configuration is unstable until 1.0; keys and shapes may change between
 minor versions — see [`./compatibility.md`](./compatibility.md) for the
 versioning policy.
+
+---
+
+# `ergo-walletd.toml`: the standalone wallet daemon
+
+Everything above configures `ergo-node`. This section configures
+`ergo-walletd`, the **separate, watch-only wallet daemon** documented in
+[`codemap/ergo-walletd.md`](./codemap/ergo-walletd.md). The two files have
+nothing in common except the `network` key: a daemon config is read only by
+`ergo-walletd --config <path>`, and its schema is strict
+(`deny_unknown_fields`), so a node key pasted into a daemon config is a hard
+parse error rather than a silently ignored line.
+
+A ready-to-use reference config ships at
+[`../ergo-walletd/ergo-walletd.toml`](../ergo-walletd/ergo-walletd.toml); a
+test parses that file against this schema, so the sample and the table cannot
+drift apart.
+
+The daemon is read-only: it holds no signing key, exposes no send/sign/unlock
+route, and its chain client cannot submit. Every balance, box, and transaction
+it reports comes from **confirmed** blocks it has applied — never from a
+mempool or an unconfirmed header.
+
+## `ergo-walletd.toml` top-level keys
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `network` | string | `"mainnet"` | Required network identity: `"mainnet"` or `"testnet"`. Any other value (including `devnet`) is a load error. It selects the base58 address prefix used for descriptor validation and for every address the local API returns, so it **must** match the network the configured `node_url` serves — the daemon cannot infer that from the node. CLI: `--network`. |
+| `data_dir` | string (path) | none (required) | Directory holding `wallet.redb`, the daemon's only database. Created on first start. |
+| `node_url` | string (URL) | none (required) | Base URL of the node's operator API. Only `/api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}` are read. Must be `http`/`https` with a host and no credentials, query, or fragment. CLI: `--node-url`. |
+| `api_key_file` | string (path) | none (required) | File containing the node's `api_key` request-header value. Must be a regular file that is **not** group- or other-readable (`chmod 600`); anything else aborts startup. The value is held in a `Debug`-redacted type, sent only as a header, and never logged. Size-capped at 4 KiB, and the content must be a single header-safe line. CLI: `--api-key-file`. |
+| `descriptor_file` | string (path) | none (required) | Public descriptor file (see [Descriptor file](#descriptor-file)). Size-capped at 16 MiB and validated at load. CLI: `--descriptor-file`. |
+| `sync_interval` | u64 or string | `15` | Delay between sync passes. Accepts plain seconds (`15`) or a duration string (`"500ms"`, `"30s"`, `"2m"`, `"1h"`). `0` is rejected. CLI: `--sync-interval`. |
+| `sync_batch` | u32 | `256` | **Apply budget**: the maximum number of blocks *applied* (committed to the wallet database) by one sync pass. Must be `1..=1024`. It is not a request size — a pass may reach the node tip through many HTTP calls, and it is not what bounds a single response. Larger values trade memory and pass latency for fewer passes. CLI: `--sync-batch`. |
+| `blocks_page` | u32 | `1` | **Request budget**: the maximum number of blocks asked for in a single `blocks-since` call, independent of `sync_batch`. Must be `1..=1024`. The wire form hex-encodes every output box, so a page of `N` blocks costs roughly twice their serialized bytes and must fit the daemon's hard 8 MiB response cap. The default `1` is the largest page whose *worst legal* body provably fits that cap (see [The two sync budgets](#the-two-sync-budgets)); raising it is an operator decision made against their own node's `maxBlockSize`. A block too large even for a one-block page is a terminal error naming the cap and the page — the daemon never retries with a smaller page. CLI: `--blocks-page`. |
+| `unix_socket` | string (path) | none | Path of the owner-only Unix socket serving the local read API. See [Socket permissions](#socket-permissions). CLI: `--unix-socket`. |
+| `tcp_fallback` | string (socket addr) | none | Optional TCP listener for the local read API. **Must** be a loopback address; a non-loopback bind is rejected at load, so the read API cannot be exposed to the network by configuration. The TOML key also accepts the alias `tcp_addr`. CLI: `--tcp-fallback`. |
+
+At least one of `unix_socket` / `tcp_fallback` is required.
+
+### The two sync budgets
+
+`sync_batch` and `blocks_page` bound different things and are deliberately not
+the same knob:
+
+- `sync_batch` (apply budget) is how much work one pass may do: at most that
+  many blocks committed to the wallet database. It is a *pass* budget.
+- `blocks_page` (request budget) is how much one HTTP call may ask for: at most
+  that many blocks in a single `blocks-since` page. It is a *request* budget,
+  and it is what keeps a response body bounded.
+
+A pass with `sync_batch = 256` and `blocks_page = 1` therefore issues up to 256
+requests to apply 256 blocks. The default `1` is chosen against the adapter's
+hard 8 MiB response cap: the chain protocol carries each output box as a hex
+string, so a page costs roughly twice the serialized bytes of the blocks in it,
+and consensus bounds one block's `BlockTransactions` section by the voted
+`maxBlockSize` parameter. Sizing it against the largest value this document
+shows an operator voting for (`maxBlockSize = 2097152`, 2 MiB) makes the default
+provably safe for any node the daemon may be pointed at: one maxed-out block is
+4 MiB of hex, so a page of `1` fits with more than half the cap spare, while a
+page of `2` would be 8 MiB *before* the JSON envelope (ids, indices, braces) is
+added. Today's mainnet parameter is smaller than that, so the default is
+deliberately conservative rather than minimal. Sizing the request from the apply
+budget instead (the earlier behaviour, `min(sync_batch, remaining)`) would ask
+for up to 1024 blocks and hit the cap on any real chain.
+
+`blocks_page` stays configurable (`1..=1024`) because a node with a much smaller
+`maxBlockSize` — or one serving an archive height where a page is known to be
+small — can safely serve a wider page. Raising it is an operator decision made
+against that node's own parameter, and the byte cap, not the block count, is
+what actually bounds a body.
+
+A block that cannot fit even a one-block page is **not** retried smaller — the
+daemon never shrinks a page — so the adapter reports it once, as a terminal
+error naming both the cap and the page size, and the durable rescan state becomes
+`failed`. `tests/it/node_api.rs` pins both halves of this against the real node
+API with ~1.5 MiB blocks, and `tests/it/sync.rs` pins the arithmetic above
+against the documented 2 MiB `maxBlockSize`.
+
+## `ergo-walletd.toml` `[api]`
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `unix_socket` | string (path) | none | Same as the top-level key. |
+| `tcp_fallback` | string (socket addr) | none | Same as the top-level key (alias `tcp_addr`). |
+
+`[api]` is an *alternative spelling* of the two top-level listener keys, not an
+extra section: specifying a listener in both places is a load error, so a
+half-edited file cannot leave the daemon listening somewhere unintended.
+
+## Descriptor file
+
+`descriptor_file` points at the daemon's no-secret input. JSON or TOML, with
+`descriptors` (or `keys`) as an array of entries:
+
+```toml
+version = 1
+
+[[keys]]
+path        = "m/44'/429'/0'/0/0"                      # derivation path
+public_key  = "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2"
+label       = "cold storage"                          # optional, <= 256 chars
+curve       = "secp256k1"                             # optional, only value
+```
+
+| Key | Required | Description |
+|---|---|---|
+| `path` | yes | `m/…` derivation path; hardened components may use `'`, `h`, or `H`; at most 255 components; leading zeros and values above `0x7fffffff` are rejected. |
+| `public_key` | yes | 66 lowercase hex characters: a 33-byte **compressed** secp256k1 point (`02`/`03` prefix). |
+| `label` | no | Free-form label returned by `/addresses`; longer than 256 characters is rejected. |
+| `curve` | no | Must be `"secp256k1"` if present. |
+| `version` (file) | no | Must be `1` if present. |
+
+Validation rules that matter operationally:
+
+- **No secrets.** A `private_key` (or any unknown) field is a parse error, not
+  a warning: the schema is strict, so a descriptor file cannot smuggle key
+  material into a watch-only daemon. The daemon itself has no code path that
+  reads or stores a secret key.
+- **Keys are validated, not trusted.** Each public key must decode as a
+  compressed point *and* render as a P2PK address for the configured
+  `network`, so a bad key fails at startup instead of on a read route.
+- **Import is idempotent and additive.** Re-running with the same file changes
+  nothing; a *new* key resets the scan cursor in the same transaction that adds
+  the key, so a crash can expose either the old wallet or a clearly invalidated
+  rebuild target — never new keys beside a clean cursor.
+- **Prefixes are never persisted.** The store keeps 33-byte public keys and the
+  API renders base58 at read time, so changing `network` changes the addresses
+  the API returns without touching the database. (The chain history itself
+  still has to be re-synced from the new network's node.)
+- **The descriptor file cannot register a scan.** The wallet-service that backs
+  the daemon also supports the node's `/scan/*` registry, and the sync loop
+  feeds it (`sync::scan_records`) whenever that registry is non-empty. The
+  descriptor schema above is the daemon's *only* input for it and admits public
+  keys, paths, and labels — no tracking rule — so **in the standalone daemon the
+  registry is always empty**: `/scans` and `/scan/listAll` always return `[]`,
+  and `WALLET_SCAN_BOXES` / `_INDEX` / `_TXS` stay empty. Scan registration is a
+  node capability (`ergo-api`'s `/scan/register`), not a daemon one, and is
+  deliberately not re-exposed here: a tracking rule is a *predicate* over
+  arbitrary box contents, which is a materially different trust decision from
+  "a list of public keys I want watched". A reorg still rewinds and replays the
+  wallet correctly — the scan tables simply have nothing to rewind.
+  `tests/it/scan_registry_rewind.rs` covers the non-empty-registry rewind path by
+  seeding a scan through the store's own `put_scan` write API, and
+  `tests/it/daemon_boot.rs` pins the empty-registry production behaviour.
+
+## Socket permissions
+
+The local read API is the daemon's entire trust boundary, so its socket is
+owner-only by construction:
+
+- The Unix socket is created under a `0o077` umask and then explicitly
+  `chmod 0600`; failure to set the mode removes the socket and aborts startup.
+- A `<socket>.owner` marker file (`ergo-walletd-socket:<pid>:<nanos>`, mode
+  `0600`) records ownership. On start, a socket with a valid marker that refuses
+  a connection is treated as stale and removed; a socket that still accepts a
+  connection, or one with a missing/invalid marker, is left alone and startup
+  fails. A daemon therefore never steals or clobbers a live socket.
+- The marker and the socket are removed on clean shutdown.
+- `tcp_fallback`, when used, must bind a loopback address (rejected otherwise).
+- The daemon does **not** add a bearer token or TLS: local socket permissions
+  (or loopback) are the access control. Do not proxy it to a shared host.
+
+## `ergo-walletd` CLI flags
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--config`, `-c <path>` | path | `ergo-walletd.toml` | Daemon config file. A missing file is a startup error (the daemon has no built-in defaults for `data_dir`, `node_url`, `api_key_file`, or `descriptor_file`). |
+| `--network <mainnet\|testnet>` | string | — | Overrides the file's `network`. |
+| `--data-dir <path>` | path | — | Overrides `data_dir`. |
+| `--node-url <url>` | string | — | Overrides `node_url`. |
+| `--api-key-file <path>` | path | — | Overrides `api_key_file`. |
+| `--descriptor-file <path>` | path | — | Overrides `descriptor_file`. |
+| `--sync-interval <secs>` | u64 | — | Overrides `sync_interval`. |
+| `--sync-batch <n>` | u32 | — | Overrides `sync_batch` (the per-pass apply budget). |
+| `--blocks-page <n>` | u32 | — | Overrides `blocks_page` (the per-request page size). |
+| `--unix-socket <path>` | path | — | Overrides `unix_socket`. |
+| `--tcp-fallback <addr>` | socket addr | — | Overrides `tcp_fallback`. |
+
+Logging uses `tracing` with the `RUST_LOG` filter (default `info`): reorgs and
+retries log at `warn`, protocol violations and other terminal sync failures log
+at `error`. Log lines carry locally generated messages and heights only — never
+the node API key, never a node response body.

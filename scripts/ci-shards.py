@@ -18,10 +18,22 @@ import subprocess
 # 4: 5.25 build + 1.5 test + 1.5 overhead = 8.25 min
 # This beats the roughly 10 min three-shard budget. Unattributed build
 # overhead and serial target invocations need warm-run controller validation.
+# ergo-walletd joins shard 2, which already hosts the rest of the wallet
+# stack, so a wallet failure is re-run in one place. Its `it` target is
+# node-grade (real StateStore, real ergo-api router, redb), so it is
+# billed at the 3 min per node lib/it rate rather than as an ordinary
+# binary: shard 2 grows to 5.25 + 3.5 build + 2.4 test + 1.5 overhead =
+# 12.65 min and is now the critical path. The three targets are listed
+# individually rather than as a whole package so the ledger still shows
+# which of lib/bin/it a split refers to; ci-shards merges them back into
+# one `nextest run -p ergo-walletd` invocation.
 # macOS: split node lib/it and distribute 20/26 default-feature test binaries.
 # Scaling the measured 7.3 build minutes by these counts gives 3.2/4.1;
 # estimated tests 1.0/0.9 + overhead 1.5 gives 5.7/6.5 min before clippy.
-# Shard 1 takes clippy to use that 0.8 min headroom.
+# Shard 1 takes clippy to use that 0.8 min headroom. ergo-walletd joins
+# shard 1 for the same wallet-stack reason and because it is the only
+# shard with headroom: 3.2 + 3.5 build + 1.4 test + 1.5 overhead = 9.6 min
+# plus the 0.8 min clippy, against shard 2's unchanged 6.5 min.
 GROUPS = {
     "Windows": (
         # Measured on run 35547586766 (windows): the previous split ran
@@ -32,6 +44,7 @@ GROUPS = {
         (
             "ergo-node --test it", "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
             "ergo-difftest", "ergo-rest-json", "ergo-indexer", "ergo-sync",
+            "ergo-walletd --lib", "ergo-walletd --bin ergo-walletd", "ergo-walletd --test it",
         ),
         (
             "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
@@ -46,6 +59,7 @@ GROUPS = {
             "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-mining", "ergo-p2p", "ergo-sigma", "ergo-compiler",
             "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
+            "ergo-walletd --lib", "ergo-walletd --bin ergo-walletd", "ergo-walletd --test it",
         ),
         (
             "ergo-node --test it", "ergo-indexer", "ergo-api", "ergo-sync", "ergo-validation",

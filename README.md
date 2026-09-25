@@ -15,11 +15,15 @@ Repository: <https://github.com/arkadianet/ergo>
   single-writer runtime model, data-flow paths, and the consensus / persistence
   / reorg contracts.
 - [`docs/codemap.md`](./docs/codemap.md) — per-crate **codebase map**: a layered
-  index, the dependency graph, and a landmark page for each of the 21 crates
+  index, the dependency graph, and a landmark page for each of the 22 crates
   (purpose, modules, key types, invariants, "start here").
 - [`docs/overview.md`](./docs/overview.md) — the handbook: repository layout and
   the full build / test / run / configure surface.
-- [`docs/configuration.md`](./docs/configuration.md) — every config field, by type.
+- [`docs/configuration.md`](./docs/configuration.md) — every config field, by type
+  (`ergo-node.toml` and the daemon's `ergo-walletd.toml`).
+- [`docs/codemap/ergo-walletd.md`](./docs/codemap/ergo-walletd.md) — the standalone
+  watch-only wallet daemon: descriptor format, no-secret boundary, read-only
+  API, socket permissions, and confirmed-only balances.
 - [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
 - [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
@@ -45,6 +49,7 @@ What ships today, against the Scala reference node's mode taxonomy:
 | Extra-index (`/blockchain/*`) | yes | yes (requires Mode 1) |
 | Mining — external-miner protocol | yes | yes; requires `state_type = "utxo"` (Modes 1–4), rejected on `digest` (Modes 5–6) |
 | HD wallet | yes | yes (single-prover + multi-sig primitives; cooperative distributed multi-sig deferred) |
+| Standalone watch-only wallet daemon | n/a | yes — `ergo-walletd`: separate process, own database, node-fed sync, read-only local API, no secrets ([docs](./docs/codemap/ergo-walletd.md)) |
 
 Specifics operators should read before deploying:
 
@@ -91,8 +96,8 @@ The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml
 (`rustup` installs it on first build).
 
 ```bash
-# Build the node + wallet binaries.
-cargo build --release -p ergo-node -p ergo-wallet
+# Build the node, the wallet CLI, and the standalone wallet daemon.
+cargo build --release -p ergo-node -p ergo-wallet -p ergo-walletd
 
 # Run against the bundled default config (mainnet full archival; REST + operator
 # web UI on 127.0.0.1:9099).
@@ -102,13 +107,48 @@ cargo build --release -p ergo-node -p ergo-wallet
 ./target/release/ergo-node --help
 ```
 
+The wallet also ships as a standalone **watch-only daemon**
+(`ergo-walletd`). It runs beside a node, keeps its own wallet database, syncs
+from the node's `/api/v1/chain/*` API, and serves a read-only local API on an
+owner-only Unix socket (or loopback TCP) — confirmed balances, boxes,
+transactions, and addresses for the public keys in its descriptor file. It
+holds no signing key and has no send, sign, or unlock route:
+
+```bash
+# Start the daemon against a local node (see the bundled reference config).
+./target/release/ergo-walletd --config ergo-walletd/ergo-walletd.toml
+
+# Read it back over the socket. Every route is a GET; nothing can mutate state.
+curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/status
+curl --unix-socket ergo-walletd.sock http://local/api/v1/wallet/balances
+```
+
 The first run performs a full Initial Block Download from genesis; subsequent
-runs resume from the persisted tip. The node also serves a dependency-free
+runs resume from the persisted tip. Sync is bounded on both axes: `sync_batch`
+is how many blocks a pass may *apply*, `blocks_page` (default 1) how many it may
+*request* per `blocks-since` call, because the wire form hex-encodes every
+output box and a single response is capped at 8 MiB. The descriptor file is the
+daemon's only input: it lists public keys, so the `/scan/*` registry the backing
+store also implements is always empty here and `/api/v1/scans` returns `[]` —
+scan registration stays a node capability. The node also serves a
+dependency-free
 operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
 default) — a single-page app with Overview (live charts + event feed),
 Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
 docs at `/swagger` and RUST API docs at `/swagger/native`; wallet actions
 require the API key. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
+
+Two deviations the daemon does not paper over, both written up in
+[`docs/codemap/ergo-walletd.md`](./docs/codemap/ergo-walletd.md#known-deviations):
+
+- the chain protocol carries no raw header bytes, so a block's protocol id is
+  checked for *consistency* (parent linkage, height, tip agreement, uniqueness)
+  but **not recomputed** from header bytes; ErgoBox bytes *are* parsed and
+  fully re-derived;
+- `/balance` and `/status` are values the daemon computes from blocks it has
+  applied — confirmed-only, with `available == confirmed`, literal-zero
+  `reserved`/`immature`, and `null` `unconfirmed`/`reemission` — so they are
+  **not** byte-identical to an embedded wallet's embedded values.
 The full build / test / run / configuration surface — profiles, feature-gated
 tests, the config reference, observability — is in
 [`docs/overview.md`](./docs/overview.md).

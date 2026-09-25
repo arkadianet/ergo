@@ -24,10 +24,10 @@ pub mod types;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableTable, ReadableTableMetadata, WriteTransaction};
 
 pub use crate::wallet::error::WalletStoreError;
-use crate::wallet::store::begin_write_quick;
+use crate::wallet::store::{begin_write_quick, clear_standalone_headers};
 
 static CHAIN_APPLY_FINALIZATION_LOCK: RwLock<()> = RwLock::new(());
 
@@ -188,19 +188,59 @@ fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(),
         }
         version_table.insert((), WALLET_SCHEMA_VERSION)?;
         if standalone {
-            let mut applied = txn.open_table(tables::WALLET_APPLIED_HEADERS)?;
             if invalidate || height == Some(0) {
-                let keys: Vec<u64> = applied
-                    .iter()?
-                    .map(|entry| entry.map(|(key, _)| key.value()))
-                    .collect::<Result<_, _>>()?;
-                for key in keys {
-                    applied.remove(key)?;
-                }
+                // The cursor was discarded, so nothing the store recorded is
+                // trustworthy: drop both directions of the applied-header index.
+                clear_standalone_headers(&txn, 0)?;
+            } else {
+                // The reverse index is derived state. A store written by a
+                // build without it (or one truncated outside a transaction)
+                // would otherwise silently lose duplicate detection, so
+                // reconcile it from the forward table at open. This runs once
+                // per store, not per block.
+                rebuild_applied_header_ids(&txn)?;
             }
         }
     }
     txn.commit()?;
+    Ok(())
+}
+
+/// Rebuild the `block id -> height` reverse index from the forward
+/// `height -> block id` table when the two disagree in size. Both tables are
+/// maintained inside the same write transaction, so equal sizes mean they are
+/// in step; a mismatch means the reverse index is missing or stale.
+fn rebuild_applied_header_ids(txn: &WriteTransaction) -> Result<(), WalletStoreError> {
+    let applied = txn.open_table(tables::WALLET_APPLIED_HEADERS)?;
+    let mut index = txn.open_table(tables::WALLET_APPLIED_HEADER_IDS)?;
+    if index.len()? == applied.len()? {
+        return Ok(());
+    }
+    let stale: Vec<[u8; 32]> = index
+        .iter()?
+        .map(|entry| entry.map(|(key, _)| key.value()))
+        .collect::<Result<_, _>>()?;
+    for block_id in stale {
+        index.remove(block_id)?;
+    }
+    let rows: Vec<(u64, [u8; 32])> = applied
+        .iter()?
+        .map(|entry| {
+            let (key, value) = entry?;
+            let height = key.value();
+            if value.value().len() != 32 {
+                return Err(WalletStoreError::decode(format!(
+                    "standalone applied-header row at {height} is not 32 bytes"
+                )));
+            }
+            let mut block_id = [0u8; 32];
+            block_id.copy_from_slice(value.value());
+            Ok((height, block_id))
+        })
+        .collect::<Result<_, WalletStoreError>>()?;
+    for (height, block_id) in rows {
+        index.insert(block_id, height)?;
+    }
     Ok(())
 }
 
