@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 
-use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError};
+use crate::node::wallet_bridge::{map_chain_error, ChainStateAccessor, WalletAdminError};
 use ergo_api::wallet::sending::PaymentRequestDto;
 
 /// Minimum fee in nanoERG. Mirrors Scala's `Parameters.MinFee`.
@@ -181,6 +181,7 @@ pub(crate) async fn build_unsigned_tx(
             // server fault (it may be already spent or never existed).
             let ergo_box = chain
                 .lookup_utxo(&id)
+                .map_err(map_chain_error)?
                 .ok_or(WalletAdminError::BoxNotFound)?;
 
             input_erg_total = input_erg_total
@@ -1071,8 +1072,12 @@ mod tests {
         fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
             Some(&self.rules)
         }
-        fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-            (box_id == &self.reward_id).then(|| self.reward_box.clone())
+        fn lookup_utxo(
+            &self,
+            box_id: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
+        {
+            Ok((box_id == &self.reward_id).then(|| self.reward_box.clone()))
         }
     }
 
@@ -1217,6 +1222,111 @@ mod tests {
         > {
             Ok(None)
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LookupOutcome {
+        Absent,
+        ReadFailure,
+    }
+
+    struct LookupOutcomeChain {
+        tip: u32,
+        outcome: LookupOutcome,
+    }
+
+    impl ChainStateAccessor for LookupOutcomeChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
+        }
+
+        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(
+            &self,
+            _h: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
+        }
+
+        fn lookup_utxo(
+            &self,
+            _box_id: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
+        {
+            match self.outcome {
+                LookupOutcome::Absent => Ok(None),
+                LookupOutcome::ReadFailure => {
+                    Err(crate::node::wallet_bridge::ChainStateError::State(
+                        ergo_state::store::StateError::Serialization(
+                            "injected UTXO read failure".to_string(),
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_input_distinguishes_absent_box_from_lookup_failure() {
+        let addr = test_addr();
+        let mut wallet_state = ergo_wallet_service::state::WalletState::empty(false);
+        wallet_state.set_change_address(addr.clone());
+        let state = RwLock::new(wallet_state);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("w.redb")).unwrap();
+        let requests = vec![PaymentRequestDto {
+            address: addr,
+            value: 1_000_000,
+            assets: Vec::new(),
+        }];
+        let inputs = vec![hex::encode([0x42; 32])];
+
+        let absent = build_unsigned_tx(
+            &requests,
+            Some(&inputs),
+            None,
+            None,
+            None,
+            &state,
+            &db,
+            &LookupOutcomeChain {
+                tip: 10,
+                outcome: LookupOutcome::Absent,
+            },
+            NetworkPrefix::Mainnet,
+        )
+        .await;
+        assert!(matches!(absent, Err(WalletAdminError::BoxNotFound)));
+
+        let failed = build_unsigned_tx(
+            &requests,
+            Some(&inputs),
+            None,
+            None,
+            None,
+            &state,
+            &db,
+            &LookupOutcomeChain {
+                tip: 10,
+                outcome: LookupOutcome::ReadFailure,
+            },
+            NetworkPrefix::Mainnet,
+        )
+        .await;
+        assert!(matches!(
+            failed,
+            Err(WalletAdminError::Internal(detail)) if detail.contains("injected UTXO read failure")
+        ));
     }
 
     /// A `boxIds` input source listing the same id twice must be rejected as

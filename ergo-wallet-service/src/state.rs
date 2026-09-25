@@ -25,10 +25,8 @@ pub trait HydrationSource {
 use ergo_wallet::storage::UnlockedSecret;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `WalletState`. Fields are public-within-crate so the apply hook (in
-/// `ergo-state`) can read them through a reader trait; public API for
-/// outside-crate access goes through the `WalletReader` abstraction in
-/// `ergo-state/src/wallet/reader.rs`.
+/// `WalletState`. Fields are public within the service so apply and
+/// persistence integrations can read them through their reader traits.
 pub struct WalletState {
     /// Tracked HD pubkeys, ordered by their derivation-path index
     /// (mirrors the persisted `WALLET_TRACKED_PUBKEYS` table).

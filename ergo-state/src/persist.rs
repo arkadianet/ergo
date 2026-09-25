@@ -28,6 +28,9 @@ use crate::store::{
     STATE_META, UNDO_LOG,
 };
 
+#[cfg(test)]
+static WALLET_APPLY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Shared commit progress + error state used as a real barrier between the
 /// persist worker and any caller of `flush()`.
 ///
@@ -261,7 +264,7 @@ pub(crate) struct PersistJob {
     /// crosses the worker-thread boundary without lifetime or
     /// Send/Sync friction. `None` when no wallet hook is wired (no-
     /// wallet deployments, tests).
-    pub wallet_payload: Option<crate::store::WalletApplyPayload>,
+    pub wallet_payload: Option<crate::wallet::WalletApplyPayload>,
     pub wallet_apply_generation: u64,
 }
 
@@ -1306,10 +1309,10 @@ mod tests {
         let mut j = minimal_job(height);
         let mut trees = std::collections::BTreeSet::new();
         trees.insert(tracked_tree_bytes.clone());
-        let tx = crate::store::OwnedBlockTxData {
+        let tx = crate::wallet::OwnedBlockTxData {
             tx_id: [height as u8; 32],
             inputs: Vec::new(),
-            outputs: vec![crate::store::OwnedBlockOutput {
+            outputs: vec![crate::wallet::OwnedBlockOutput {
                 box_id: output_box_id,
                 output_index: 0,
                 ergo_tree_bytes: tracked_tree_bytes,
@@ -1319,7 +1322,7 @@ mod tests {
                 box_bytes: Vec::new(),
             }],
         };
-        j.wallet_payload = Some(crate::store::WalletApplyPayload {
+        j.wallet_payload = Some(crate::wallet::WalletApplyPayload {
             apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: trees,
             cached_pubkeys: std::collections::BTreeMap::new(),
@@ -1616,7 +1619,7 @@ mod tests {
 
     #[test]
     fn queued_job_survives_wallet_finalization_fence() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let (_dir, pipeline) = fresh_pipeline(2);
         crate::wallet::set_wallet_finalization_in_progress(true);
         pipeline.send(minimal_job(1)).unwrap();
@@ -1633,7 +1636,7 @@ mod tests {
 
     #[test]
     fn queued_chain_only_job_invalidates_on_generation_change() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
@@ -1660,7 +1663,7 @@ mod tests {
 
     #[test]
     fn queued_payload_crossing_partial_rescan_invalidates() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
@@ -1708,7 +1711,7 @@ mod tests {
     /// without needing fixture-heavy CheckedBlock construction.
     #[test]
     fn worker_applies_wallet_payload_inside_batch_txn() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
         use crate::wallet::tables::WALLET_BOXES;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");

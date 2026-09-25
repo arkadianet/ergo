@@ -40,11 +40,38 @@ pub struct ChainSnapshot {
     committed: CommittedSnapshot,
     tip: ChainTip,
     headers: Vec<Header>,
+    header_ids: Vec<[u8; 32]>,
     state_context: BlockchainStateContext,
     active_params: ActiveProtocolParameters,
     signing_params: BlockchainParameters,
     protocol_params: ProtocolParams,
     reemission: Option<ReemissionRuleInputs>,
+}
+
+pub(super) fn decode_utxo_box(box_id: &[u8; 32], bytes: &[u8]) -> Result<ErgoBox, StateError> {
+    let mut reader = VlqReader::new(bytes);
+    let ergo_box = read_ergo_box(&mut reader)
+        .map_err(|error| StateError::Serialization(format!("UTXO box decode: {error}")))?;
+    if !reader.is_empty() {
+        return Err(StateError::Serialization(
+            "UTXO box has trailing bytes".to_string(),
+        ));
+    }
+    let actual_id = ergo_box
+        .box_id()
+        .map_err(|error| StateError::Serialization(format!("UTXO box id: {error}")))?;
+    if actual_id.as_bytes() != box_id {
+        return Err(StateError::DbCorruption {
+            table: "avl_nodes",
+            key: hex::encode(box_id),
+            reason: format!(
+                "decoded box id {} does not match requested box id {}",
+                hex::encode(actual_id.as_bytes()),
+                hex::encode(box_id)
+            ),
+        });
+    }
+    Ok(ergo_box)
 }
 
 impl ChainSnapshot {
@@ -61,7 +88,15 @@ impl ChainSnapshot {
             height: committed.best_full_block_height(),
             header_id: committed.best_full_block_id(),
         };
-        let headers = committed.last_ancestor_headers_window()?;
+        let header_window = committed.last_ancestor_header_window_with_ids()?;
+        let headers: Vec<Header> = header_window
+            .iter()
+            .map(|(header, _)| header.clone())
+            .collect();
+        let header_ids: Vec<[u8; 32]> = header_window
+            .into_iter()
+            .map(|(_, header_id)| header_id)
+            .collect();
         let tip_header = headers.first().ok_or(StateError::InternalInvariant {
             what: "ChainSnapshot::from_committed: empty ancestor header window",
         })?;
@@ -93,6 +128,7 @@ impl ChainSnapshot {
             committed,
             tip,
             headers,
+            header_ids,
             state_context,
             active_params,
             signing_params,
@@ -107,6 +143,10 @@ impl ChainSnapshot {
 
     pub fn headers(&self) -> &[Header] {
         &self.headers
+    }
+
+    pub fn header_ids(&self) -> &[[u8; 32]] {
+        &self.header_ids
     }
 
     pub fn state_context(&self) -> &BlockchainStateContext {
@@ -133,10 +173,7 @@ impl ChainSnapshot {
         let Some(bytes) = self.committed.lookup_box(box_id)? else {
             return Ok(None);
         };
-        let mut reader = VlqReader::new(&bytes);
-        let ergo_box = read_ergo_box(&mut reader)
-            .map_err(|error| StateError::Serialization(format!("snapshot box decode: {error}")))?;
-        Ok(Some(ergo_box))
+        decode_utxo_box(box_id, &bytes).map(Some)
     }
 }
 
@@ -185,6 +222,51 @@ mod tests {
         (parent, tip)
     }
 
+    fn snapshot_with_boxes(boxes: Vec<([u8; 32], Vec<u8>)>) -> (tempfile::TempDir, ChainSnapshot) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&boxes).unwrap();
+        apply_headers(&mut store, 5);
+        let reader = ergo_state::reader::ChainStoreReader::new_from_db(store.db_arc());
+        let wallet_store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
+            std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(store.db_arc()));
+        let accessor = super::super::ChainStateAccessorImpl::new(reader, wallet_store, false, None);
+        let snapshot = accessor.chain_snapshot().unwrap();
+        (dir, snapshot)
+    }
+
+    fn valid_box_bytes() -> ([u8; 32], Vec<u8>) {
+        let tree = ergo_ser::ergo_tree::ErgoTree {
+            version: 0,
+            has_size: true,
+            constant_segregation: true,
+            constants: vec![(
+                ergo_ser::sigma_type::SigmaType::SBoolean,
+                ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            )],
+            body: ergo_ser::opcode::Expr::Const {
+                tpe: ergo_ser::sigma_type::SigmaType::SBoolean,
+                val: ergo_ser::sigma_value::SigmaValue::Boolean(true),
+            },
+        };
+        let candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            1_000_000,
+            tree,
+            1,
+            Vec::new(),
+            ergo_ser::register::AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        let ergo_box = ergo_ser::ergo_box::ErgoBox {
+            candidate,
+            transaction_id: ModifierId::from_bytes([7; 32]),
+            index: 0,
+        };
+        let box_id = *ergo_box.box_id().unwrap().as_bytes();
+        let bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box).unwrap();
+        (box_id, bytes)
+    }
+
     #[test]
     fn snapshot_supports_short_chain_with_five_headers() {
         let dir = tempfile::tempdir().unwrap();
@@ -199,6 +281,35 @@ mod tests {
         assert_eq!(snapshot.tip().height, 5);
         assert_eq!(snapshot.headers().len(), 5);
         assert_eq!(snapshot.headers()[0].height, 5);
+    }
+
+    #[test]
+    fn snapshot_lookup_distinguishes_absent_from_invalid_box_bytes() {
+        let invalid_id = [0x77; 32];
+        let (_dir, snapshot) = snapshot_with_boxes(vec![(invalid_id, vec![0x01, 0x02])]);
+
+        assert!(matches!(snapshot.lookup_utxo(&[0x78; 32]), Ok(None)));
+        assert!(matches!(
+            snapshot.lookup_utxo(&invalid_id),
+            Err(StateError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_lookup_rejects_trailing_bytes_and_box_id_mismatch() {
+        let (box_id, bytes) = valid_box_bytes();
+        let mut trailing = bytes.clone();
+        trailing.push(0xAA);
+        let (_dir, snapshot) = snapshot_with_boxes(vec![(box_id, trailing), ([0x99; 32], bytes)]);
+
+        assert!(matches!(
+            snapshot.lookup_utxo(&box_id),
+            Err(StateError::Serialization(message)) if message.contains("trailing")
+        ));
+        assert!(matches!(
+            snapshot.lookup_utxo(&[0x99; 32]),
+            Err(StateError::DbCorruption { .. })
+        ));
     }
 
     #[test]

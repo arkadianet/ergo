@@ -12,50 +12,14 @@ use super::types;
 use super::WalletAdmin;
 
 pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_json::Value>) {
-    use super::WalletAdminError as E;
-    let (status, reason) = match &e {
-        E::Uninitialized => (StatusCode::BAD_REQUEST, "wallet_uninitialized"),
-        E::Locked => (StatusCode::BAD_REQUEST, "wallet_locked"),
-        E::InvalidMnemonic => (StatusCode::BAD_REQUEST, "invalid_mnemonic"),
-        E::WrongPassword => (StatusCode::UNAUTHORIZED, "wrong_password"),
-        E::RestorePruningUnsupported => (
-            StatusCode::BAD_REQUEST,
-            "wallet_restore_pruning_unsupported",
-        ),
-        E::ChangeAddressUntracked => (StatusCode::BAD_REQUEST, "change_address_untracked"),
-        E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-        E::StaleChainTip(_) => (StatusCode::CONFLICT, "stale_chain_tip"),
-        E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
-        E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
-        E::WalletExists => (StatusCode::BAD_REQUEST, "wallet_exists"),
-        E::DerivationPathExists => (StatusCode::BAD_REQUEST, "derivation_path_exists"),
-        E::AddressNotTracked => (StatusCode::NOT_FOUND, "address_not_found"),
-        E::RescanUnavailable(_) => (StatusCode::CONFLICT, "rescan_unavailable"),
-        E::SensitiveOpDisabled => (StatusCode::FORBIDDEN, "sensitive_op_disabled"),
-        E::AcknowledgementRequired => (StatusCode::BAD_REQUEST, "acknowledgement_required"),
-        E::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-        E::BoxNotFound => (StatusCode::NOT_FOUND, "box_not_found"),
-        E::UnsupportedScript => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_script"),
-        E::MissingSecret => (StatusCode::UNPROCESSABLE_ENTITY, "missing_secret"),
-        E::UnsupportedIntent => (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_intent"),
-        E::ReemissionObligationUnmet(_) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "reemission_obligation_unmet",
-        ),
-        E::InsufficientFunds(_) => (StatusCode::UNPROCESSABLE_ENTITY, "insufficient_funds"),
-        E::ReemissionSpendNotAllowed(_) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "reemission_spend_not_allowed",
-        ),
-        E::TokenBurnNotAllowed(_) => (StatusCode::UNPROCESSABLE_ENTITY, "token_burn_not_allowed"),
-        E::TxNotFound => (StatusCode::NOT_FOUND, "tx_not_found"),
-    };
+    let mapped = ergo_wallet_protocol::WalletErrorSurface::Scala.map(&e);
+    let status = StatusCode::from_u16(mapped.status).expect("protocol wallet status is valid");
     if status.is_server_error() {
-        tracing::error!(reason, detail = %e, "wallet request failed");
+        tracing::error!(reason = mapped.reason, detail = %e, "wallet request failed");
     } else {
-        tracing::debug!(reason, detail = %e, "wallet request rejected");
+        tracing::debug!(reason = mapped.reason, detail = %e, "wallet request rejected");
     }
-    let body = serde_json::json!({ "reason": reason, "detail": e.to_string() });
+    let body = serde_json::json!({ "reason": mapped.reason, "detail": e.to_string() });
     (status, Json(body))
 }
 

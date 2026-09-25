@@ -1114,14 +1114,17 @@ dependencies = [
 name = "ergo-wallet-service"
 version = "0.8.0"
 dependencies = [
+ "bincode",
  "ergo-primitives",
  "ergo-ser",
  "ergo-validation",
  "ergo-wallet",
  "ergo-wallet-protocol",
  "hex",
+ "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

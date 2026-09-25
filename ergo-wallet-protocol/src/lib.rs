@@ -4,7 +4,9 @@ pub mod native;
 pub mod scala;
 
 pub use chain::*;
-pub use error::{WalletAdminError, WalletAdminErrorKind, WalletError};
+pub use error::{
+    WalletAdminError, WalletAdminErrorKind, WalletError, WalletErrorStatus, WalletErrorSurface,
+};
 pub use native::dto;
 pub use native::dto::*;
 pub use native::error::NativeWalletError;

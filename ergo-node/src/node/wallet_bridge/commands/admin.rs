@@ -282,6 +282,10 @@ pub(crate) async fn rescan(
             return;
         }
     };
+    if let Some(service) = ctx.service {
+        rescan_via_service(ctx, service, from_height, tip_h, reply).await;
+        return;
+    }
     let start_h = from_height;
     let mut registry_recovered = false;
     let scan_matcher = if start_h == 0 {
@@ -369,7 +373,7 @@ pub(crate) async fn rescan(
                     .tip_height()
                     .map_err(|e| ergo_state::wallet::scan::RescanReadError::Storage {
                         height: reached_for_tip.load(Ordering::SeqCst),
-                        source: e,
+                        source: ergo_state::wallet::WalletStoreError::decode(e.to_string()),
                     })
             },
             || {
@@ -425,6 +429,100 @@ pub(crate) async fn rescan(
     let _ = reply.send(Ok(()));
 }
 
+async fn rescan_via_service(
+    ctx: &WriterContext<'_>,
+    service: &ergo_wallet_service::runtime::WalletService,
+    from_height: u32,
+    _tip_h: u32,
+    reply: oneshot::Sender<Result<(), WalletAdminError>>,
+) {
+    if from_height == 0 {
+        match super::scan::build_rescan_matcher_from_store(ctx.store.as_ref()) {
+            Ok(_) => {}
+            Err(super::scan::ScanRegistryLoadError::Read(error)) => {
+                let _ = reply.send(Err(WalletAdminError::Internal(format!(
+                    "scan registry read failed: {error}"
+                ))));
+                return;
+            }
+            Err(super::scan::ScanRegistryLoadError::Corrupt(error)) => {
+                tracing::error!(%error, "scan registry is corrupt; discarding registry before service rescan");
+                if let Err(recovery_error) = recover_corrupt_scan_registry(ctx.store.as_ref()) {
+                    fail_closed_after_scan_recovery_error(ctx.store.as_ref());
+                    let _ = reply.send(Err(WalletAdminError::Internal(format!(
+                        "scan registry is corrupt and recovery failed: {recovery_error}"
+                    ))));
+                    return;
+                }
+            }
+        }
+    }
+    let rescan_start = match begin_rescan_process(from_height, ctx.store.as_ref(), _tip_h) {
+        Ok(rescan_start) => rescan_start,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
+        }
+    };
+    if let Err(error) = persist_rescan_state(
+        ctx.store.as_ref(),
+        &ergo_state::wallet::RescanState::Running { from_height },
+    ) {
+        fail_rescan_start_with_invalidation(ctx.store.as_ref());
+        let _ = reply.send(Err(WalletAdminError::Internal(error.to_string())));
+        return;
+    }
+    if from_height == 0 {
+        if let Err(error) = ctx.store.as_ref().persist_scan_invalidation(true) {
+            fail_rescan_start_with_invalidation(ctx.store.as_ref());
+            let _ = reply.send(Err(WalletAdminError::Internal(error.to_string())));
+            return;
+        }
+    }
+    let generation = ergo_state::wallet::wallet_apply_generation();
+    let service = service.clone();
+    let store = ctx.store.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut flags =
+            RescanFlagsGuard::new(generation, rescan_start.fenced_wallet_apply, store.clone());
+        let result = service.rescan_to_tip_with_cancellation(from_height, || {
+            crate::wallet_boot::RESCAN_CANCEL_REQUESTED.load(Ordering::SeqCst)
+                || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
+        });
+        if let Err(error) = &result {
+            let already_failed = store
+                .read()
+                .and_then(|read| read.rescan_state())
+                .map(|state| matches!(state, ergo_state::wallet::RescanState::Failed { .. }))
+                .unwrap_or(false);
+            if !already_failed {
+                let _ = persist_rescan_state(
+                    store.as_ref(),
+                    &ergo_state::wallet::RescanState::Failed {
+                        height: from_height,
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            flags.block();
+        } else if store
+            .read()
+            .and_then(|read| read.scan_invalidated())
+            .unwrap_or(true)
+        {
+            flags.block();
+        }
+    });
+    if let Err(error) = crate::wallet_boot::track_wallet_task(ctx.wallet_session_id, task).await {
+        tracing::error!(%error, "wallet service rescan task failed");
+        let _ = reply.send(Err(WalletAdminError::Internal(format!(
+            "wallet rescan task failed: {error}"
+        ))));
+        return;
+    }
+    let _ = reply.send(Ok(()));
+}
+
 fn recover_corrupt_scan_registry(
     store: &dyn ergo_state::wallet::WalletStore,
 ) -> Result<(), ergo_state::wallet::WalletStoreError> {
@@ -472,8 +570,10 @@ fn rescan_failure_state(
         RescanError::Read(RescanReadError::Missing { height })
         | RescanError::Read(RescanReadError::Corrupt { height, .. })
         | RescanError::Read(RescanReadError::Storage { height, .. })
+        | RescanError::Read(RescanReadError::Chain { height, .. })
         | RescanError::Cancelled { height }
         | RescanError::Matcher { height, .. } => *height,
+        RescanError::TipChanged { expected, .. } => expected.height,
         RescanError::Storage(_)
         | RescanError::InvalidStart { .. }
         | RescanError::Invalidation { .. } => from_height,
@@ -709,13 +809,18 @@ pub(crate) async fn balances(
 ) {
     let result: Result<WalletBalances, WalletAdminError> =
         (|| -> Result<WalletBalances, WalletAdminError> {
-            let read = ctx
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let balance = read
-                .balance()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let balance = if let Some(service) = ctx.service {
+                service
+                    .confirmed_balance()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            } else {
+                let read = ctx
+                    .store
+                    .read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                read.balance()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            };
             let assets = balance
                 .tokens
                 .iter()
@@ -1058,13 +1163,18 @@ pub(crate) async fn boxes(
 ) {
     let result: Result<WalletBoxesPage, WalletAdminError> =
         (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let read = ctx
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let all = read
-                .all_boxes()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let all = if let Some(service) = ctx.service {
+                service
+                    .boxes()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            } else {
+                let read = ctx
+                    .store
+                    .read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                read.all_boxes()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            };
             Ok(super::paginate_boxes(all, page))
         })();
     let _ = reply.send(result);
@@ -1077,13 +1187,18 @@ pub(crate) async fn boxes_unspent(
 ) {
     let result: Result<WalletBoxesPage, WalletAdminError> =
         (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let read = ctx
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let unspent = read
-                .unspent_boxes()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let unspent = if let Some(service) = ctx.service {
+                service
+                    .confirmed_boxes()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            } else {
+                let read = ctx
+                    .store
+                    .read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                read.unspent_boxes()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            };
             Ok(super::paginate_boxes(unspent, page))
         })();
     let _ = reply.send(result);
@@ -1096,13 +1211,18 @@ pub(crate) async fn transactions(
 ) {
     let result: Result<WalletTransactionsPage, WalletAdminError> =
         (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-            let read = ctx
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let all = read
-                .all_transactions()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let all = if let Some(service) = ctx.service {
+                service
+                    .transactions()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            } else {
+                let read = ctx
+                    .store
+                    .read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                read.all_transactions()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            };
             Ok(super::paginate_transactions(all, page))
         })();
     let _ = reply.send(result);
@@ -1122,14 +1242,20 @@ pub(crate) async fn transaction_by_id(
                         WalletAdminError::Internal("tx_id must be 32 bytes".to_string())
                     })
                 })?;
-            let read = ctx
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let entry = read
-                .transaction_by_id(&tx_bytes)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(super::wallet_tx_to_entry);
+            let entry = if let Some(service) = ctx.service {
+                service
+                    .transaction_by_id(&tx_bytes)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                    .map(super::wallet_tx_to_entry)
+            } else {
+                let read = ctx
+                    .store
+                    .read()
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+                read.transaction_by_id(&tx_bytes)
+                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                    .map(super::wallet_tx_to_entry)
+            };
             Ok(entry)
         })();
     let _ = reply.send(result);
@@ -1675,7 +1801,7 @@ mod attempt_limiter_tests {
             &ergo_state::wallet::scan::RescanError::Read(
                 ergo_state::wallet::scan::RescanReadError::Storage {
                     height: 42,
-                    source: ergo_state::store::StateError::Serialization("boom".to_string()),
+                    source: ergo_state::wallet::WalletStoreError::decode("boom".to_string()),
                 },
             ),
         );

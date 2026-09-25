@@ -10,6 +10,8 @@ pub const RESERVED_ZERO_ID: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 pub const RESERVED_MAX_ID: &str =
     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+pub const GENESIS_CURSOR_ID: &str = RESERVED_ZERO_ID;
+pub const GENESIS_CURSOR_HEADER_ID: &str = GENESIS_CURSOR_ID;
 
 pub fn validate_id32(value: &str, field: &str) -> Result<(), String> {
     if value.len() != ID32_HEX_LEN
@@ -75,7 +77,7 @@ where
     let value = Option::<String>::deserialize(deserializer)?;
     value
         .map(|value| {
-            validate_id32(&value, "header_id").map_err(serde::de::Error::custom)?;
+            validate_id32(&value, "tip").map_err(serde::de::Error::custom)?;
             Ok(value)
         })
         .transpose()
@@ -229,6 +231,7 @@ impl ChainTip {
 pub type Tip = ChainTip;
 pub type TipResponse = ChainTip;
 pub type ChainTipResponse = ChainTip;
+pub type ExpectedTip = ChainTip;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -236,6 +239,19 @@ pub struct ChainCursor {
     pub height: u32,
     #[serde(deserialize_with = "deserialize_header_id")]
     pub header_id: String,
+}
+
+impl ChainCursor {
+    pub fn genesis() -> Self {
+        Self {
+            height: 0,
+            header_id: GENESIS_CURSOR_ID.to_string(),
+        }
+    }
+
+    pub fn is_genesis_sentinel(&self) -> bool {
+        self.height == 0 && self.header_id == GENESIS_CURSOR_ID
+    }
 }
 
 pub type Cursor = ChainCursor;
@@ -419,8 +435,15 @@ pub type PrunedBlocksResponse = PrunedBlocksSince;
 pub struct BoxLookupRequest {
     #[serde(deserialize_with = "deserialize_id32")]
     pub box_id: String,
-    #[serde(default, deserialize_with = "deserialize_optional_header_id")]
+    #[serde(
+        default,
+        alias = "expectedTip",
+        deserialize_with = "deserialize_optional_header_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tip: Option<String>,
+    #[serde(default, alias = "tipHeight", skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +457,7 @@ pub struct BoxLookupResponse {
 pub type BoxLookup = BoxLookupResponse;
 pub type ChainBoxLookupRequest = BoxLookupRequest;
 pub type ChainBoxLookupResponse = BoxLookupResponse;
+pub type UtxoLookupRequest = BoxLookupRequest;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -657,6 +681,48 @@ mod tests {
                     | ("pruned", BlocksSinceResponse::Pruned(_))
             ));
         }
+    }
+
+    #[test]
+    fn box_lookup_tip_round_trips_as_a_header_id_query() {
+        let request = BoxLookupRequest {
+            box_id: id('a'),
+            tip: Some(id('b')),
+            height: Some(12),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""tip":""#));
+        assert!(json.contains(r#""height":12"#));
+        assert_eq!(
+            serde_json::from_str::<BoxLookupRequest>(&json).unwrap(),
+            request
+        );
+        let query = serde_json::json!({
+            "boxId": id('a'),
+            "tip": id('b')
+        });
+        assert_eq!(
+            serde_json::from_value::<BoxLookupRequest>(query).unwrap(),
+            BoxLookupRequest {
+                box_id: id('a'),
+                tip: Some(id('b')),
+                height: None,
+            }
+        );
+        assert!(
+            serde_json::from_value::<BoxLookupRequest>(serde_json::json!({
+                "boxId": id('a'),
+                "tip": {"height": 12, "headerId": id('b')}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<BoxLookupRequest>(serde_json::json!({
+                "boxId": id('a'),
+                "tip": "not-an-id"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

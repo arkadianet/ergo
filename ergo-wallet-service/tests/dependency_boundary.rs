@@ -16,7 +16,6 @@ const SERVICE_FORBIDDEN: &[&str] = &[
     "ergo-mempool",
     "ergo-mining",
     "ergo-sync",
-    "redb",
     "tokio",
     "axum",
 ];

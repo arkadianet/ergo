@@ -5,6 +5,7 @@ pub type HeaderId = [u8; 32];
 pub type BlockId = [u8; 32];
 pub type BoxId = [u8; 32];
 pub type TxId = [u8; 32];
+pub const GENESIS_CURSOR_ID: HeaderId = [0; 32];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedTip {
@@ -26,6 +27,19 @@ impl CommittedTip {
 pub struct ChainCursor {
     pub height: u32,
     pub header_id: HeaderId,
+}
+
+impl ChainCursor {
+    pub const fn genesis() -> Self {
+        Self {
+            height: 0,
+            header_id: GENESIS_CURSOR_ID,
+        }
+    }
+
+    pub fn is_genesis_sentinel(&self) -> bool {
+        self.height == 0 && self.header_id == GENESIS_CURSOR_ID
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +147,7 @@ pub struct Utxo {
 }
 
 pub type ChainTip = CommittedTip;
+pub type ExpectedTip = CommittedTip;
 pub type Tip = CommittedTip;
 pub type Snapshot = ChainSnapshot;
 pub type BlocksSince = BlocksSinceResponse;
@@ -142,6 +157,12 @@ pub type PrunedBlocks = PrunedBlocksSince;
 pub type ChainBox = Utxo;
 pub type BoxLookup = UtxoLookup;
 pub type Submit = SubmitResponse;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UtxoLookupRequest {
+    pub box_id: BoxId,
+    pub expected_tip: ExpectedTip,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UtxoLookup {
@@ -186,8 +207,88 @@ pub enum SubmitResponse {
 pub enum ChainClientError {
     #[error("unsupported chain operation")]
     Unsupported,
+    #[error(
+        "stale chain tip: expected ({expected_height}, {expected_id}), actual ({actual_height}, {actual_id})",
+        expected_height = expected.height,
+        expected_id = hex::encode(expected.header_id),
+        actual_height = actual.height,
+        actual_id = hex::encode(actual.header_id)
+    )]
+    StaleTip {
+        expected: CommittedTip,
+        actual: CommittedTip,
+    },
+    #[error("chain history is pruned (minimum height: {minimum_height:?})")]
+    HistoryPruned { minimum_height: Option<u32> },
+    #[error("chain history is unavailable: {reason}")]
+    UnsupportedHistory { reason: String },
     #[error("chain client failure: {0}")]
     Failure(String),
+}
+
+impl ChainClientError {
+    pub fn stale_tip(expected: CommittedTip, actual: CommittedTip) -> Self {
+        Self::StaleTip { expected, actual }
+    }
+}
+
+impl UtxoLookupRequest {
+    pub fn from_wire(
+        request: &ergo_wallet_protocol::chain::BoxLookupRequest,
+        current_tip: CommittedTip,
+    ) -> Result<Self, ChainClientError> {
+        ergo_wallet_protocol::chain::validate_id32(&request.box_id, "box_id")
+            .map_err(ChainClientError::Failure)?;
+        let box_id = hex::decode(&request.box_id)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ChainClientError::Failure("box_id must be 32 bytes".to_string()))?;
+        let Some(tip) = request.tip.as_deref() else {
+            if request.height.is_some() {
+                return Err(ChainClientError::Failure(
+                    "lookup height requires a tip header id".to_string(),
+                ));
+            }
+            return Ok(Self {
+                box_id,
+                expected_tip: current_tip,
+            });
+        };
+        ergo_wallet_protocol::chain::validate_id32(tip, "tip")
+            .map_err(ChainClientError::Failure)?;
+        let header_id = hex::decode(tip)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ChainClientError::Failure("tip must be 32 bytes".to_string()))?;
+        let height = request.height.unwrap_or(current_tip.height);
+        Ok(Self {
+            box_id,
+            expected_tip: CommittedTip::new(height, header_id),
+        })
+    }
+}
+
+impl TryFrom<&ergo_wallet_protocol::chain::BoxLookupRequest> for UtxoLookupRequest {
+    type Error = ChainClientError;
+
+    fn try_from(
+        request: &ergo_wallet_protocol::chain::BoxLookupRequest,
+    ) -> Result<Self, Self::Error> {
+        let height = request.height.ok_or_else(|| {
+            ChainClientError::Failure("lookup height is required without a current tip".to_string())
+        })?;
+        Self::from_wire(request, CommittedTip::new(height, [0; 32]))
+    }
+}
+
+impl TryFrom<(&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip)> for UtxoLookupRequest {
+    type Error = ChainClientError;
+
+    fn try_from(
+        (request, current_tip): (&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip),
+    ) -> Result<Self, Self::Error> {
+        Self::from_wire(request, current_tip)
+    }
 }
 
 pub trait ChainClient: Send + Sync {
@@ -200,7 +301,11 @@ pub trait ChainClient: Send + Sync {
         request: BlocksSinceRequest,
     ) -> Result<BlocksSinceResponse, ChainClientError>;
 
-    fn lookup_utxo(&self, box_id: BoxId) -> Result<UtxoLookup, ChainClientError>;
+    fn lookup_utxo(
+        &self,
+        box_id: BoxId,
+        expected_tip: CommittedTip,
+    ) -> Result<UtxoLookup, ChainClientError>;
 
     fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse, ChainClientError>;
 
@@ -221,13 +326,38 @@ pub trait ChainClient: Send + Sync {
     }
 
     fn lookup_utxo_by_id(&self, box_id: BoxId) -> Result<UtxoLookup, ChainClientError> {
-        self.lookup_utxo(box_id)
+        let tip = self.committed_tip()?;
+        self.lookup_utxo(box_id, tip)
+    }
+
+    fn lookup_utxo_at_tip(
+        &self,
+        box_id: BoxId,
+        expected_tip: CommittedTip,
+    ) -> Result<UtxoLookup, ChainClientError> {
+        self.lookup_utxo(box_id, expected_tip)
+    }
+
+    fn lookup_utxo_request(
+        &self,
+        request: UtxoLookupRequest,
+    ) -> Result<UtxoLookup, ChainClientError> {
+        self.lookup_utxo(request.box_id, request.expected_tip)
+    }
+
+    fn lookup_utxo_wire(
+        &self,
+        request: &ergo_wallet_protocol::chain::BoxLookupRequest,
+    ) -> Result<UtxoLookup, ChainClientError> {
+        let current_tip = self.committed_tip()?;
+        self.lookup_utxo_request(UtxoLookupRequest::from_wire(request, current_tip)?)
     }
 
     fn submit_bytes(&self, transaction: Vec<u8>) -> Result<SubmitResponse, ChainClientError> {
+        let tip = self.committed_tip()?;
         self.submit(SubmitRequest {
             transaction,
-            snapshot_id: None,
+            snapshot_id: Some(tip.header_id),
         })
     }
 }
@@ -267,9 +397,13 @@ mod tests {
             }))
         }
 
-        fn lookup_utxo(&self, box_id: BoxId) -> Result<UtxoLookup, ChainClientError> {
+        fn lookup_utxo(
+            &self,
+            box_id: BoxId,
+            expected_tip: CommittedTip,
+        ) -> Result<UtxoLookup, ChainClientError> {
             Ok(UtxoLookup {
-                tip: self.committed_tip()?,
+                tip: expected_tip,
                 utxo: Some(Utxo {
                     box_id,
                     bytes: vec![1, 2, 3],
@@ -381,6 +515,59 @@ mod tests {
     }
 
     #[test]
+    fn wire_lookup_converts_header_id_query_to_a_full_expected_tip() {
+        let current = CommittedTip::new(9, [1; 32]);
+        let request = ergo_wallet_protocol::chain::BoxLookupRequest {
+            box_id: hex::encode([2; 32]),
+            tip: Some(hex::encode([3; 32])),
+            height: Some(7),
+        };
+        let converted = UtxoLookupRequest::try_from((&request, current.clone())).unwrap();
+        assert_eq!(converted.box_id, [2; 32]);
+        assert_eq!(converted.expected_tip, CommittedTip::new(7, [3; 32]));
+        assert_eq!(
+            UtxoLookupRequest::try_from(&request).unwrap().expected_tip,
+            CommittedTip::new(7, [3; 32])
+        );
+
+        let no_height = ergo_wallet_protocol::chain::BoxLookupRequest {
+            box_id: hex::encode([2; 32]),
+            tip: Some(hex::encode([3; 32])),
+            height: None,
+        };
+        assert_eq!(
+            UtxoLookupRequest::from_wire(&no_height, current.clone())
+                .unwrap()
+                .expected_tip,
+            CommittedTip::new(9, [3; 32])
+        );
+        let no_tip = ergo_wallet_protocol::chain::BoxLookupRequest {
+            box_id: hex::encode([2; 32]),
+            tip: None,
+            height: None,
+        };
+        assert_eq!(
+            UtxoLookupRequest::from_wire(&no_tip, current.clone())
+                .unwrap()
+                .expected_tip,
+            current
+        );
+    }
+
+    #[test]
+    fn wire_lookup_rejects_a_height_without_a_tip() {
+        let request = ergo_wallet_protocol::chain::BoxLookupRequest {
+            box_id: hex::encode([2; 32]),
+            tip: None,
+            height: Some(1),
+        };
+        assert!(matches!(
+            UtxoLookupRequest::from_wire(&request, CommittedTip::new(1, [1; 32])),
+            Err(ChainClientError::Failure(_))
+        ));
+    }
+
+    #[test]
     fn chain_client_is_object_safe_and_returns_owned_values() {
         let client: &dyn ChainClient = &Stub;
         assert_eq!(client.committed_tip().unwrap().height, 9);
@@ -395,7 +582,15 @@ mod tests {
             ),
             Ok(BlocksSinceResponse::Pruned(_))
         ));
-        assert_eq!(client.lookup_utxo([6; 32]).unwrap().utxo.unwrap().value, 10);
+        assert_eq!(
+            client
+                .lookup_utxo([6; 32], CommittedTip::new(9, [1; 32]))
+                .unwrap()
+                .utxo
+                .unwrap()
+                .value,
+            10
+        );
         assert!(matches!(
             client.submit_bytes(vec![7]),
             Ok(SubmitResponse::Accepted { .. })

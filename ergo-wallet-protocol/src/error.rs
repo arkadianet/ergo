@@ -33,6 +33,166 @@ pub enum WalletAdminError {
 pub type WalletError = WalletAdminError;
 pub type WalletAdminErrorKind = WalletAdminError;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalletErrorSurface {
+    Scala,
+    NativeV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletErrorStatus {
+    pub status: u16,
+    pub reason: &'static str,
+    pub detail: Option<String>,
+}
+
+impl WalletErrorStatus {
+    pub fn status_code(&self) -> u16 {
+        self.status
+    }
+}
+
+impl WalletErrorSurface {
+    pub const SCALA_COMPATIBLE: Self = Self::Scala;
+    pub const NATIVE_V1: Self = Self::NativeV1;
+
+    pub fn map(&self, error: &WalletAdminError) -> WalletErrorStatus {
+        let reason = match self {
+            Self::Scala => match error {
+                WalletAdminError::Uninitialized => "wallet_uninitialized",
+                WalletAdminError::Locked => "wallet_locked",
+                WalletAdminError::InvalidMnemonic => "invalid_mnemonic",
+                WalletAdminError::WrongPassword => "wrong_password",
+                WalletAdminError::RestorePruningUnsupported => "wallet_restore_pruning_unsupported",
+                WalletAdminError::ChangeAddressUntracked => "change_address_untracked",
+                WalletAdminError::BadRequest(_) => "bad_request",
+                WalletAdminError::StaleChainTip(_) => "stale_chain_tip",
+                WalletAdminError::Internal(_) => "internal",
+                WalletAdminError::Forbidden(_) => "forbidden",
+                WalletAdminError::WalletExists => "wallet_exists",
+                WalletAdminError::DerivationPathExists => "derivation_path_exists",
+                WalletAdminError::AddressNotTracked => "address_not_found",
+                WalletAdminError::RescanUnavailable(_) => "rescan_unavailable",
+                WalletAdminError::SensitiveOpDisabled => "sensitive_op_disabled",
+                WalletAdminError::AcknowledgementRequired => "acknowledgement_required",
+                WalletAdminError::RateLimited => "rate_limited",
+                WalletAdminError::BoxNotFound => "box_not_found",
+                WalletAdminError::UnsupportedScript => "unsupported_script",
+                WalletAdminError::MissingSecret => "missing_secret",
+                WalletAdminError::UnsupportedIntent => "unsupported_intent",
+                WalletAdminError::ReemissionObligationUnmet(_) => "reemission_obligation_unmet",
+                WalletAdminError::InsufficientFunds(_) => "insufficient_funds",
+                WalletAdminError::ReemissionSpendNotAllowed(_) => "reemission_spend_not_allowed",
+                WalletAdminError::TokenBurnNotAllowed(_) => "token_burn_not_allowed",
+                WalletAdminError::TxNotFound => "tx_not_found",
+            },
+            Self::NativeV1 => match error {
+                WalletAdminError::Uninitialized => "wallet_uninitialized",
+                WalletAdminError::Locked => "wallet_locked",
+                WalletAdminError::InvalidMnemonic => "invalid_mnemonic",
+                WalletAdminError::WrongPassword => "wrong_password",
+                WalletAdminError::RestorePruningUnsupported => "pruning_unsupported",
+                WalletAdminError::ChangeAddressUntracked => "change_address_untracked",
+                WalletAdminError::BadRequest(_) => "bad_request",
+                WalletAdminError::StaleChainTip(_) => "stale_chain_tip",
+                WalletAdminError::Internal(_) => "internal",
+                WalletAdminError::Forbidden(_) => "sensitive_op_disabled",
+                WalletAdminError::WalletExists => "wallet_exists",
+                WalletAdminError::DerivationPathExists => "derivation_path_exists",
+                WalletAdminError::AddressNotTracked => "address_not_found",
+                WalletAdminError::RescanUnavailable(_) => "rescan_unavailable",
+                WalletAdminError::SensitiveOpDisabled => "sensitive_op_disabled",
+                WalletAdminError::AcknowledgementRequired => "acknowledgement_required",
+                WalletAdminError::RateLimited => "rate_limited",
+                WalletAdminError::BoxNotFound => "box_not_found",
+                WalletAdminError::UnsupportedScript => "unsupported_script",
+                WalletAdminError::MissingSecret => "missing_secret",
+                WalletAdminError::UnsupportedIntent => "unsupported_intent",
+                WalletAdminError::ReemissionObligationUnmet(_) => "reemission_obligation_unmet",
+                WalletAdminError::InsufficientFunds(_) => "insufficient_funds",
+                WalletAdminError::ReemissionSpendNotAllowed(_) => "reemission_spend_not_allowed",
+                WalletAdminError::TokenBurnNotAllowed(_) => "token_burn_not_allowed",
+                WalletAdminError::TxNotFound => "tx_not_found",
+            },
+        };
+        let detail = match (self, error) {
+            (Self::Scala, _) => error.detail().map(ToOwned::to_owned),
+            (Self::NativeV1, WalletAdminError::Forbidden(_)) => None,
+            (Self::NativeV1, _) => error.detail().map(ToOwned::to_owned),
+        };
+        let status = match self {
+            Self::Scala => match error {
+                WalletAdminError::WrongPassword => 401,
+                WalletAdminError::StaleChainTip(_) | WalletAdminError::RescanUnavailable(_) => 409,
+                WalletAdminError::Internal(_) => 500,
+                WalletAdminError::Forbidden(_) | WalletAdminError::SensitiveOpDisabled => 403,
+                WalletAdminError::AddressNotTracked
+                | WalletAdminError::BoxNotFound
+                | WalletAdminError::TxNotFound => 404,
+                WalletAdminError::RateLimited => 429,
+                WalletAdminError::UnsupportedScript
+                | WalletAdminError::MissingSecret
+                | WalletAdminError::UnsupportedIntent
+                | WalletAdminError::ReemissionObligationUnmet(_)
+                | WalletAdminError::InsufficientFunds(_)
+                | WalletAdminError::ReemissionSpendNotAllowed(_)
+                | WalletAdminError::TokenBurnNotAllowed(_) => 422,
+                _ => 400,
+            },
+            Self::NativeV1 => match error {
+                WalletAdminError::Uninitialized
+                | WalletAdminError::Locked
+                | WalletAdminError::RestorePruningUnsupported
+                | WalletAdminError::StaleChainTip(_)
+                | WalletAdminError::RescanUnavailable(_)
+                | WalletAdminError::WalletExists
+                | WalletAdminError::DerivationPathExists => 409,
+                WalletAdminError::WrongPassword => 401,
+                WalletAdminError::Internal(_) => 500,
+                WalletAdminError::Forbidden(_) | WalletAdminError::SensitiveOpDisabled => 403,
+                WalletAdminError::AddressNotTracked
+                | WalletAdminError::BoxNotFound
+                | WalletAdminError::TxNotFound => 404,
+                WalletAdminError::RateLimited => 429,
+                WalletAdminError::ChangeAddressUntracked
+                | WalletAdminError::UnsupportedScript
+                | WalletAdminError::MissingSecret
+                | WalletAdminError::UnsupportedIntent
+                | WalletAdminError::ReemissionObligationUnmet(_)
+                | WalletAdminError::InsufficientFunds(_)
+                | WalletAdminError::ReemissionSpendNotAllowed(_)
+                | WalletAdminError::TokenBurnNotAllowed(_) => 422,
+                _ => 400,
+            },
+        };
+        WalletErrorStatus {
+            status,
+            reason,
+            detail,
+        }
+    }
+
+    pub fn status(&self, error: &WalletAdminError) -> u16 {
+        self.map(error).status
+    }
+
+    pub fn reason(&self, error: &WalletAdminError) -> &'static str {
+        self.map(error).reason
+    }
+
+    pub fn detail(&self, error: &WalletAdminError) -> Option<String> {
+        self.map(error).detail
+    }
+
+    pub fn scala(error: &WalletAdminError) -> WalletErrorStatus {
+        Self::Scala.map(error)
+    }
+
+    pub fn native_v1(error: &WalletAdminError) -> WalletErrorStatus {
+        Self::NativeV1.map(error)
+    }
+}
+
 impl WalletAdminError {
     pub fn reason(&self) -> &'static str {
         match self {
@@ -119,3 +279,37 @@ impl fmt::Display for WalletAdminError {
 }
 
 impl std::error::Error for WalletAdminError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surfaces_preserve_their_different_statuses_and_reasons() {
+        let error = WalletAdminError::Locked;
+        assert_eq!(WalletErrorSurface::Scala.status(&error), 400);
+        assert_eq!(WalletErrorSurface::NativeV1.status(&error), 409);
+        let restore = WalletAdminError::RestorePruningUnsupported;
+        assert_eq!(
+            WalletErrorSurface::Scala.reason(&restore),
+            "wallet_restore_pruning_unsupported"
+        );
+        assert_eq!(
+            WalletErrorSurface::NativeV1.reason(&restore),
+            "pruning_unsupported"
+        );
+    }
+
+    #[test]
+    fn native_mapping_owns_detail_without_forbidden_internal_text() {
+        let error = WalletAdminError::Internal("db".to_string());
+        let mapped = WalletErrorSurface::NativeV1.map(&error);
+        assert_eq!(mapped.status, 500);
+        assert_eq!(mapped.detail.as_deref(), Some("db"));
+        let forbidden = WalletAdminError::Forbidden("private".to_string());
+        assert!(WalletErrorSurface::NativeV1
+            .map(&forbidden)
+            .detail
+            .is_none());
+    }
+}

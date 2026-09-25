@@ -137,7 +137,7 @@ impl ChainStateAccessor for BlockingRescanChain {
             let _ = self.release.lock().unwrap().recv();
             return Err(ergo_state::wallet::scan::RescanReadError::Storage {
                 height,
-                source: ergo_state::store::StateError::Serialization(
+                source: ergo_state::wallet::WalletStoreError::decode(
                     "synthetic rescan read failure".to_string(),
                 ),
             });

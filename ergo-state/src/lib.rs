@@ -220,7 +220,7 @@ pub mod test_helpers {
             let apply_generation = crate::wallet::wallet_apply_generation();
             let (trees, pubkeys) = wallet_hook.wallet_state_snapshot();
             let owned = crate::store::build_wallet_block_txs_checked(checked, height)?;
-            let payload = crate::store::WalletApplyPayload {
+            let payload = crate::wallet::WalletApplyPayload {
                 apply_generation,
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,

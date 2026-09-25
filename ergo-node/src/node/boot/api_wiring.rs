@@ -143,7 +143,11 @@ fn recover_interrupted_rescan(
         let tracked_count = read.tracked_pubkeys_with_paths()?.len();
         let box_count = read.all_boxes()?.len();
         let transaction_count = read.all_transactions()?.len();
-        let has_wallet_facts = tracked_count > 0 || box_count > 0 || transaction_count > 0;
+        let registered_scan_count = read.registered_scan_count()?;
+        let has_wallet_facts = tracked_count > 0
+            || box_count > 0
+            || transaction_count > 0
+            || registered_scan_count > 0;
         let cursor_behind = has_wallet_facts
             && cursor.is_some_and(|cursor| {
                 committed_tip.is_some_and(|tip_height| cursor.height < tip_height)
@@ -256,13 +260,36 @@ pub(super) async fn bind(
         wallet_session_id = session_id;
         let is_pruned = config.blocks_to_keep != -1;
         let chain_reader = ergo_state::reader::ChainStoreReader::new_from_db(db_arc.clone());
+        let reemission_rules = super::build_reemission_rules(&config.chain_spec);
         let chain_accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> =
             Arc::new(super::super::wallet_bridge::ChainStateAccessorImpl::new(
-                chain_reader,
+                chain_reader.clone(),
                 wallet_store.clone(),
                 is_pruned,
-                super::build_reemission_rules(&config.chain_spec),
+                reemission_rules.clone(),
             ));
+        let reemission_inputs = reemission_rules
+            .as_ref()
+            .map(|rules| {
+                vec![ergo_wallet_service::chain::ReemissionInput {
+                    token_id: rules.reemission_token_id,
+                    amount: 0,
+                    box_ids: Vec::new(),
+                }]
+            })
+            .unwrap_or_default();
+        let chain_client = Arc::new(
+            super::super::wallet_bridge::InProcessChainClient::new(
+                chain_reader,
+                submit_bridge.clone(),
+            )
+            .with_state_accessor(chain_accessor.clone())
+            .with_reemission_inputs(reemission_inputs),
+        );
+        let wallet_service = Arc::new(ergo_wallet_service::runtime::WalletService::new(
+            wallet_store.clone(),
+            chain_client,
+        ));
         let wallet_storage = {
             let secret_dir = config.data_dir.join("wallet");
             Arc::new(parking_lot::RwLock::new(
@@ -336,7 +363,7 @@ pub(super) async fn bind(
             super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
         );
         let writer_handle =
-            tokio::spawn(super::super::wallet_bridge::run_wallet_writer_with_session(
+            tokio::spawn(super::super::wallet_bridge::run_wallet_writer_with_service(
                 wallet_rx,
                 wallet_storage,
                 wallet_state,
@@ -346,6 +373,7 @@ pub(super) async fn bind(
                 submit_handle,
                 mempool_view.clone(),
                 wallet_session_id,
+                wallet_service,
             ));
         if let Err(error) =
             crate::wallet_boot::track_wallet_task(wallet_session_id, writer_handle).await
@@ -757,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn recover_scan_only_cursor_lag_is_safe() {
+    fn recover_scan_only_cursor_lag_is_not_silently_clean() {
         let _guard = RECOVERY_GUARD
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -774,12 +802,13 @@ mod tests {
         write.commit().unwrap();
 
         recover_interrupted_rescan(&store).unwrap();
-        assert_eq!(
+        assert!(matches!(
             store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Idle
-        );
-        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
-        assert!(!crate::wallet_boot::RESCAN_FAIL_CLOSED.load(std::sync::atomic::Ordering::SeqCst));
+            RescanState::Failed { .. }
+        ));
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(std::sync::atomic::Ordering::SeqCst));
+        crate::wallet_boot::clear_rescan_guards();
     }
 
     #[test]
