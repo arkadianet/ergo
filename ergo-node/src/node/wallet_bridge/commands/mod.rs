@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::state::WalletState;
 
 use super::{ChainStateAccessor, TxSubmitter, WriterConfig};
 

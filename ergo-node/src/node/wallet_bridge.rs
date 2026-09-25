@@ -24,8 +24,8 @@ use ergo_api::wallet::types::{
     WalletTransactionsPage,
 };
 use ergo_api::wallet::{WalletAdmin, WalletAdminError};
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::state::WalletState;
 
 pub mod chain_snapshot;
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
@@ -1149,7 +1149,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// much slower than even a slow PBKDF2 (sub-second), so the worst case is a
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
-    pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
+    pub wallet: Arc<RwLock<ergo_wallet_service::state::WalletState>>,
     /// Shared wallet store used for block-apply matching and invalidation.
     pub store: Arc<dyn ergo_state::wallet::WalletStore>,
 }
@@ -1733,7 +1733,9 @@ mod scan_invalidation_tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         crate::wallet_boot::clear_rescan_guards();
-        let state = Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false)));
+        let state = Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
+            false,
+        )));
         state
             .write()
             .insert_tracked_pubkey(0, [2; 33], ergo_ser::address::NetworkPrefix::Mainnet)
@@ -1768,7 +1770,9 @@ mod scan_invalidation_tests {
         let store: Arc<dyn ergo_state::wallet::WalletStore> =
             Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
         let hook = WalletStateHook {
-            wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
+            wallet: Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
+                false,
+            ))),
             store,
         };
         // match_boxes loads the registry first (regardless of the box slice), so

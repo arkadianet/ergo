@@ -237,7 +237,7 @@ fn spawn_writer_with_chain(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
@@ -575,7 +575,7 @@ async fn admin_init_status_roundtrip() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
@@ -640,7 +640,7 @@ async fn get_private_key_gated_by_expose_flag_false() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
@@ -702,7 +702,7 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
 
@@ -822,7 +822,7 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_for_seed = db.clone();
@@ -938,7 +938,7 @@ async fn native_select_boxes_burn_aware_dry_run() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
@@ -1113,7 +1113,7 @@ async fn native_reads_status_boxes_and_lookup() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
@@ -1214,7 +1214,7 @@ async fn native_status_shows_change_address_while_locked() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
@@ -1278,7 +1278,7 @@ async fn init_twice_returns_wallet_exists() {
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
     ));
     let state = Arc::new(parking_lot::RwLock::new(
-        ergo_wallet::state::WalletState::empty(false),
+        ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);

@@ -9,6 +9,8 @@ members = [
     "ergo-compiler",
     "ergo-validation",
     "ergo-wallet",
+    "ergo-wallet-service",
+    "ergo-wallet-protocol",
     "ergo-state",
     "ergo-p2p",
     "ergo-sync",
@@ -38,6 +40,8 @@ ergo-sigma         = { path = "ergo-sigma" }
 ergo-compiler      = { path = "ergo-compiler" }
 ergo-validation    = { path = "ergo-validation" }
 ergo-wallet        = { path = "ergo-wallet" }
+ergo-wallet-service = { path = "ergo-wallet-service" }
+ergo-wallet-protocol = { path = "ergo-wallet-protocol" }
 ergo-state         = { path = "ergo-state" }
 ergo-p2p           = { path = "ergo-p2p" }
 ergo-sync          = { path = "ergo-sync" }

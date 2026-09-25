@@ -28,6 +28,7 @@ ergo-chain-spec   = { workspace = true }
 ergo-crypto       = { workspace = true }
 ergo-validation   = { workspace = true }
 ergo-sigma        = { workspace = true }
+ergo-wallet       = { workspace = true }
 ergo_avltree_rust = { workspace = true }
 bincode           = { workspace = true }
 blake2            = { workspace = true }
@@ -47,7 +48,7 @@ tracing-subscriber = { workspace = true, optional = true }
 [dev-dependencies]
 ergo-state        = { path = ".", features = ["test-helpers", "recompute-oracle", "test-utils"] }
 ergo-validation   = { workspace = true, features = ["test-helpers"] }
-ergo-wallet       = { workspace = true }
+ergo-wallet-service = { workspace = true }
 hex               = { workspace = true }
 proptest          = { workspace = true }
 rand              = { workspace = true }

@@ -6,8 +6,8 @@
 //! the production boot path depends on.
 
 use ergo_state::wallet::reader::WalletReader;
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::state::WalletState;
 use redb::Database;
 
 /// A test wallet that lives in a temporary directory. Owns:

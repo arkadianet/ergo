@@ -9,20 +9,10 @@
 
 use axum::http::StatusCode;
 use axum::Json;
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
+pub use ergo_wallet_protocol::native::error::NativeWalletError;
 
 use crate::wallet::WalletAdminError;
-
-/// The native wallet error body. `detail` is omitted (not `null`) when absent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct NativeWalletError {
-    /// A closed snake_case reason set (e.g. `"locked"`, `"box_not_found"`).
-    pub reason: String,
-    /// Optional human-readable detail; never carries secret material.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
 
 /// A typed `(status, body)` pair the native handlers return on the error arm.
 pub(crate) type NativeErr = (StatusCode, Json<NativeWalletError>);

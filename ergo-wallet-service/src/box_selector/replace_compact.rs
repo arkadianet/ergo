@@ -9,7 +9,8 @@
 //! compaction can land later without a signature change.
 
 use super::{BoxSelector, BoxSummary, SelectionResult, SelectionTarget};
-use crate::{box_selector::default::DefaultBoxSelector, error::WalletError};
+use crate::box_selector::default::DefaultBoxSelector;
+use ergo_wallet::error::WalletError;
 
 pub struct ReplaceCompactCollectBoxSelector;
 

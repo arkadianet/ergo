@@ -31,13 +31,13 @@ use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::transaction::bytes_to_sign;
 use ergo_sigma::reduce::verify_spending_proof_with_context_and_cost;
 use ergo_validation::pre_header::CandidatePreHeader;
-use ergo_wallet::box_selector::BoxSummary;
 use ergo_wallet::proving::external::ProverExternalSecret;
 use ergo_wallet::proving::hints::TransactionHintsBag;
 use ergo_wallet::proving::prover::Prover;
 use ergo_wallet::proving::secrets::SecretRegistry;
-use ergo_wallet::tx_builder::UnsignedTxBuilder;
 use ergo_wallet::tx_context::{BlockchainParameters, BlockchainStateContext};
+use ergo_wallet_service::box_selector::BoxSummary;
+use ergo_wallet_service::tx_builder::UnsignedTxBuilder;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::ops::{MulByGenerator, Reduce};
 use k256::{FieldBytes, ProjectivePoint, Scalar, U256};
@@ -201,8 +201,8 @@ fn full_send_flow_produces_tx_that_verifies_at_transaction_level() {
     }];
 
     // Build unsigned tx via UnsignedTxBuilder.
-    let selector = ergo_wallet::box_selector::default::DefaultBoxSelector;
-    let payment_request = ergo_wallet::tx_builder::PaymentRequest {
+    let selector = ergo_wallet_service::box_selector::default::DefaultBoxSelector;
+    let payment_request = ergo_wallet_service::tx_builder::PaymentRequest {
         to_ergo_tree: recv_ergo_tree_bytes.clone(),
         value: payment_value,
         assets: std::collections::BTreeMap::new(),
@@ -325,7 +325,7 @@ fn unsigned_tx_roundtrip_then_sign_verifies() {
         value: 5_000_000_000,
         tokens: std::collections::BTreeMap::new(),
     }];
-    let selector = ergo_wallet::box_selector::default::DefaultBoxSelector;
+    let selector = ergo_wallet_service::box_selector::default::DefaultBoxSelector;
     let builder = UnsignedTxBuilder {
         available_summaries: &summaries,
         selector: &selector,
@@ -339,7 +339,7 @@ fn unsigned_tx_roundtrip_then_sign_verifies() {
         reemission_height: 0,
     };
     let unsigned_tx_original = builder
-        .build(&[ergo_wallet::tx_builder::PaymentRequest {
+        .build(&[ergo_wallet_service::tx_builder::PaymentRequest {
             to_ergo_tree: recv_ergo_tree_bytes,
             value: 500_000_000,
             assets: std::collections::BTreeMap::new(),
@@ -454,7 +454,7 @@ fn send_path_output_trees_are_canonical_p2pk_not_segregated() {
 
     // The wallet tracks pubkeys by this same canonical tree, so a change box
     // built this way is recognized as wallet-owned on the next scan.
-    let mut wallet = ergo_wallet::state::WalletState::empty(false);
+    let mut wallet = ergo_wallet_service::state::WalletState::empty(false);
     wallet
         .insert_tracked_pubkey(0, pk, NetworkPrefix::Mainnet)
         .expect("track pubkey");

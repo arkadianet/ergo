@@ -32,7 +32,7 @@ use ergo_ser::ergo_box::ErgoBox;
 use serde::{Deserialize, Serialize};
 
 use super::predicate::ScanningPredicate;
-use crate::error::WalletError;
+use ergo_wallet::error::WalletError;
 
 /// Reserved scan id for the mining scan (Scala `Constants.MiningScanId`).
 pub const MINING_SCAN_ID: u16 = 9;

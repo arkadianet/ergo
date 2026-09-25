@@ -14,7 +14,6 @@
 pub mod apply;
 pub mod hydration;
 pub mod maturity;
-pub mod miner_reward;
 pub mod reader;
 pub mod scan;
 pub mod store;

@@ -280,7 +280,7 @@ pub(super) async fn bind(
                     }),
                 }
             };
-            let mut state = ergo_wallet::state::WalletState::empty(use_pre_1627);
+            let mut state = ergo_wallet_service::state::WalletState::empty(use_pre_1627);
             let read = wallet_store.read().map_err(|error| {
                 tracing::warn!(%error, "wallet boot: could not open wallet store read");
                 NodeError::from(format!("wallet boot: wallet store read failed: {error}"))
@@ -307,7 +307,10 @@ pub(super) async fn bind(
                 ))
             })?;
             state
-                .hydrate_from_reader(read.as_ref(), network_prefix)
+                .hydrate_from_reader(
+                    &crate::wallet_boot::WalletHydrationSource::new(read.as_ref()),
+                    network_prefix,
+                )
                 .map_err(|error| {
                     tracing::warn!(%error, "wallet boot: hydration from wallet store failed");
                     NodeError::from(format!("wallet boot: wallet hydration failed: {error}"))

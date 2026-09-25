@@ -113,8 +113,8 @@ pub const WALLET_CHANGE_ADDRESS: TableDefinition<(), [u8; 33]> =
 /// table yields scans in ascending-id order (native `u16` redb ordering),
 /// which is the `/scan/listAll` response order.
 ///
-/// Key: `scan_id: u16` (>= 11 for user scans; see `ergo_wallet::scan`).
-/// Value: `serde_json`-serialized `ergo_wallet::scan::Scan`. JSON (not
+/// Key: `scan_id: u16` (>= 11 for user scans; see `ergo_wallet_service::scan`).
+/// Value: `serde_json`-serialized `ergo_wallet_service::scan::Scan`. JSON (not
 /// bincode) because the scan's `trackingRule` is an internally-tagged serde
 /// enum, which bincode's non-self-describing format cannot represent.
 pub const WALLET_SCANS: TableDefinition<u16, Vec<u8>> = TableDefinition::new("wallet_scans");

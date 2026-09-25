@@ -1149,7 +1149,7 @@ pub(crate) async fn transactions_by_scan_id(
     // scans; reserved 9 + unknown ids read as empty — Scala serves mining-scan
     // txs at id 9, a documented parity gap).
     let result: Result<WalletTransactionsPage, WalletAdminError> =
-        if scan_id == u32::from(ergo_wallet::scan::PAYMENTS_SCAN_ID) {
+        if scan_id == u32::from(ergo_wallet_service::scan::PAYMENTS_SCAN_ID) {
             (|| -> Result<WalletTransactionsPage, WalletAdminError> {
                 let read = ctx
                     .store

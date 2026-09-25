@@ -4,11 +4,46 @@
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::TrackedPubkeyMeta;
 use ergo_wallet::error::WalletError;
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::{LockState, SecretStorage};
+use ergo_wallet_service::state::WalletState;
 use redb::WriteTransaction;
 use std::sync::{Mutex, MutexGuard};
 use tokio::task::{JoinError, JoinHandle};
+
+pub(crate) struct WalletHydrationSource<'a> {
+    reader: &'a dyn ergo_state::wallet::WalletRead,
+}
+
+impl<'a> WalletHydrationSource<'a> {
+    pub(crate) fn new(reader: &'a dyn ergo_state::wallet::WalletRead) -> Self {
+        Self { reader }
+    }
+}
+
+impl ergo_wallet_service::state::HydrationSource for WalletHydrationSource<'_> {
+    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
+        Box::new(
+            self.reader
+                .tracked_pubkeys_with_paths()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(index, pubkey, _)| (index, pubkey)),
+        )
+    }
+
+    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
+        Box::new(
+            self.reader
+                .visible_pubkeys()
+                .unwrap_or_default()
+                .into_iter(),
+        )
+    }
+
+    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
+        self.reader.change_address_pubkey().ok().flatten()
+    }
+}
 
 /// Rescan-in-progress flag. Set by `NodeWalletAdmin`'s Rescan dispatch;
 /// read by the chain-apply hook (via `WalletApplyHook` impl) and by
@@ -441,7 +476,8 @@ impl WalletBootService {
                         WalletError::SecretFile(format!("wallet store change address: {e}"))
                     })?;
                     // Step 5a: hydrate from the store snapshot (the persisted state is the source of truth).
-                    state.hydrate_from_reader(read.as_ref(), network)?;
+                    state
+                        .hydrate_from_reader(&WalletHydrationSource::new(read.as_ref()), network)?;
                     drop(read);
                 } else {
                     drop(read);
@@ -712,7 +748,7 @@ mod tests {
         storage
             .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "pw", "")
             .expect("init");
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
         let result = WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state,
@@ -819,7 +855,7 @@ mod tests {
         storage
             .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "pw", "")
             .expect("init");
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
 
         // Arm the fault-injection.
         FAULT_INJECT.store(true, Ordering::SeqCst);
@@ -870,7 +906,7 @@ mod tests {
             .expect("init");
 
         // First unlock: persists tracked keys + a default change address.
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
         WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state,
@@ -901,7 +937,7 @@ mod tests {
         // Re-unlock with fresh in-memory state (mirrors a node restart): the
         // hydrated state has no change address, and Step 5.5 must backfill it.
         storage.lock();
-        let mut state2 = ergo_wallet::state::WalletState::empty(false);
+        let mut state2 = ergo_wallet_service::state::WalletState::empty(false);
         WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state2,

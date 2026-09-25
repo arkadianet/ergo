@@ -26,7 +26,7 @@ use thiserror::Error;
 use ergo_state::wallet::tables::*;
 #[cfg(test)]
 use ergo_state::wallet::types::{ScanTrackedBox, ScanTxRecord};
-use ergo_wallet::scan::{
+use ergo_wallet_service::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
     MAX_SCAN_NAME_LENGTH, MINING_SCAN_ID, PAYMENTS_SCAN_ID,
 };
@@ -925,7 +925,7 @@ fn read_reserved_scan_boxes(
             for (box_id, b) in mp.pool_outputs().iter() {
                 let tree_bytes = b.candidate.ergo_tree_bytes();
                 let matches = if mining {
-                    ergo_state::wallet::miner_reward::extract_miner_reward_pubkey(tree_bytes)
+                    ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(tree_bytes)
                         .map(|pk| tracked_pubkeys.contains(&pk))
                         .unwrap_or(false)
                 } else {
@@ -2220,7 +2220,7 @@ mod tests {
         let store = std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db));
         let hook = crate::node::wallet_bridge::WalletStateHook {
             wallet: std::sync::Arc::new(parking_lot::RwLock::new(
-                ergo_wallet::state::WalletState::empty(false),
+                ergo_wallet_service::state::WalletState::empty(false),
             )),
             store,
         };

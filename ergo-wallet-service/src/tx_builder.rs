@@ -1,7 +1,6 @@
 //! UnsignedTxBuilder: payment requests → unsigned tx.
 
 use crate::box_selector::{BoxSelector, BoxSummary, SelectionTarget};
-use crate::error::WalletError;
 use ergo_primitives::digest::Digest32;
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::ErgoBoxCandidate;
@@ -10,6 +9,7 @@ use ergo_ser::input::{ContextExtension, DataInput, UnsignedInput};
 use ergo_ser::register::AdditionalRegisters;
 use ergo_ser::token::Token;
 use ergo_ser::transaction::UnsignedTransaction;
+use ergo_wallet::error::WalletError;
 use std::collections::BTreeMap;
 
 /// A single payment the builder must include as an output.

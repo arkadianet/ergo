@@ -164,7 +164,7 @@ fn build_owned_tx_data_checked(
                 .map(|t| (*t.token_id.as_bytes(), t.amount))
                 .collect();
             let miner_reward_pubkey =
-                crate::wallet::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
+                ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
             Ok(OwnedBlockOutput {
                 box_id: *box_id.as_bytes(),
                 output_index: idx as u16,
@@ -304,7 +304,9 @@ pub(crate) fn build_wallet_block_txs_from_read_txn_classified(
                         .map(|t| (*t.token_id.as_bytes(), t.amount))
                         .collect();
                     let miner_reward_pubkey =
-                        crate::wallet::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
+                        ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(
+                            &ergo_tree_bytes,
+                        );
                     // Replay/rescan path: carry the full box so the rescan
                     // scan-matcher can re-derive scan membership and so
                     // `ScanTrackedBox.box_bytes` can be reconstructed. The
