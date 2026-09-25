@@ -349,6 +349,7 @@ fn app_changing_network(joins: bool) -> Router {
     });
     operator_router(
         OperatorState {
+            blocking: ergo_api::v1::BlockingReads::new(Default::default()).unwrap(),
             read: network.clone(),
             chain: Some(network),
             admin: None,
