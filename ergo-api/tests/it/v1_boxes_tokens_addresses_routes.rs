@@ -8,7 +8,8 @@
 //! `boxes/{by-address,unspent/by-address}` dual mount (O10), and the honest
 //! `state_unavailable` for the not-yet-indexable mint-order token list (G3).
 //! Handlers are driven via `oneshot` over the store-less `IndexerHandle` (all
-//! reads empty/None) so the envelope + gating are exercised in isolation.
+//! infallible reads empty/None) for gating. Point-miss tests use a real empty
+//! store so a successful read is distinct from an unavailable store.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,6 +46,13 @@ fn caught_up() -> Arc<dyn IndexerQuery> {
     let h = IndexerHandle::syncing(HEIGHT as u64);
     h.set_status(IndexerStatus::CaughtUp);
     Arc::new(h)
+}
+fn empty_index() -> (tempfile::TempDir, Arc<dyn IndexerQuery>) {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = ergo_indexer::IndexerStore::open(&dir.path().join("index.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, HEIGHT as u64);
+    handle.set_status(IndexerStatus::CaughtUp);
+    (dir, Arc::new(handle))
 }
 fn syncing() -> Arc<dyn IndexerQuery> {
     Arc::new(IndexerHandle::syncing(HEIGHT as u64))
@@ -146,7 +154,8 @@ async fn boxes_while_halted_is_indexer_halted() {
 
 #[tokio::test]
 async fn box_by_id_unknown_is_box_not_found() {
-    let (status, body) = get(Some(caught_up()), &format!("/api/v1/boxes/{HEX_64}")).await;
+    let (_dir, indexer) = empty_index();
+    let (status, body) = get(Some(indexer), &format!("/api/v1/boxes/{HEX_64}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(reason(&body), "box_not_found");
 }
@@ -262,7 +271,8 @@ async fn box_range_is_id_collection_with_range_cap_limit() {
 
 #[tokio::test]
 async fn token_by_id_unknown_is_token_not_found() {
-    let (status, body) = get(Some(caught_up()), &format!("/api/v1/tokens/{HEX_64}")).await;
+    let (_dir, indexer) = empty_index();
+    let (status, body) = get(Some(indexer), &format!("/api/v1/tokens/{HEX_64}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(reason(&body), "token_not_found");
 }
@@ -306,7 +316,8 @@ async fn token_holders_empty_is_collection_with_meta() {
 
 #[tokio::test]
 async fn token_stats_unknown_token_is_token_not_found() {
-    let (status, body) = get(Some(caught_up()), &format!("/api/v1/tokens/{HEX_64}/stats")).await;
+    let (_dir, indexer) = empty_index();
+    let (status, body) = get(Some(indexer), &format!("/api/v1/tokens/{HEX_64}/stats")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(reason(&body), "token_not_found");
 }

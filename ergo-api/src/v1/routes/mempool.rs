@@ -451,7 +451,10 @@ fn resolve_io(
         .iter()
         .map(|input| {
             if let Some(idx) = state.indexer.as_ref() {
-                if let Some(b) = idx.box_by_id(&input.box_id) {
+                if let Some(b) = idx.try_box_by_id(&input.box_id).map_err(|error| {
+                    tracing::warn!(%error, "v1 indexer input read failed");
+                    "the indexer store could not be read".to_string()
+                })? {
                     let resp = build_indexed_box_response(net, &b)?;
                     return Ok(V1IoBox {
                         box_id: Some(resp.box_id),

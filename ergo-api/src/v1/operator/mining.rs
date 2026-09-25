@@ -21,6 +21,7 @@ use crate::mining::MiningApiError;
 use crate::types::{ApiMinerStat, ApiMinerStats, SyncStateLabel};
 use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::chain::chain_read_failed;
 
 /// Map a [`MiningApiError`] onto the standard v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
@@ -94,7 +95,10 @@ pub(crate) async fn miner_stats(
     s.blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let headers = chain.last_headers(window);
+            let headers = match chain.try_last_headers(window) {
+                Ok(headers) => headers,
+                Err(error) => return chain_read_failed(error),
+            };
             let blocks = headers.len() as u32;
             let tip_height = headers.last().map(|h| h.height).unwrap_or(0);
             // Fold by pk hex: (count, last_height). Headers arrive ascending, so a

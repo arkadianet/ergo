@@ -250,9 +250,9 @@ fn confirmed_survivors<T>(
     start: u32,
     limit: u32,
     dir: SortDir,
-    fetch: impl Fn(IdxPage, SortDir) -> Vec<T>,
+    fetch: impl Fn(IdxPage, SortDir) -> Result<Vec<T>, ergo_indexer_types::IndexerReadError>,
     keep: impl Fn(&T) -> bool,
-) -> Vec<(T, u32)> {
+) -> Result<Vec<(T, u32)>, ergo_indexer_types::IndexerReadError> {
     let target = limit as usize + 1;
     let mut survivors: Vec<(T, u32)> = Vec::with_capacity(target);
     let mut read_off = start;
@@ -263,7 +263,7 @@ fn confirmed_survivors<T>(
                 limit: target as u32,
             },
             dir,
-        );
+        )?;
         let batch_len = batch.len() as u32;
         if batch_len == 0 {
             break;
@@ -273,7 +273,7 @@ fn confirmed_survivors<T>(
                 let off_after = read_off.saturating_add(i as u32).saturating_add(1);
                 survivors.push((b, off_after));
                 if survivors.len() >= target {
-                    return survivors;
+                    return Ok(survivors);
                 }
             }
         }
@@ -282,7 +282,7 @@ fn confirmed_survivors<T>(
             break; // reader exhausted
         }
     }
-    survivors
+    Ok(survivors)
 }
 
 /// The unspent variants: confirmed page (overfetched to fill past
@@ -296,7 +296,9 @@ fn confirmed_survivors<T>(
 async fn render_unspent_page(
     state: &V1State,
     q: &UnspentQuery,
-    fetch_confirmed: impl Fn(IdxPage, SortDir) -> Vec<IndexedErgoBox> + Send + 'static,
+    fetch_confirmed: impl Fn(IdxPage, SortDir) -> Result<Vec<IndexedErgoBox>, ergo_indexer_types::IndexerReadError>
+        + Send
+        + 'static,
     pool: impl FnOnce(bool) -> Vec<IndexedErgoBox> + Send + 'static,
 ) -> Response {
     let dir = match parse_sort(q.sort.as_deref()) {
@@ -319,7 +321,7 @@ async fn render_unspent_page(
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let confirmed = confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
+            let confirmed = match confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
                 match b.box_data.box_id() {
                     // Short-circuits when `exclude_spent` is false: every row is kept
                     // and `is_spent_by_pool` is never consulted.
@@ -328,7 +330,10 @@ async fn render_unspent_page(
                     // surfaces the same 500 rather than silently dropping it.
                     Err(_) => true,
                 }
-            });
+            }) {
+                Ok(confirmed) => confirmed,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             // The overlay resumes past the `p` rows earlier pages already emitted, so
             // an overlay bigger than one page pages THROUGH rather than repeating.
             let pool_rows: Vec<IndexedErgoBox> = if include_unconfirmed {
@@ -426,15 +431,16 @@ pub async fn box_by_id(
     state
         .blocking
         .clone()
-        .run(ReadLane::Point, move || match idx.box_by_id(&box_id) {
-            Some(b) => {
+        .run(ReadLane::Point, move || match idx.try_box_by_id(&box_id) {
+            Err(error) => super::indexer_read_failed(error),
+            Ok(Some(b)) => {
                 let best = state.read.sync().best_full_block_height;
                 match v1box_from_indexed_box(state.network, &b, best, q.decode.unwrap_or(false)) {
                     Ok(v) => Json(v).into_response(),
                     Err(d) => assemble_failed(d),
                 }
             }
-            None => box_not_found(),
+            Ok(None) => box_not_found(),
         })
         .await
 }
@@ -525,7 +531,7 @@ pub async fn boxes_unspent_by_address(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
+        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
         move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
     .await
@@ -614,7 +620,7 @@ pub async fn boxes_unspent_by_ergo_tree(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
+        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
         move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
     .await
@@ -709,7 +715,7 @@ pub async fn boxes_unspent_by_template(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| idx.template_unspent_paged(&th, page, dir),
+        move |page, dir| idx.try_template_unspent_paged(&th, page, dir),
         move |excl| pool_unspent_for_template(mempool.as_ref(), &th, excl),
     )
     .await
@@ -802,7 +808,7 @@ pub async fn boxes_unspent_by_token(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| idx.token_unspent_paged(&tid, page, dir),
+        move |page, dir| Ok(idx.token_unspent_paged(&tid, page, dir)),
         move |excl| pool_unspent_for_token(mempool.as_ref(), &tid, excl),
     )
     .await
@@ -872,11 +878,14 @@ mod tests {
 
     /// A `fetch` closure over a fixed backing slice `0..n`, honoring the page
     /// window (ASC only — enough to exercise the overfetch loop).
-    fn windowed_reader(n: u32) -> impl Fn(IdxPage, SortDir) -> Vec<u32> {
-        move |page: IdxPage, _dir: SortDir| {
-            (page.offset..n)
+    fn windowed_reader(
+        n: u32,
+    ) -> impl Fn(IdxPage, SortDir) -> Result<Vec<u32>, ergo_indexer_types::IndexerReadError> {
+        move |page: IdxPage, dir: SortDir| {
+            assert_eq!(dir, SortDir::Asc);
+            Ok((page.offset..n)
                 .take(page.limit as usize)
-                .collect::<Vec<u32>>()
+                .collect::<Vec<u32>>())
         }
     }
 
@@ -890,7 +899,7 @@ mod tests {
     fn confirmed_survivors_no_filter_reads_one_overfetch_window() {
         // limit=3, no filter: exactly limit+1 survivors, each carrying the
         // reader offset just past it.
-        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true);
+        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true).unwrap();
         assert_eq!(rows_of(&rows), vec![0, 1, 2, 3]);
         // The limit-th (3rd) survivor sat at reader offset 2 → resumes at 3.
         assert_eq!(rows[2].1, 3);
@@ -898,7 +907,8 @@ mod tests {
 
     #[test]
     fn confirmed_survivors_start_offset_advances_by_limit() {
-        let rows = confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true);
+        let rows =
+            confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true).unwrap();
         assert_eq!(rows_of(&rows), vec![10, 11, 12]);
         assert_eq!(rows[1].1, 12);
     }
@@ -912,7 +922,8 @@ mod tests {
         // limit+1 survivors exist, each with the offset PAST the rows read to
         // reach it (no dupes, no underfill).
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even);
+        let rows =
+            confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even).unwrap();
         // limit+1 = 4 survivors: 0,2,4,6.
         assert_eq!(rows_of(&rows), vec![0, 2, 4, 6]);
         // 3rd survivor (value 4) sat at reader offset 4 → resumes at offset 5.
@@ -928,7 +939,7 @@ mod tests {
         // Only 3 evens in 0..5 — short of limit+1; every survivor still
         // carries its own resume offset.
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let rows = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even);
+        let rows = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even).unwrap();
         assert_eq!(rows_of(&rows), vec![0, 2, 4]);
         assert_eq!(rows[2].1, 5);
     }

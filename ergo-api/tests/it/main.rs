@@ -69,3 +69,5 @@ mod wallet_ui_headers;
 mod wallet_ui_two_step_unlock;
 
 mod v1_blocking_reads;
+
+mod v1_remaining_read_errors;

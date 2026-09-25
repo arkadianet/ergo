@@ -1772,6 +1772,13 @@ fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
 fn bridge_over_store(
     setup: impl FnOnce(&ergo_state::store::StateStore),
 ) -> (tempfile::TempDir, ScalaCompatBridge) {
+    bridge_over_store_at_height(0, setup)
+}
+
+fn bridge_over_store_at_height(
+    height: u32,
+    setup: impl FnOnce(&ergo_state::store::StateStore),
+) -> (tempfile::TempDir, ScalaCompatBridge) {
     let dir = tempfile::tempdir().unwrap();
     let store = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
     setup(&store);
@@ -1788,6 +1795,13 @@ fn bridge_over_store(
         std::time::Instant::now(),
         ergo_api::types::ApiWeightFunction::Cost,
     );
+    let handle = publisher.handle();
+    let mut snap = crate::snapshot::NodeSnapshot::empty(
+        handle.load().info.clone(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    snap.tip.best_header.height = height;
+    handle.store(std::sync::Arc::new(snap));
     let bridge = ScalaCompatBridge::new(
         publisher.handle(),
         ScalaCompatStatic {
@@ -2096,4 +2110,60 @@ fn bridge_try_modifier_by_id_unknown_type_tag_is_corrupt_compat_stays_none() {
     assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
     assert!(err.to_string().contains("unknown type byte 7"));
     assert!(bridge.modifier_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_voted_params_corrupt_row_is_corrupt_legacy_stays_empty() {
+    let (_dir, bridge) = bridge_over_store(|store| {
+        let db = store.db_arc();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new("voted_params"))
+                .unwrap();
+            t.insert(0, &[0xff][..]).unwrap();
+        }
+        w.commit().unwrap();
+    });
+    assert!(matches!(
+        bridge.try_votes_history(),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    let legacy = bridge.votes_history();
+    assert_eq!(legacy.epoch_length, 1024);
+    assert!(legacy.changes.is_empty());
+}
+
+#[test]
+fn bridge_header_ranges_corrupt_row_is_corrupt_compat_stays_best_effort() {
+    let header_id = [0xab; 32];
+    let (_dir, bridge) = bridge_over_store_at_height(1, |store| {
+        store.store_header(&header_id, &[0xff]).unwrap();
+        let db = store.db_arc();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new(
+                    "header_chain_index",
+                ))
+                .unwrap();
+            t.insert(1, &header_id[..]).unwrap();
+        }
+        w.commit().unwrap();
+    });
+    assert!(matches!(
+        bridge.try_chain_slice(0, 1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(matches!(
+        bridge.try_last_headers(1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(matches!(
+        bridge.try_nipopow_header_at_height(1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(bridge.chain_slice(0, 1).is_empty());
+    assert!(bridge.last_headers(1).is_empty());
+    assert!(bridge.nipopow_header_at_height(1).is_none());
 }

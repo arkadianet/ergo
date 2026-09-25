@@ -17,6 +17,7 @@ use super::{offset_collection, ListQuery, OperatorState};
 use crate::traits::VotingControlError;
 use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::chain::chain_read_failed;
 use crate::v1::routes::dto::Collection;
 
 /// A votable parameter + bounds, snake_case (reshape of the camelCase
@@ -118,7 +119,10 @@ pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
     s.blocking
         .clone()
         .run(ReadLane::Point, move || {
-            let h = chain.votes_history();
+            let h = match chain.try_votes_history() {
+                Ok(h) => h,
+                Err(error) => return chain_read_failed(error),
+            };
             Json(VotesHistory {
                 epoch_length: h.epoch_length,
                 current_height: h.current_height,

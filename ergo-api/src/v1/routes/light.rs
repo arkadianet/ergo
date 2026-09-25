@@ -406,14 +406,15 @@ pub async fn headers_interlinks(
             let mut items: Vec<LightPopowHeader> = Vec::new();
             let mut last_height = start;
             for h in start..end {
-                match chain.nipopow_header_at_height(h) {
-                    Some(ph) => {
+                match chain.try_nipopow_header_at_height(h) {
+                    Err(error) => return super::chain::chain_read_failed(error),
+                    Ok(Some(ph)) => {
                         items.push(LightPopowHeader::from_scala(&ph));
                         last_height = h;
                     }
                     // A miss at a height <= tip means the extension/interlink data is
-                    // not retained on this node — honest 409, never a silent gap.
-                    None => {
+                    // not retained on this node; preserve the nipopow_unavailable response.
+                    Ok(None) => {
                         if items.is_empty() {
                             return v1_error(
                                 Reason::NipopowUnavailable,

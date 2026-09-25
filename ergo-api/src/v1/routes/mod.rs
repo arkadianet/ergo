@@ -581,3 +581,16 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .merge(realtime)
         .with_state(state)
 }
+
+/// An indexer store read failed. `IndexerReadError` does not distinguish a
+/// transient read failure from a corrupt record and v1 has no dedicated
+/// indexer-unavailable reason, so this is `internal_error`; the store text is
+/// logged, never returned.
+pub(crate) fn indexer_read_failed(error: ergo_indexer_types::IndexerReadError) -> Response {
+    tracing::warn!(%error, "v1 indexer read failed");
+    v1_error(
+        Reason::InternalError,
+        "the indexer store could not be read",
+        "the node logged the store error; check its indexer storage",
+    )
+}
