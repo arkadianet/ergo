@@ -466,6 +466,8 @@ pub enum WalletAdminError {
     /// request, rather than the opaque 500 that `Internal` implies.
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("stale chain tip: {0}")]
+    StaleChainTip(String),
     #[error("internal: {0}")]
     Internal(String),
     /// Operation refused by an operator flag. Maps to HTTP 403.

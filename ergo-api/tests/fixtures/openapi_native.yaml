@@ -3725,6 +3725,22 @@ components:
             - running
       - type: object
         required:
+        - height
+        - reason
+        - type
+        properties:
+          height:
+            type: integer
+            format: int32
+            minimum: 0
+          reason:
+            type: string
+          type:
+            type: string
+            enum:
+            - failed
+      - type: object
+        required:
         - detail
         - type
         properties:

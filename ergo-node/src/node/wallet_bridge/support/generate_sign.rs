@@ -8,7 +8,9 @@ use ergo_api::wallet::sending::{BoxesCollectRequest, BoxesCollectResponse, Payme
 use super::hints_codec::tx_hints_bag_from_dto;
 use super::sign_submit::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
 use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE};
-use crate::node::wallet_bridge::{ChainStateAccessor, TxSubmitter, WalletAdminError};
+use crate::node::wallet_bridge::{
+    map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
+};
 
 /// `PaymentSend` + `TransactionSend` shared path: build, sign, self-verify, submit.
 ///
@@ -61,17 +63,22 @@ pub(crate) async fn payment_send_impl(
     // `payment_send_impl` is spawned on a multi-thread runtime where any
     // value live across an .await must be `Send`. An explicit `drop()`
     // does not shrink the future state machine's scope; a block does.
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
             db,
-            chain,
+            &snapshot,
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
         )?
     };
+    chain
+        .ensure_snapshot_current(&snapshot)
+        .map_err(map_chain_error)?;
+    drop(snapshot);
 
     let tx_id = ergo_ser::transaction::transaction_id(&signed_tx)
         .map_err(|e| WalletAdminError::Internal(format!("transaction_id: {e:?}")))?;
@@ -130,15 +137,17 @@ pub(crate) async fn transaction_generate_impl(
     };
 
     let storage = storage.read();
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
     let signed_tx = sign_unsigned_tx(
         &unsigned_tx,
         &storage,
         db,
-        chain,
+        &snapshot,
         &[],
         &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
     )?;
     drop(storage);
+    drop(snapshot);
 
     serialize_signed_tx(&signed_tx)
 }
@@ -182,12 +191,31 @@ pub(crate) async fn transaction_sign_impl(
     external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
     hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    _state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
 ) -> Result<Vec<u8>, WalletAdminError> {
-    // The unsigned tx bytes are fully client-supplied (native sign + compat sign):
-    // a malformed value is a client error (400), not a server fault (500).
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    transaction_sign_impl_with_snapshot(
+        unsigned_tx_hex,
+        external_secret_dtos,
+        hints,
+        storage,
+        state,
+        db,
+        &snapshot,
+    )
+}
+
+pub(crate) fn transaction_sign_impl_with_snapshot(
+    unsigned_tx_hex: &str,
+    external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
+    hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
+    storage: &RwLock<ergo_wallet::storage::SecretStorage>,
+    _state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    snapshot: &ChainSnapshot,
+) -> Result<Vec<u8>, WalletAdminError> {
     let unsigned_tx_bytes = hex::decode(unsigned_tx_hex)
         .map_err(|_| WalletAdminError::BadRequest("unsigned_tx: bad hex".into()))?;
     let unsigned_tx = {
@@ -209,7 +237,7 @@ pub(crate) async fn transaction_sign_impl(
     };
 
     let storage = storage.read();
-    let signed_tx = sign_unsigned_tx(&unsigned_tx, &storage, db, chain, &externals, &hints_bag)?;
+    let signed_tx = sign_unsigned_tx(&unsigned_tx, &storage, db, snapshot, &externals, &hints_bag)?;
     drop(storage);
 
     serialize_signed_tx(&signed_tx)
