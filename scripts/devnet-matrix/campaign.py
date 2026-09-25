@@ -4060,6 +4060,51 @@ def _self_test_fork_workload():
         'unread' in read[1], read
     assert len(read) == 2, read
 
+    # ----- every payment is posted to every miner, the signer first -----
+    import io
+    import urllib.error
+
+    import smoke
+    assert 'pump_payments_to_all(' in _src, 'fork pays both miners'
+    _calls = []
+    _generated = iter([(200, {'id': 't1'}), (400, 'not enough boxes'),
+                       (200, {'id': 't3'}), (200, {'id': 't4'})])
+
+    def _refuse(path, detail):
+        return urllib.error.HTTPError(path, 400, 'Bad Request', {},
+                                      io.BytesIO(detail.encode()))
+
+    def _fake_request(node, path, data=None, timeout=15):
+        _calls.append((node, path, data.get('id') if isinstance(data, dict)
+                       else None))
+        if path == '/wallet/transaction/generate':
+            status, body = next(_generated)
+            if status != 200:
+                raise _refuse(path, body)
+            return status, body
+        if (node, data['id']) in (('scala2', 't3'), ('scala', 't4')):
+            raise _refuse(path, 'double spending attempt')
+        return 200, data['id']
+
+    _saved_request = smoke.request
+    _sent, _refused, _forwarded = [], [], {}
+    try:
+        smoke.request = _fake_request
+        common.pump_payments_to_all(None, 'addr', _sent, ('scala', 'scala2'),
+                                    count=4, rejected=_refused,
+                                    forwarded=_forwarded)
+    finally:
+        smoke.request = _saved_request
+    assert _sent == ['t1', 't3'], _sent
+    assert _forwarded == {'scala2': {'accepted': 1, 'HTTP 400': 1}}, _forwarded
+    assert len(_refused) == 2 and 'not enough boxes' in _refused[0] and \
+        'double spending' in _refused[1], _refused
+    _posts = [(n, i) for n, p, i in _calls if p == '/transactions']
+    # Signed once, posted to the signer first; a payment its own node
+    # refused is never forwarded.
+    assert _posts == [('scala', 't1'), ('scala2', 't1'), ('scala', 't3'),
+                      ('scala2', 't3'), ('scala', 't4')], _posts
+
 
 def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):
     """A `lifecycle` and a `smoke` that start nothing and record what the

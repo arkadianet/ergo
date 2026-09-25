@@ -9,8 +9,9 @@ a chain Scala lacks — the D3 sibling-completion guard — and a block Rust
 rolled back that Scala kept is a switch Scala never made.
 
 The two-miner window is FUNDED: miner 1's wallet matures before the
-second miner is seeded, and payments go to it on every ordering block,
-so the competing input chains carry transactions. That is what makes the
+second miner is seeded, and on every ordering block it signs payments
+that are posted to BOTH miners' mempools, so both competing input chains
+carry transactions whichever miner wins. That is what makes the
 followers' reconstruction accounting over the window (the #2562
 committed-prefix question) mean anything: over empty input blocks every
 prefix rebuilds the same root. Each ordering block's NAMED input tip is
@@ -27,8 +28,10 @@ NODES = ('scala', 'scala2', 'rust')
 ORDERING_BLOCKS = 25
 # Ordering blocks of shared history before the second miner joins.
 SHARED_BLOCKS = 4
-# Payments submitted to miner 1 per ordering block of the two-miner window.
+# Payments per ordering block of the two-miner window, each signed by
+# miner 1's wallet and posted to both miners.
 PAYMENTS_PER_BLOCK = 3
+MINERS = ('scala', 'scala2')
 
 # The second miner is NOT started with the others: it is seeded from
 # miner 1's data directory once there is a chain to copy (see
@@ -69,19 +72,22 @@ def run(ctx):
     # commits, so every follower rebuilds it from any chain it holds and
     # the reconstruction accounting measures nothing (see `fund_miner`).
     # Miner 1 is funded BEFORE the second miner is seeded, so every block
-    # of the window can carry payments.
+    # of the window can carry payments, and each payment is posted to both
+    # miners: posted to miner 1 alone, it never reached a miner 2 that was
+    # winning the race (`pump_payments_to_all`).
     balance, address = common.fund_miner(ctx, 'scala')
     ctx.note('funding', {'balance_nano': balance, 'address': address})
     if not balance or not address:
         ctx.fail('no spendable coin on miner 1, so the two-miner window seals '
                  'empty input blocks and any prefix of them rebuilds the same '
                  'root', {'balance_nano': balance, 'address': address})
-    sent, refused = [], []
+    sent, refused, forwarded = [], [], {}
 
     def pump():
         if balance and address:
-            common.pump_payments(ctx, address, sent, 'scala',
-                                 PAYMENTS_PER_BLOCK, rejected=refused)
+            common.pump_payments_to_all(ctx, address, sent, MINERS,
+                                        PAYMENTS_PER_BLOCK, rejected=refused,
+                                        forwarded=forwarded)
 
     # The seed restarts the follower, which empties its input chain. The
     # sample range that covers is recorded so the reset it causes is not
@@ -149,7 +155,8 @@ def run(ctx):
     ctx.note('workload', {'funded_balance_nano': balance,
                           'payments_submitted': len(sent),
                           'payments_refused': len(refused),
-                          'refusals': refused[:10]})
+                          'refusals': refused[:10],
+                          'posted_to_other_miners': forwarded})
     # What each ordering block of the window NAMED as its input tip,
     # against what every follower held under its parent. Read now, while
     # the nodes are up: the named tip lives only in the block's extension.

@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.error
 
 import smoke
 from smoke import Unavailable, api, api_retry
@@ -379,6 +380,65 @@ def pump_payments(ctx, address, sent, node='scala', count=3,
             sent.append(txid)
         elif rejected is not None:
             rejected.append(f'HTTP {status}: {txid!r}')
+    return sent
+
+
+def _post(node, path, body):
+    """`(status, payload)` for one POST, with an HTTP error's body kept."""
+    try:
+        return smoke.request(node, path, body)
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode(errors='replace')[:300]
+        except OSError:
+            detail = ''
+        return error.code, detail
+    except (OSError, ValueError) as error:
+        return None, f'{type(error).__name__}: {error}'
+
+
+def pump_payments_to_all(ctx, address, sent, nodes, count=3,
+                         value=PAYMENT_NANOERG, rejected=None, forwarded=None):
+    """`pump_payments` for a run with more than one miner: every payment
+    reaches EVERY miner's mempool directly.
+
+    The first node's wallet signs each payment
+    (`/wallet/transaction/generate`, which does not submit it), and the
+    same signed transaction is posted to `/transactions` on every node in
+    `nodes`, the signing node first so its wallet sees the spend before it
+    signs the next payment. Gossip does not carry it between miners
+    reliably: a Scala node requests a transaction inv only while its
+    full-block height equals its header height and its best header is not
+    behind its peers' (`ErgoNodeViewSynchronizer.processInv`,
+    `txAcceptanceFilter`), which a miner racing another miner's chain
+    often is not. In rm-B-fork-stockctl-1 the second miner never held a
+    payment, won 22 of the window's 26 blocks, and the window carried no
+    transaction at all.
+
+    `sent` gets the ids the signing node accepted; `forwarded` counts,
+    per other node, how each post was answered.
+    """
+    for _ in range(count):
+        status, tx = _post(nodes[0], '/wallet/transaction/generate',
+                           {'requests': [{'address': address, 'value': value}]})
+        if status != 200 or not isinstance(tx, dict) or not tx.get('id'):
+            if rejected is not None:
+                rejected.append(f'generate: HTTP {status}: {str(tx)[:200]}')
+            continue
+        for index, node in enumerate(nodes):
+            code, answer = _post(node, '/transactions', tx)
+            if index == 0:
+                if code == 200:
+                    sent.append(tx['id'])
+                else:
+                    if rejected is not None:
+                        rejected.append(f'{node} /transactions: HTTP {code}: '
+                                        f'{str(answer)[:200]}')
+                    break
+            elif forwarded is not None:
+                outcome = 'accepted' if code == 200 else f'HTTP {code}'
+                counts = forwarded.setdefault(node, {})
+                counts[outcome] = counts.get(outcome, 0) + 1
     return sent
 
 
