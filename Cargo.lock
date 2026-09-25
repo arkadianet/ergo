@@ -883,6 +883,7 @@ dependencies = [
  "ergo-sync",
  "ergo-validation",
  "ergo-wallet",
+ "ergo-wallet-protocol",
  "ergo-wallet-service",
  "hex",
  "indexmap",

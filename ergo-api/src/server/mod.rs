@@ -46,8 +46,10 @@ use crate::compat::handlers::{
     utxo_with_pool_boxes_by_ids_handler as scala_utxo_with_pool_boxes_by_ids_handler,
 };
 use crate::compat::traits::NodeChainQuery;
-use crate::traits::ChainParamsView;
-use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
+use crate::traits::{
+    ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
+    WalletChain,
+};
 use crate::web::{
     JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
     JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
@@ -96,6 +98,7 @@ pub struct ServerCtx {
     pub read: Arc<dyn NodeReadState>,
     pub compat: Option<Arc<dyn NodeChainQuery>>,
     pub submit: Option<Arc<dyn NodeSubmit>>,
+    pub wallet_chain: Option<Arc<dyn WalletChain>>,
     pub indexer: Option<Arc<dyn IndexerQuery>>,
     pub mempool: Arc<dyn MempoolView>,
     pub network: NetworkPrefix,
@@ -192,6 +195,7 @@ pub fn serve_on(
         read,
         compat,
         submit,
+        wallet_chain: None,
         indexer,
         mempool: Arc::new(NoopMempoolView::new()),
         network,
@@ -597,6 +601,7 @@ pub fn router_with_wallet(
         read,
         compat,
         submit,
+        wallet_chain: None,
         indexer,
         mempool: Arc::new(NoopMempoolView::new()),
         network,
@@ -740,6 +745,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         read,
         compat,
         submit,
+        wallet_chain,
         indexer,
         mempool,
         network,
@@ -760,6 +766,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
     // Per-height emission schedule for the `stats/*` supply series.
     let v1_emission = emission.clone();
     let v1_submit = submit.clone();
+    let v1_wallet_chain = wallet_chain.clone();
     let v1_mempool = mempool.clone();
     // Same up-front-clone rationale for the `script/*` group: `compat` is
     // moved into the Scala-compat `match` further down, so the chain reader for
@@ -1001,6 +1008,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         chain: v1_chain,
         indexer: v1_indexer,
         submit: v1_submit,
+        wallet_chain: v1_wallet_chain.clone(),
         // Keyless build stays honest-unavailable (route_unavailable) until the
         // extracted keyless TxBuilder core is wired in ergo-node.
         tx_builder: None,
@@ -1058,6 +1066,7 @@ fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
         rust_api::product_router(rust_api::ProductRouterState {
             script: script_state,
             api: v1_state,
+            wallet_chain: v1_wallet_chain,
             operator: v1_operator_state,
             accounts: v1_accounts_state,
             webhooks: v1_webhooks_state,

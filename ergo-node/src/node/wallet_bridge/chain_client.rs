@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ergo_api::traits::{WalletChain, WalletChainError};
 use ergo_api::types::{SubmitError as ApiSubmitError, SubmitMode};
 use ergo_primitives::digest::ModifierId;
 use ergo_primitives::reader::VlqReader;
@@ -10,11 +11,12 @@ use ergo_ser::header::{read_header, Header};
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
 use ergo_ser::transaction::{read_transaction, transaction_id};
 use ergo_state::reader::ChainStoreReader;
+use ergo_wallet_protocol::chain as wire;
 use ergo_wallet_service::chain::{
     BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient, ChainClientError,
     ChainCursor, ChainHeader, ChainInput, ChainOutput, ChainSnapshot, ChainTransaction,
     CommittedTip, ReemissionInput, SubmitRequest, SubmitResponse, Utxo, UtxoLookup,
-    GENESIS_CURSOR_ID,
+    UtxoLookupRequest, GENESIS_CURSOR_ID,
 };
 
 use super::ChainStateAccessor;
@@ -22,6 +24,18 @@ use super::ChainStateAccessor;
 const MAX_BLOCKS_PER_RESPONSE: u32 = 1_024;
 const MAX_ANCESTOR_WALK: u32 = 4_096;
 const SUBMIT_WAIT: Duration = Duration::from_secs(6);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmitFailureClass {
+    Duplicate,
+    RejectedInvalid,
+    RejectedFee,
+    Overloaded,
+    ShuttingDown,
+    Timeout,
+    Unsupported,
+    Internal,
+}
 
 pub trait IntoChainSubmitter {
     fn into_chain_submitter(self) -> Option<Arc<dyn ergo_api::NodeSubmit>>;
@@ -81,6 +95,23 @@ impl InProcessChainClient {
             #[cfg(test)]
             tip_movement_hook: None,
         }
+    }
+
+    pub fn from_chain_reader<S>(
+        reader: ChainStoreReader,
+        submitter: S,
+        is_pruned: bool,
+        reemission: Option<ergo_validation::ReemissionRuleInputs>,
+    ) -> Self
+    where
+        S: IntoChainSubmitter,
+    {
+        let state = Arc::new(super::ChainStateAccessorImpl::chain_only(
+            reader.clone(),
+            is_pruned,
+            reemission,
+        ));
+        Self::new(reader, submitter).with_state_accessor(state)
     }
 
     pub fn from_state_store<S>(store: &ergo_state::store::StateStore, submitter: S) -> Self
@@ -519,38 +550,61 @@ impl InProcessChainClient {
         }
     }
 
+    fn classify_submit_error(reason: &str) -> SubmitFailureClass {
+        match reason {
+            "duplicate" => SubmitFailureClass::Duplicate,
+            "fee" | "below_min_fee" | "insufficient_fee" => SubmitFailureClass::RejectedFee,
+            "overloaded" => SubmitFailureClass::Overloaded,
+            "shutting_down" => SubmitFailureClass::ShuttingDown,
+            "timeout" => SubmitFailureClass::Timeout,
+            "unsupported" | "route_disabled" => SubmitFailureClass::Unsupported,
+            "internal_error" | "runtime" | "submitter" => SubmitFailureClass::Internal,
+            _ => SubmitFailureClass::RejectedInvalid,
+        }
+    }
+
     fn map_submit_error(
         &self,
         tip: CommittedTip,
         transaction: &[u8],
         error: ApiSubmitError,
     ) -> Result<SubmitResponse, ChainClientError> {
-        let detail = error
-            .detail
+        let ApiSubmitError {
+            reason,
+            detail: source_detail,
+        } = error;
+        let detail = source_detail
             .as_ref()
-            .map(|detail| format!("{error_reason}: {detail}", error_reason = error.reason));
-        match error.reason.as_str() {
-            "duplicate" => {
+            .map(|detail| format!("{reason}: {detail}"));
+        match Self::classify_submit_error(&reason) {
+            SubmitFailureClass::Duplicate => {
                 let tx_id = self.tx_id_from_bytes(transaction)?;
                 Ok(SubmitResponse::Duplicate { tip, tx_id })
             }
-            "fee" | "below_min_fee" => Ok(SubmitResponse::Rejected {
+            SubmitFailureClass::RejectedFee => Ok(SubmitResponse::Rejected {
                 tip,
                 reason: ergo_wallet_service::chain::SubmitError::Fee,
                 detail,
             }),
-            "invalid" | "deserialize" | "non_canonical" | "structural" | "known_invalid"
-            | "validation_failed" | "script_failed" | "monetary_failed" | "cost_exceeded"
-            | "reemission_policy" => Ok(SubmitResponse::Rejected {
+            SubmitFailureClass::RejectedInvalid => Ok(SubmitResponse::Rejected {
                 tip,
                 reason: ergo_wallet_service::chain::SubmitError::Invalid,
                 detail,
             }),
-            _ => Err(ChainClientError::Failure(format!(
-                "submit failed: {}{}",
-                error.reason,
-                error
-                    .detail
+            SubmitFailureClass::Overloaded => Err(ChainClientError::Overloaded(
+                source_detail
+                    .unwrap_or_else(|| "node submission channel is overloaded".to_string()),
+            )),
+            SubmitFailureClass::ShuttingDown => Err(ChainClientError::ShuttingDown(
+                source_detail.unwrap_or_else(|| "node is shutting down".to_string()),
+            )),
+            SubmitFailureClass::Timeout => Err(ChainClientError::Timeout(
+                source_detail.unwrap_or_else(|| "node submission timed out".to_string()),
+            )),
+            SubmitFailureClass::Unsupported => Err(ChainClientError::Unsupported),
+            SubmitFailureClass::Internal => Err(ChainClientError::Failure(format!(
+                "submit failed: {reason}{}",
+                source_detail
                     .map(|detail| format!(": {detail}"))
                     .unwrap_or_default()
             ))),
@@ -569,6 +623,304 @@ impl InProcessChainClient {
         Ok(*transaction_id(&transaction)
             .map_err(|error| Self::state_error("submit transaction id", error))?
             .as_bytes())
+    }
+}
+
+fn wire_tip(tip: CommittedTip) -> Result<wire::ChainTip, WalletChainError> {
+    wire::ChainTip::new(tip.height, hex::encode(tip.header_id)).map_err(WalletChainError::internal)
+}
+
+fn map_service_error(error: ChainClientError) -> WalletChainError {
+    match error {
+        ChainClientError::Unsupported => WalletChainError::Unsupported,
+        ChainClientError::Overloaded(detail) => WalletChainError::Overloaded(detail),
+        ChainClientError::ShuttingDown(detail) => WalletChainError::ShuttingDown(detail),
+        ChainClientError::Timeout(detail) => WalletChainError::Timeout(detail),
+        ChainClientError::StaleTip { expected, actual } => {
+            match (wire_tip(expected), wire_tip(actual)) {
+                (Ok(expected), Ok(actual)) => WalletChainError::StaleTip { expected, actual },
+                _ => WalletChainError::Internal("invalid stale-tip identity".to_string()),
+            }
+        }
+        ChainClientError::HistoryPruned {
+            minimum_height: Some(minimum_height),
+        } => WalletChainError::history_pruned(minimum_height),
+        ChainClientError::HistoryPruned {
+            minimum_height: None,
+        } => WalletChainError::Failure(
+            "chain history is unavailable without a minimum height".to_string(),
+        ),
+        ChainClientError::UnsupportedHistory { reason } => {
+            WalletChainError::Failure(format!("chain history is unavailable: {reason}"))
+        }
+        ChainClientError::Failure(message) => WalletChainError::Failure(message),
+    }
+}
+
+fn map_request_error(error: ChainClientError) -> WalletChainError {
+    match error {
+        ChainClientError::Failure(message) => WalletChainError::invalid(message),
+        other => map_service_error(other),
+    }
+}
+
+fn decode_wire_id(value: &str, field: &str) -> Result<[u8; 32], WalletChainError> {
+    wire::validate_id32(value, field).map_err(WalletChainError::invalid)?;
+    hex::decode(value)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| WalletChainError::invalid(format!("{field} must be 32 bytes")))
+}
+
+fn decode_wire_bytes(value: &str, field: &str) -> Result<Vec<u8>, WalletChainError> {
+    wire::validate_hex_bytes(value, field).map_err(WalletChainError::invalid)?;
+    hex::decode(value).map_err(|error| WalletChainError::invalid(format!("{field}: {error}")))
+}
+
+fn wire_snapshot(snapshot: ChainSnapshot) -> Result<wire::ChainSnapshot, WalletChainError> {
+    Ok(wire::ChainSnapshot {
+        tip: wire_tip(snapshot.tip)?,
+        headers: snapshot
+            .headers
+            .into_iter()
+            .map(|header| wire::ChainHeader {
+                height: header.height,
+                header_id: hex::encode(header.header_id),
+                parent_id: hex::encode(header.parent_id),
+                timestamp_unix_ms: header.timestamp_unix_ms,
+            })
+            .collect(),
+        active_parameters: snapshot.active_parameters,
+        reemission_inputs: snapshot
+            .reemission_inputs
+            .into_iter()
+            .map(|input| {
+                let box_ids = input
+                    .box_ids
+                    .into_iter()
+                    .map(hex::encode)
+                    .collect::<Vec<_>>();
+                wire::ReemissionInput {
+                    token_id: hex::encode(input.token_id),
+                    amount: input.amount.to_string(),
+                    box_ids: (!box_ids.is_empty()).then_some(box_ids),
+                }
+            })
+            .collect(),
+        snapshot_id: hex::encode(snapshot.snapshot_id),
+    })
+}
+
+fn wire_blocks_since(
+    response: BlocksSinceResponse,
+) -> Result<wire::BlocksSinceResponse, WalletChainError> {
+    match response {
+        BlocksSinceResponse::Forward(response) => Ok(wire::BlocksSinceResponse::Forward(
+            wire::ForwardBlocksSince {
+                tip: wire_tip(response.tip)?,
+                blocks: response
+                    .blocks
+                    .into_iter()
+                    .map(|block| {
+                        Ok(wire::ChainBlock {
+                            block_id: hex::encode(block.block_id),
+                            height: block.height,
+                            parent_id: hex::encode(block.parent_id),
+                            transactions: block
+                                .transactions
+                                .into_iter()
+                                .map(|transaction| wire::ChainTransaction {
+                                    tx_id: hex::encode(transaction.tx_id),
+                                    inputs: transaction
+                                        .inputs
+                                        .into_iter()
+                                        .map(|input| wire::ChainInput {
+                                            box_id: hex::encode(input.box_id),
+                                            index: input.index,
+                                        })
+                                        .collect(),
+                                    outputs: transaction
+                                        .outputs
+                                        .into_iter()
+                                        .map(|output| wire::ChainOutput {
+                                            box_id: hex::encode(output.box_id),
+                                            index: output.index,
+                                            bytes: hex::encode(output.bytes),
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, WalletChainError>>()?,
+            },
+        )),
+        BlocksSinceResponse::Ancestor(response) => Ok(wire::BlocksSinceResponse::Ancestor(
+            wire::AncestorBlocksSince {
+                tip: wire_tip(response.tip)?,
+                ancestor: wire::ChainCursor {
+                    height: response.ancestor.height,
+                    header_id: hex::encode(response.ancestor.header_id),
+                },
+            },
+        )),
+        BlocksSinceResponse::Pruned(response) => {
+            Ok(wire::BlocksSinceResponse::Pruned(wire::PrunedBlocksSince {
+                tip: wire_tip(response.tip)?,
+                minimum_height: response.minimum_height,
+            }))
+        }
+    }
+}
+
+fn wire_box(utxo: Utxo) -> wire::ChainBox {
+    wire::ChainBox {
+        box_id: hex::encode(utxo.box_id),
+        bytes: hex::encode(utxo.bytes),
+        value: utxo.value,
+        assets: utxo
+            .assets
+            .into_iter()
+            .map(|asset| wire::ChainAsset {
+                token_id: hex::encode(asset.token_id),
+                amount: asset.amount.to_string(),
+            })
+            .collect(),
+        creation_tx_id: hex::encode(utxo.creation_tx_id),
+        creation_output_index: utxo.creation_output_index,
+        creation_height: utxo.creation_height,
+    }
+}
+
+fn wire_box_lookup(lookup: UtxoLookup) -> Result<wire::BoxLookupResponse, WalletChainError> {
+    let Some(utxo) = lookup.utxo else {
+        return Err(WalletChainError::BoxNotFound);
+    };
+    Ok(wire::BoxLookupResponse {
+        tip: wire_tip(lookup.tip)?,
+        box_info: wire_box(utxo),
+    })
+}
+
+fn wire_submit(response: SubmitResponse) -> Result<wire::SubmitResponse, WalletChainError> {
+    match response {
+        SubmitResponse::Accepted { tip, tx_id } => Ok(wire::SubmitResponse::Accepted {
+            tip: wire_tip(tip)?,
+            tx_id: hex::encode(tx_id),
+        }),
+        SubmitResponse::Duplicate { tip, tx_id } => Ok(wire::SubmitResponse::Duplicate {
+            tip: wire_tip(tip)?,
+            tx_id: hex::encode(tx_id),
+        }),
+        SubmitResponse::Rejected {
+            tip,
+            reason,
+            detail,
+        } => Ok(wire::SubmitResponse::Rejected {
+            tip: wire_tip(tip)?,
+            reason: match reason {
+                ergo_wallet_service::chain::SubmitError::Duplicate => wire::SubmitError::Duplicate,
+                ergo_wallet_service::chain::SubmitError::Invalid => wire::SubmitError::Invalid,
+                ergo_wallet_service::chain::SubmitError::Fee => wire::SubmitError::Fee,
+            },
+            detail,
+        }),
+    }
+}
+
+pub struct WalletChainAdapter {
+    client: Arc<dyn ChainClient>,
+}
+
+impl WalletChainAdapter {
+    pub fn new(client: Arc<dyn ChainClient>) -> Self {
+        Self { client }
+    }
+
+    pub fn from_client(client: Arc<dyn ChainClient>) -> Self {
+        Self::new(client)
+    }
+
+    pub fn into_dyn(self) -> Arc<dyn WalletChain> {
+        Arc::new(self)
+    }
+}
+
+impl WalletChain for WalletChainAdapter {
+    fn tip(&self) -> Result<wire::ChainTip, WalletChainError> {
+        wire_tip(self.client.committed_tip().map_err(map_service_error)?)
+    }
+
+    fn snapshot(&self) -> Result<wire::ChainSnapshot, WalletChainError> {
+        wire_snapshot(self.client.snapshot().map_err(map_service_error)?)
+    }
+
+    fn blocks_since(
+        &self,
+        request: wire::BlocksSinceRequest,
+    ) -> Result<wire::BlocksSinceResponse, WalletChainError> {
+        let cursor = ChainCursor {
+            height: request.height,
+            header_id: decode_wire_id(&request.id, "id")?,
+        };
+        let response = self
+            .client
+            .blocks_since(BlocksSinceRequest {
+                cursor,
+                limit: request.limit,
+            })
+            .map_err(map_service_error)?;
+        wire_blocks_since(response)
+    }
+
+    fn box_lookup(
+        &self,
+        request: wire::BoxLookupRequest,
+    ) -> Result<wire::BoxLookupResponse, WalletChainError> {
+        wire::validate_id32(&request.box_id, "box_id").map_err(WalletChainError::invalid)?;
+        if let Some(tip) = request.tip.as_deref() {
+            wire::validate_id32(tip, "tip").map_err(WalletChainError::invalid)?;
+        } else if request.height.is_some() {
+            return Err(WalletChainError::invalid(
+                "lookup height requires a tip header id",
+            ));
+        }
+        let current_tip = self.client.committed_tip().map_err(map_service_error)?;
+        let service_request =
+            UtxoLookupRequest::from_wire(&request, current_tip).map_err(map_request_error)?;
+        let lookup = self
+            .client
+            .lookup_utxo_request(service_request)
+            .map_err(map_service_error)?;
+        wire_box_lookup(lookup)
+    }
+
+    fn submit(
+        &self,
+        request: wire::SubmitRequest,
+    ) -> Result<wire::SubmitResponse, WalletChainError> {
+        if request.transaction.is_empty() {
+            return Err(WalletChainError::invalid(
+                "transaction bytes must be non-empty lowercase hex",
+            ));
+        }
+        let transaction = decode_wire_bytes(&request.transaction, "transaction")?;
+        let snapshot_id = request
+            .snapshot_id
+            .as_deref()
+            .map(|value| {
+                wire::validate_snapshot_id(value).map_err(WalletChainError::invalid)?;
+                decode_wire_id(value, "snapshot_id")
+            })
+            .transpose()?;
+        let response = self
+            .client
+            .submit(SubmitRequest {
+                transaction,
+                snapshot_id,
+            })
+            .map_err(map_service_error)?;
+        wire_submit(response)
     }
 }
 
@@ -1101,6 +1453,41 @@ mod tests {
     }
 
     #[test]
+    fn submit_reason_table_maps_admission_transport_and_internal_failures() {
+        let cases = [
+            ("duplicate", SubmitFailureClass::Duplicate),
+            ("deserialize", SubmitFailureClass::RejectedInvalid),
+            ("validation_failed", SubmitFailureClass::RejectedInvalid),
+            ("script_failed", SubmitFailureClass::RejectedInvalid),
+            ("monetary_failed", SubmitFailureClass::RejectedInvalid),
+            ("cost_exceeded", SubmitFailureClass::RejectedInvalid),
+            ("reemission_policy", SubmitFailureClass::RejectedInvalid),
+            ("below_min_fee", SubmitFailureClass::RejectedFee),
+            ("pool_full", SubmitFailureClass::RejectedInvalid),
+            ("double_spend_loser", SubmitFailureClass::RejectedInvalid),
+            ("size_limit", SubmitFailureClass::RejectedInvalid),
+            ("unresolved_input", SubmitFailureClass::RejectedInvalid),
+            ("unresolved_data_input", SubmitFailureClass::RejectedInvalid),
+            ("budget_exhausted", SubmitFailureClass::RejectedInvalid),
+            ("disabled", SubmitFailureClass::RejectedInvalid),
+            ("ibd_gated", SubmitFailureClass::RejectedInvalid),
+            ("tip_unready", SubmitFailureClass::RejectedInvalid),
+            ("overloaded", SubmitFailureClass::Overloaded),
+            ("shutting_down", SubmitFailureClass::ShuttingDown),
+            ("timeout", SubmitFailureClass::Timeout),
+            ("route_disabled", SubmitFailureClass::Unsupported),
+            ("internal_error", SubmitFailureClass::Internal),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(
+                InProcessChainClient::classify_submit_error(reason),
+                expected,
+                "reason {reason}"
+            );
+        }
+    }
+
+    #[test]
     fn submit_maps_api_success_to_neutral_response() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
@@ -1116,6 +1503,32 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(response, SubmitResponse::Accepted { .. }));
+    }
+
+    #[test]
+    fn submit_rejects_a_stale_snapshot_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        apply_empty_blocks(&mut store, 1);
+        let (height, _) = store.reader_handle().committed_tip().unwrap().unwrap();
+        let client = InProcessChainClient::new(
+            ChainStoreReader::new_from_db(store.db_arc()),
+            Arc::new(AcceptSubmit) as Arc<dyn ergo_api::NodeSubmit>,
+        );
+        let error = client
+            .submit(SubmitRequest {
+                transaction: vec![1, 2, 3],
+                snapshot_id: Some([0xEE; 32]),
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ChainClientError::StaleTip {
+                expected,
+                actual,
+            } if expected.height == height && expected.header_id == [0xEE; 32] && actual.height == height
+        ));
     }
 
     #[test]
@@ -1319,6 +1732,75 @@ mod tests {
         assert!(matches!(
             fresh_client.committed_tip(),
             Err(ChainClientError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn api_wallet_chain_adapter_reads_committed_snapshot_without_wallet_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (box_id, box_bytes) = valid_utxo_box();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[(box_id, box_bytes)]).unwrap();
+        let ids = apply_empty_blocks(&mut store, 2);
+        let client = InProcessChainClient::from_chain_reader(
+            ChainStoreReader::new_from_db(store.db_arc()),
+            None::<Arc<dyn ergo_api::NodeSubmit>>,
+            false,
+            None,
+        );
+        let adapter = WalletChainAdapter::new(Arc::new(client) as Arc<dyn ChainClient>);
+
+        let tip = WalletChain::committed_tip(&adapter).unwrap();
+        assert_eq!(tip.height, 2);
+        assert_eq!(tip.header_id, hex::encode(ids[1]));
+
+        let snapshot = WalletChain::snapshot(&adapter).unwrap();
+        assert_eq!(snapshot.tip, tip);
+        assert_eq!(snapshot.snapshot_id, hex::encode(ids[1]));
+        assert_eq!(snapshot.headers.len(), 2);
+        assert_eq!(snapshot.headers[0].parent_id, hex::encode(ids[0]));
+
+        let blocks = WalletChain::blocks_since(
+            &adapter,
+            wire::BlocksSinceRequest {
+                height: 0,
+                id: wire::GENESIS_CURSOR_ID.to_string(),
+                limit: 2,
+            },
+        )
+        .unwrap();
+        match blocks {
+            wire::BlocksSinceResponse::Forward(response) => {
+                assert_eq!(response.tip, tip);
+                assert_eq!(response.blocks.len(), 2);
+                assert_eq!(response.blocks[0].block_id, hex::encode(ids[0]));
+                assert_eq!(response.blocks[1].block_id, hex::encode(ids[1]));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let box_response = WalletChain::box_lookup(
+            &adapter,
+            wire::BoxLookupRequest {
+                box_id: hex::encode(box_id),
+                tip: Some(tip.header_id.clone()),
+                height: Some(tip.height),
+            },
+        )
+        .unwrap();
+        assert_eq!(box_response.tip, tip);
+        assert_eq!(box_response.box_info.box_id, hex::encode(box_id));
+        assert_eq!(box_response.box_info.value, 1_000_000);
+        assert!(matches!(
+            WalletChain::box_lookup(
+                &adapter,
+                wire::BoxLookupRequest {
+                    box_id: "ee".repeat(32),
+                    tip: Some(tip.header_id),
+                    height: Some(tip.height),
+                },
+            ),
+            Err(WalletChainError::BoxNotFound)
         ));
     }
 }

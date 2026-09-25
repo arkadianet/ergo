@@ -1165,6 +1165,74 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/blocks-since:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_blocks_since
+      parameters:
+      - name: height
+        in: query
+        description: Committed cursor height (0 is the genesis cursor)
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 0
+      - name: id
+        in: query
+        description: 64-character lowercase hex cursor header id (all-zero exactly at height 0)
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Maximum blocks to return (default 100, cap 1024)
+        required: false
+        schema:
+          type: integer
+          format: int32
+          maximum: 1024
+          minimum: 1
+      responses:
+        '200':
+          description: Forward or ancestor result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBlocksSinceResponse'
+        '400':
+          description: Malformed cursor, cursor/height identity mismatch, or invalid limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '410':
+          description: Requested history is pruned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainPrunedBlocksSinceResponse'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/blocks/at-height/{height}:
     get:
       tags:
@@ -1327,6 +1395,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/boxes/{id}:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_box_lookup
+      parameters:
+      - name: tip
+        in: query
+        description: 64-character lowercase hex committed tip id
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Committed box
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainBoxLookupResponse'
+        '400':
+          description: Malformed box id or missing tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '404':
+          description: Box is not unspent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '409':
+          description: Committed tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/chain/headers:
     get:
       tags:
@@ -1583,6 +1707,108 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+  /api/v1/chain/snapshot:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_snapshot
+      responses:
+        '200':
+          description: Committed signing snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSnapshot'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/tip:
+    get:
+      tags:
+      - chain
+      operationId: wallet_chain_tip
+      responses:
+        '200':
+          description: Committed full-block tip
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainTip'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/chain/transactions:
+    post:
+      tags:
+      - chain
+      operationId: wallet_chain_submit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletChainSubmitRequest'
+        required: true
+      responses:
+        '200':
+          description: Accepted or duplicate transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSubmitResponse'
+        '400':
+          description: Malformed request (V1Error) or typed transaction rejection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletChainSubmitBadRequest'
+        '409':
+          description: Snapshot tip changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Wallet chain adapter failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: Wallet chain adapter unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Node transaction admission timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+      security:
+      - ApiKeyAuth: []
   /api/v1/diagnostics:
     get:
       tags:
@@ -8899,6 +9125,8 @@ components:
       - slow_consumer
       - idle_timeout
       - already_blacklisted
+      - stale_tip
+      - history_pruned
       - internal_error
     RegisterRequest:
       type: object
@@ -10537,6 +10765,338 @@ components:
           type: integer
           format: int32
           minimum: 0
+    WalletChainAsset:
+      type: object
+      required:
+      - tokenId
+      - amount
+      properties:
+        amount:
+          type: string
+        tokenId:
+          type: string
+    WalletChainBlock:
+      type: object
+      required:
+      - blockId
+      - height
+      - parentId
+      - transactions
+      properties:
+        blockId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainTransaction'
+    WalletChainBlocksSinceResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - blocks
+        - type
+        properties:
+          blocks:
+            type: array
+            items:
+              $ref: '#/components/schemas/WalletChainBlock'
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - forward
+      - type: object
+        required:
+        - tip
+        - ancestor
+        - type
+        properties:
+          ancestor:
+            $ref: '#/components/schemas/WalletChainCursor'
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - ancestor
+      - type: object
+        required:
+        - tip
+        - minimumHeight
+        - type
+        properties:
+          minimumHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - pruned
+    WalletChainBox:
+      type: object
+      required:
+      - boxId
+      - bytes
+      - value
+      - assets
+      - creationTxId
+      - creationOutputIndex
+      - creationHeight
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainAsset'
+        boxId:
+          type: string
+        bytes:
+          type: string
+        creationHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        creationOutputIndex:
+          type: integer
+          format: int32
+          minimum: 0
+        creationTxId:
+          type: string
+        value:
+          type: string
+    WalletChainBoxLookupResponse:
+      type: object
+      required:
+      - tip
+      - box
+      properties:
+        box:
+          $ref: '#/components/schemas/WalletChainBox'
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+    WalletChainCursor:
+      type: object
+      required:
+      - height
+      - headerId
+      properties:
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainHeader:
+      type: object
+      required:
+      - height
+      - headerId
+      - parentId
+      - timestampUnixMs
+      properties:
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+        parentId:
+          type: string
+        timestampUnixMs:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletChainInput:
+      type: object
+      required:
+      - boxId
+      - index
+      properties:
+        boxId:
+          type: string
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainOutput:
+      type: object
+      required:
+      - boxId
+      - index
+      - bytes
+      properties:
+        boxId:
+          type: string
+        bytes:
+          type: string
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainPrunedBlocksSinceResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - minimumHeight
+        - type
+        properties:
+          minimumHeight:
+            type: integer
+            format: int32
+            minimum: 0
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          type:
+            type: string
+            enum:
+            - pruned
+    WalletChainReemissionInput:
+      type: object
+      required:
+      - tokenId
+      - amount
+      properties:
+        amount:
+          type: string
+        boxIds:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+        tokenId:
+          type: string
+    WalletChainSnapshot:
+      type: object
+      required:
+      - tip
+      - headers
+      - activeParameters
+      - reemissionInputs
+      - snapshotId
+      properties:
+        activeParameters: {}
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainHeader'
+        reemissionInputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainReemissionInput'
+        snapshotId:
+          type: string
+        tip:
+          $ref: '#/components/schemas/WalletChainTip'
+    WalletChainSubmitBadRequest:
+      oneOf:
+      - $ref: '#/components/schemas/V1Error'
+      - $ref: '#/components/schemas/WalletChainSubmitResponse'
+    WalletChainSubmitReason:
+      type: string
+      enum:
+      - duplicate
+      - invalid
+      - fee
+    WalletChainSubmitRequest:
+      type: object
+      required:
+      - transaction
+      properties:
+        snapshotId:
+          type:
+          - string
+          - 'null'
+        transaction:
+          type: string
+    WalletChainSubmitResponse:
+      oneOf:
+      - type: object
+        required:
+        - tip
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - accepted
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          txId:
+            type: string
+      - type: object
+        required:
+        - tip
+        - txId
+        - status
+        properties:
+          status:
+            type: string
+            enum:
+            - duplicate
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+          txId:
+            type: string
+      - type: object
+        required:
+        - tip
+        - reason
+        - status
+        properties:
+          detail:
+            type:
+            - string
+            - 'null'
+          reason:
+            $ref: '#/components/schemas/WalletChainSubmitReason'
+          status:
+            type: string
+            enum:
+            - rejected
+          tip:
+            $ref: '#/components/schemas/WalletChainTip'
+    WalletChainTip:
+      type: object
+      required:
+      - height
+      - headerId
+      properties:
+        headerId:
+          type: string
+        height:
+          type: integer
+          format: int32
+          minimum: 0
+    WalletChainTransaction:
+      type: object
+      required:
+      - txId
+      - inputs
+      - outputs
+      properties:
+        inputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainInput'
+        outputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletChainOutput'
+        txId:
+          type: string
     WatchRequest:
       type: object
       description: '`POST /api/v1/accounts/watch` request.'

@@ -141,8 +141,91 @@ fn canonical_rust_openapi_is_the_union_of_both_fragments_and_known_aliases() {
         operation("/api/v1/transactions-psbt/{psbt_id}", "get"),
         operation("/api/v1/transactions-psbt/{psbt_id}/contributions", "post"),
         operation("/api/v1/transactions-psbt/{psbt_id}/finalize", "post"),
+        operation("/api/v1/chain/tip", "get"),
+        operation("/api/v1/chain/snapshot", "get"),
+        operation("/api/v1/chain/boxes/{id}", "get"),
+        operation("/api/v1/chain/blocks-since", "get"),
+        operation("/api/v1/chain/transactions", "post"),
     ]);
     assert!(required.is_subset(&operations));
+}
+
+#[test]
+fn wallet_chain_operations_have_unique_ids_and_runtime_error_schemas() {
+    let document = canonical_json();
+    let operations = [
+        ("/api/v1/chain/tip", "get", "wallet_chain_tip"),
+        ("/api/v1/chain/snapshot", "get", "wallet_chain_snapshot"),
+        ("/api/v1/chain/boxes/{id}", "get", "wallet_chain_box_lookup"),
+        (
+            "/api/v1/chain/blocks-since",
+            "get",
+            "wallet_chain_blocks_since",
+        ),
+        ("/api/v1/chain/transactions", "post", "wallet_chain_submit"),
+    ];
+    let expected_ids = operations
+        .iter()
+        .map(|(_, _, operation_id)| *operation_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected_ids.len(), operations.len());
+
+    let all_operation_ids = document["paths"]
+        .as_object()
+        .unwrap()
+        .values()
+        .flat_map(|path| path.as_object().unwrap().values())
+        .filter_map(|operation| operation["operationId"].as_str())
+        .collect::<Vec<_>>();
+    for (path, method, operation_id) in operations {
+        assert_eq!(
+            get_operation(&document, path, method)["operationId"],
+            operation_id
+        );
+        assert_eq!(
+            all_operation_ids
+                .iter()
+                .filter(|candidate| **candidate == operation_id)
+                .count(),
+            1,
+            "{operation_id} must be globally unique"
+        );
+    }
+
+    let submit = get_operation(&document, "/api/v1/chain/transactions", "post");
+    assert_eq!(
+        response_statuses(submit),
+        BTreeSet::from(["200", "400", "409", "500", "503", "504"])
+    );
+    assert_eq!(
+        response_schema_ref(submit, "400"),
+        "#/components/schemas/WalletChainSubmitBadRequest"
+    );
+    let bad_request_refs = document["components"]["schemas"]["WalletChainSubmitBadRequest"]
+        ["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|schema| schema["$ref"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        bad_request_refs,
+        BTreeSet::from([
+            "#/components/schemas/V1Error",
+            "#/components/schemas/WalletChainSubmitResponse",
+        ])
+    );
+
+    let blocks_since = get_operation(&document, "/api/v1/chain/blocks-since", "get");
+    assert_eq!(
+        response_schema_ref(blocks_since, "410"),
+        "#/components/schemas/WalletChainPrunedBlocksSinceResponse"
+    );
+
+    let reemission = &document["components"]["schemas"]["WalletChainReemissionInput"];
+    let required = reemission["required"].as_array().unwrap();
+    assert!(!required.iter().any(|field| field == "boxIds"));
+    assert!(reemission["properties"]["boxIds"].is_object());
 }
 
 #[test]
@@ -406,7 +489,7 @@ fn canonical_scala_and_rust_operation_inventories_are_disjoint() {
     let scala = scala_openapi_operations();
     let rust = openapi_operations(&rust_openapi().expect("canonical RUST OpenAPI must merge"));
     assert_eq!(scala.len(), 125);
-    assert_eq!(rust.len(), 180);
+    assert_eq!(rust.len(), 185);
     assert_operation_inventory_matches_fixture(&scala, "api_family_scala_operations.txt");
     assert_operation_inventory_matches_fixture(&rust, "api_family_rust_operations.txt");
 

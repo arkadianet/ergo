@@ -209,6 +209,72 @@ fn recover_interrupted_rescan(
     result
 }
 
+struct WalletChainWiring {
+    writer: Option<(
+        Arc<super::super::wallet_bridge::InProcessChainClient>,
+        Arc<dyn super::super::wallet_bridge::ChainStateAccessor>,
+    )>,
+    api: Option<Arc<dyn ergo_api::WalletChain>>,
+}
+
+fn build_wallet_chain_wiring(
+    store: &ergo_state::StateBackendKind,
+    wallet_store: Option<&Arc<dyn ergo_state::wallet::WalletStore>>,
+    submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
+    is_pruned: bool,
+    reemission_rules: Option<ergo_validation::ReemissionRuleInputs>,
+    reemission_inputs: Vec<ergo_wallet_service::chain::ReemissionInput>,
+) -> WalletChainWiring {
+    let is_utxo_backend = store.as_utxo().is_some();
+    if let Some(wallet_store) = wallet_store {
+        let reader = store.reader_handle();
+        let accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> =
+            Arc::new(super::super::wallet_bridge::ChainStateAccessorImpl::new(
+                reader.clone(),
+                wallet_store.clone(),
+                is_pruned,
+                reemission_rules.clone(),
+            ));
+        let client = Arc::new(
+            super::super::wallet_bridge::InProcessChainClient::new(reader, submit_bridge.clone())
+                .with_state_accessor(accessor.clone())
+                .with_reemission_inputs(reemission_inputs.clone()),
+        );
+        let api = is_utxo_backend.then(|| {
+            Arc::new(super::super::wallet_bridge::WalletChainAdapter::new(
+                client.clone() as Arc<dyn ergo_wallet_service::chain::ChainClient>,
+            )) as Arc<dyn ergo_api::WalletChain>
+        });
+        WalletChainWiring {
+            writer: Some((client, accessor)),
+            api,
+        }
+    } else if is_utxo_backend {
+        let client = Arc::new(
+            super::super::wallet_bridge::InProcessChainClient::from_chain_reader(
+                store.reader_handle(),
+                submit_bridge,
+                is_pruned,
+                reemission_rules,
+            )
+            .with_reemission_inputs(reemission_inputs),
+        );
+        WalletChainWiring {
+            writer: None,
+            api: Some(Arc::new(
+                super::super::wallet_bridge::WalletChainAdapter::new(
+                    client as Arc<dyn ergo_wallet_service::chain::ChainClient>,
+                ),
+            )),
+        }
+    } else {
+        WalletChainWiring {
+            writer: None,
+            api: None,
+        }
+    }
+}
+
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
 /// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
@@ -246,49 +312,46 @@ pub(super) async fn bind(
     let mempool_view = SnapshotMempoolView::new(snapshot_publisher.handle()).into_dyn();
     let wallet_moved = (config.wallet_mode == crate::config::WalletMode::External)
         .then_some(config.wallet_daemon_address.as_str());
+    let is_pruned = config.blocks_to_keep != -1;
+    let reemission_rules = super::build_reemission_rules(&config.chain_spec);
+    let reemission_inputs = reemission_rules
+        .as_ref()
+        .map(|rules| {
+            vec![ergo_wallet_service::chain::ReemissionInput {
+                token_id: rules.reemission_token_id,
+                amount: 0,
+                box_ids: Vec::new(),
+            }]
+        })
+        .unwrap_or_default();
+    let WalletChainWiring {
+        writer: mut wallet_writer_chain,
+        api: wallet_chain,
+    } = build_wallet_chain_wiring(
+        store,
+        wallet_store.as_ref(),
+        submit_bridge.clone(),
+        is_pruned,
+        reemission_rules,
+        reemission_inputs,
+    );
 
     let mut wallet_session_id = 0;
     let (wallet_admin, hook): (
         Arc<dyn ergo_api::wallet::WalletAdmin>,
         Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
     ) = if let Some(wallet_store) = wallet_store {
-        let db_arc = store.db_arc();
         if let Err(error) = recover_interrupted_rescan(wallet_store.as_ref()) {
             tracing::warn!(%error, "wallet boot: failed to recover interrupted rescan; wallet remains fail-closed");
         }
         let session_id = crate::wallet_boot::wallet_session_id();
         wallet_session_id = session_id;
-        let is_pruned = config.blocks_to_keep != -1;
-        let chain_reader = ergo_state::reader::ChainStoreReader::new_from_db(db_arc.clone());
-        let reemission_rules = super::build_reemission_rules(&config.chain_spec);
-        let chain_accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> =
-            Arc::new(super::super::wallet_bridge::ChainStateAccessorImpl::new(
-                chain_reader.clone(),
-                wallet_store.clone(),
-                is_pruned,
-                reemission_rules.clone(),
-            ));
-        let reemission_inputs = reemission_rules
-            .as_ref()
-            .map(|rules| {
-                vec![ergo_wallet_service::chain::ReemissionInput {
-                    token_id: rules.reemission_token_id,
-                    amount: 0,
-                    box_ids: Vec::new(),
-                }]
-            })
-            .unwrap_or_default();
-        let chain_client = Arc::new(
-            super::super::wallet_bridge::InProcessChainClient::new(
-                chain_reader,
-                submit_bridge.clone(),
-            )
-            .with_state_accessor(chain_accessor.clone())
-            .with_reemission_inputs(reemission_inputs),
-        );
+        let (chain_client, chain_accessor) = wallet_writer_chain.take().ok_or_else(|| {
+            NodeError::from("wallet boot: chain client was not constructed".to_string())
+        })?;
         let wallet_service = Arc::new(ergo_wallet_service::runtime::WalletService::new(
             wallet_store.clone(),
-            chain_client,
+            chain_client as Arc<dyn ergo_wallet_service::chain::ChainClient>,
         ));
         let wallet_storage = {
             let secret_dir = config.data_dir.join("wallet");
@@ -495,6 +558,7 @@ pub(super) async fn bind(
         read: read_state.clone(),
         compat: Some(scala_compat.clone()),
         submit: mounted_submit,
+        wallet_chain,
         indexer: indexer_for_api,
         mempool: mempool_view,
         network: network_prefix,
@@ -557,7 +621,7 @@ pub(super) async fn bind(
 
 #[cfg(test)]
 mod tests {
-    use super::recover_interrupted_rescan;
+    use super::{build_wallet_chain_wiring, recover_interrupted_rescan};
     use ergo_state::store::StateStore;
     use ergo_state::wallet::types::TrackedPubkeyMeta;
     use ergo_state::wallet::{RedbWalletStore, RescanState, WalletStore};
@@ -571,6 +635,12 @@ mod tests {
             redb::Database::create(dir.path().join("state.redb")).unwrap(),
         ));
         (dir, store)
+    }
+
+    fn submit_bridge() -> Arc<dyn ergo_api::NodeSubmit> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        crate::api_bridge::SubmitBridge::new(tx, event_tx).into_dyn()
     }
 
     #[test]
@@ -829,5 +899,51 @@ mod tests {
         assert!(
             !crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst)
         );
+    }
+
+    #[test]
+    fn chain_wiring_is_available_for_external_and_embedded_utxo_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        state.initialize_genesis(&[]).unwrap();
+        let backend = ergo_state::StateBackendKind::Utxo(state);
+        let submit = submit_bridge();
+
+        let external =
+            build_wallet_chain_wiring(&backend, None, submit.clone(), false, None, Vec::new());
+        assert!(external.writer.is_none());
+        assert!(external.api.is_some());
+
+        let wallet_store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(backend.db_arc()));
+        let embedded = build_wallet_chain_wiring(
+            &backend,
+            Some(&wallet_store),
+            submit,
+            false,
+            None,
+            Vec::new(),
+        );
+        assert!(embedded.writer.is_some());
+        assert!(embedded.api.is_some());
+    }
+
+    #[test]
+    fn chain_wiring_is_absent_for_digest_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ergo_state::DigestStateStore::open(
+            &dir.path().join("state.redb"),
+            ergo_validation::scala_launch(),
+            ergo_chain_spec::VotingParams {
+                voting_length: 2,
+                ..ergo_chain_spec::VotingParams::mainnet()
+            },
+            [0; 33],
+        )
+        .unwrap();
+        let backend = ergo_state::StateBackendKind::Digest(state);
+        let wiring =
+            build_wallet_chain_wiring(&backend, None, submit_bridge(), false, None, Vec::new());
+        assert!(wiring.writer.is_none());
+        assert!(wiring.api.is_none());
     }
 }

@@ -49,7 +49,9 @@ pub use operator::{operator_router, OperatorState};
 pub use realtime::{
     spawn_event_bridge, spawn_event_bridge_once, ConnLimiter, RealtimeBus, RealtimeHandle,
 };
-pub use routes::{batch_router, v1_router, V1State};
+pub use routes::{
+    batch_router, v1_router, wallet_chain_router, V1ChainState, V1State, WalletChainState,
+};
 pub use script::{script_router, OracleVerdict, ScalaOracle, ScriptConfig, ScriptState};
 pub use webhooks::{
     spawn_webhook_worker, spawn_webhook_worker_once, webhooks_router, ReqwestSink, WebhookEngine,

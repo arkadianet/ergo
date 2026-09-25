@@ -406,6 +406,7 @@ fn app(deps: Deps) -> Router {
         chain: deps.chain,
         indexer: deps.indexer,
         submit: deps.submit,
+        wallet_chain: None,
         tx_builder: deps.tx_builder,
         mempool,
         mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),

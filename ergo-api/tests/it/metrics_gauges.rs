@@ -66,6 +66,7 @@ fn app() -> axum::Router {
         read: Arc::new(MetricsReadState),
         compat: None,
         submit: None,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(ergo_api::NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,

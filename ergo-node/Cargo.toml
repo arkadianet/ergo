@@ -23,6 +23,7 @@ ergo-crypto     = { workspace = true }
 ergo-validation = { workspace = true }
 ergo-wallet        = { workspace = true }
 ergo-wallet-service = { workspace = true }
+ergo-wallet-protocol = { workspace = true }
 ergo-state      = { workspace = true }
 ergo-p2p        = { workspace = true }
 ergo-sync       = { workspace = true }
