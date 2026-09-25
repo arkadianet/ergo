@@ -7,6 +7,15 @@ changes the sampler recorded), and checks each against the miner:
 a block Rust applied that Scala never had under the same ordering id is
 a chain Scala lacks — the D3 sibling-completion guard — and a block Rust
 rolled back that Scala kept is a switch Scala never made.
+
+The two-miner window is FUNDED: miner 1's wallet matures before the
+second miner is seeded, and payments go to it on every ordering block,
+so the competing input chains carry transactions. That is what makes the
+followers' reconstruction accounting over the window (the #2562
+committed-prefix question) mean anything: over empty input blocks every
+prefix rebuilds the same root. Each ordering block's NAMED input tip is
+recorded beside the chain every follower held under its parent
+(`named_tip_vs_held`).
 """
 import time
 
@@ -18,6 +27,8 @@ NODES = ('scala', 'scala2', 'rust')
 ORDERING_BLOCKS = 25
 # Ordering blocks of shared history before the second miner joins.
 SHARED_BLOCKS = 4
+# Payments submitted to miner 1 per ordering block of the two-miner window.
+PAYMENTS_PER_BLOCK = 3
 
 # The second miner is NOT started with the others: it is seeded from
 # miner 1's data directory once there is a chain to copy (see
@@ -52,12 +63,40 @@ def run(ctx):
     # the seed: asking about a node that has not been started is not an
     # observation of anything.
     common.wait_ordering_blocks(ctx, SHARED_BLOCKS, 'shared_prefix')
+    # The two-miner window has to carry transactions. An unfunded chain
+    # seals empty input blocks, and an ordering block over empty input
+    # blocks has the same transactions root whichever prefix of them it
+    # commits, so every follower rebuilds it from any chain it holds and
+    # the reconstruction accounting measures nothing (see `fund_miner`).
+    # Miner 1 is funded BEFORE the second miner is seeded, so every block
+    # of the window can carry payments.
+    balance, address = common.fund_miner(ctx, 'scala')
+    ctx.note('funding', {'balance_nano': balance, 'address': address})
+    if not balance or not address:
+        ctx.fail('no spendable coin on miner 1, so the two-miner window seals '
+                 'empty input blocks and any prefix of them rebuilds the same '
+                 'root', {'balance_nano': balance, 'address': address})
+    sent, refused = [], []
+
+    def pump():
+        if balance and address:
+            common.pump_payments(ctx, address, sent, 'scala',
+                                 PAYMENTS_PER_BLOCK, rejected=refused)
+
     # The seed restarts the follower, which empties its input chain. The
     # sample range that covers is recorded so the reset it causes is not
     # mistaken for a fork switch — and so a reset OUTSIDE it still is.
     samples_before_seed = len(ctx.run.series)
     common.seed_second_miner(ctx, campaign, lifecycle, nodes=SEEDED_NODES)
     samples_after_seed = len(ctx.run.series)
+    # ONE measurement boundary for every follower's reconstruction
+    # accounting, opened after the seed (which restarts the Rust follower
+    # and so its event ring) and closed when the window ends: the funded
+    # two-miner blocks, not the single-miner prefix before them.
+    collector = common.EventCollector(ctx)
+    ctx.note('reference_log_offsets',
+             common.open_measurement_window(ctx, collector))
+    watermark = ctx.collector_watermark
     # NOT `assertion_1_peering`: it requires every node to hold a peer at
     # one instant, and the two miners cannot peer with each other here,
     # so the second one's only possible peer is the follower. A momentary
@@ -75,7 +114,9 @@ def run(ctx):
     start = smoke.scala_height(ctx.run)
     target = start + blocks
     reached = start
+    pump()
     while time.monotonic() < ctx.run.deadline:
+        collector.poll()
         try:
             status = smoke.api('rust', '/api/v1/status') or {}
             input_blocks = status.get('input_blocks') or {}
@@ -89,12 +130,37 @@ def run(ctx):
                         'waitlist': input_blocks.get('waitlist')})
             peers_seen = max(peers_seen,
                              len(smoke.api('rust', '/peers/connected') or []))
-            reached = smoke.scala_height(ctx.run)
+            height = smoke.scala_height(ctx.run)
+            if height > reached:
+                pump()
+            reached = height
         except smoke.Unavailable:
             pass
         if reached >= target:
             break
         ctx.run.idle(0.5)
+    close = common.close_measurement_window(ctx)
+    ctx.note('measurement_close', close)
+    ctx.note('event_collection', collector.summary(watermark))
+    if collector.lost_in_window(watermark):
+        ctx.fail('the event feed evicted entries between polls, so the Rust '
+                 'follower\'s reconstruction outcomes in the window are '
+                 'incomplete', {'collection': collector.summary(watermark)})
+    ctx.note('workload', {'funded_balance_nano': balance,
+                          'payments_submitted': len(sent),
+                          'payments_refused': len(refused),
+                          'refusals': refused[:10]})
+    # What each ordering block of the window NAMED as its input tip,
+    # against what every follower held under its parent. Read now, while
+    # the nodes are up: the named tip lives only in the block's extension.
+    ordering_blocks, unread_heights = common.ordering_blocks_between(
+        'scala', start + 1, reached)
+    ctx.note('ordering_blocks_in_window', {'blocks': ordering_blocks,
+                                           'unread_heights': unread_heights})
+    followers = [node for node, role in sorted((ctx.roles or {}).items())
+                 if not lifecycle.ROLES[role].mines]
+    ctx.note('named_tip_vs_held', common.named_tip_vs_held(
+        ordering_blocks, list(ctx.run.series), followers))
 
     ctx.note('ordering_window', {'start_height': start, 'target': target,
                                  'reached': reached})

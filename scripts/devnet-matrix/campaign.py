@@ -3959,6 +3959,106 @@ def _self_test_remeasure():
         _roots
     assert "scala_root_announcements(window)" in inspect.getsource(
         common.reconstruction_accounting)
+    _self_test_fork_workload()
+
+
+def _self_test_fork_workload():
+    """The #2562 two-miner run (`fork`): a funded window with its own
+    measurement boundary, and each ordering block's named input tip
+    against what every follower held under its parent."""
+    import inspect
+
+    from scenarios import common, fork
+
+    # ----- the window is funded and bounded, in this order -----
+    _src = inspect.getsource(fork.run)
+    for _earlier, _later in (('fund_miner(', 'seed_second_miner('),
+                             ('seed_second_miner(', 'open_measurement_window('),
+                             ('open_measurement_window(', 'collector.poll()'),
+                             ('collector.poll()', 'close_measurement_window('),
+                             ('close_measurement_window(', 'ordering_blocks_between(')):
+        assert _src.index(_earlier) < _src.index(_later), (_earlier, _later)
+    assert 'pump()' in _src and 'named_tip_vs_held(' in _src, _src
+
+    # ----- each class, on a synthetic series -----
+    # Miner chains, newest first: P's tree a1 <- a2 <- a3, and a sibling
+    # branch b2 under a1. The follower `rust` is sampled on P twice (the
+    # LAST sample counts); `scala3` holds the sibling branch.
+    series = [
+        {'scala_ordering': 'P', 'scala_chain': ['a2', 'a1'],
+         'rust_ordering': 'P', 'rust_chain': ['a1'],
+         'scala3_ordering': 'P', 'scala3_chain': []},
+        {'scala_ordering': 'P', 'scala_chain': ['a3', 'a2', 'a1'],
+         'rust_ordering': 'P', 'rust_chain': ['a3', 'a2', 'a1'],
+         'scala3_ordering': 'P', 'scala3_chain': ['b2', 'a1'],
+         'scala2_chain': ['b2', 'a1']},
+        {'rust_ordering': 'Q', 'rust_chain': ['q1'],
+         'scala3_ordering': 'Q', 'scala3_chain': ['q1']},
+    ]
+    blocks = [
+        {'height': 5, 'id': 'B1', 'rank': 0, 'parent': 'P',
+         'named_input_tip': 'a3'},                 # rust equal, scala3 other
+        {'height': 5, 'id': 'B2', 'rank': 1, 'parent': 'P',
+         'named_input_tip': 'a1'},                 # both hold more
+        {'height': 6, 'id': 'B3', 'rank': 0, 'parent': 'Q',
+         'named_input_tip': 'q2'},                 # never sampled below q2
+        {'height': 6, 'id': 'B4', 'rank': 1, 'parent': 'P',
+         'named_input_tip': None},                 # names nothing
+        {'height': 7, 'id': 'B5', 'rank': 0, 'parent': 'R',
+         'named_input_tip': 'r1'},                 # parent never sampled
+        {'height': 7, 'id': 'B6', 'rank': 1, 'unread': 'HTTP 404'},
+    ]
+    result = common.named_tip_vs_held(blocks, series, ['rust', 'scala3'])
+    rust = {r['id']: (r['class'], r['depth']) for r in result['rust']['rows']}
+    assert rust == {'B1': ('equal', 0), 'B2': ('held_more', 2),
+                    'B3': ('named_chain_unknown', None),
+                    'B4': ('names_nothing', None),
+                    'B5': ('not_sampled', None), 'B6': ('unread', None)}, rust
+    assert result['rust']['held_more_depths'] == [2], result['rust']
+    scala3 = {r['id']: (r['class'], r['depth'])
+              for r in result['scala3']['rows']}
+    assert scala3['B1'] == ('other_branch', None), scala3
+    assert scala3['B2'] == ('held_more', 1), scala3
+    assert sum(result['scala3']['counts'].values()) == len(blocks), result
+    # A follower whose tip is BELOW the named tip holds less, and one that
+    # held nothing under the parent says so.
+    behind = common.named_tip_vs_held(
+        [{'id': 'B', 'parent': 'P', 'named_input_tip': 'a3'}],
+        [{'scala_chain': ['a3', 'a2', 'a1'], 'rust_ordering': 'P',
+          'rust_chain': ['a1']},
+         {'scala3_ordering': 'P', 'scala3_chain': []}], ['rust', 'scala3'])
+    assert behind['rust']['rows'][0]['class'] == 'held_less', behind
+    assert behind['rust']['rows'][0]['depth'] == 2, behind
+    assert behind['scala3']['rows'][0]['class'] == 'held_nothing', behind
+
+    # ----- the window's blocks are read from the node, never dropped -----
+    _pages = {
+        '/blocks/at/5': ['B1', 'B2'], '/blocks/at/6': [],
+        '/blocks/B1': {'header': {'parentId': 'P'},
+                       'extension': {'fields': [['0100', 'aa'],
+                                                ['0302', 'a3']]},
+                       'blockTransactions': {'transactions': [{}, {}, {}]}},
+    }
+
+    def _fake_api(node, path, *args, **kwargs):
+        if path == '/blocks/at/7':
+            raise common.Unavailable('down')
+        if path not in _pages:
+            raise common.Unavailable(f'{path}: 404')
+        return _pages[path]
+
+    _saved_api = common.api
+    try:
+        common.api = _fake_api
+        read, unread = common.ordering_blocks_between('scala', 5, 7)
+    finally:
+        common.api = _saved_api
+    assert unread == [7], unread
+    assert read[0] == {'height': 5, 'id': 'B1', 'rank': 0, 'parent': 'P',
+                       'named_input_tip': 'a3', 'transactions': 3}, read
+    assert read[1]['id'] == 'B2' and read[1]['rank'] == 1 and \
+        'unread' in read[1], read
+    assert len(read) == 2, read
 
 
 def _fake_node_modules(work, calls, stop_raises=False, findings_raise=False):

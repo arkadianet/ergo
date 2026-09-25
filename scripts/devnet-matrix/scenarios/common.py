@@ -550,6 +550,130 @@ def scala_blocks_by_height(ctx, low, high):
     return at, unread
 
 
+# The extension key under which an ordering block names the input block
+# its committed input chain ends at (weak-blocks `Extension.PrevInputBlockIdKey`,
+# `InputBlocksDataPrefix` 0x03 then 0x02). The committed chain is a
+# prefix, possibly empty, of the chain ending there.
+NAMED_INPUT_TIP_KEY = '0302'
+
+
+def ordering_blocks_between(node, low, high):
+    """Every ordering block `node` holds at heights `[low, high]`: its id,
+    parent, rank at its height (0 = best), the input tip it names and its
+    transaction count. Returns `(blocks, unread_heights)`.
+
+    Read while the nodes are up, because the named tip lives only in the
+    block's extension. A block whose body `node` cannot serve (a losing
+    fork's header) is kept with `unread`, never dropped.
+    """
+    blocks, unread = [], []
+    for height in range(low, high + 1):
+        try:
+            ids = api(node, f'/blocks/at/{height}') or []
+        except Unavailable:
+            unread.append(height)
+            continue
+        for rank, header_id in enumerate(ids):
+            try:
+                block = api(node, f'/blocks/{header_id}') or {}
+            except Unavailable as error:
+                blocks.append({'height': height, 'id': header_id,
+                               'rank': rank, 'unread': str(error)})
+                continue
+            fields = {k: v for k, v in
+                      (block.get('extension') or {}).get('fields') or []}
+            blocks.append({
+                'height': height, 'id': header_id, 'rank': rank,
+                'parent': (block.get('header') or {}).get('parentId'),
+                'named_input_tip': fields.get(NAMED_INPUT_TIP_KEY),
+                'transactions': len((block.get('blockTransactions') or {})
+                                    .get('transactions') or [])})
+    return blocks, unread
+
+
+NAMED_TIP_CLASSES = ('equal', 'held_more', 'held_less', 'other_branch',
+                     'held_nothing', 'names_nothing', 'not_sampled',
+                     'named_chain_unknown', 'unread')
+
+
+def named_tip_vs_held(ordering_blocks, series, followers):
+    """Per follower: how each ordering block's NAMED input tip compares
+    with the input chain the follower held under the block's parent. Pure.
+
+    The held chain is the follower's `<node>_chain` (newest first) at the
+    LAST sample in which its `<node>_ordering` was the block's parent. The
+    classes, one per (block, follower):
+
+    * `equal`: the follower's tip is the named tip;
+    * `held_more`: the named tip is `depth` >= 1 blocks below the
+      follower's tip, so the follower held input blocks this ordering
+      block did not commit (the #2562 case: a held chain that outruns the
+      commitment);
+    * `held_less`: the follower's tip is `depth` >= 1 blocks below the
+      named tip;
+    * `other_branch`: the two tips are on different branches;
+    * `held_nothing`: the follower held no chain under the parent;
+    * `names_nothing`: the block names no input tip;
+    * `not_sampled`: the follower was never sampled on the parent;
+    * `named_chain_unknown`: the named tip is not on the held chain, and
+      no sample of any node carried the chain below it;
+    * `unread`: the block's body could not be read.
+
+    It compares the NAMED tip only. A miner names its latest input block
+    but commits only the bodies it processed, so a block can commit fewer
+    blocks than it names; that is not visible here, and `held_more` is
+    therefore a LOWER bound on "committed a shorter prefix than held".
+    """
+    held, ancestry = {}, {}
+    for sample in series:
+        for key, chain in sample.items():
+            if not key.endswith('_chain') or not chain:
+                continue
+            for index, block in enumerate(chain):
+                # The longest chain seen below each block wins.
+                if len(chain) - index > len(ancestry.get(block, ())):
+                    ancestry[block] = chain[index:]
+        for node in followers:
+            ordering = sample.get(f'{node}_ordering')
+            if ordering:
+                held[(node, ordering)] = sample.get(f'{node}_chain') or []
+    out = {}
+    for node in followers:
+        counts = {cls: 0 for cls in NAMED_TIP_CLASSES}
+        rows = []
+        for block in ordering_blocks:
+            named = block.get('named_input_tip')
+            if block.get('unread'):
+                cls, depth = 'unread', None
+            elif not named:
+                cls, depth = 'names_nothing', None
+            elif (node, block.get('parent')) not in held:
+                cls, depth = 'not_sampled', None
+            else:
+                chain = held[(node, block['parent'])]
+                below_named = ancestry.get(named)
+                if not chain:
+                    cls, depth = 'held_nothing', None
+                elif chain[0] == named:
+                    cls, depth = 'equal', 0
+                elif named in chain:
+                    cls, depth = 'held_more', chain.index(named)
+                elif below_named is None:
+                    cls, depth = 'named_chain_unknown', None
+                elif chain[0] in below_named:
+                    cls, depth = 'held_less', below_named.index(chain[0])
+                else:
+                    cls, depth = 'other_branch', None
+            counts[cls] += 1
+            rows.append({'height': block.get('height'), 'id': block.get('id'),
+                         'rank': block.get('rank'), 'class': cls,
+                         'depth': depth})
+        depths = sorted(r['depth'] for r in rows if r['class'] == 'held_more')
+        out[node] = {'counts': counts, 'blocks': len(rows),
+                     'held_more_depths': depths, 'rows': rows}
+    return out
+
+
 # ----- fork-switch evaluation (pure) -----
 
 def fork_switches(series, side):

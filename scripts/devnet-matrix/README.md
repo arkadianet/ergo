@@ -369,6 +369,15 @@ there with the reason rather than silently downgraded.
   (`p2p_adversary ... input_block_root_flood ... --hold-ms`).
   `P2P_ADVERSARY` names a prebuilt adversary, as `RUST_NODE` names the
   node.
+* `fork` (the #2562 two-miner run, with `--reference-follower patched`)
+  funds miner 1 before the second miner is seeded and pays through it on
+  every ordering block, inside one measurement window, so the followers'
+  reconstruction accounting covers funded two-miner blocks: over empty
+  input blocks every prefix rebuilds the same root. `named_tip_vs_held`
+  sets each ordering block's named input tip (extension key `0302`)
+  against the chain every follower held under its parent; `held_more` is
+  a lower bound on "committed a shorter prefix than the follower held",
+  since a miner can commit fewer blocks than it names.
 
 ### Reconstruction accounting
 
