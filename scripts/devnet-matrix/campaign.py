@@ -4108,6 +4108,50 @@ def _self_test_fork_workload():
     assert _posts == [('scala', 't1'), ('scala2', 't1'), ('scala', 't3'),
                       ('scala2', 't3'), ('scala', 't4')], _posts
     _self_test_seed_artifact()
+    _self_test_switch_granularity()
+
+
+def _self_test_switch_granularity():
+    """A fork switch is judged on HISTORY: either end may be a non-empty
+    prefix of a reference's sampled chain, never an invented or stitched
+    one (rm-B-fork-2562f-3)."""
+    from scenarios import common
+
+    def rs(o, rust, s1=(), s2=()):
+        return {'ordering': o, 'rust_chain': list(rust), 'scala_chain': list(s1),
+                'scala2_chain': list(s2), 'scala_ordering': o, 'scala2_ordering': o}
+
+    # The follower (read after the miner in the same sweep) leaves miner
+    # 1's chain at a length miner 1 was never sampled at: 1, then 3.
+    granular = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1c', 'm1b', 'm1a'], ['m2b', 'm2a'])])
+    assert granular['switches_matching_no_reference'] == [], granular
+    # ...and the match says which kind it was.
+    match = granular['matched_switches'][0]
+    assert match['left_a_reference_chain'] == {
+        'node': 'scala', 'sample': 1, 'match': 'prefix'}, match
+    assert match['landed_on_a_reference_chain']['match'] == 'exact', match
+    # A stitched chain (miner 2's block on miner 1's root) is a prefix of
+    # neither miner's chain, and still matches nothing.
+    stitched = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a']),
+         rs('O1', ['m2b', 'm1a'], ['m1b', 'm1a'], ['m2b', 'm2a'])])
+    assert stitched['switches_matching_no_reference'], stitched
+    unmatched = stitched['switches_matching_no_reference'][0]
+    assert unmatched['left_a_reference_chain']['match'] == 'exact', unmatched
+    assert unmatched['landed_on_a_reference_chain'] is None, unmatched
+    # A landing that is a strict prefix of the other miner's chain (the
+    # follower trailing it) is its history, and says so.
+    trailing = common.compare_fork_switches(
+        [rs('O1', ['m1b', 'm1a'], ['m1b', 'm1a'], ['m2c', 'm2b', 'm2a']),
+         rs('O1', ['m2b', 'm2a'], ['m1b', 'm1a'], ['m2c', 'm2b', 'm2a'])])
+    assert trailing['switches_matching_no_reference'] == [], trailing
+    # A reset to the empty chain is still a reset, not a prefix match.
+    reset = common.compare_fork_switches(
+        [rs('O1', ['m1a'], ['m1a'], ['m2a']), rs('O1', [], ['m1a'], ['m2a'])])
+    assert reset['resets_to_the_empty_chain'] and \
+        not reset['switches_matching_no_reference'], reset
 
 
 def _self_test_seed_artifact():

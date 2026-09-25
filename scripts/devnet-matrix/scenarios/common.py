@@ -1077,10 +1077,19 @@ def compare_fork_switches(series):
     match it against, and a follower that has just restarted produces
     one legitimately. The caller says whether it caused the reset.
 
-    Equality is on the ordered list, so "the follower moved from one
-    miner's exact chain to another miner's exact chain" is the only
-    shape that passes — which is what a two-miner fork switch IS. A
-    follower that invented either end matches nothing.
+    Equality is on the ordered HISTORY: each end must be one reference's
+    chain, or a non-empty prefix of it read oldest-first, so "the
+    follower moved from one miner's history to another miner's history"
+    is the only shape that passes — which is what a two-miner fork switch
+    IS. A follower that invented a block, or stitched two branches, is a
+    prefix of no single reference's chain and matches nothing.
+
+    A prefix, not only the exact list, because the sampler cannot see
+    every length a chain passes through: a miner sealing an input block
+    every half second grows between two sweeps, and a follower read later
+    in the same sweep can hold a length the miner was never sampled at
+    (rm-B-fork-2562f-3: the follower left miner 1's 18-block chain, and
+    miner 1 was sampled at 17 and then 19). Each match says which it was.
     """
     # Every chain each reference published under each ordering id.
     seen = {}
@@ -1090,16 +1099,22 @@ def compare_fork_switches(series):
                 seen.setdefault(ref_ordering, []).append((i, node, list(chain)))
 
     def published(ordering, chain, at):
-        """Which reference published exactly `chain`, near sample `at`."""
+        """Which reference published `chain` near sample `at`: exactly,
+        or as a prefix of a longer chain of its own (see above)."""
+        wanted = list(reversed(chain))
+        prefix = None
         for j, node, ref_chain in seen.get(ordering, ()):
             if abs(j - at) > LATER_CONFIRMATION_SAMPLES:
                 continue
             if ref_chain == list(chain):
-                return {'node': node, 'sample': j}
-        return None
+                return {'node': node, 'sample': j, 'match': 'exact'}
+            if (prefix is None and wanted
+                    and list(reversed(ref_chain))[:len(wanted)] == wanted):
+                prefix = {'node': node, 'sample': j, 'match': 'prefix'}
+        return prefix
 
     rust = fork_switches(series, 'rust')
-    unmatched, resets, rolled_back_still_held = [], [], []
+    unmatched, resets, rolled_back_still_held, matched = [], [], [], []
     for switch in rust:
         ordering = switch['ordering']
         before = switch.get('chain_before') or []
@@ -1120,6 +1135,10 @@ def compare_fork_switches(series):
             resets.append(entry)
         elif left is None or landed is None:
             unmatched.append(entry)
+        else:
+            matched.append({'index': switch['index'], 'ordering': ordering,
+                            'left_a_reference_chain': left,
+                            'landed_on_a_reference_chain': landed})
         # Telemetry: was it still on a reference's LAST chain for this
         # ordering id? Per node, so one miner's stale earlier reading
         # cannot answer for the other's current one.
@@ -1139,6 +1158,8 @@ def compare_fork_switches(series):
         # THE guard: a switch whose BEFORE and AFTER chains are not both
         # chains a reference actually published.
         'switches_matching_no_reference': unmatched,
+        # Every other non-reset switch, with how each end matched.
+        'matched_switches': matched,
         # Transitions to the EMPTY chain, which no reference publishes.
         'resets_to_the_empty_chain': resets,
         # Telemetry with two miners that cannot peer with each other:
