@@ -207,6 +207,16 @@ pub enum SubmitResponse {
 pub enum ChainClientError {
     #[error("unsupported chain operation")]
     Unsupported,
+    #[error("chain endpoint unauthorized")]
+    Unauthorized,
+    #[error("chain endpoint conflict")]
+    Conflict,
+    #[error("chain endpoint unavailable: {0}")]
+    Unavailable(String),
+    #[error("chain transport failure: {0}")]
+    Transport(String),
+    #[error("chain protocol failure: {0}")]
+    Protocol(String),
     #[error("chain client overloaded: {0}")]
     Overloaded(String),
     #[error("chain client shutting down: {0}")]

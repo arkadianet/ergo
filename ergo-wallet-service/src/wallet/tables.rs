@@ -15,6 +15,8 @@ use redb::TableDefinition;
 pub(crate) const CHAIN_INDEX: TableDefinition<u64, &[u8]> = TableDefinition::new("chain_index");
 pub(crate) const CHAIN_STATE_META: TableDefinition<&str, &[u8]> =
     TableDefinition::new("chain_state_meta");
+pub(crate) const WALLET_APPLIED_HEADERS: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("wallet_applied_headers");
 
 /// Best block height the wallet has scanned to (one row). When the
 /// wallet trails the chain (e.g., after restore-with-rescan), the

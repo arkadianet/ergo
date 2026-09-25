@@ -683,7 +683,7 @@ impl WalletService {
         Ok(result)
     }
 
-    fn convert_block(&self, block: ChainBlock) -> Result<RescanBlock, WalletServiceError> {
+    pub fn convert_block(&self, block: ChainBlock) -> Result<RescanBlock, WalletServiceError> {
         let transactions = block
             .transactions
             .into_iter()

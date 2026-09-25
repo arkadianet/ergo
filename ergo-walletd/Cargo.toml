@@ -1,0 +1,39 @@
+[package]
+name = "ergo-walletd"
+description = "Standalone watch-only Ergo wallet daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "ergo_walletd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ergo-walletd"
+path = "src/main.rs"
+
+[dependencies]
+ergo-wallet          = { workspace = true }
+ergo-wallet-protocol = { workspace = true }
+ergo-wallet-service  = { workspace = true }
+ergo-ser             = { workspace = true }
+axum                = { workspace = true }
+hyper               = { workspace = true }
+hyper-util          = { workspace = true }
+tower                = { workspace = true }
+clap                = { workspace = true, features = ["derive"] }
+hex                 = { workspace = true }
+reqwest             = { workspace = true, features = ["blocking", "rustls-tls"] }
+serde               = { workspace = true, features = ["derive"] }
+serde_json          = { workspace = true }
+thiserror            = { workspace = true }
+tokio               = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
+toml                = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -10,6 +10,7 @@ members = [
     "ergo-validation",
     "ergo-wallet",
     "ergo-wallet-service",
+    "ergo-walletd",
     "ergo-wallet-protocol",
     "ergo-state",
     "ergo-p2p",
@@ -41,6 +42,7 @@ ergo-compiler      = { path = "ergo-compiler" }
 ergo-validation    = { path = "ergo-validation" }
 ergo-wallet        = { path = "ergo-wallet" }
 ergo-wallet-service = { path = "ergo-wallet-service" }
+ergo-walletd         = { path = "ergo-walletd" }
 ergo-wallet-protocol = { path = "ergo-wallet-protocol" }
 ergo-state         = { path = "ergo-state" }
 ergo-p2p           = { path = "ergo-p2p" }
@@ -103,7 +105,9 @@ rayon = "1.11"
 
 # HTTP
 axum            = "0.7"
+hyper           = { version = "1", features = ["http1", "server"] }
 tower           = "0.5"
+hyper-util      = { version = "0.1", features = ["http1", "server", "tokio"] }
 tower-http      = "0.5"
 http-body-util  = "0.1"
 # The v1 webhooks outbound delivery client (features set at the member —

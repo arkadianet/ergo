@@ -24,7 +24,7 @@ pub mod types;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
-use redb::Database;
+use redb::{Database, ReadableTable};
 
 pub use crate::wallet::error::WalletStoreError;
 use crate::wallet::store::begin_write_quick;
@@ -113,6 +113,14 @@ pub struct WalletScanCursor {
 pub const WALLET_SCHEMA_VERSION: u32 = 2;
 
 pub fn migrate_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
+    migrate_schema_with_index(db, false)
+}
+
+pub fn migrate_standalone_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
+    migrate_schema_with_index(db, true)
+}
+
+fn migrate_schema_with_index(db: &Arc<Database>, standalone: bool) -> Result<(), WalletStoreError> {
     let (version, height, stored_id) = {
         let txn = db.begin_read()?;
         let version = match txn.open_table(tables::WALLET_SCHEMA_VERSION_TABLE) {
@@ -150,7 +158,7 @@ pub fn migrate_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
             invalidate |= stored_id.is_some();
             None
         }
-        Some(height) => match read_chain_index_header(db, height) {
+        Some(height) => match read_index_header(db, height, standalone) {
             Ok(expected) if stored_id.is_some_and(|stored| stored != expected) => {
                 invalidate = true;
                 None
@@ -179,30 +187,52 @@ pub fn migrate_schema(db: &Arc<Database>) -> Result<(), WalletStoreError> {
             header_table.remove(())?;
         }
         version_table.insert((), WALLET_SCHEMA_VERSION)?;
+        if standalone {
+            let mut applied = txn.open_table(tables::WALLET_APPLIED_HEADERS)?;
+            if invalidate || height == Some(0) {
+                let keys: Vec<u64> = applied
+                    .iter()?
+                    .map(|entry| entry.map(|(key, _)| key.value()))
+                    .collect::<Result<_, _>>()?;
+                for key in keys {
+                    applied.remove(key)?;
+                }
+            }
+        }
     }
     txn.commit()?;
     Ok(())
 }
 
-fn read_chain_index_header(db: &Database, height: u32) -> Result<[u8; 32], WalletStoreError> {
+fn read_index_header(
+    db: &Database,
+    height: u32,
+    standalone: bool,
+) -> Result<[u8; 32], WalletStoreError> {
     let txn = db.begin_read()?;
-    let table = match txn.open_table(tables::CHAIN_INDEX) {
+    let table = if standalone {
+        txn.open_table(tables::WALLET_APPLIED_HEADERS)
+    } else {
+        txn.open_table(tables::CHAIN_INDEX)
+    };
+    let table = match table {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => {
             return Err(WalletStoreError::decode(
-                "wallet cursor points to a height without chain_index",
+                "wallet cursor points to a height without its applied-header index",
             ));
         }
         Err(error) => return Err(error.into()),
     };
     let row = table.get(height as u64)?.ok_or_else(|| {
-        WalletStoreError::decode("wallet cursor points to a height without chain_index")
+        WalletStoreError::decode(
+            "wallet cursor points to a height without its applied-header index",
+        )
     })?;
     let bytes = row.value();
     if bytes.len() != 32 {
         return Err(WalletStoreError::decode(format!(
-            "chain_index row has len {} (expected 32)",
-            bytes.len()
+            "applied-header row at {height} is not 32 bytes"
         )));
     }
     let mut header_id = [0u8; 32];

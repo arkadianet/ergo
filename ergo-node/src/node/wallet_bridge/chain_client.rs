@@ -633,6 +633,13 @@ fn wire_tip(tip: CommittedTip) -> Result<wire::ChainTip, WalletChainError> {
 fn map_service_error(error: ChainClientError) -> WalletChainError {
     match error {
         ChainClientError::Unsupported => WalletChainError::Unsupported,
+        ChainClientError::Unauthorized | ChainClientError::Conflict => {
+            WalletChainError::Failure("chain request was rejected".to_string())
+        }
+        ChainClientError::Unavailable(detail) | ChainClientError::Transport(detail) => {
+            WalletChainError::Overloaded(detail)
+        }
+        ChainClientError::Protocol(detail) => WalletChainError::Failure(detail),
         ChainClientError::Overloaded(detail) => WalletChainError::Overloaded(detail),
         ChainClientError::ShuttingDown(detail) => WalletChainError::ShuttingDown(detail),
         ChainClientError::Timeout(detail) => WalletChainError::Timeout(detail),
