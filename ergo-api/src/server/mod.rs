@@ -1,15 +1,13 @@
 //! HTTP server: axum router, handlers, asset serving.
 //!
-//! Local-only by default. The caller chooses the bind address; binding
-//! beyond loopback requires `[api] public_bind = true` plus
-//! `[api.security].api_key_hash` at the config layer. `/wallet/*` and
-//! `/node/shutdown` are auth-gated by `require_api_key` middleware
-//! whenever a `Some(ApiSecurity)` reaches `router_with_mempool_and_
-//! wallet_and_security`; the rest of the surface stays unauthenticated.
+//! Local-only by default. Binding beyond loopback requires
+//! `[api] public_bind = true`. Privileged routes always carry the shared
+//! API-key gate: a configured hash checks the client key, while an absent
+//! hash denies access with setup guidance. Public routes remain open.
 //!
 //! Entry points come in two tiers. The positional convenience builders
 //! (`serve_on`, `serve`, `router`, `router_with_wallet`) hardwire a
-//! `NoopMempoolView`/`NoopWalletAdmin` and no auth gate — they let tests
+//! `NoopMempoolView`/`NoopWalletAdmin` with privileged routes closed — they let tests
 //! stand up a router without assembling a full `ServerCtx`. Production
 //! goes through the explicit builder
 //! (`serve_on_with_mempool_and_wallet_and_security` /
@@ -126,6 +124,10 @@ pub struct ServerCtx {
     /// state type" body — the rest of the API remains available.
     /// The integrator sets this from the resolved `state_type`.
     pub utxo_reads_supported: bool,
+    /// Declare a loopback reverse proxy so peer sockets receive no loopback
+    /// rate-limit exemption and use the remote Admin policy (warn-and-allow
+    /// in production). Forwarded headers never determine client identity.
+    pub local_reverse_proxy: bool,
 }
 
 /// Bind a TCP listener for the API server without starting axum.
@@ -200,6 +202,7 @@ pub fn serve_on(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
 }
@@ -213,7 +216,7 @@ pub fn serve_on(
 /// callers that don't need the overlay.
 ///
 /// Wallet routes are backed by a [`crate::wallet::NoopWalletAdmin`] and
-/// the auth gate is `None`. For production, use
+/// privileged routes are closed (`security = None`). For production, use
 /// [`serve_on_with_mempool_and_wallet_and_security`] directly.
 pub fn serve_on_with_mempool(
     ctx: ServerCtx,
@@ -221,7 +224,7 @@ pub fn serve_on_with_mempool(
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     admin: Option<Arc<dyn NodeAdmin>>,
 ) -> JoinHandle<()> {
-    // Test entry point: no wallet, no auth. Production uses
+    // Test entry point: no wallet, privileged routes closed. Production uses
     // [`serve_on_with_mempool_and_wallet_and_security`] directly.
     serve_on_with_mempool_and_wallet_and_security(
         ctx,
@@ -236,13 +239,8 @@ pub fn serve_on_with_mempool(
 /// Full-featured server entry point: mempool overlay + `NodeAdmin` +
 /// `WalletAdmin` + explicit `Option<Arc<ApiSecurity>>`.
 ///
-/// Production `ergo-node` passes `Some(operator_security)` so
-/// `/wallet/*` and the two `/node/shutdown` aliases are gated by the
-/// configured `api_key_hash`. Tests that don't exercise the auth gate
-/// pass `None` and document the choice at the call site — no
-/// convenience wrapper exists that hides the parameter, by design:
-/// it would re-introduce the "did production remember to enable auth?"
-/// footgun.
+/// Production passes `Some(operator_security)` when a hash is configured,
+/// or `None` to keep privileged routes closed. Public routes stay available.
 pub fn serve_on_with_mempool_and_wallet_and_security(
     ctx: ServerCtx,
     listener: tokio::net::TcpListener,
@@ -576,6 +574,7 @@ pub fn router_with_wallet(
         emission: None,
         emission_scripts: None,
         utxo_reads_supported,
+        local_reverse_proxy: false,
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
 }
@@ -686,6 +685,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         emission,
         emission_scripts,
         utxo_reads_supported,
+        local_reverse_proxy,
     } = ctx;
     // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
     // reads). Cloned up front because the compat / submit handles are moved into
@@ -811,7 +811,9 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         Some(chain) => {
             let scala = scala_api::compat_read_router(chain, utxo_reads_supported);
             let scala = match submit {
-                Some(submit) => scala.merge(scala_api::compat_write_router(submit)),
+                Some(submit) => {
+                    scala.merge(scala_api::compat_write_router(submit, security.clone()))
+                }
                 None => scala,
             };
             route_registry::merge_family_router(operator, &mut inventory, scala)
@@ -832,7 +834,9 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // The v1 T1 (operator) auth config — the same api-key gate the wallet
     // surface uses, reused for the `webhooks/*` management routes below.
     // Captured before `security` is consumed by the native wallet mount.
-    let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone()).into_shared();
+    let v1_auth = crate::v1::auth::V1AuthConfig::new(security.clone())
+        .with_local_reverse_proxy(local_reverse_proxy)
+        .into_shared();
     // Captured before the native mount consumes `wallet_admin`: the v1
     // scan/accounts group (`/api/v1/scan/*` + `/api/v1/accounts/*`)
     // reuses the SAME wallet-admin bridge for scan + key operations.
@@ -950,8 +954,11 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         realtime: Some(v1_realtime),
         network,
     };
-    let v1_governor = crate::v1::governor::Governor::new(Default::default())
-        .expect("default GovernorConfig is valid");
+    let v1_governor = crate::v1::governor::Governor::new(crate::v1::governor::GovernorConfig {
+        local_reverse_proxy,
+        ..Default::default()
+    })
+    .expect("GovernorConfig is valid");
     // The `script/*` playground shares the one per-node governor (bounded
     // at the `Compute` class — the load-bearing anti-DoS control) and the
     // one v1 auth config (so `[api.script] require_api_key` can flip the group

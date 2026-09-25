@@ -13,7 +13,7 @@
 // REPLACES the full target set.
 import { api } from './api-client.js';
 import { num } from './format.js';
-import { getApiKey, subscribe } from './auth.js';
+import { getApiKey, subscribe, authState, CONFIGURE_API_KEY } from './auth.js';
 
 
 let root = null;
@@ -320,7 +320,7 @@ async function save() {
     return;
   }
   if (res.status === 403) {
-    setStatus('Rejected (403): missing or invalid api_key — use the Authorize chip.', 'err');
+    setStatus(authState() === 'unconfigured' ? CONFIGURE_API_KEY : 'Rejected (403): missing or invalid api_key — use the Authorize chip.', 'err');
   } else if (res.status === 409) {
     setStatus('Node is not mining — vote targets have no effect until mining is enabled.', 'err');
   } else {
@@ -422,11 +422,11 @@ export function mount(el) {
   const saveBtn = el.querySelector('[data-save]');
   if (votingAuthUnsub) votingAuthUnsub();
   votingAuthUnsub = subscribe((s) => {
-    const noKey = s === 'none';
+    const noKey = s === 'none' || s === 'unconfigured';
     saveBtn.disabled = noKey;
-    saveBtn.title = noKey ? 'Set your api_key via the Authorize chip to set votes' : '';
+    saveBtn.title = s === 'unconfigured' ? CONFIGURE_API_KEY : noKey ? 'Set your api_key via the Authorize chip to set votes' : '';
     root.querySelector('[data-access]').textContent = noKey ? 'Read-only access' : 'Operator key set';
-    root.querySelector('[data-access-note]').textContent = noKey ? 'Authorize using the sidebar to save targets. You can explore and prepare a draft here.' : 'Saving requires a valid operator key and mining enabled on this node.';
+    root.querySelector('[data-access-note]').textContent = s === 'unconfigured' ? CONFIGURE_API_KEY : noKey ? 'Authorize using the sidebar to save targets. You can explore and prepare a draft here.' : 'Saving requires a valid operator key and mining enabled on this node.';
   });
   historyLoaded = false;
   historyLoading = false;

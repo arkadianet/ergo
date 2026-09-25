@@ -39,7 +39,7 @@ use tower::ServiceExt;
 
 // ---- Stubs (minimal — only what the router needs for state) ----
 
-struct StubReadState;
+pub(super) struct StubReadState;
 
 impl NodeReadState for StubReadState {
     fn info(&self) -> ApiInfo {
@@ -123,7 +123,7 @@ impl NodeReadState for StubReadState {
     }
 }
 
-struct StubCompat;
+pub(super) struct StubCompat;
 
 impl NodeChainQuery for StubCompat {
     fn info(&self) -> ScalaInfo {

@@ -545,8 +545,7 @@ pub enum WalletAdminError {
     TxNotFound,
 }
 
-/// Build the `/wallet/*` axum router and, if `security` is `Some`,
-/// wrap it with the [`crate::auth::require_api_key`] middleware via
+/// Build the `/wallet/*` axum router and always wrap it with the [`crate::auth::require_api_key`] middleware via
 /// `route_layer` — which fires only on matched routes. A plain `layer`
 /// here would also wrap this subtree's implicit fallback, which
 /// `Router::merge` then propagates router-wide, auth-gating every
@@ -556,12 +555,8 @@ pub enum WalletAdminError {
 /// via the explicit `/wallet` + `/wallet/*rest` catch-all routes, which
 /// `route_layer` does cover.
 ///
-/// **Security boundary**: callers MUST pass an explicit `Option` — no
-/// convenience wrapper exists that hides the choice. Production callers
-/// pass `Some(operator_security)`; tests that don't exercise the auth
-/// gate pass `None` and document why at the call site. This makes
-/// "no auth" a deliberate per-call decision rather than a default
-/// fallthrough.
+/// **Security boundary**: `Some(operator_security)` checks the supplied key;
+/// `None` refuses every privileged request with configuration guidance.
 pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
@@ -637,13 +632,10 @@ pub fn router_with_security(
         .route("/scan", any(crate::auth::unknown_gated_subpath))
         .route("/scan/*rest", any(crate::auth::unknown_gated_subpath))
         .with_state(admin);
-    match security {
-        Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(
-            sec,
-            crate::auth::require_api_key,
-        )),
-        None => r,
-    }
+    r.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
 }
 
 /// No-op `WalletAdmin` that returns `Uninitialized` for every call.

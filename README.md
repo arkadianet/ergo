@@ -54,10 +54,11 @@ Specifics operators should read before deploying:
   "bootstrap complete" on mainnet. The Mode 2 trust anchor is provisional —
   cross-check the installed UTXO root against a known-good reference manifest
   before treating it as authoritative.
-- **REST API authentication** applies only to `/wallet/*` and `/node/shutdown`
-  (Blake2b-256 of the `api_key` header vs `[api.security].api_key_hash`).
-  Read/submit routes stay unauthenticated by design — front the public surface
-  with a reverse proxy if exposing off loopback.
+- **REST API authentication** gates privileged routes, including `POST /blocks`,
+  wallet, scan, mining and operator controls (Blake2b-256 of the `api_key` header
+  vs `[api.security].api_key_hash`). Public reads and transaction submission
+  remain unauthenticated — front the public surface with a reverse proxy if
+  exposing off loopback. See the [route inventory](docs/configuration.md#security-notes-for-the-api).
 
 Configuration enforces four of Scala's five `consistentSettings` rules at load
 time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
@@ -107,8 +108,10 @@ runs resume from the persisted tip. The node also serves a dependency-free
 operator web dashboard at the REST bind address (`http://127.0.0.1:9099/` by
 default) — a single-page app with Overview (live charts + event feed),
 Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
-docs at `/swagger` and RUST API docs at `/swagger/native`; wallet actions
-require the API key. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
+docs at `/swagger` and RUST API docs at `/swagger/native`. Dashboard and public
+REST work without a key. Wallet, mining controls, voting writes and admin routes
+stay locked until you set `[api.security] api_key_hash` and restart; see
+[API configuration](docs/configuration.md#apisecurity) for key generation. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
 The full build / test / run / configuration surface — profiles, feature-gated
 tests, the config reference, observability — is in
 [`docs/overview.md`](./docs/overview.md).

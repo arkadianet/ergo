@@ -66,13 +66,10 @@ pub(super) fn admin_router(
             axum::routing::any(crate::auth::unknown_gated_subpath),
         )
         .with_state(admin);
-    match security {
-        Some(security) => routes.route_layer(axum::middleware::from_fn_with_state(
-            security,
-            crate::auth::require_api_key,
-        )),
-        None => routes,
-    }
+    routes.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
 }
 
 pub(super) fn auxiliary_router(
@@ -94,13 +91,10 @@ pub(super) fn auxiliary_router(
         // Scala leaves these open, but our own v1 design doc flagged that
         // as drift to close, not parity to keep.
         let mined = crate::mining::mining_router(mining);
-        let mined = match &security {
-            Some(security) => mined.route_layer(axum::middleware::from_fn_with_state(
-                security.clone(),
-                crate::auth::require_api_key,
-            )),
-            None => mined,
-        };
+        let mined = mined.route_layer(axum::middleware::from_fn_with_state(
+            security.clone(),
+            crate::auth::require_api_key,
+        ));
         router = router.merge(mined);
         operations.extend(
             documented
@@ -487,7 +481,23 @@ pub(super) fn compat_read_router(
     FamilyRouter::new(ApiFamily::Scala).merge_documented(router, operations)
 }
 
-pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {
+pub(super) fn compat_write_router(
+    submit: Arc<dyn NodeSubmit>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> FamilyRouter {
+    // Scala BlocksApiRoute.scala:127 requires withAuth for block submission.
+    let blocks = FamilyRouter::new(ApiFamily::Scala)
+        .route(
+            "/blocks",
+            "/blocks",
+            &["post"],
+            post(crate::compat::blocks::submit_handler),
+        )
+        .with_state(submit.clone())
+        .route_layer(axum::middleware::from_fn_with_state(
+            security,
+            crate::auth::require_api_key,
+        ));
     FamilyRouter::new(ApiFamily::Scala)
         .route(
             "/transactions/bytes",
@@ -513,13 +523,8 @@ pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {
             &["post"],
             post(crate::compat::transactions::check_handler),
         )
-        .route(
-            "/blocks",
-            "/blocks",
-            &["post"],
-            post(crate::compat::blocks::submit_handler),
-        )
         .with_state(submit)
+        .merge(blocks)
 }
 
 pub(super) fn wallet_router(

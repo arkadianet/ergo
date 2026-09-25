@@ -162,7 +162,7 @@ fn app(initialized: bool, unlocked: bool, height: u32) -> axum::Router {
         unlocked,
         height,
     });
-    ergo_api::wallet::router_with_security(admin, None)
+    ergo_api::wallet::router_with_security(admin, Some(super::auth::security()))
 }
 
 // ----- happy path -----
@@ -172,6 +172,7 @@ async fn status_returns_zero_state_for_uninitialized_wallet() {
     let resp = app(false, false, 0)
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/status")
                 .body(Body::empty())
@@ -193,6 +194,7 @@ async fn status_returns_camelcase_fields_per_scala_parity() {
     let resp = app(true, true, 12345)
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::GET)
                 .uri("/wallet/status")
                 .body(Body::empty())
@@ -362,7 +364,7 @@ async fn restore_omits_use_pre_1627_field_defaults_to_true() {
         captured: Mutex::new(None),
     });
     let admin_arc: Arc<dyn WalletAdmin> = admin.clone();
-    let app = ergo_api::wallet::router_with_security(admin_arc, None);
+    let app = ergo_api::wallet::router_with_security(admin_arc, Some(super::auth::security()));
 
     // POST /wallet/restore WITHOUT usePre1627KeyDerivation field.
     let body = serde_json::json!({
@@ -373,6 +375,7 @@ async fn restore_omits_use_pre_1627_field_defaults_to_true() {
     let resp = app
         .oneshot(
             Request::builder()
+                .header(ergo_api::auth::API_KEY_HEADER, "hello")
                 .method(Method::POST)
                 .uri("/wallet/restore")
                 .header("content-type", "application/json")

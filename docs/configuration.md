@@ -27,6 +27,9 @@ A ready-to-use default config ships at
 full-archival node with the `/blockchain/*` extra-index enabled — and a
 fully-commented operator template lives next to it at
 [`../ergo-node/ergo-node.toml.example`](../ergo-node/ergo-node.toml.example).
+Both templates enable the API on loopback with no credential. The dashboard,
+swagger and public REST work immediately; privileged routes stay closed until
+the operator configures their own key.
 
 ### Unknown-key handling is per-section
 
@@ -127,39 +130,48 @@ beyond loopback.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `bind` | string (socket addr) | `"127.0.0.1:9099"` | HTTP API bind address. Parsed at load; a malformed value is rejected. A non-loopback bind is rejected unless `public_bind = true`. |
-| `disabled` | bool | `false` | When `true`, the API server is not started and no `api_key_hash` is required. |
+| `disabled` | bool | `false` | When `true`, the API server is not started. Both shipped templates use `false`. |
 | `public_bind` | bool | `false` | Permits binding a non-loopback address. A non-loopback `bind` without `public_bind = true` is rejected at load. See the security note below. |
+| `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
 ### `[api.security]`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. **Mandatory whenever the API server is enabled** (mirroring Scala `ErgoApp.scala`). Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Not required when `[api] disabled = true`. |
+| `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
 
 ### Security notes for the API
 
-The `api_key` gate is narrow by design, matching the Scala reference
-node: it protects only the `/wallet/*` routes and the
-`/node/shutdown` route. The gate covers those whole path prefixes —
-an unknown subpath under `/wallet/` or `/node/` rejects on the key
-first (mirroring Scala's `pathPrefix(...) & withAuth`), while any
-other unmatched path is a plain, ungated `404`. Every other route is
-unauthenticated regardless
-of bind scope — including transaction submission
-(`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/*`, `/emission/*`, all read endpoints, and
-`/metrics`.
+The API distinguishes public routes from privileged routes:
+
+| Privileged (require a configured hash and valid `api_key`) | Public (no key required) |
+|---|---|
+| `/wallet/*`, `/scan/*`, `/api/v1/wallet/*` | Dashboard `/`, `/wallet/ui*` redirects, swagger |
+| `POST /node/shutdown`, `POST /api/v1/node/shutdown`, `POST /peers/connect`, `POST /api/v1/votes`, `POST /blocks` | Read REST, including `GET /api/v1/votes`, `/info`, `/blocks/*`, `/peers/*`, `/blockchain/*` |
+| `/mining/*` (candidate, solution, reward address/public key) | Transaction submission/checks: `POST /transactions`, `/transactions/bytes`, `/transactions/check`, `/transactions/checkBytes`, `/api/v1/mempool/{submit,check}` |
+| v1 Operator/Admin routes (node config, network controls, mining controls, operator votes, scans, account management/PSBT, watch writes, private-key export, webhooks); script compute when configured to require a key | Public v1 queries including watch-only account reads, `/emission/*`, `/utils/*`, `/metrics` |
+
+The whole wallet, scan and node prefixes are gated, including unknown subpaths;
+other unmatched paths return `404`. Public means no API-key authentication;
+normal validation, subsystem availability and admission policies still apply.
+
+Transaction submission is public in Scala (`TransactionsApiRoute.scala:174-209`).
+Block submission requires an API key, matching Scala (`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
+Scala leaves those four open (`MiningApiRoute.scala:45,77,86,98`).
 
 Consequences:
 
-- **`api_key_hash` is required even on a loopback bind** whenever the API
-  is enabled — it is keyed off whether the API server runs, not off the
-  bind address. The header name is `api_key` (lowercase, underscore);
-  the value is compared in constant time against the configured hash.
+- **Absent hash means privileged routes are closed, including on loopback.**
+  Compat/native privileged mounts return `403` with reason
+  `api-key-not-configured` and detail
+  "API key not configured: set [api.security] api_key_hash (see docs/configuration.md)".
+  The v1 tier gate returns its `401 unauthorized` envelope with the same guidance.
+  Once configured, the header name is `api_key` (lowercase, underscore), checked
+  in constant time; a missing/wrong key retains the existing invalid-key response.
 - **`public_bind = true` exposes the submission and read surface to the
   network.** Binding `0.0.0.0` with `public_bind = true` makes
-  transaction submission, block submission, and `/metrics` world-callable.
+  transaction submission and `/metrics` world-callable.
   For remote operator access, prefer binding loopback and fronting the
   node with an authenticated reverse proxy. On a public bind, transaction
   submissions are automatically charged against the shared
@@ -169,16 +181,42 @@ Consequences:
   `local_reserved_cost_budget` below.
 - **`/metrics` is not authenticated.** Keep it on loopback or behind a
   proxy.
+- **Set `local_reverse_proxy = true` when a reverse proxy connects to a
+  loopback API bind.** This flag does not authenticate clients or unlock privileged
+  routes; configure client authentication at the proxy separately. Client identity comes only from the real peer socket;
+  the node never trusts `X-Forwarded-For`. All clients through the same proxy
+  peer IP (usually `127.0.0.1`, or `::1`) share **one v1 governor bucket**:
+  default burst 40 tokens, refill 20 tokens/second, Compute requests costing
+  10 tokens each. Direct local operator access also loses its loopback
+  exemption and shares that bucket when using the same peer IP. Apply
+  per-client rate limits at the proxy and size aggregate traffic for this
+  budget. Raising governor limits requires changing the server's
+  `GovernorConfig`; these limits are not currently exposed in TOML.
+- **Realtime connections also share the proxy's peer IP.** The fixed
+  `MAX_SOCKETS_PER_IP = 16` cap applies across all proxied clients using that
+  IP, including direct local connections from that IP. This socket cap uses
+  peer identity regardless of `local_reverse_proxy`; budget concurrent
+  WebSocket clients accordingly. Proxy rate limiting does not raise the cap.
+- **A declared proxy routes all API transaction submissions through the
+  public mempool budget**, including direct local submissions. At boot,
+  `api_publicly_bound` becomes true and admission uses `TxSource::PublicApi`
+  (shared `global_cost_budget`) rather than `TxSource::Api`
+  (`local_reserved_cost_budget`), even though the API binds to loopback.
+- **Admin operations remain authenticated and warn-and-allow in production.**
+  With `local_reverse_proxy = true`, loopback requests use the remote Admin
+  policy and emit a warning after a valid API key is supplied. The setting
+  does not enable `admin_hard_deny_nonloopback` or block authenticated Admin
+  operations; restrict remote Admin access at the proxy if needed.
 - **The `Host` header is checked to close the DNS-rebinding read path.**
   A loopback bind (the default) rejects any request whose `Host` header
   isn't `localhost`, `127.0.0.1`, `[::1]`, the literal `bind` address, or
   an `allowed_hosts` entry, with `421 Misdirected Request` — this stops
   attacker-controlled JavaScript on a rebound domain from reading the
   unauthenticated surface (`/info`, `/blocks/*`, `/peers/*`, …) via a
-  victim's browser hitting `127.0.0.1:9099`. Key-gated routes were never
-  at risk (the `api_key` header can't be forged cross-origin), so this
-  is a hardening measure for the public routes, not a fix for a gap in
-  the api-key gate. A request with no `Host` header at all is allowed
+  victim's browser hitting `127.0.0.1:9099`. A rebinding page can also
+  send an `api_key` header under its same-origin hostname: privileged routes
+  rely on a secret key, with the Host guard adding defense in depth.
+  A request with no `Host` header or HTTP/2 `:authority` is allowed
   (HTTP/1.0 tooling). On a non-loopback bind the guard only activates
   when `allowed_hosts` is non-empty — most public deployments front the
   API with a reverse proxy that already validates `Host`/SNI, and
@@ -195,10 +233,13 @@ printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
 
 Save `$secret` somewhere safe — it is the plaintext `api_key` clients send;
 the hash above is what goes in `api_key_hash`. The shipped
-`ergo-node.toml` template ships with `api_key_hash` set to
-`Blake2b256("hello")` — the node's boot-warn fires for this value on
-every boot, loopback bind included, because anything with local shell
-access already has it. Rotate it before relying on the API for anything.
+templates contain no credential. Add the generated hash under `[api.security]`
+and restart to unlock privileged routes; the API is already enabled.
+
+**Upgrade:** operators running the bundled file directly lose the old known
+`hello` key. Privileged calls using it now fail until they set their own
+`[api.security] api_key_hash`. Existing explicitly configured hashes keep their
+behavior.
 
 ## `[mempool]`
 
@@ -392,7 +433,7 @@ checks and are enforced at load:
 
 ## Minimal example
 
-A minimal mainnet full-archive node with the operator API enabled:
+A minimal mainnet full-archive node with public API enabled and privileged routes locked:
 
 ```toml
 network = "mainnet"
@@ -402,11 +443,13 @@ network = "mainnet"
 known = ["213.239.193.208:9030", "159.65.11.55:9030"]
 
 [api]
+disabled = false
 bind = "127.0.0.1:9099"
 
-[api.security]
-# lowercase Base16 of Blake2b256(<your-secret>)
-api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+# To unlock privileged routes, generate a random secret and hash it as
+# described above, then add the generated value here and restart:
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
 ```
 
 For the full set of keys, comments, and a fast clean-database boot

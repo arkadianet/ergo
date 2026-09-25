@@ -668,43 +668,25 @@ impl NodeConfig {
             if !addr.ip().is_loopback() && !public_bind {
                 return Err(format!(
                     "[api] bind = {raw:?} is not a loopback address. \
-                     api_key_hash gates /wallet/* and /node/shutdown only; \
-                     /transactions, /blocks, and /api/v1/mempool/{{submit,check}} \
+                     api_key_hash gates privileged routes including POST /blocks; \
+                     /transactions and /api/v1/mempool/{{submit,check}} \
                      remain unauthenticated (matches Scala node behavior). \
                      For remote operator access, bind 127.0.0.1 / ::1 and put a \
                      reverse proxy in front, OR set [api] public_bind = true \
-                     and accept that submission routes are publicly callable."
+                     and accept that transaction submission routes are publicly callable."
                 ));
             }
             Some(addr)
         };
 
-        // [api.security] — always required when the API server is enabled,
-        // matching Scala `ErgoApp.scala:40-43` `require(apiKeyHash.isDefined,
-        // "API key hash must be set")`. Generate a RANDOM secret first
-        // (never a guessable word) and hash it, e.g.:
-        //   secret=$(openssl rand -hex 32)
-        //   printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
-        // Validated here so a malformed value exits the node with a clear
-        // shell message rather than silently disabling the gate downstream.
-        let api_key_hash = if api_bind.is_some() {
-            let raw = toml_cfg
-                .api
-                .security
-                .as_ref()
-                .and_then(|s| s.api_key_hash.as_deref())
-                .ok_or_else(|| {
-                    "[api.security] api_key_hash is required when the API is enabled. \
-                     Set it to the lowercase Base16 of Blake2b256(<your-secret>). Generate \
-                     a RANDOM secret first — never a guessable word — save it, then hash \
-                     it, e.g.: `secret=$(openssl rand -hex 32); printf '%s' \"$secret\" | \
-                     b2sum -l 256 | cut -d' ' -f1` (or without openssl: `secret=$(head -c \
-                     32 /dev/urandom | xxd -p -c 256); printf '%s' \"$secret\" | b2sum -l \
-                     256 | cut -d' ' -f1`). \
-                     Disable the API server entirely with [api] disabled = true if you \
-                     have no operator surface to expose."
-                        .to_string()
-                })?;
+        // An absent hash keeps public routes available and privileged routes closed.
+        // Validate every supplied hash before passing it to the API wiring.
+        let api_key_hash = if let Some(raw) = toml_cfg
+            .api
+            .security
+            .as_ref()
+            .and_then(|s| s.api_key_hash.as_deref())
+        {
             if raw.len() != 64 {
                 return Err(format!(
                     "[api.security] api_key_hash must be 64 lowercase hex chars (got {})",
@@ -722,7 +704,7 @@ impl NodeConfig {
                         .to_string(),
                 );
             }
-            Some(raw.to_string())
+            api_bind.map(|_| raw.to_string())
         } else {
             None
         };
@@ -734,6 +716,7 @@ impl NodeConfig {
         // are compared as opaque strings, not `SocketAddr`s, so a typo
         // just never matches rather than failing to parse.
         let api_allowed_hosts = toml_cfg.api.allowed_hosts.clone().unwrap_or_default();
+        let api_local_reverse_proxy = toml_cfg.api.local_reverse_proxy.unwrap_or(false);
 
         // [mempool] — TOML overrides defaults; CLI flags override TOML.
         let def = MempoolConfig::default();
@@ -1137,6 +1120,7 @@ impl NodeConfig {
             api_bind,
             api_key_hash,
             api_allowed_hosts,
+            api_local_reverse_proxy,
             allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
             devnet_max_block_cost,
             mempool_config,

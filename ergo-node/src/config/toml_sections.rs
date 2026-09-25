@@ -182,9 +182,10 @@ pub(super) struct TomlApi {
     /// non-empty. Each entry may include a port (`"example.com:9099"`)
     /// to pin it, or omit one to match any port.
     pub(super) allowed_hosts: Option<Vec<String>>,
-    /// `[api.security]` subsection. Optional in TOML but its
-    /// `api_key_hash` field must be present when the API server is
-    /// enabled — checked at load.
+    /// Declare a loopback reverse proxy in front of the API. Default `false`.
+    pub(super) local_reverse_proxy: Option<bool>,
+    /// Optional `[api.security]` subsection. Without a hash, privileged
+    /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
 }
 

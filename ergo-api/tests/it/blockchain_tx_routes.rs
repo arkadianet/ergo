@@ -725,6 +725,7 @@ fn build_app_with_mempool(indexer: IndexerHandle, mempool: Arc<dyn MempoolView>)
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
     };
     router_with_mempool(ctx, None)
 }
