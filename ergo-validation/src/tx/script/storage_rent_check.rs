@@ -36,36 +36,64 @@ pub(super) fn is_storage_rent_eligible(
     box_age >= storage_period && proof_empty && has_storage_var
 }
 
+/// Outcome of the storage-rent branch of Scala's `ErgoInterpreter.verify`
+/// for an input that passed [`is_storage_rent_eligible`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StorageRentCheck {
+    /// `checkExpiredBox` returned true: the input is valid at
+    /// [`STORAGE_CONTRACT_COST`] without evaluating its script.
+    Accepted,
+    /// `checkExpiredBox` returned false: Scala's `verify` returns
+    /// `Success((false, StorageContractCost))`, so the input fails
+    /// without evaluating its script.
+    Rejected,
+    /// Scala's `Try` threw before `checkExpiredBox` (var 127 is not a
+    /// `Short`, or its index names no output), so `recoverWith` runs
+    /// normal script verification.
+    ScriptFallback,
+}
+
 /// Check if a storage-rent spend is valid.
 ///
-/// Matches Scala's `ErgoInterpreter.checkExpiredBox`. The storage fee
-/// calculation uses i32 wrapping multiplication to replicate Scala's
-/// Int overflow behavior (see ergoplatform/ergo#2251).
+/// Matches the `Try { ... }.recoverWith { case _ => super.verify(...) }`
+/// block of Scala's `ErgoInterpreter.verify` and its `checkExpiredBox`.
+/// `recoverWith` only catches exceptions, so a false `checkExpiredBox`
+/// is final. The storage fee calculation uses i32 wrapping
+/// multiplication to replicate Scala's Int overflow behavior (see
+/// ergoplatform/ergo#2251).
 pub(super) fn check_storage_rent(
     input_box: &ErgoBox,
     extension: &ergo_ser::input::ContextExtension,
     tx: &Transaction,
     current_height: u32,
     params: &ProtocolParams,
-) -> bool {
-    // Get output index from context extension variable 127
+) -> StorageRentCheck {
+    // Scala reads variable 127 with `asInstanceOf[Short]`; any other
+    // type, `Int` included, throws `ClassCastException`.
     let output_idx = match extension.values.get(&STORAGE_INDEX_VAR_ID) {
-        Some((_, ergo_ser::sigma_value::SigmaValue::Short(idx))) => *idx as usize,
-        Some((_, ergo_ser::sigma_value::SigmaValue::Int(idx))) => *idx as usize,
-        _ => return false,
+        Some((_, ergo_ser::sigma_value::SigmaValue::Short(idx))) => *idx,
+        _ => return StorageRentCheck::ScriptFallback,
     };
 
-    let output = match tx.output_candidates.get(output_idx) {
+    // `outputCandidates(idx)` throws for a negative or out-of-range index.
+    let output = match usize::try_from(output_idx)
+        .ok()
+        .and_then(|idx| tx.output_candidates.get(idx))
+    {
         Some(o) => o,
-        None => return false,
+        None => return StorageRentCheck::ScriptFallback,
     };
 
     // Compute box size (serialized bytes length)
     let box_bytes_len = match ergo_ser::ergo_box::serialize_ergo_box(input_box) {
         Ok(bytes) => bytes.len() as i32,
         Err(e) => {
-            tracing::warn!(error = ?e, "storage rent: input box serialization failed; treating as not rent-eligible");
-            return false;
+            // Unreachable from `validate_scripts`: `ergo_box_to_eval_box`
+            // already serialized every input box. Scala has no failure here,
+            // but any throw inside its `Try` reaches `recoverWith`, so the
+            // box's own script decides.
+            tracing::warn!(error = ?e, "storage rent: input box serialization failed; falling back to script verification");
+            return StorageRentCheck::ScriptFallback;
         }
     };
 
@@ -79,7 +107,7 @@ pub(super) fn check_storage_rent(
     // Any output is acceptable in this case.
     let storage_fee_not_covered = (input_box.candidate.value as i64) - (storage_fee as i64) <= 0;
     if storage_fee_not_covered {
-        return true;
+        return StorageRentCheck::Accepted;
     }
 
     // Otherwise the output must preserve the box's properties:
@@ -94,11 +122,16 @@ pub(super) fn check_storage_rent(
     let correct_tokens = output.tokens == input_box.candidate.tokens;
     let correct_registers = output.additional_registers == input_box.candidate.additional_registers;
 
-    correct_creation_height
+    if correct_creation_height
         && correct_value
         && correct_script
         && correct_tokens
         && correct_registers
+    {
+        StorageRentCheck::Accepted
+    } else {
+        StorageRentCheck::Rejected
+    }
 }
 
 #[cfg(test)]
@@ -236,8 +269,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
+        assert_eq!(
             check_storage_rent(&in_box, &ext, &tx, 200, &p),
+            StorageRentCheck::Accepted,
             "fee-not-covered branch must accept any output",
         );
     }
@@ -269,7 +303,10 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(check_storage_rent(&in_box, &ext, &tx, current_height, &p));
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Accepted,
+        );
     }
 
     // ----- per-property rejection paths -----
@@ -295,8 +332,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Rejected,
             "creation_height != current_height must reject",
         );
     }
@@ -322,8 +360,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Rejected,
             "output.value < input.value - fee must reject",
         );
     }
@@ -349,8 +388,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Rejected,
             "ergo_tree change must reject",
         );
     }
@@ -383,8 +423,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Rejected,
             "tokens change must reject",
         );
     }
@@ -410,8 +451,9 @@ mod tests {
         let ext = ctx_ext_with_output_idx(0);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::Rejected,
             "additional_registers change must reject",
         );
     }
@@ -419,7 +461,7 @@ mod tests {
     // ----- context-extension edge cases -----
 
     #[test]
-    fn missing_output_index_in_extension_rejects() {
+    fn missing_output_index_in_extension_falls_back_to_script() {
         let in_box = make_input_box(1_000_000_000, 100, simple_tree(), vec![], empty_regs());
         let tx = make_tx_with_one_input_and_outputs(vec![make_output(
             1,
@@ -432,16 +474,18 @@ mod tests {
         let ext = ContextExtension::empty();
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, 200, &p),
-            "missing output-index var must reject (no fallback)",
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, 200, &p),
+            StorageRentCheck::ScriptFallback,
+            "missing output-index var must fall back to the script",
         );
     }
 
     #[test]
-    fn output_index_out_of_bounds_rejects() {
+    fn output_index_out_of_bounds_falls_back_to_script() {
         let in_box = make_input_box(1_000_000_000, 100, simple_tree(), vec![], empty_regs());
-        // Tx has 1 output; extension references index 5.
+        // Tx has 1 output; extension references index 5, then -1.
+        // Scala's `outputCandidates(idx)` throws for both.
         let tx = make_tx_with_one_input_and_outputs(vec![make_output(
             1,
             200,
@@ -449,13 +493,15 @@ mod tests {
             vec![],
             empty_regs(),
         )]);
-        let ext = ctx_ext_with_output_idx(5);
         let p = params_with_factor(1_250_000);
 
-        assert!(
-            !check_storage_rent(&in_box, &ext, &tx, 200, &p),
-            "out-of-bounds output index must reject",
-        );
+        for idx in [5, -1] {
+            assert_eq!(
+                check_storage_rent(&in_box, &ctx_ext_with_output_idx(idx), &tx, 200, &p),
+                StorageRentCheck::ScriptFallback,
+                "output index {idx} must fall back to the script",
+            );
+        }
     }
 
     // ----- 4-year-boundary eligibility edges -----
@@ -539,10 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn output_index_int_variant_also_accepted() {
-        // Scala accepts both Short and Int as the variable
-        // type. Our code path matches: ensure an Int-typed
-        // entry resolves the same output as a Short-typed one.
+    fn output_index_int_variant_falls_back_to_script() {
+        // Scala reads var 127 with `asInstanceOf[Short]`, which
+        // throws `ClassCastException` for an Int. `recoverWith`
+        // then verifies the script, even though a Short index
+        // would name an output that passes `checkExpiredBox`.
         let in_value: u64 = 10_000_000_000;
         let in_box = make_input_box(in_value, 100, simple_tree(), vec![], empty_regs());
         let current_height = 200;
@@ -563,6 +610,15 @@ mod tests {
             .insert(STORAGE_INDEX_VAR_ID, (SigmaType::SInt, SigmaValue::Int(0)));
         let p = params_with_factor(1_250_000);
 
-        assert!(check_storage_rent(&in_box, &ext, &tx, current_height, &p));
+        assert_eq!(
+            check_storage_rent(&in_box, &ext, &tx, current_height, &p),
+            StorageRentCheck::ScriptFallback,
+        );
+        let short_ext = ctx_ext_with_output_idx(0);
+        assert_eq!(
+            check_storage_rent(&in_box, &short_ext, &tx, current_height, &p),
+            StorageRentCheck::Accepted,
+            "the same output must pass when indexed by a Short",
+        );
     }
 }

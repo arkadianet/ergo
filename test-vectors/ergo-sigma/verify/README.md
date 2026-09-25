@@ -41,12 +41,29 @@ rent fallback uses serialized `sigmaProp(if (true == true) true else false)`
 and charged-to-failure total 4 BC. Seven probes exercise storage-fee field
 validation with rent enabled or disabled. No expected cost comes from Rust.
 
+`rent-cases.json` adds ten storage-rent branch cases: var 127 as an `Int`, a
+`Short` index of 1 or -1 with one output, and a false `checkExpiredBox`
+(below the fee floor, at init 17 / limit 49, and at factor 0). Each runs on the
+P2PK `rent_expired` box and on a 1 ERG `sigmaProp(true)` box. Where
+`checkExpiredBox` is false the JVM reports `rent_block_cost` 50, but
+`ErgoTransaction.verifyInput` rejects before adding it, so
+`ergo-validation/tests/it/cost_storage_rent.rs` compares only the verdict
+there. The difftest `verify` tests do not read this file. The cases were
+recorded against ergo-core and ergo-wallet 6.0.2 published locally from ergo
+`2cdbb8cf` (tag v6.0.2) with
+`sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"`.
+With the same setup, regenerating `requests.jsonl` and `fix-requests.jsonl`
+reproduces every checked-in field of all 22 responses; the current script only
+adds `wrapped_rule_id`, `wrapped_rule_args` and `evaluator_failure_block_cost`.
+
 Regenerate the raw JVM responses from the checked-in requests:
 
 ```sh
 scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/requests.jsonl > test-vectors/ergo-sigma/verify/responses.jsonl
 scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/fix-requests.jsonl > test-vectors/ergo-sigma/verify/fix-responses.jsonl
+scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl
 cargo test -p ergo-difftest --lib oracle::verify::tests
+cargo test -p ergo-validation --test it cost_storage_rent
 ```
 
 Responses correspond by line to the requests and case objects. Compare each

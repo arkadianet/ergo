@@ -50,7 +50,9 @@ use ergo_sigma::reduce::{verify_spending_proof_with_context_and_cost, VerifySpen
 use crate::error::ValidationError;
 use crate::tx::TxValidationCtx;
 pub use storage_rent_check::STORAGE_CONTRACT_COST;
-use storage_rent_check::{check_storage_rent, is_storage_rent_eligible, STORAGE_INDEX_VAR_ID};
+use storage_rent_check::{
+    check_storage_rent, is_storage_rent_eligible, StorageRentCheck, STORAGE_INDEX_VAR_ID,
+};
 
 /// Map a `VerifySpendingError` from the script evaluator onto the
 /// validation envelope, preserving JitCost arithmetic overflow as a
@@ -163,7 +165,8 @@ pub(crate) fn validate_scripts_at_index(
         // Storage rent path: if the box is old enough, proof is empty,
         // and context extension contains the output index variable,
         // check storage rent rules instead of script verification.
-        // Matches Scala ErgoInterpreter.verify() fallback logic.
+        // Matches Scala ErgoInterpreter.verify(): only an unreadable
+        // output index falls back to script verification.
         let box_age = cx
             .ctx
             .height
@@ -181,14 +184,14 @@ pub(crate) fn validate_scripts_at_index(
             proof_empty,
             has_storage_var,
         ) {
-            let rent_ok = check_storage_rent(
+            let rent = check_storage_rent(
                 resolved,
                 input.spending_proof.extension(),
                 tx,
                 cx.ctx.height,
                 cx.params,
             );
-            if rent_ok {
+            if rent == StorageRentCheck::Accepted {
                 // Storage rent check passed — skip script/proof verification.
                 // Convert the fixed block-unit charge to the JIT accumulator unit.
                 cx.cost
@@ -219,8 +222,16 @@ pub(crate) fn validate_scripts_at_index(
                 }
                 continue;
             }
-            // Storage rent check failed — fall through to normal verification.
-            // Scala does: `.recoverWith { case _ => super.verify(...) }`
+            if rent == StorageRentCheck::Rejected {
+                // `checkExpiredBox` returned false. Scala's `verify` yields
+                // `Success((false, StorageContractCost))`, and `verifyInput`
+                // fails `txScriptValidation` on it before the cost is added
+                // or limit-checked, so nothing is charged here.
+                return Err(ValidationError::ProofFailed { index: i });
+            }
+            // `ScriptFallback`: Scala's `Try` threw, and
+            // `.recoverWith { case _ => super.verify(...) }` runs normal
+            // script verification below.
         }
 
         // Mainnet populates LastBlockUtxoRootHash from the previous state
