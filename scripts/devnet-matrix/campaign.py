@@ -3895,9 +3895,16 @@ def _self_test_remeasure():
         {'drops': 6, 'evictions': 4}
     assert flood.counters_between(
         {'drops': {'duplicate': 1, 'hostLimit': 0}, 'replayed': 3},
-        {'drops': {'duplicate': 4, 'hostLimit': 7, 'fairness': 2},
+        {'drops': {'duplicate': 4, 'hostLimit': 7, 'staleParent': 2},
          'replayed': 3}) == {'drops.duplicate': 3, 'drops.hostLimit': 7,
                              'replayed': 0}
+    # A held-flood target must publish the fixed store's counters, and
+    # only those: `replayNotForwarded`, and `drops` by seven reasons.
+    assert flood.STORE_COUNTERS == (
+        'admitted', 'replayed', 'replayNotForwarded', 'evictions',
+        'drops.duplicate', 'drops.hostLimit', 'drops.variantLimit',
+        'drops.oversize', 'drops.expired', 'drops.staleParent',
+        'drops.disconnected'), flood.STORE_COUNTERS
     assert flood.counters_between(None, {'drops': 1}) == {}
     flood.self_test_held_evaluation()
     flood_conf = scala_override('flood', 'scala3', ('scala', 'scala3'), '/tmp/test')

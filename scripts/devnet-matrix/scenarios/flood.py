@@ -325,9 +325,10 @@ def evaluate_root_flood(lines, samples, caps, adversary_octets):
     }
 
 
-STORE_COUNTERS = ('admitted', 'replayed', 'replayInvalid', 'evictions') + tuple(
-    'drops.' + reason for reason in ('duplicate', 'hostLimit', 'variantLimit',
-    'oversize', 'fairness', 'expired', 'staleParent', 'disconnected'))
+# Every counter a held-flood target must publish: the fixed #2563 store's,
+# stated once in `smoke` (`replayNotForwarded`, and `drops` by seven
+# reasons with no `fairness`).
+STORE_COUNTERS = smoke.PENDING_FIXED_COUNTERS
 
 
 def _number(value):
@@ -382,10 +383,12 @@ def evaluate_store_window(samples, baseline, patched, plan, result):
     """Pure verdict; an unavailable measurement is incomplete, never zero."""
     errors = []
     present = any(isinstance(s.get('pending'), dict) for s in samples)
-    old = any(isinstance(p, dict) and _number(p.get('drops')) for p in
-              [baseline or {}] + [s.get('pending') or {} for s in samples])
-    report = {'store_present': present, 'telemetry': 'old telemetry' if old else
-              ('fixed telemetry' if present else 'missing'), 'errors': errors}
+    shape = smoke.pending_telemetry_label(
+        [baseline] + [s.get('pending') for s in samples])
+    old = shape == 'old telemetry'
+    report = {'store_present': present,
+              'telemetry': shape if present or old else 'missing',
+              'errors': errors}
     held = plan.get('hold_ms') is not None
     coverage = held_coverage(result, plan) if held else None
     report['held_coverage'] = coverage
@@ -435,7 +438,7 @@ def self_test_held_evaluation():
     from copy import deepcopy
     plan = root_flood_plan('held')
     baseline = dict(size=0, bytes=0, admitted=100, replayed=10,
-                    replayInvalid=0, evictions=20,
+                    replayNotForwarded=0, evictions=20,
                     drops={k.removeprefix('drops.'): 30 for k in STORE_COUNTERS
                            if k.startswith('drops.')})
     pending = deepcopy(baseline)
@@ -457,6 +460,28 @@ def self_test_held_evaluation():
                                      patched, plan, result if outcome is None else outcome)
 
     assert not verdict()['errors'], verdict()
+    assert verdict()['telemetry'] == 'fixed telemetry', verdict()
+    # A 2563f target: the fixed store's own JSON (13fc25df2
+    # `PendingInputAnnouncements.Stats.jsonEncoder`), key for key, with
+    # the host-limit and expiry growth a held flood produces.
+    shipped = json.loads(
+        '{"size": 256, "bytes": 40000, "admitted": 900, "replayed": 12, '
+        '"replayNotForwarded": 3, "evictions": 40, "drops": {'
+        '"duplicate": 30, "hostLimit": 90, "variantLimit": 30, '
+        '"oversize": 30, "expired": 45, "staleParent": 30, '
+        '"disconnected": 30}}')
+    shipped_verdict = verdict(samples=[dict(sample, pending=shipped)])
+    assert not shipped_verdict['errors'], shipped_verdict
+    assert shipped_verdict['telemetry'] == 'fixed telemetry', shipped_verdict
+    # The draft counters the harness used to require (`replayInvalid`, a
+    # `fairness` drop) never shipped; a store carrying them instead of
+    # `replayNotForwarded` is incomplete, and named as unrecognised.
+    draft = deepcopy(shipped)
+    draft['replayInvalid'] = draft.pop('replayNotForwarded')
+    draft['drops']['fairness'] = 0
+    draft_verdict = verdict(samples=[dict(sample, pending=draft)])
+    assert any('incomplete' in e for e in draft_verdict['errors']), draft_verdict
+    assert draft_verdict['telemetry'] == 'unrecognised telemetry', draft_verdict
     assert parse_root_result('log\nROOT_FLOOD_RESULT ' + json.dumps(result)) == result
     assert parse_root_result('ROOT_FLOOD_RESULT bad') is None
     assert parse_root_result('no result') is None
@@ -495,6 +520,14 @@ def self_test_held_evaluation():
     old['pending']['drops'] = 999
     assert verdict(samples=[old])['telemetry'] == 'old telemetry'
     assert verdict(samples=[old])['errors']
+    # The pre-review store as it really published (F13, #2563 before the
+    # review): four keys, one `drops` number. Still reported as old.
+    prereview = {'size': 256, 'bytes': 87083, 'evictions': 1675, 'drops': 3075}
+    prereview_verdict = verdict(samples=[dict(sample, pending=prereview)],
+                                base=dict(prereview, evictions=0, drops=0))
+    assert prereview_verdict['telemetry'] == 'old telemetry', prereview_verdict
+    assert any('(old telemetry)' in e for e in prereview_verdict['errors']), \
+        prereview_verdict
     over = deepcopy(sample)
     over['pending']['bytes'] = ROOT_FLOOD_CAPS['maxBytes'] + 1
     assert verdict(samples=[over, sample])['errors']

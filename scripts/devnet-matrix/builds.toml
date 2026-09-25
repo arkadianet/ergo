@@ -93,9 +93,10 @@ description = "the integration build: base + every patch branch merged, measured
 # ----- the ergoplatform/ergo#2563 re-measure (REVIEW-2563 §3.2) -----
 #
 # Every build below is on sigma 6.0.5-22-368a860b-SNAPSHOT, which
-# a1bd938ef declares. `campaign.py --base-build` puts the miner(s) and
-# the stock follower on one of them; `--build` puts the patched
-# follower on another.
+# a1bd938ef declares, and every commit is in the local fork checkout
+# (`~/coding/development/arkadianet/ergo-scala`). `campaign.py
+# --base-build` puts the miner(s) and the stock follower on one of them;
+# `--build` puts the patched follower on another.
 
 [builds.base]
 work_dir = ".work-a1bd938e"
@@ -103,30 +104,36 @@ ergo_ref = "a1bd938effb7f5acabfe5230a5ef20fe0d50ae62"
 branch = "weak-blocks"
 description = "upstream ergoplatform/ergo weak-blocks @ a1bd938ef (90a129733 + #2560): the re-measure base, miner and stock follower of arm A"
 
-# Declared once their commits are final. A branch name is refused as an
-# `ergo_ref`, so each waits here, commented, until it has a full commit
-# id; uncomment it and add its name to `builds.BUILD_NAMES` together.
-#
-# [builds."base+2506"]
-# work_dir = ".work-base+2506-<commit>"
-# ergo_ref = "<full commit of the merge a1bd938ef + #2506 c11df116ea372234d8b0b6fdd931401d4a02a091>"
-# branch = "<local merge branch>"
-# description = "a1bd938ef + #2506 (processed-tip replay, sender side): miner and stock follower of arm B"
-#
-# [builds.2563f]
-# work_dir = ".work-2563f-<commit>"
-# ergo_ref = "<full commit of the fixed #2563, rebased on a1bd938ef>"
-# branch = "upstream/pending-root-announcement-store"
-# description = "#2563 with the review fixes, on a1bd938ef: the patched follower of arm A and the flood target"
-#
-# [builds."2563f+2506"]
-# work_dir = ".work-2563f+2506-<commit>"
-# ergo_ref = "<full commit of the merge 2563f + c11df116e>"
-# branch = "<local merge branch>"
-# description = "2563f + #2506: the patched follower of arm B"
-#
-# [builds.soak]
-# work_dir = ".work-soak-<commit>"
-# ergo_ref = "<full commit of the final soak integration head>"
-# branch = "soak/matrix-2026-09-25"
-# description = "90a12973 + retained-mining-work + waitlist-sibling-order + #2562 + #2563 + the route fix: the integration soak build"
+# A `+` in a build NAME is spelled `plus` (or `-`) in its work
+# directory, so the directory and every classpath entry under it stay
+# plain paths.
+
+[builds."base+2506"]
+work_dir = ".work-base-2506-f7cc55dd"
+ergo_ref = "f7cc55dd29b3c0a06e4f7f3eafbe1bef4044081e"
+branch = "remeasure/base-plus-2506"
+description = "a1bd938ef + #2506 head 24f550ef0 (processed input-tip replay, sender side): miner and stock follower of arm B"
+
+[builds.2563f]
+work_dir = ".work-2563f"
+ergo_ref = "13fc25df26f13b2f4ee6c38c87f5cb7d0765b71b"
+branch = "upstream/pending-root-announcement-store"
+description = "#2563 with the review fixes (the PR head), on a1bd938ef: the patched follower of arm A and the flood target"
+
+[builds."2563f+2506"]
+work_dir = ".work-2563f-plus-2506"
+ergo_ref = "d3d69c610d8a02b13971ac68b52978b5aeb87797"
+branch = "remeasure/2563f-plus-2506"
+description = "2563f + #2506 head 24f550ef0, the DisconnectedPeer handler composed with both releases kept: the patched follower of arm B"
+
+[builds.2562f]
+work_dir = ".work-2562f"
+ergo_ref = "0efc06fef33f79a6f2b73084681e69f132350aef"
+branch = "remeasure/2562-on-a1bd938ef"
+description = "a1bd938ef + #2562 head e18963ad3 (committed-prefix reconstruction): the patched follower of the two-miner reconstruction run"
+
+[builds.soak]
+work_dir = ".work-soak"
+ergo_ref = "abf02c053946ae780fabcf5ad48b2d1e5680e023"
+branch = "soak/matrix-2026-09-25b"
+description = "a1bd938ef + every patch we filed: retained mining work (#2504 + the #2505 miner parts), #2562, #2563 fixed, #2564, waitlist sibling order, and the #2505 route line; the integration soak build, never used for a per-patch claim"

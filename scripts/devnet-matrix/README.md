@@ -262,9 +262,11 @@ what JOB it is doing.
 
 `builds.toml` lists the provisioned Scala builds by the names
 `campaign.py --build` / `--base-build` accept — `stock`, `F16`, `F12F05`,
-`F14`, `F13`, `F04`, `F11`, `all`, and the #2563 re-measure's `base` —
-and `builds.py` loads them. They live in the shared archive
-`../matrix-evidence/scala-builds` beside the checkouts. The M4 entries
+`F14`, `F13`, `F04`, `F11`, `all`; the #2563 re-measure's `base`,
+`base+2506`, `2563f` and `2563f+2506`; the #2562 two-miner build `2562f`;
+and the integration build `soak` — and `builds.py` loads them. They live
+in the shared archive `../matrix-evidence/scala-builds` beside the
+checkouts. The M4 entries
 were moved there from a deleted worktree and their classpath files still
 name it, so they are refused until re-provisioned (see the file's
 header). A build's identity is
@@ -346,8 +348,16 @@ there with the reason rather than silently downgraded.
 * Every agreement-series sample carries each Scala node's
   `/info.pendingInputAnnouncements` (`pending`), and every evidence file
   summarises it per node (`pending_store`: peak entries and bytes, and
-  how much each counter — admitted, replayed, evictions, drops by reason
-  — grew, restarts folded in). A build without the store reads `absent`.
+  how much each counter — admitted, replayed, replayNotForwarded,
+  evictions, drops by reason — grew, restarts folded in). A build without
+  the store reads `absent`. `telemetry` names the shape: `fixed
+  telemetry` is the reviewed store (#2563 13fc25df2: `size`, `bytes`,
+  `admitted`, `replayed`, `replayNotForwarded`, `evictions`, and `drops`
+  by `duplicate`, `hostLimit`, `variantLimit`, `oversize`, `expired`,
+  `staleParent`, `disconnected`); `old telemetry` is the pre-review
+  store's single `drops` number; anything else is `unrecognised
+  telemetry` with its `missing_fixed_keys` listed. A held flood against a
+  patched follower requires fixed telemetry.
 * Every Scala role's reconstruction accounting carries `waitlist`
   (`Put input block to disconnected queue` per ordering block — each is
   also a parent download) and `root_announcements` (+2 roots seen and

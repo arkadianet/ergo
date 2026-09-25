@@ -1142,6 +1142,19 @@ def pending_announcements(reading):
 # The store's GAUGES: everything else it publishes that is a number is a
 # counter, monotonic within one process.
 PENDING_GAUGES = ('size', 'bytes')
+# The fixed #2563 store's counters, as ergoplatform/ergo#2563 13fc25df2
+# publishes them (`PendingInputAnnouncements.Stats` and the `NodeInfo`
+# schema in `openapi.yaml`): `drops` split by reason, with no `fairness`
+# reason (that refusal branch was unreachable and was removed) and the
+# replays that did not reach the view holder counted as
+# `replayNotForwarded`. The pre-review store published `size`, `bytes`,
+# `evictions` and ONE `drops` number.
+PENDING_COUNTERS = ('admitted', 'replayed', 'replayNotForwarded', 'evictions')
+PENDING_DROP_REASONS = ('duplicate', 'hostLimit', 'variantLimit', 'oversize',
+                        'expired', 'staleParent', 'disconnected')
+PENDING_FIXED_COUNTERS = PENDING_COUNTERS + tuple(
+    f'drops.{reason}' for reason in PENDING_DROP_REASONS)
+PENDING_FIXED_KEYS = PENDING_GAUGES + PENDING_FIXED_COUNTERS
 
 
 def flatten_counters(value, prefix=''):
@@ -1161,6 +1174,43 @@ def flatten_counters(value, prefix=''):
             out.update(flatten_counters(inner, f'{prefix}.{key}' if prefix
                                         else str(key)))
     return out
+
+
+def pending_telemetry(reading):
+    """The shape of one `/info.pendingInputAnnouncements` reading. Pure.
+
+    `old`: the pre-review store, whose `drops` is one number. `fixed`:
+    every key in `PENDING_FIXED_KEYS` is a number. `unrecognised`: a
+    store object that is neither, such as a reading with keys missing.
+    `None`: no store at all.
+    """
+    if not isinstance(reading, dict):
+        return None
+    drops = reading.get('drops')
+    if isinstance(drops, (int, float)) and not isinstance(drops, bool):
+        return 'old'
+    flat = flatten_counters(reading)
+    if all(key in flat for key in PENDING_FIXED_KEYS):
+        return 'fixed'
+    return 'unrecognised'
+
+
+def pending_telemetry_label(readings):
+    """One label for a node's readings over a window. Pure.
+
+    A single old reading makes the node's telemetry `old telemetry`: the
+    build is the pre-review store, whatever else was read. Only a window
+    whose every store reading is complete is `fixed telemetry`.
+    """
+    shapes = [shape for shape in map(pending_telemetry, readings)
+              if shape is not None]
+    if not shapes:
+        return 'missing'
+    if 'old' in shapes:
+        return 'old telemetry'
+    if all(shape == 'fixed' for shape in shapes):
+        return 'fixed telemetry'
+    return 'unrecognised telemetry'
 
 
 def counter_increase(values, restarts=None):
@@ -1215,7 +1265,13 @@ def pending_store_summary(samples, node):
         out['store'] = ('absent: no sample carried '
                         '/info.pendingInputAnnouncements for this node')
         return out
+    out['telemetry'] = pending_telemetry_label(r for _, r in present)
     flat = [flatten_counters(r) for _, r in present]
+    if out['telemetry'] != 'old telemetry':
+        # Which fixed-store keys some reading lacked, so an incomplete
+        # reading is named rather than summarised as a zero.
+        out['missing_fixed_keys'] = sorted(
+            {key for f in flat for key in PENDING_FIXED_KEYS if key not in f})
     for gauge in PENDING_GAUGES:
         values = [f[gauge] for f in flat if gauge in f]
         out[f'peak_{gauge}'] = max(values) if values else None
@@ -1245,9 +1301,10 @@ def restart_recovery(samples, since, node, window_s=30.0):
     * `first_apply_at`: the first sample after the respawn at which the
       node's ordering block differs from the one it came back on — the
       first block it applied after the restart;
-    * `replay_burst`: how much each `replayed*` counter of its pending
-      store grew in the `window_s` seconds from that first apply (the
-      store is in memory, so it starts empty and this is its refill).
+    * `replay_burst`: how much each replay counter of its pending store
+      (`replayed`, and `replayNotForwarded` on the fixed store) grew in
+      the `window_s` seconds from that first apply (the store is in
+      memory, so it starts empty and this is its refill).
     """
     tip_key, ordering_key = f'{node}_tip', f'{node}_ordering'
     after = [s for s in samples if (s.get('at') or 0) >= since]
@@ -1273,7 +1330,7 @@ def restart_recovery(samples, since, node, window_s=30.0):
               if isinstance((s.get('pending') or {}).get(node), dict)]
     if stores:
         keys = sorted({k for f in stores for k in f
-                       if k.split('.')[0].startswith('replayed')})
+                       if k.split('.')[0].startswith('replay')})
         out['replay_burst'] = {
             'window_s': window_s,
             **{k: counter_increase([f[k] for f in stores if k in f])[0]
@@ -2787,12 +2844,48 @@ def _self_test_pending_and_restart():
     assert absent['samples_with_store'] == 0 and 'absent' in absent['store'], absent
     assert pending_store_summary(series, 'scala3')['samples'] == 0
 
+    # ----- which store a reading comes from -----
+    # Exactly what the fixed store's encoder emits (#2563 13fc25df2,
+    # `PendingInputAnnouncements.Stats.jsonEncoder`): all seven reasons.
+    fixed = {'size': 2, 'bytes': 700, 'admitted': 9, 'replayed': 4,
+             'replayNotForwarded': 1, 'evictions': 0,
+             'drops': {reason: 0 for reason in PENDING_DROP_REASONS}}
+    assert pending_telemetry(fixed) == 'fixed', fixed
+    assert 'fairness' not in PENDING_DROP_REASONS
+    assert pending_telemetry(
+        {'size': 1, 'bytes': 9, 'evictions': 0, 'drops': 4}) == 'old'
+    # A draft of the review's counters that never shipped: `replayInvalid`
+    # and a `fairness` reason, no `replayNotForwarded`.
+    draft = dict(fixed, replayInvalid=1,
+                 drops=dict(fixed['drops'], fairness=0))
+    del draft['replayNotForwarded']
+    assert pending_telemetry(draft) == 'unrecognised', draft
+    assert pending_telemetry(None) is None and pending_telemetry('x') is None
+    assert pending_telemetry_label([None, fixed, fixed]) == 'fixed telemetry'
+    assert pending_telemetry_label([fixed, {'drops': 4}]) == 'old telemetry'
+    assert pending_telemetry_label([fixed, draft]) == 'unrecognised telemetry'
+    assert pending_telemetry_label([None]) == 'missing'
+    fixed_summary = pending_store_summary(
+        [at(0, fixed), at(1, dict(fixed, replayNotForwarded=3))], 'scala2')
+    assert fixed_summary['telemetry'] == 'fixed telemetry', fixed_summary
+    assert fixed_summary['missing_fixed_keys'] == [], fixed_summary
+    assert fixed_summary['counters']['replayNotForwarded']['increase'] == 2
+    old_summary = pending_store_summary(
+        [at(0, {'size': 0, 'bytes': 0, 'evictions': 0, 'drops': 1})], 'scala2')
+    assert old_summary['telemetry'] == 'old telemetry', old_summary
+    assert 'missing_fixed_keys' not in old_summary, old_summary
+    # The synthetic series above lacks most fixed keys: each is named.
+    assert summary['telemetry'] == 'unrecognised telemetry', summary
+    assert 'drops.hostLimit' in summary['missing_fixed_keys'], summary
+
     # ----- restart recovery -----
-    def rs(t, tip, miner, ordering, replayed=None):
+    def rs(t, tip, miner, ordering, replayed=None, not_forwarded=None):
         entry = {'at': t, 'scala_tip': miner, 'scala2_tip': tip,
                  'scala2_ordering': ordering, 'pending': {}}
         if replayed is not None:
             entry['pending']['scala2'] = {'replayed': replayed}
+            if not_forwarded is not None:
+                entry['pending']['scala2']['replayNotForwarded'] = not_forwarded
         return entry
 
     recovery = restart_recovery([
@@ -2811,6 +2904,15 @@ def _self_test_pending_and_restart():
     never = restart_recovery([rs(12, 'a', 'm', 'O1')], since=10, node='scala2')
     assert never['seconds_to_miner_tip'] is None and \
         never['first_apply_at'] is None and never['replay_burst'] is None, never
+    # The fixed store's burst carries the replays it did not forward too.
+    burst = restart_recovery([
+        rs(10, None, 'm1', None),
+        rs(12, 'a', 'm2', 'O1', replayed=0, not_forwarded=0),
+        rs(20, 'c', 'm4', 'O2', replayed=3, not_forwarded=1),
+        rs(35, 'm5', 'm5', 'O2', replayed=9, not_forwarded=2),
+    ], since=10, node='scala2')
+    assert burst['replay_burst'] == {'window_s': 30.0, 'replayed': 6,
+                                     'replayNotForwarded': 1}, burst
 
     # ----- the sampler across a deliberately killed follower -----
     down_node = 'scala2'
