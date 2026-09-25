@@ -1123,6 +1123,7 @@ components:
         [`ApiBootstrapStatus`]. UI maps each variant to a human label and
         phase indicator.
       enum:
+      - halted
       - discovery
       - manifest_requested
       - manifest_verified
@@ -1187,6 +1188,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -2189,6 +2195,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiRecentBlock:
       type: object
@@ -2410,8 +2417,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            Free bytes on the filesystem holding the data dir, probed per
-            status read. `None` when the mount could not be determined. The
+            Free bytes on the filesystem holding the data dir, from the
+            background storage sampler. `None` before the first sample or when
+            the mount could not be determined. The
             `ergo_disk_free_bytes` Prometheus gauge source.
           minimum: 0
         disk_total_bytes:
@@ -2420,8 +2428,8 @@ components:
           - 'null'
           format: int64
           description: |-
-            Total bytes on the filesystem holding the data dir, probed per
-            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+            Total bytes on the filesystem holding the data dir, from the
+            background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
           minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
@@ -2433,9 +2441,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of the indexer redb in bytes, probed per status
-            read. `None` when `[indexer] enabled = false` or the file is
-            absent. The `ergo_index_db_bytes` Prometheus gauge source.
+            On-disk size of the indexer redb in bytes, from the background
+            storage sampler. `None` before the first sample, when
+            `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -2572,8 +2580,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of `state.redb` in bytes, probed per status read.
-            `None` when the file is absent (never synced / failed to open).
+            On-disk size of `state.redb` in bytes, from the background storage
+            sampler (refreshed every 10 s). `None` before the first sample or
+            when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         storage_errors_indexer_total:
@@ -3692,6 +3701,17 @@ components:
             - idle
       - type: object
         required:
+        - detail
+        - type
+        properties:
+          detail:
+            type: string
+          type:
+            type: string
+            enum:
+            - required
+      - type: object
+        required:
         - fromHeight
         - type
         properties:
@@ -3705,6 +3725,22 @@ components:
             - running
       - type: object
         required:
+        - height
+        - reason
+        - type
+        properties:
+          height:
+            type: integer
+            format: int32
+            minimum: 0
+          reason:
+            type: string
+          type:
+            type: string
+            enum:
+            - failed
+      - type: object
+        required:
         - detail
         - type
         properties:
@@ -3715,8 +3751,8 @@ components:
             enum:
             - unavailable
       description: |-
-        Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
-        state; `unavailable` is returned only on a backend that cannot replay blocks.
+        Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+        `unavailable` means the backend cannot replay blocks.
     RestoreRequest:
       type: object
       description: '`POST /api/v1/wallet/restore` request. Secrets body-only, never logged.'
@@ -4288,7 +4324,7 @@ components:
           minimum: 0
         scanInvalidated:
           type: boolean
-          description: The wallet scan was invalidated (balances/addresses may be stale until a rescan).
+          description: The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
         tipHeight:
           type: integer
           format: int32

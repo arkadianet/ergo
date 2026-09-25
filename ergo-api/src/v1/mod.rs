@@ -17,6 +17,7 @@
 
 pub mod accounts;
 pub mod auth;
+pub mod blocking;
 pub mod cursor;
 pub mod decode;
 pub mod error;
@@ -34,6 +35,7 @@ pub use accounts::{accounts_router, AccountsState};
 pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
 };
+pub use blocking::{BlockingReads, BlockingReadsConfig, BlockingReadsConfigError, ReadLane};
 pub use cursor::{
     clamp_limit, decode_cursor, decode_opt_cursor, encode_cursor, CursorError, CursorPayload, Page,
     CURSOR_VERSION, DEFAULT_LIMIT, MAX_LIMIT,

@@ -66,9 +66,13 @@ pub enum ManifestVerifyError {
         expected_manifest_id: [u8; 32],
         actual_state_root_prefix: [u8; 32],
     },
+    HeightMismatch {
+        manifest_height: u8,
+        state_root_height: u8,
+    },
 }
 
-/// Trust-check a `manifest_id` against a header's `state_root`.
+/// Trust-check a manifest root against a header's `state_root`.
 ///
 /// Contract: the header MUST have been fetched from the canonical
 /// best-header chain at the snapshot height (the caller is
@@ -76,24 +80,21 @@ pub enum ManifestVerifyError {
 /// the chain index). On a reorg between selection and verification
 /// the caller must re-fetch and re-verify.
 ///
-/// Comparison rule: `manifest_id == state_root.as_bytes()[..32]`.
-/// `ADDigest` is 33 bytes (32-byte AVL+ root label + 1-byte tree
-/// height); we compare only the first 32 against the snapshot
-/// codec's manifest_id (which is the root label by construction —
-/// see `SnapshotServer::build` in `ergo-state`).
-///
-/// **Oracle-pinned:** the prefix-32 rule is confirmed against a
-/// Scala-produced manifest + header pair
-/// (`test-vectors/testnet/utxo_snapshot_manifest_522239.json`, captured
-/// from a Scala 6.0.3 testnet node with
-/// `scripts/capture-utxo-manifest.sh`): the advertised `manifestId` is
-/// byte-for-byte the first 32 bytes of the header `stateRoot` at the
-/// same height. `manifest_prefix32_rule_matches_scala_manifest` in this
-/// module's oracle-parity section pins it.
+/// The 32-byte manifest ID is compared with the first 32 bytes of
+/// `state_root`, and the manifest-declared AVL+ height is compared
+/// with the trailing height byte of the 33-byte `ADDigest`.
 pub fn verify_manifest_against_state_root(
     manifest_id: &[u8; 32],
+    manifest_height: u8,
     state_root: &ADDigest,
 ) -> Result<(), ManifestVerifyError> {
+    let state_root_height = state_root.tree_height_byte();
+    if manifest_height != state_root_height {
+        return Err(ManifestVerifyError::HeightMismatch {
+            manifest_height,
+            state_root_height,
+        });
+    }
     let prefix = &state_root.as_bytes()[..32];
     if prefix == manifest_id {
         Ok(())
@@ -204,6 +205,8 @@ type PeerVote = (i32, [u8; 32]);
 /// recomputed across the remaining quorum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapState {
+    /// Local failure requires operator intervention; no further downloads.
+    Halted,
     /// No peer responses recorded yet.
     Idle,
     /// At least one vote recorded but no quorum yet.
@@ -235,9 +238,16 @@ pub struct SnapshotBootstrap {
     pub(super) votes: HashMap<PeerId, PeerVote>,
     /// Quorum threshold. Default = [`MIN_MANIFEST_VOTES`].
     quorum: usize,
+    rejected: HashSet<PeerVote>,
+    /// Supplier exclusions survive reconnects and re-advertisements for this epoch.
+    excluded_suppliers: HashMap<PeerVote, HashSet<PeerId>>,
+    manifest_failures: HashMap<PeerVote, HashSet<PeerId>>,
+    /// An authenticated epoch needs another supplier, not another quorum.
+    retry_target: Option<PeerVote>,
+    halted: bool,
     /// Cached result of the last [`Self::recompute_selection`] call.
-    /// `None` means no quorum; `Some` means quorum was reached at
-    /// the stored `(height, manifest_id)`.
+    /// `Some` is the current quorum choice or the pinned authenticated retry
+    /// target; the latter remains selected even with no remaining voters.
     selected: Option<PeerVote>,
     /// Peers we've already sent `GetSnapshotsInfo` to during the
     /// current discovery epoch. The outbound fan-out (part 2f-3)
@@ -251,10 +261,9 @@ pub struct SnapshotBootstrap {
     /// manifest_id are ignored — strict request ownership.
     pending_request: Option<PendingManifestRequest>,
     /// Sticky marker set when trust verification succeeds. Stays
-    /// `Some` for the rest of the bootstrap session (even after
-    /// the chunk-download phase has taken the bytes) so the state
-    /// machine never re-fires `GetManifest` for a manifest already
-    /// verified. The inner `bytes` is what gets consumed by 2h.
+    /// `Some` after byte handoff until install, recovery, or halt.
+    /// Supplier recovery clears this latch to request replacement metadata
+    /// for the same authenticated epoch. The inner `bytes` is consumed by 2h.
     verified: Option<VerifiedManifest>,
 }
 
@@ -274,6 +283,7 @@ struct PendingManifestRequest {
 /// surrounding `(height, manifest_id)` stays so the reducer keeps
 /// reporting `ManifestVerified` and never re-issues a request.
 struct VerifiedManifest {
+    peer: PeerId,
     height: i32,
     manifest_id: [u8; 32],
     bytes: Option<Vec<u8>>,
@@ -291,6 +301,11 @@ impl SnapshotBootstrap {
         Self {
             votes: HashMap::new(),
             quorum,
+            rejected: HashSet::new(),
+            excluded_suppliers: HashMap::new(),
+            manifest_failures: HashMap::new(),
+            retry_target: None,
+            halted: false,
             selected: None,
             discovery_queried: HashSet::new(),
             pending_request: None,
@@ -299,11 +314,22 @@ impl SnapshotBootstrap {
     }
 
     /// Record a peer's `SnapshotsInfo` response. The peer's vote is
-    /// the *highest-height* entry in `manifests`. An empty list
+    /// the highest eligible entry in `manifests`, preferring an authenticated
+    /// retry target when present. An empty list
     /// removes any prior vote from this peer (they had something,
     /// then evicted it, then re-advertised). Recomputes selection.
     pub fn on_snapshots_info(&mut self, peer: PeerId, manifests: &[(i32, [u8; 32])]) {
-        match manifests.iter().max_by_key(|(h, _)| *h) {
+        match manifests
+            .iter()
+            .filter(|vote| !self.rejected.contains(vote))
+            .filter(|vote| {
+                !self
+                    .excluded_suppliers
+                    .get(vote)
+                    .is_some_and(|peers| peers.contains(&peer))
+            })
+            .max_by_key(|vote| (Some(**vote) == self.retry_target, vote.0))
+        {
             Some(vote) => {
                 self.votes.insert(peer, *vote);
             }
@@ -333,6 +359,7 @@ impl SnapshotBootstrap {
             self.reject_manifest_and_evict_voter(*peer);
         } else if self.votes.remove(peer).is_some() {
             self.recompute_selection();
+            self.reopen_discovery_if_below_quorum();
         }
     }
 
@@ -342,10 +369,20 @@ impl SnapshotBootstrap {
     /// selection — `Selected` **or beyond** (`ManifestRequested` /
     /// `ManifestVerified`). Past `Selected` the manifest download phase
     /// has taken over, so querying even a newly-seen peer would only
-    /// re-open discovery for a decision already made.
+    /// re-open discovery for a decision already made. An authenticated retry
+    /// with no remaining voters queries fresh suppliers while retaining its target.
     pub fn should_query(&self, peer: &PeerId) -> bool {
+        if !self.halted
+            && self.retry_target.is_some()
+            && self.verified.is_none()
+            && self.pending_request.is_none()
+            && self.voter_for_selected_manifest().is_none()
+        {
+            return !self.supplier_excluded(peer) && !self.discovery_queried.contains(peer);
+        }
         match self.state() {
-            BootstrapState::Selected { .. }
+            BootstrapState::Halted
+            | BootstrapState::Selected { .. }
             | BootstrapState::ManifestRequested { .. }
             | BootstrapState::ManifestVerified { .. } => return false,
             BootstrapState::Idle | BootstrapState::Querying => {}
@@ -359,9 +396,22 @@ impl SnapshotBootstrap {
         self.discovery_queried.insert(peer);
     }
 
+    pub fn reopen_discovery_if_below_quorum(&mut self) {
+        if (self.selected.is_none()
+            || (self.retry_target.is_some() && self.voter_for_selected_manifest().is_none()))
+            && self.verified.is_none()
+            && self.pending_request.is_none()
+        {
+            self.discovery_queried.clear();
+        }
+    }
+
     /// Current selection state. Computes the public state from
-    /// internal fields: verified > pending > selected > votes.
+    /// internal fields: halted > verified > pending > selected > votes.
     pub fn state(&self) -> BootstrapState {
+        if self.halted {
+            return BootstrapState::Halted;
+        }
         if let Some(v) = &self.verified {
             return BootstrapState::ManifestVerified {
                 height: v.height,
@@ -425,8 +475,8 @@ impl SnapshotBootstrap {
     /// selected), not the live `selected` tally, so a vote change
     /// after verification cannot repoint chunk requests away from the
     /// verified manifest. Includes the peer that already served the
-    /// manifest — they can serve chunks too. Excludes only peers we've
-    /// explicitly evicted via `reject_manifest_and_evict_voter`.
+    /// manifest — they can serve chunks too. Bad suppliers are evicted and
+    /// cannot re-advertise this epoch during the session.
     pub fn voters_for_selected_manifest(&self) -> Vec<PeerId> {
         let Some(target) = self.latched_target() else {
             return Vec::new();
@@ -448,7 +498,7 @@ impl SnapshotBootstrap {
     ///   further requests even after bytes have been taken), or
     /// * no voter for the selected manifest is reachable.
     pub fn should_request_manifest(&self) -> Option<(PeerId, i32, [u8; 32])> {
-        if self.pending_request.is_some() || self.verified.is_some() {
+        if self.halted || self.pending_request.is_some() || self.verified.is_some() {
             return None;
         }
         let (height, manifest_id) = self.selected?;
@@ -484,8 +534,9 @@ impl SnapshotBootstrap {
     ///
     /// * `Some((height, manifest_id, bytes))` if the reply matches
     ///   our pending request (from the peer we asked) — caller MUST
-    ///   now run the trust check using the returned height to look
-    ///   up the canonical header, then call either
+    ///   now recompute the body's root and compare it to the returned REQUESTED
+    ///   id, then check root + AVL height against the canonical header at the
+    ///   returned snapshot height, and call either
     ///   `accept_verified_manifest` or `reject_manifest_and_evict_voter`.
     /// * `None` if the reply is stale, unsolicited, or from the
     ///   wrong peer — caller silently drops the bytes.
@@ -498,6 +549,9 @@ impl SnapshotBootstrap {
         from_peer: PeerId,
         bytes: Vec<u8>,
     ) -> Option<(i32, [u8; 32], Vec<u8>)> {
+        if self.halted {
+            return None;
+        }
         let pending = self.pending_request.as_ref()?;
         if pending.peer == from_peer {
             Some((pending.height, pending.manifest_id, bytes))
@@ -520,52 +574,111 @@ impl SnapshotBootstrap {
             "accept_verified_manifest called twice (verified already latched)",
         );
         self.verified = Some(VerifiedManifest {
+            peer: pending.peer,
             height: pending.height,
             manifest_id: pending.manifest_id,
             bytes: Some(bytes),
         });
     }
 
-    /// Caller's trust check failed OR the manifest reply was
-    /// missing OR a manifest that verified fine against the
-    /// canonical header turned out to be unreachable later (Mode 4
-    /// install found the anchor sits in a NiPoPoW proof's sparse
-    /// prefix, which forward catch-up never indexes) — the chosen
-    /// voter is dishonest about that height, or simply cannot serve
-    /// an epoch this node's header history can ever reach. Evicts
-    /// their vote, drops any latched `verified` manifest, recomputes
-    /// selection, clears the pending request. State transitions back
-    /// to `Selected` (different voter, same or new manifest) /
-    /// `Querying` / `Idle` depending on what the remaining quorum
-    /// supports.
-    ///
-    /// Clearing `verified` is a no-op at every manifest-phase call
-    /// site (verification hasn't happened yet there — `pending_request`
-    /// is still set, `verified` is still `None`). It is exactly what
-    /// lets the Mode 4 install-phase `UnreachableGap` arm in
-    /// `ergo-node`'s `install_reconstructed_snapshot` reuse this same
-    /// recovery path instead of halting bootstrap permanently: without
-    /// un-latching `verified`, `state()` would keep reporting
-    /// `ManifestVerified` forever and discovery could never select a
-    /// different, reachable epoch.
+    /// Evict a failed or unavailable request owner and clear the request/latch.
+    /// Other voters may still serve the authentic requested manifest, so this
+    /// does not reject its epoch. Authenticated manifest metadata failures use
+    /// [`Self::retry_verified_manifest`] to preserve the target with a retry cap.
     pub fn reject_manifest_and_evict_voter(&mut self, peer: PeerId) {
         self.pending_request = None;
         self.verified = None;
         self.votes.remove(&peer);
         self.recompute_selection();
+        self.reopen_discovery_if_below_quorum();
     }
 
-    /// Drop a latched `verified` manifest without evicting any vote —
-    /// the install-phase counterpart to
-    /// [`Self::reject_manifest_and_evict_voter`] for the case where no
-    /// live voter remains to evict (e.g. the peer that served the
-    /// manifest disconnected between verification and install, and
-    /// `on_peer_disconnect` already removed their vote). Recomputes
-    /// selection so discovery can pick a new target from whatever
-    /// votes remain.
+    /// Drop the verified latch while retaining votes and epoch eligibility.
+    /// Recompute selection and reopen discovery if the quorum has disappeared.
     pub fn drop_verified_manifest(&mut self) {
         self.verified = None;
+        self.retry_target = None;
         self.recompute_selection();
+        self.reopen_discovery_if_below_quorum();
+    }
+
+    /// The server remains attributable after byte handoff and voter churn.
+    pub fn verified_manifest_peer(&self) -> Option<PeerId> {
+        self.verified.as_ref().map(|v| v.peer)
+    }
+
+    /// Whether the current target is an authenticated epoch awaiting new metadata.
+    /// A changed canonical root during this retry is a reorg, not supplier misconduct.
+    pub fn retrying_verified_manifest(&self) -> bool {
+        self.retry_target.is_some()
+    }
+
+    /// Exclude a bad supplier from this epoch without clearing authenticated data.
+    /// Both voter scheduling and the archive-peer fallback must honor this exclusion.
+    pub fn evict_snapshot_supplier(&mut self, peer: PeerId) {
+        if let Some(target) = self.latched_target() {
+            self.excluded_suppliers
+                .entry(target)
+                .or_default()
+                .insert(peer);
+        }
+        self.votes.remove(&peer);
+        self.recompute_selection();
+    }
+
+    /// Whether this peer supplied bad data for the currently latched epoch.
+    pub fn supplier_excluded(&self, peer: &PeerId) -> bool {
+        self.latched_target()
+            .and_then(|target| self.excluded_suppliers.get(&target))
+            .is_some_and(|peers| peers.contains(peer))
+    }
+
+    /// Discard bad manifest metadata and retry the same authenticated epoch.
+    /// Returns the recorded server and distinct-server failure count. Three
+    /// failures reject the epoch to bound retries even if local validation is wrong.
+    /// Chunk failures do not contribute to this count. No verified latch is a no-op.
+    pub fn retry_verified_manifest(&mut self) -> Option<(PeerId, usize)> {
+        let verified = self.verified.as_ref()?;
+        let target = (verified.height, verified.manifest_id);
+        let peer = verified.peer;
+        let failures = self.manifest_failures.entry(target).or_default();
+        failures.insert(peer);
+        let count = failures.len();
+        self.evict_snapshot_supplier(peer);
+        if count >= 3 {
+            self.reject_current_manifest(None);
+        } else {
+            self.retry_target = Some(target);
+            self.verified = None;
+            self.pending_request = None;
+            self.discovery_queried.clear();
+            self.recompute_selection();
+        }
+        Some((peer, count))
+    }
+
+    /// Reject an unusable epoch (or one whose supplier retry budget is exhausted)
+    /// for the session so rediscovery cannot restart its download.
+    /// Only a known supplier is evicted; other voters retain their votes.
+    pub fn reject_current_manifest(&mut self, culprit: Option<PeerId>) {
+        if let Some(target) = self.latched_target() {
+            self.rejected.insert(target);
+        }
+        self.retry_target = None;
+        self.pending_request = None;
+        self.verified = None;
+        if let Some(peer) = culprit {
+            self.votes.remove(&peer);
+        }
+        self.recompute_selection();
+        self.reopen_discovery_if_below_quorum();
+    }
+
+    /// Stop downloads after a local failure without rotating or blaming peers.
+    pub fn halt(&mut self) {
+        self.halted = true;
+        self.pending_request = None;
+        self.verified = None;
     }
 
     /// Time-out check. If the pending request has been outstanding
@@ -594,16 +707,20 @@ impl SnapshotBootstrap {
         self.verified.as_mut()?.bytes.take()
     }
 
-    /// Re-tally votes and pick the highest-height entry that has
-    /// `>= self.quorum` agreement. Called whenever votes change.
+    /// Preserve an authenticated retry target, otherwise pick the highest-height
+    /// entry with `>= self.quorum` agreement. Called whenever votes change.
     fn recompute_selection(&mut self) {
+        if let Some(target) = self.retry_target {
+            self.selected = Some(target);
+            return;
+        }
         let mut tally: HashMap<PeerVote, usize> = HashMap::new();
         for vote in self.votes.values() {
             *tally.entry(*vote).or_insert(0) += 1;
         }
         self.selected = tally
             .into_iter()
-            .filter(|(_, count)| *count >= self.quorum)
+            .filter(|(vote, count)| *count >= self.quorum && !self.rejected.contains(vote))
             .map(|(vote, _)| vote)
             .max_by_key(|(h, _)| *h);
     }
@@ -612,5 +729,182 @@ impl SnapshotBootstrap {
 impl Default for SnapshotBootstrap {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- helpers -----
+
+    fn peer(port: u16) -> PeerId {
+        ([10, 0, 0, 1], port).into()
+    }
+    fn mid(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+    fn reach_selected(quorum: usize) -> SnapshotBootstrap {
+        let mut bs = SnapshotBootstrap::with_quorum(quorum);
+        for p in 1..=3 {
+            bs.on_snapshots_info(peer(p), &[(100, mid(0xAA))]);
+        }
+        bs
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn snapshot_supplier_eviction_preserves_verified_epoch() {
+        let mut bs = reach_selected(3);
+        bs.mark_manifest_requested(peer(1), 100, mid(0xAA), Instant::now());
+        bs.accept_verified_manifest(vec![1]);
+        bs.evict_snapshot_supplier(peer(2));
+        assert!(matches!(
+            bs.state(),
+            BootstrapState::ManifestVerified { .. }
+        ));
+        assert!(!bs.rejected.contains(&(100, mid(0xAA))));
+        assert_eq!(bs.take_verified_manifest_bytes(), Some(vec![1]));
+        bs.on_peer_disconnect(&peer(2));
+        bs.on_snapshots_info(peer(2), &[(100, mid(0xAA))]);
+        assert!(!bs.votes.contains_key(&peer(2)));
+        assert!(bs.supplier_excluded(&peer(2)));
+        assert!(!bs.should_query(&peer(3)));
+    }
+
+    #[test]
+    fn manifest_retry_voter_churn_preserves_authenticated_target() {
+        let mut bs = reach_selected(3);
+        bs.mark_manifest_requested(peer(1), 100, mid(0xAA), Instant::now());
+        bs.accept_verified_manifest(vec![]);
+        for p in 4..=6 {
+            bs.on_snapshots_info(peer(p), &[(200, mid(0xBB))]);
+        }
+        assert_eq!(bs.retry_verified_manifest(), Some((peer(1), 1)));
+        assert!(!bs.rejected.contains(&(100, mid(0xAA))));
+        let (server, height, id) = bs.should_request_manifest().unwrap();
+        assert_ne!(server, peer(1));
+        assert_eq!((height, id), (100, mid(0xAA)));
+        bs.mark_manifest_requested(server, height, id, Instant::now());
+        bs.check_request_timeout(Instant::now() + MANIFEST_REQUEST_TIMEOUT);
+        let (server, height, id) = bs.should_request_manifest().unwrap();
+        assert_eq!((height, id), (100, mid(0xAA)));
+        bs.on_peer_disconnect(&server);
+        assert!(bs.should_request_manifest().is_none());
+        assert!(bs.should_query(&peer(7)));
+        assert!(!bs.should_query(&peer(1)));
+        bs.on_snapshots_info(peer(7), &[(100, mid(0xAA)), (200, mid(0xBB))]);
+        assert_eq!(
+            bs.should_request_manifest(),
+            Some((peer(7), 100, mid(0xAA)))
+        );
+    }
+
+    #[test]
+    fn manifest_retry_distinct_servers_bounds_only_current_epoch() {
+        let mut bs = reach_selected(3);
+        for p in [1, 1, 2, 3] {
+            // Repeating an attribution must not consume another server's budget.
+            bs.mark_manifest_requested(peer(p), 100, mid(0xAA), Instant::now());
+            bs.accept_verified_manifest(vec![]);
+            assert_eq!(
+                bs.retry_verified_manifest(),
+                Some((peer(p), usize::from(p)))
+            );
+            assert_eq!(bs.rejected.contains(&(100, mid(0xAA))), p == 3);
+        }
+        for p in 1..=3 {
+            bs.on_snapshots_info(peer(p), &[(100, mid(0xAA)), (99, mid(0xBB))]);
+        }
+        let (server, height, id) = bs.should_request_manifest().unwrap();
+        assert_eq!((height, id), (99, mid(0xBB)));
+        bs.mark_manifest_requested(server, height, id, Instant::now());
+        bs.accept_verified_manifest(vec![]);
+        assert_eq!(bs.retry_verified_manifest(), Some((server, 1)));
+        assert!(!bs.rejected.contains(&(height, id)));
+    }
+
+    #[test]
+    fn verified_manifest_disconnect_preserves_discovery_epoch() {
+        let mut bs = reach_selected(3);
+        for p in 1..=3 {
+            bs.mark_queried(peer(p));
+        }
+        let (server, height, id) = bs.should_request_manifest().unwrap();
+        bs.mark_manifest_requested(server, height, id, Instant::now());
+        bs.accept_verified_manifest(vec![]);
+        bs.take_verified_manifest_bytes();
+        bs.on_peer_disconnect(&server);
+        assert_eq!(bs.verified_manifest_peer(), Some(server));
+        assert!(matches!(
+            bs.state(),
+            BootstrapState::ManifestVerified { .. }
+        ));
+        for p in 1..=3 {
+            if peer(p) != server {
+                assert!(bs.discovery_queried.contains(&peer(p)));
+                assert!(!bs.should_query(&peer(p)));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_manifest_rediscovery_selects_only_new_epoch() {
+        let mut bs = reach_selected(3);
+        let (server, height, id) = bs.should_request_manifest().unwrap();
+        bs.mark_manifest_requested(server, height, id, Instant::now());
+        bs.accept_verified_manifest(vec![]);
+        bs.reject_current_manifest(Some(server));
+        for p in 1..=20 {
+            bs.on_snapshots_info(peer(p), &[(height, id)]);
+        }
+        assert!(bs.should_request_manifest().is_none());
+        for p in 1..=3 {
+            bs.on_snapshots_info(peer(p), &[(height, id), (height - 1, mid(0xBB))]);
+        }
+        assert_eq!(
+            bs.state(),
+            BootstrapState::Selected {
+                height: height - 1,
+                manifest_id: mid(0xBB)
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_manifest_many_voters_evicts_only_recorded_server() {
+        let mut bs = SnapshotBootstrap::new();
+        for p in 1..=32 {
+            bs.on_snapshots_info(peer(p), &[(100, mid(0xAA))]);
+        }
+        // Pick a server other than the HashMap's first voter, deterministically.
+        let server = bs.voters_for_selected_manifest()[1];
+        bs.mark_manifest_requested(server, 100, mid(0xAA), Instant::now());
+        bs.accept_verified_manifest(vec![]);
+        bs.take_verified_manifest_bytes();
+        assert_eq!(bs.verified_manifest_peer(), Some(server));
+        bs.reject_current_manifest(bs.verified_manifest_peer());
+        assert!(!bs.votes.contains_key(&server));
+        assert_eq!(bs.votes.len(), 31);
+        for p in 1..=32 {
+            if peer(p) != server {
+                assert!(bs.votes.contains_key(&peer(p)));
+            }
+        }
+    }
+
+    #[test]
+    fn halted_bootstrap_new_votes_do_not_restart_downloads() {
+        let mut bs = reach_selected(3);
+        let before = bs.votes.clone();
+        bs.halt();
+        for (peer, vote) in &before {
+            bs.on_snapshots_info(*peer, &[*vote]);
+        }
+        assert_eq!(bs.state(), BootstrapState::Halted);
+        assert_eq!(bs.votes, before);
+        assert!(bs.should_request_manifest().is_none());
+        assert!(!bs.should_query(&peer(99)));
     }
 }

@@ -16,15 +16,23 @@ pub enum NetworkDto {
     Testnet,
 }
 
-/// Wallet rescan lifecycle phase. `running` is a real full-rebuild-in-progress
-/// state; `unavailable` is returned only on a backend that cannot replay blocks.
+/// Wallet rescan lifecycle phase. `required` means a full rescan is needed;
+/// `unavailable` means the backend cannot replay blocks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RescanStateDto {
     Idle,
+    Required {
+        detail: String,
+    },
     #[serde(rename_all = "camelCase")]
     Running {
         from_height: u32,
+    },
+    #[serde(rename_all = "camelCase")]
+    Failed {
+        height: u32,
+        reason: String,
     },
     #[serde(rename_all = "camelCase")]
     Unavailable {
@@ -55,7 +63,7 @@ pub struct WalletStatusDto {
     pub eip27_active: bool,
     /// Rescan lifecycle phase.
     pub rescan: RescanStateDto,
-    /// The wallet scan was invalidated (balances/addresses may be stale until a rescan).
+    /// The wallet scan was invalidated; a full rescan (fromHeight=0) is required.
     pub scan_invalidated: bool,
 }
 
@@ -153,6 +161,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RescanStateDto::Running { from_height: 100 }).unwrap(),
             serde_json::json!({ "type": "running", "fromHeight": 100 }),
+        );
+        assert_eq!(
+            serde_json::to_value(RescanStateDto::Failed {
+                height: 7,
+                reason: "storage".to_string(),
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "failed", "height": 7, "reason": "storage" }),
         );
         assert_eq!(
             serde_json::to_value(RescanStateDto::Unavailable {

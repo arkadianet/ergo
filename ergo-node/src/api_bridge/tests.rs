@@ -1054,9 +1054,9 @@ async fn submit_full_block_oneshot_dropped_returns_shutting_down() {
     action_loop.await.unwrap();
 }
 
-// ----- host() byte fields: Option<u64> semantics -----
+// ----- helpers -----
 
-/// Build a `SnapshotReadState` pinned to `host_paths` for host() tests.
+/// Build a `SnapshotReadState` with one storage sample from `host_paths`.
 /// The snapshot itself is a default empty publisher — host() ignores it.
 fn read_state_for_host(host_paths: HostPaths) -> SnapshotReadState {
     read_state_with_targets(host_paths, std::collections::BTreeMap::new())
@@ -1109,15 +1109,19 @@ fn read_state_with_slot_and_apply(
     );
     let identity_slot: crate::api_bridge::IdentitySlot =
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(ApiIdentity::default()));
+    let storage = Arc::new(LiveStorage::default());
+    storage.store_sample(crate::node::storage_probe::sample(&host_paths));
     SnapshotReadState::new(
         publisher.handle(),
         identity_slot,
-        host_paths,
+        storage,
         voting_targets,
         apply_phase,
         std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default()),
     )
 }
+
+// ----- happy path -----
 
 /// Live apply-phase atomics must overlay snapshot-stale ApiStatus fields.
 #[test]
@@ -1162,7 +1166,6 @@ fn status_overlays_live_apply_phase_metrics() {
 fn status_overlays_live_telemetry_values() {
     use ergo_api::NodeReadState;
 
-    let dir = tempfile::tempdir().unwrap();
     let telemetry = std::sync::Arc::new(crate::node::telemetry::LiveTelemetry::default());
     let api_info = ergo_api::types::ApiInfo {
         agent_name: "test".into(),
@@ -1184,11 +1187,7 @@ fn status_overlays_live_telemetry_values() {
     let read = SnapshotReadState::new(
         publisher.handle(),
         identity_slot,
-        HostPaths {
-            state_db: dir.path().join("s.redb"),
-            index_db: dir.path().join("i.redb"),
-            data_dir: dir.path().to_path_buf(),
-        },
+        Arc::new(LiveStorage::default()),
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
         std::sync::Arc::new(ergo_sync::ApplyPhaseMetrics::default()),
         telemetry.clone(),
@@ -1271,40 +1270,81 @@ fn status_reflects_live_storage_error_with_no_new_snapshot_published() {
     assert!(last.contains("simulated redb write failure"));
 }
 
-/// Measure-first (#257): `status()` probes the two redb stores and the
-/// data-dir filesystem on every call, so data-dir growth (bytes per
-/// synced height) is observable on /metrics rather than guessed. Absent
-/// files must read as `None`, present files as their exact byte length.
+/// Storage reads stay at the last sample even when the files grow.
 #[test]
-fn status_probes_storage_sizes_per_call() {
-    use ergo_api::NodeReadState;
-
+fn status_serves_cached_storage_sample_without_probing() {
     let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
+    let paths = HostPaths {
         state_db: dir.path().join("s.redb"),
         index_db: dir.path().join("i.redb"),
         data_dir: dir.path().to_path_buf(),
-    });
+    };
+    std::fs::write(&paths.state_db, [0u8; 1234]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 567]).unwrap();
+    let read = read_state_for_host(paths.clone());
+    let before = read.status();
+    assert_eq!(before.state_db_bytes, Some(1234));
+    assert_eq!(before.index_db_bytes, Some(567));
+    assert!(before.disk_free_bytes.is_some());
+    assert!(before.disk_total_bytes.is_some());
 
-    // Nothing on disk yet: both stores are absent, but the filesystem
-    // probe still resolves for a real temp dir.
-    let pre = read.status();
-    assert_eq!(pre.state_db_bytes, None);
-    assert_eq!(pre.index_db_bytes, None);
-    let (free, total) = (pre.disk_free_bytes, pre.disk_total_bytes);
-    assert!(
-        free.is_some() && total.is_some(),
-        "disk probe failed on a real temp dir"
-    );
-    assert!(free.unwrap() <= total.unwrap());
+    std::fs::write(&paths.state_db, [0u8; 2468]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 1134]).unwrap();
+    let after = read.status();
+    assert_eq!(after.state_db_bytes, before.state_db_bytes);
+    assert_eq!(after.index_db_bytes, before.index_db_bytes);
+    assert_eq!(after.disk_free_bytes, before.disk_free_bytes);
+    assert_eq!(after.disk_total_bytes, before.disk_total_bytes);
+}
 
-    // Files appear (node synced / indexer enabled): exact byte lengths,
-    // re-probed per call — a stale snapshot value would be the bug.
-    std::fs::write(dir.path().join("s.redb"), [0u8; 1234]).unwrap();
-    std::fs::write(dir.path().join("i.redb"), [0u8; 567]).unwrap();
-    let post = read.status();
-    assert_eq!(post.state_db_bytes, Some(1234));
-    assert_eq!(post.index_db_bytes, Some(567));
+#[test]
+fn status_storage_fields_none_before_first_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    };
+    std::fs::write(&paths.state_db, b"state").unwrap();
+    std::fs::write(&paths.index_db, b"index").unwrap();
+    let mut read = read_state_for_host(paths);
+    read.storage = Arc::new(LiveStorage::default());
+    let status = read.status();
+    assert_eq!(status.state_db_bytes, None);
+    assert_eq!(status.index_db_bytes, None);
+    assert_eq!(status.disk_free_bytes, None);
+    assert_eq!(status.disk_total_bytes, None);
+    let host = read.host();
+    assert_eq!(host.state_db_bytes, None);
+    assert_eq!(host.index_db_bytes, None);
+    assert_eq!(host.disk_free_bytes, None);
+    assert_eq!(host.disk_total_bytes, None);
+}
+
+#[test]
+fn host_serves_cached_storage_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = HostPaths {
+        state_db: dir.path().join("s.redb"),
+        index_db: dir.path().join("i.redb"),
+        data_dir: dir.path().to_path_buf(),
+    };
+    std::fs::write(&paths.state_db, [0u8; 1234]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 567]).unwrap();
+    let read = read_state_for_host(paths.clone());
+    let before = read.host();
+    assert_eq!(before.state_db_bytes, Some(1234));
+    assert_eq!(before.index_db_bytes, Some(567));
+    assert!(before.disk_free_bytes.is_some());
+    assert!(before.disk_total_bytes.is_some());
+
+    std::fs::write(&paths.state_db, [0u8; 2468]).unwrap();
+    std::fs::write(&paths.index_db, [0u8; 1134]).unwrap();
+    let after = read.host();
+    assert_eq!(after.state_db_bytes, before.state_db_bytes);
+    assert_eq!(after.index_db_bytes, before.index_db_bytes);
+    assert_eq!(after.disk_free_bytes, before.disk_free_bytes);
+    assert_eq!(after.disk_total_bytes, before.disk_total_bytes);
 }
 
 /// `votes()` projects the snapshot's active params into the votable-parameter
@@ -1527,72 +1567,6 @@ fn set_voting_targets_rejects_target_outside_allowable_range() {
     );
 }
 
-/// State DB file present and non-empty → `Some(len)` with the actual
-/// file length.
-#[test]
-fn host_state_db_existing_file_returns_some_len() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::write(&state_db, b"redb-payload").unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: state_db.clone(),
-        index_db: dir.path().join("missing-index.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(
-        host.state_db_bytes,
-        Some(12),
-        "wrote 12 bytes, expected Some(12)"
-    );
-}
-
-/// Empty file → `Some(0)`, not `None`. The wire shape must
-/// distinguish "file exists but is empty" from "file missing."
-#[test]
-fn host_state_db_empty_file_returns_some_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::File::create(&state_db).unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: state_db.clone(),
-        index_db: dir.path().join("missing-index.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.state_db_bytes, Some(0));
-}
-
-/// State DB path doesn't exist → `None`, not `0` — monitoring scrapers
-/// would misread a wired `0` as "database empty."
-#[test]
-fn host_state_db_missing_file_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: dir.path().join("does-not-exist.redb"),
-        index_db: dir.path().join("also-missing.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.state_db_bytes, None);
-}
-
-/// Indexer disabled (file absent) → `None`. Operators with
-/// `[indexer] enabled = false` should see `null`, not `0`.
-#[test]
-fn host_index_db_disabled_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let state_db = dir.path().join("state.redb");
-    std::fs::write(&state_db, b"x").unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db,
-        index_db: dir.path().join("indexer.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    assert_eq!(host.index_db_bytes, None);
-}
-
 /// Current process is always sampleable via sysinfo → RSS is
 /// `Some(_)`. Pins that the sysinfo path constructs `Some`, not
 /// `unwrap_or(0)` falling through to a bogus zero.
@@ -1609,36 +1583,6 @@ fn host_rss_for_current_process_is_some() {
         .rss_bytes
         .expect("RSS must be measurable for the test process");
     assert!(rss > 0, "test process RSS must be > 0, got {rss}");
-}
-
-/// `tempfile::tempdir()` lives on a mounted volume on every
-/// supported platform, so the disk-match path produces
-/// `Some(_)` for both fields. Pins the success branch — the
-/// `None` branch fires when no sysinfo disk's mount-point is a
-/// prefix of `data_dir`, which is environment-specific and
-/// flaky to provoke in a test. Coverage of the `None` branch
-/// for byte fields lives in the state-db / index-db tests
-/// above.
-#[test]
-fn host_disk_for_tempdir_returns_some_pair() {
-    let dir = tempfile::tempdir().unwrap();
-    let read = read_state_for_host(HostPaths {
-        state_db: dir.path().join("state.redb"),
-        index_db: dir.path().join("indexer.redb"),
-        data_dir: dir.path().to_path_buf(),
-    });
-    let host = read.host();
-    let free = host
-        .disk_free_bytes
-        .expect("tempdir is on a mounted volume → Some(free)");
-    let total = host
-        .disk_total_bytes
-        .expect("tempdir is on a mounted volume → Some(total)");
-    assert!(
-        total >= free,
-        "disk_total_bytes ({total}) must be >= disk_free_bytes ({free})",
-    );
-    assert!(total > 0, "disk_total_bytes on a real volume must be > 0");
 }
 
 /// End-to-end JSON-encoder parity on REAL mainnet data, no node needed:
@@ -1818,6 +1762,63 @@ fn encode_pow_solutions_v1_d_matches_scala_served_number() {
 
 // ----- helpers -----
 
+fn corrupt_header_bridge() -> (tempfile::TempDir, ScalaCompatBridge, String) {
+    let id = [0xab; 32];
+    let (dir, bridge) = bridge_over_store(|store| store.store_header(&id, &[0xff]).unwrap());
+    (dir, bridge, hex::encode(id))
+}
+
+/// A compat bridge over a fresh temp store that `setup` has written into.
+fn bridge_over_store(
+    setup: impl FnOnce(&ergo_state::store::StateStore),
+) -> (tempfile::TempDir, ScalaCompatBridge) {
+    bridge_over_store_at_height(0, setup)
+}
+
+fn bridge_over_store_at_height(
+    height: u32,
+    setup: impl FnOnce(&ergo_state::store::StateStore),
+) -> (tempfile::TempDir, ScalaCompatBridge) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+    setup(&store);
+    let publisher = crate::snapshot::SnapshotPublisher::new(
+        ApiInfo {
+            agent_name: "test".into(),
+            node_name: "test".into(),
+            network: "mainnet".into(),
+            version: "test".into(),
+            started_at_unix_ms: 0,
+            uptime_seconds: 0,
+            target_block_interval_ms: 120_000,
+        },
+        std::time::Instant::now(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    let handle = publisher.handle();
+    let mut snap = crate::snapshot::NodeSnapshot::empty(
+        handle.load().info.clone(),
+        ergo_api::types::ApiWeightFunction::Cost,
+    );
+    snap.tip.best_header.height = height;
+    handle.store(std::sync::Arc::new(snap));
+    let bridge = ScalaCompatBridge::new(
+        publisher.handle(),
+        ScalaCompatStatic {
+            name: "test".into(),
+            app_version: "test".into(),
+            network: "mainnet".into(),
+            launch_time_unix_ms: 0,
+            voting_length: ergo_chain_spec::ChainSpec::mainnet().voting.voting_length,
+            rest_api_url: None,
+            min_relay_fee_nano_erg: 1_000_000,
+        },
+        store.reader_handle(),
+        ergo_chain_spec::DifficultyParams::mainnet(),
+    );
+    (dir, bridge)
+}
+
 /// `{header, blockTransactions}` slice of Scala's `GET /blocks/{id}`.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1880,6 +1881,61 @@ fn mainnet_block_545684_section_bytes(v: &BlockSectionsVector) -> Vec<u8> {
         "section bytes must hash to the transactionsRoot Scala signed into the header",
     );
     bytes
+}
+
+// ----- error paths -----
+
+#[test]
+fn bridge_try_header_ids_at_height_malformed_row_is_corrupt() {
+    let height = 7;
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .write_malformed_headers_by_height_row_for_test(height)
+            .unwrap();
+    });
+    let err = bridge.try_header_ids_at_height(height).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.header_ids_at_height(height).is_empty());
+    assert!(bridge
+        .try_header_ids_at_height(height + 1)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn bridge_try_proof_for_tx_root_mismatch_is_corrupt_compat_stays_none() {
+    let v = mainnet_block_545684_sections();
+    let section_bytes = mainnet_block_545684_section_bytes(&v);
+    let header_id: [u8; 32] = hex::decode(&v.header.id).unwrap().try_into().unwrap();
+    let mut header = ergo_rest_json::decode_scala_header_struct(&v.header).unwrap();
+    let mut root = *header.transactions_root.as_bytes();
+    root[0] ^= 1;
+    header.transactions_root = Digest32::from(root);
+    let mut writer = VlqWriter::new();
+    ergo_ser::header::write_header(&mut writer, &header).unwrap();
+    let header_bytes = writer.result();
+    let expected = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &header_id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    let (_dir, bridge) = bridge_over_store(|store| {
+        // Keep the original header id so the real section still names its header.
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .store_block_section_typed(
+                &expected.transactions_id,
+                &section_bytes,
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap();
+    });
+    let tx_id = &v.block_transactions.transactions[0].id;
+    let err = bridge.try_proof_for_tx(&v.header.id, tx_id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("proof does not verify"));
+    assert!(bridge.proof_for_tx(&v.header.id, tx_id).is_none());
 }
 
 // ----- oracle parity -----
@@ -2003,4 +2059,111 @@ fn block_545684_transaction_is_rejected_under_todays_activated_version() {
     }
     let mut r = ergo_primitives::reader::VlqReader::new(&tx_bytes).with_activated_script_version(1);
     ergo_ser::transaction::read_transaction(&mut r).expect("activated 1: the require is inert");
+}
+
+#[test]
+fn bridge_try_header_by_id_corrupt_stored_bytes_is_corrupt() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    let err = bridge.try_header_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().starts_with("parse header:"));
+    assert!(bridge
+        .try_header_by_id(&hex::encode([0xcd; 32]))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn bridge_header_by_id_corrupt_stored_bytes_stays_none() {
+    let (_dir, bridge, id) = corrupt_header_bridge();
+    assert!(bridge.header_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_short_section_is_corrupt_compat_stays_none() {
+    let id = [0xa1; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(
+                &id,
+                &[0x01; 8],
+                ergo_ser::modifier_id::TYPE_BLOCK_TRANSACTIONS,
+            )
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(bridge.modifier_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_try_modifier_by_id_unknown_type_tag_is_corrupt_compat_stays_none() {
+    let id = [0xa2; 32];
+    let (_dir, bridge) = bridge_over_store(|store| {
+        store
+            .store_block_section_typed(&id, &[0x01; 40], 7)
+            .unwrap()
+    });
+    let id = hex::encode(id);
+    let err = bridge.try_modifier_by_id(&id).unwrap_err();
+    assert!(matches!(err, ergo_api::compat::ChainReadError::Corrupt(_)));
+    assert!(err.to_string().contains("unknown type byte 7"));
+    assert!(bridge.modifier_by_id(&id).is_none());
+}
+
+#[test]
+fn bridge_voted_params_corrupt_row_is_corrupt_legacy_stays_empty() {
+    let (_dir, bridge) = bridge_over_store(|store| {
+        let db = store.db_arc();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new("voted_params"))
+                .unwrap();
+            t.insert(0, &[0xff][..]).unwrap();
+        }
+        w.commit().unwrap();
+    });
+    assert!(matches!(
+        bridge.try_votes_history(),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    let legacy = bridge.votes_history();
+    assert_eq!(legacy.epoch_length, 1024);
+    assert!(legacy.changes.is_empty());
+}
+
+#[test]
+fn bridge_header_ranges_corrupt_row_is_corrupt_compat_stays_best_effort() {
+    let header_id = [0xab; 32];
+    let (_dir, bridge) = bridge_over_store_at_height(1, |store| {
+        store.store_header(&header_id, &[0xff]).unwrap();
+        let db = store.db_arc();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w
+                .open_table(redb::TableDefinition::<u64, &[u8]>::new(
+                    "header_chain_index",
+                ))
+                .unwrap();
+            t.insert(1, &header_id[..]).unwrap();
+        }
+        w.commit().unwrap();
+    });
+    assert!(matches!(
+        bridge.try_chain_slice(0, 1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(matches!(
+        bridge.try_last_headers(1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(matches!(
+        bridge.try_nipopow_header_at_height(1),
+        Err(ergo_api::compat::ChainReadError::Corrupt(_))
+    ));
+    assert!(bridge.chain_slice(0, 1).is_empty());
+    assert!(bridge.last_headers(1).is_empty());
+    assert!(bridge.nipopow_header_at_height(1).is_none());
 }

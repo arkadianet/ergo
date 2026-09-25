@@ -13,6 +13,7 @@ use ergo_indexer_types::{IndexerStatus, TxId};
 use super::super::dto::unix_ms_to_iso;
 use super::super::V1State;
 use super::invalid_tx_id;
+use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
 
 // ==========================================================================
@@ -65,7 +66,9 @@ pub(crate) struct StatusResponse {
     responses(
         (status = 200, description = "Lifecycle status: confirmed / pending / unknown", body = StatusResponse),
         (status = 400, description = "Malformed tx id", body = V1Error),
-        (status = 500, description = "Failed to assemble the confirmed transaction status", body = V1Error),
+        (status = 500, description = "Failed to assemble the confirmed transaction status; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Read capacity busy (overloaded, Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>) -> Response {
@@ -74,50 +77,56 @@ pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>)
     };
     let tx_id = TxId::from_bytes(raw);
 
-    // Confirmed path (extra index, when caught up).
-    if let Some(indexer) = state.indexer.as_ref() {
-        if matches!(indexer.status(), IndexerStatus::CaughtUp) {
-            if let Some(itx) = indexer.tx_by_id(&tx_id) {
-                let bstate = state.blockchain_state(indexer);
-                return match crate::blockchain::build_indexed_tx_response(&bstate, &itx) {
-                    Ok(resp) => Json(StatusResponse {
-                        tx_id: resp.id,
-                        state: "confirmed",
-                        pool: None,
-                        first_seen_unix_ms: None,
-                        first_seen_iso: None,
-                        inclusion_height: Some(resp.inclusion_height),
-                        confirmations: Some(i64::from(resp.num_confirmations)),
-                        header_id: Some(resp.block_id),
-                    })
-                    .into_response(),
-                    Err(detail) => v1_error(
-                        Reason::InternalError,
-                        "failed to assemble the confirmed transaction status",
-                        detail,
-                    ),
-                };
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || {
+            // Confirmed path (extra index, when caught up).
+            if let Some(indexer) = state.indexer.as_ref() {
+                if matches!(indexer.status(), IndexerStatus::CaughtUp) {
+                    if let Some(itx) = indexer.tx_by_id(&tx_id) {
+                        let bstate = state.blockchain_state(indexer);
+                        return match crate::blockchain::build_indexed_tx_response(&bstate, &itx) {
+                            Ok(resp) => Json(StatusResponse {
+                                tx_id: resp.id,
+                                state: "confirmed",
+                                pool: None,
+                                first_seen_unix_ms: None,
+                                first_seen_iso: None,
+                                inclusion_height: Some(resp.inclusion_height),
+                                confirmations: Some(i64::from(resp.num_confirmations)),
+                                header_id: Some(resp.block_id),
+                            })
+                            .into_response(),
+                            Err(detail) => v1_error(
+                                Reason::InternalError,
+                                "failed to assemble the confirmed transaction status",
+                                detail,
+                            ),
+                        };
+                    }
+                }
             }
-        }
-    }
 
-    // Pooled path.
-    if let Some(row) = state.read.mempool_transaction(&tx_id_hex) {
-        return Json(pooled_status(&state, row)).into_response();
-    }
+            // Pooled path.
+            if let Some(row) = state.read.mempool_transaction(&tx_id_hex) {
+                return Json(pooled_status(&state, row)).into_response();
+            }
 
-    // Unknown: a legitimate lifecycle answer, not an error.
-    Json(StatusResponse {
-        tx_id: tx_id_hex,
-        state: "unknown",
-        pool: None,
-        first_seen_unix_ms: None,
-        first_seen_iso: None,
-        inclusion_height: None,
-        confirmations: None,
-        header_id: None,
-    })
-    .into_response()
+            // Unknown: a legitimate lifecycle answer, not an error.
+            Json(StatusResponse {
+                tx_id: tx_id_hex,
+                state: "unknown",
+                pool: None,
+                first_seen_unix_ms: None,
+                first_seen_iso: None,
+                inclusion_height: None,
+                confirmations: None,
+                header_id: None,
+            })
+            .into_response()
+        })
+        .await
 }
 
 fn pooled_status(state: &V1State, row: crate::types::ApiMempoolTransaction) -> StatusResponse {

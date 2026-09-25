@@ -27,6 +27,9 @@ use ergo_api::wallet::{WalletAdmin, WalletAdminError};
 use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 
+pub mod chain_snapshot;
+pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
+
 /// Abstracts the chain submit path so the wallet writer can submit a
 /// signed transaction without depending on the API crate's concrete
 /// `SubmitBridge`. Production impl wraps `NodeSubmit`; tests can
@@ -755,9 +758,9 @@ impl WalletAdmin for NodeWalletAdmin {
 /// and (d) signing-context + UTXO lookup for send routes.
 pub trait ChainStateAccessor: Send + Sync {
     /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
-    fn wallet_scan_height(&self) -> u32;
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError>;
     /// Best full-block tip height. Used as the rescan upper bound.
-    fn tip_height(&self) -> u32;
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError>;
     /// True if the node is configured with `blocks_to_keep != -1`.
     /// `/wallet/restore` refuses on pruned nodes per Scala parity.
     fn is_pruned(&self) -> bool;
@@ -769,37 +772,52 @@ pub trait ChainStateAccessor: Send + Sync {
     fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
         None
     }
-    /// Fetch the block at `height` for rescan replay. Returns `None`
-    /// only if pruned past the requested height.
-    fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock>;
-    /// True when `read_block_at` can return real block data. Distinct from
-    /// `is_pruned()` (which gates `/wallet/restore`) — this gates
-    /// `/wallet/rescan`. When false, rescan is refused before touching any
-    /// wallet state, preventing the destructive clear-then-skip sequence.
-    /// Default impl probes `read_block_at(0)`; override for efficiency.
-    fn read_block_at_supported(&self) -> bool {
-        self.read_block_at(0).is_some()
+    /// Fetch the block at `height` for rescan replay. `Ok(None)` means the
+    /// requested block is unavailable (pruned or not yet downloaded).
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    >;
+    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
+    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+        Err(ChainStateError::Unsupported)
+    }
+
+    fn ensure_snapshot_current(&self, snapshot: &ChainSnapshot) -> Result<(), ChainStateError> {
+        let actual = self
+            .committed_tip()?
+            .ok_or(ChainStateError::NoCommittedState)?;
+        if actual == snapshot.tip() {
+            return Ok(());
+        }
+        Err(ChainStateError::StaleTip {
+            expected_height: snapshot.tip().height,
+            expected_id: hex::encode(snapshot.tip().header_id),
+            actual_height: actual.height,
+            actual_id: hex::encode(actual.header_id),
+        })
+    }
     /// Build the blockchain state context needed for signing: last ≤10
     /// applied headers + candidate pre-header + previous state digest.
     /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_signing_context not implemented for this accessor".into(),
-        ))
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Build per-block cost parameters from the active protocol parameters
     /// at the tip.
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_signing_params not implemented for this accessor".into(),
-        ))
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Structural protocol parameters at the tip (min-value-per-byte,
@@ -807,10 +825,8 @@ pub trait ChainStateAccessor: Send + Sync {
     /// the consensus validator's `ProtocolParams`; the wallet runs
     /// `ergo_validation::validate_structural` against these so it never
     /// submits a tx the node would reject (e.g. a dust output).
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, WalletAdminError> {
-        Err(WalletAdminError::Internal(
-            "build_protocol_params not implemented for this accessor".into(),
-        ))
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 
     /// Look up a full `ErgoBox` from the UTXO set by its 32-byte box ID.
@@ -818,6 +834,14 @@ pub trait ChainStateAccessor: Send + Sync {
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
         let _ = box_id;
         None
+    }
+}
+
+pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
+    let detail = error.to_string();
+    match error {
+        ChainStateError::StaleTip { .. } => WalletAdminError::StaleChainTip(detail),
+        _ => WalletAdminError::Internal(detail),
     }
 }
 
@@ -866,33 +890,18 @@ impl ChainStateAccessorImpl {
 }
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
-    fn wallet_scan_height(&self) -> u32 {
-        let Ok(read_txn) = self.db.begin_read() else {
-            return 0;
-        };
-        let Ok(tbl) = read_txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_HEIGHT) else {
-            return 0;
-        };
-        tbl.get(()).ok().flatten().map(|g| g.value()).unwrap_or(0)
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        let read_txn = self.db.begin_read()?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
+        Ok(reader.scan_height()?.unwrap_or(0))
     }
 
-    fn tip_height(&self) -> u32 {
-        // Live committed tip (best full-block height), read each call — NOT a
-        // value captured at construction. A node that boots below EIP-27
-        // activation and then syncs past it MUST observe the new tip, or the
-        // native `reserved`/`eip27Active` (candidate height `tip+1`) would stay
-        // wrong forever. Same `chain_state_meta` source the block
-        // validator's candidate height uses. `Ok(None)` = chain unstarted → 0; a
-        // read FAILURE is surfaced in the log (not silently downgraded to 0, which
-        // would mask an operational fault as "below activation").
-        match self.reader.committed_tip() {
-            Ok(Some((h, _))) => h,
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(error = %e, "wallet chain accessor: committed_tip read failed; reporting tip=0");
-                0
-            }
-        }
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(self
+            .reader
+            .committed_tip()?
+            .map(|(height, _)| height)
+            .unwrap_or(0))
     }
 
     fn is_pruned(&self) -> bool {
@@ -903,26 +912,19 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         self.reemission.as_ref()
     }
 
-    fn read_block_at(&self, height: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
         use ergo_state::store::block_txs_for_wallet_at_height;
         use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx};
 
-        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return None,
-            Err(e) => {
-                // A DB read error here used to be swallowed as "no block at
-                // this height" (unwrap_or(None)), which on a wallet rescan
-                // would silently skip the height and could drop owned txs.
-                // Behaviour is unchanged (still None), but the fault is now
-                // visible instead of masquerading as an empty block.
-                tracing::warn!(
-                    height,
-                    error = %e,
-                    "wallet rescan: block_txs_for_wallet_at_height failed — skipping height"
-                );
-                return None;
-            }
+        let (block_id, owned) = match block_txs_for_wallet_at_height(&self.db, height)? {
+            Some(pair) => pair,
+            None => return Ok(None),
         };
 
         let txs = owned
@@ -940,140 +942,47 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
                         value: o.value,
                         assets: o.assets,
                         miner_reward_pubkey: o.miner_reward_pubkey,
-                        // Carried for the rescan scan-matcher + ScanTrackedBox.
                         box_bytes: o.box_bytes,
                     })
                     .collect(),
             })
             .collect();
 
-        Some(RescanBlock { block_id, txs })
+        Ok(Some(RescanBlock { block_id, txs }))
+    }
+
+    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
+        let committed = self
+            .reader
+            .committed_snapshot()?
+            .ok_or(ChainStateError::NoCommittedState)?;
+        ChainSnapshot::from_committed(committed, self.reemission.as_ref()).map_err(Into::into)
+    }
+
+    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+        Ok(self
+            .reader
+            .committed_tip()?
+            .map(|(height, header_id)| ChainTip { height, header_id }))
     }
 
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, WalletAdminError> {
-        use ergo_primitives::digest::ADDigest;
-        use ergo_primitives::reader::VlqReader;
-        use ergo_ser::header::read_header;
-        use ergo_validation::pre_header::CandidatePreHeader;
-
-        // Determine committed tip from chain_state_meta.
-        let (tip_height, tip_id) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| {
-                WalletAdminError::Internal("no committed tip (chain not started)".into())
-            })?;
-
-        if tip_height < 10 {
-            return Err(WalletAdminError::Internal(format!(
-                "chain tip {tip_height} < 10; wait for more sync before signing"
-            )));
-        }
-
-        // Read the last ≤10 applied headers from the canonical chain.
-        let window_lo = tip_height.saturating_sub(9);
-        let header_ids = self
-            .reader
-            .scan_header_chain_range(window_lo, tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("scan_header_chain_range: {e}")))?;
-
-        let mut sigma_last_headers = Vec::with_capacity(header_ids.len());
-        for (_, hid) in &header_ids {
-            let hdr_bytes = self
-                .reader
-                .get_header(hid)
-                .map_err(|e| WalletAdminError::Internal(format!("get_header: {e}")))?
-                .ok_or_else(|| {
-                    WalletAdminError::Internal(format!(
-                        "header missing for id {}",
-                        hex::encode(hid)
-                    ))
-                })?;
-            let mut r = VlqReader::new(&hdr_bytes);
-            let h = read_header(&mut r)
-                .map_err(|e| WalletAdminError::Internal(format!("read_header: {e:?}")))?;
-            sigma_last_headers.push(h);
-        }
-        // Reverse so index 0 = most recent (tip) — `sigma_last_headers[0]` is
-        // the parent of the candidate block per BlockchainStateContext contract.
-        sigma_last_headers.reverse();
-
-        let tip_header = sigma_last_headers
-            .first()
-            .ok_or_else(|| WalletAdminError::Internal("empty header window".into()))?;
-
-        // Read previous state digest (STATE_META). We fall back to the tip
-        // header's state_root if STATE_META isn't readable.
-        let previous_state_digest = ADDigest::from_bytes(*tip_header.state_root.as_bytes());
-
-        // Build CandidatePreHeader from the tip header.
-        let sigma_pre_header = CandidatePreHeader {
-            version: tip_header.version,
-            parent_id: tip_id,
-            height: tip_height + 1,
-            timestamp: tip_header.timestamp + 1,
-            n_bits: tip_header.n_bits,
-            votes: [0, 0, 0],
-            // Use the tip header's miner pubkey as a stand-in. Wallet signing
-            // doesn't mine — the pubkey only affects CONTEXT.preHeader.minerPk
-            // in script evaluation (rare for P2PK spend scripts).
-            miner_pubkey: *tip_header.solution.pk().as_bytes(),
-        };
-
-        Ok(ergo_wallet::tx_context::BlockchainStateContext {
-            sigma_last_headers,
-            sigma_pre_header,
-            previous_state_digest,
-        })
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.state_context().clone())
     }
 
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, WalletAdminError> {
-        let (tip_height, _) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no committed tip".into()))?;
-
-        let params = self
-            .reader
-            .active_params_at(tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("active_params_at: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no active params at tip".into()))?;
-
-        Ok(ergo_wallet::tx_context::BlockchainParameters {
-            max_block_cost: params.max_block_cost as u64,
-            input_cost: params.input_cost as u64,
-            data_input_cost: params.data_input_cost as u64,
-            output_cost: params.output_cost as u64,
-            token_access_cost: params.token_access_cost as u64,
-            // interpreter_init_cost is a fixed constant not stored in voted params;
-            // must match ergo_validation::INTERPRETER_INIT_COST (10_000) exactly so
-            // wallet self-verify reproduces the chain validator's cost accounting.
-            interpreter_init_cost: ergo_validation::INTERPRETER_INIT_COST,
-            block_version: params.block_version,
-        })
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.signing_params().clone())
     }
 
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, WalletAdminError> {
-        let (tip_height, _) = self
-            .reader
-            .committed_tip()
-            .map_err(|e| WalletAdminError::Internal(format!("committed_tip: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no committed tip".into()))?;
-        let active = self
-            .reader
-            .active_params_at(tip_height)
-            .map_err(|e| WalletAdminError::Internal(format!("active_params_at: {e}")))?
-            .ok_or_else(|| WalletAdminError::Internal("no active params at tip".into()))?;
-        // Authoritative per-epoch params — the same source the consensus
-        // validator uses, so the wallet's pre-submit structural check can't
-        // drift from on-chain min-box-value / box-cap rules.
-        Ok(ergo_validation::ProtocolParams::from_active(&active))
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
+        self.chain_snapshot()
+            .map(|snapshot| snapshot.protocol_params().clone())
     }
 
     fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
@@ -1102,13 +1011,14 @@ pub struct WalletStateHook {
     /// Shared redb handle — used to read the registered scans for block-apply
     /// matching (the scans live in redb, not `WalletState`).
     pub db: Arc<redb::Database>,
+    pub store: Arc<dyn ergo_state::wallet::WalletStore>,
 }
 
 impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
         // Skip during rescan: the live apply hook returns empty so chain-apply
         // doesn't interfere with the background rescan writing the same tables.
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        if crate::wallet_boot::rescan_in_progress() {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1116,7 +1026,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+        if crate::wallet_boot::rescan_in_progress() {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
@@ -1128,7 +1038,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
         // block, so a concurrent live write would race it (miss a spend
         // against the cleared reverse index, or stale that index). Mirrors
-        // how the pubkey path skips during RESCAN_IN_PROGRESS. A PARTIAL
+        // how the pubkey path skips during a rescan. A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
         if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -1138,18 +1048,14 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // independent of the wallet-pubkey rescan, so (unlike the methods above)
         // it is NOT skipped while a *partial* rescan is in progress. A read error
         // skips scan work for this block (logged) rather than aborting chain apply.
-        use redb::ReadableTableMetadata;
-        let count = self.db.begin_read().ok().and_then(|r| {
-            match r.open_table(ergo_state::wallet::tables::WALLET_SCANS) {
-                Ok(t) => t.len().ok().map(|n| n as usize),
-                Err(redb::TableError::TableDoesNotExist(_)) => Some(0),
-                Err(_) => None,
-            }
-        });
+        let count = self
+            .store
+            .begin_read()
+            .and_then(|read| read.registered_scan_count());
         match count {
-            Some(n) => n,
-            None => {
-                tracing::error!("scan apply: WALLET_SCANS count read failed; skipping this block");
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
                 mark_scan_invalidated(&self.db);
                 0
             }
@@ -1164,7 +1070,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
             return vec![Vec::new(); boxes.len()];
         }
         // Load the registry once for the whole block, then match each box.
-        match commands::scan::load_registry(&self.db) {
+        match commands::scan::load_registry_from_store(self.store.as_ref()) {
             Ok(registry) => boxes
                 .iter()
                 .map(|b| registry.matching_scan_ids(b))
@@ -1251,10 +1157,13 @@ pub async fn run_wallet_writer(
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
 ) {
+    let store: Arc<dyn ergo_state::wallet::WalletStore> =
+        Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
     let ctx = commands::WriterContext {
         storage: &storage,
         state: &state,
         db: &db,
+        store: &store,
         chain: &chain,
         cfg: &cfg,
         submit_handle: &submit_handle,
@@ -1266,6 +1175,9 @@ pub async fn run_wallet_writer(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
+        let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
+            continue;
+        };
         match cmd {
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
@@ -1434,6 +1346,7 @@ pub async fn run_wallet_writer(
 // `commands::WriterContext` plus the per-command params +
 // reply oneshot.
 mod commands;
+mod scan_guard;
 
 mod support;
 #[cfg(test)]
@@ -1479,6 +1392,7 @@ mod scan_invalidation_tests {
         let hook = WalletStateHook {
             wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
             db: db.clone(),
+            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone())),
         };
         // match_boxes loads the registry first (regardless of the box slice), so
         // the corrupt row trips the Err branch even with no boxes.
@@ -1488,5 +1402,48 @@ mod scan_invalidation_tests {
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
         );
+    }
+
+    #[test]
+    fn chain_tip_no_committed_chain_returns_zero() {
+        let (_d, db) = temp_db();
+        let accessor = ChainStateAccessorImpl::new(db, false, None);
+        use tracing_subscriber::prelude::*;
+        struct WarnCounter(Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let warnings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCounter(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(accessor.tip_height().unwrap(), 0);
+        });
+        assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn production_chain_access_propagates_database_errors() {
+        let (_d, db) = temp_db();
+        let state_meta: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_state_meta");
+        let chain_index: redb::TableDefinition<u64, u64> =
+            redb::TableDefinition::new("chain_index");
+        {
+            let w = db.begin_write().unwrap();
+            w.open_table(state_meta).unwrap().insert(1, 1).unwrap();
+            w.open_table(chain_index).unwrap().insert(1, 1).unwrap();
+            w.commit().unwrap();
+        }
+        let accessor = ChainStateAccessorImpl::new(db, false, None);
+        assert!(accessor.tip_height().is_err());
+        assert!(accessor.read_block_at(1).is_err());
     }
 }

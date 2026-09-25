@@ -35,6 +35,7 @@ use tokio::sync::Notify;
 // Tests below exercise these directly to maintain the b4_* byte-parity
 // oracle in this file (the load-bearing Scala-vs-Rust check).
 
+use crate::node::storage_probe::LiveStorage;
 use crate::snapshot::{unix_now_ms, SnapshotHandle};
 
 mod block_reassembly;
@@ -64,11 +65,8 @@ pub struct SnapshotReadState {
     /// `/api/v1/identity` request reads the current value via
     /// `load()`; no allocation on the hot path.
     identity: IdentitySlot,
-    /// Paths host metrics need at request time. Captured at boot; never
-    /// change. `state_db` and `index_db` are file paths whose `metadata().len()`
-    /// is the on-disk size; `data_dir` is the volume the disk-space readout
-    /// resolves against.
-    host_paths: HostPaths,
+    /// Latest background storage sample; requests never probe the filesystem.
+    storage: Arc<LiveStorage>,
     /// Operator voting targets (param id → target value), seeded from
     /// `[voting.targets]` at boot. This is the SAME `Arc<RwLock<…>>` slot the
     /// `MiningHandle` reads and the auth-gated `POST /api/v1/votes` writes, so
@@ -83,45 +81,13 @@ pub struct SnapshotReadState {
     telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
 }
 
-/// Filesystem paths the `/api/v1/host` handler needs to compute per-call
-/// metrics. Cheap to clone — three `PathBuf`s.
+/// Filesystem paths the background storage sampler probes.
+/// Cheap to clone — three `PathBuf`s.
 #[derive(Clone, Debug)]
 pub struct HostPaths {
     pub state_db: PathBuf,
     pub index_db: PathBuf,
     pub data_dir: PathBuf,
-}
-
-/// Drop the Windows `\\?\` extended-length namespace prefix from a
-/// canonicalized path so it can be compared against bare drive roots
-/// returned by sysinfo (e.g. `C:\`). No-op on non-Windows paths and
-/// on paths that don't start with the prefix. Returned as `PathBuf`
-/// so the caller can use `Path::starts_with` on it.
-fn strip_extended_length_prefix(p: PathBuf) -> PathBuf {
-    // The prefix is `\\?\` (four characters). Use `Path::components`
-    // first so we don't accidentally rewrite a path that happens to
-    // contain `?` literals later in its body.
-    use std::path::{Component, Prefix};
-    let mut comps = p.components();
-    if let Some(Component::Prefix(prefix_comp)) = comps.next() {
-        match prefix_comp.kind() {
-            Prefix::VerbatimDisk(letter) => {
-                // `\\?\C:\Users\...` → `C:\Users\...`
-                let mut rebuilt = PathBuf::from(format!("{}:", letter as char));
-                for c in comps {
-                    rebuilt.push(c.as_os_str());
-                }
-                return rebuilt;
-            }
-            Prefix::Verbatim(_) | Prefix::VerbatimUNC(_, _) => {
-                // Other extended-length forms (rare): fall through
-                // and return the original. Disk-space match will
-                // miss, but that's better than guessing wrong.
-            }
-            _ => {}
-        }
-    }
-    p
 }
 
 /// Implements `NodeAdmin` by firing a shared `tokio::sync::Notify` that
@@ -261,7 +227,7 @@ impl SnapshotReadState {
     pub fn new(
         handle: SnapshotHandle,
         identity: IdentitySlot,
-        host_paths: HostPaths,
+        storage: Arc<LiveStorage>,
         voting_targets: std::sync::Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
         apply_phase: std::sync::Arc<ergo_sync::ApplyPhaseMetrics>,
         telemetry: std::sync::Arc<crate::node::telemetry::LiveTelemetry>,
@@ -269,7 +235,7 @@ impl SnapshotReadState {
         Self {
             handle,
             identity,
-            host_paths,
+            storage,
             voting_targets,
             apply_phase,
             telemetry,
@@ -285,49 +251,6 @@ impl SnapshotReadState {
         Instant::now()
             .saturating_duration_since(produced_at)
             .as_millis() as u64
-    }
-
-    /// On-disk sizes of the two redb stores, probed per call. Plain
-    /// files, so the on-disk size is `metadata().len()`. The indexer
-    /// file is absent when `[indexer] enabled = false`, which produces
-    /// `None` for that half.
-    fn db_sizes(&self) -> (Option<u64>, Option<u64>) {
-        let state = std::fs::metadata(&self.host_paths.state_db)
-            .map(|m| m.len())
-            .ok();
-        let index = std::fs::metadata(&self.host_paths.index_db)
-            .map(|m| m.len())
-            .ok();
-        (state, index)
-    }
-
-    /// Free / total bytes on the filesystem holding the data dir — the
-    /// disk whose mount-point is a longest-prefix match of data_dir
-    /// (in case data_dir lives on a sub-mount).
-    ///
-    /// On Windows, `std::fs::canonicalize` returns paths prefixed
-    /// with the `\\?\` extended-length namespace (e.g.
-    /// `\\?\C:\Users\...\ergo-data`), while sysinfo's mount points
-    /// come back as bare drive roots (e.g. `C:\`). `Path::starts_with`
-    /// compares path components, not byte prefixes, so the extended
-    /// namespace prefix kills the match. Strip it before comparing.
-    fn disk_space(&self) -> (Option<u64>, Option<u64>) {
-        let disks = sysinfo::Disks::new_with_refreshed_list();
-        let canonical_data = std::fs::canonicalize(&self.host_paths.data_dir)
-            .map(strip_extended_length_prefix)
-            .unwrap_or_else(|_| self.host_paths.data_dir.clone());
-        let mut best_match: Option<&sysinfo::Disk> = None;
-        let mut best_len = 0usize;
-        for disk in &disks {
-            let mp = disk.mount_point();
-            if canonical_data.starts_with(mp) && mp.as_os_str().len() > best_len {
-                best_len = mp.as_os_str().len();
-                best_match = Some(disk);
-            }
-        }
-        best_match
-            .map(|d| (Some(d.available_space()), Some(d.total_space())))
-            .unwrap_or((None, None))
     }
 }
 
@@ -395,7 +318,7 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn host(&self) -> ApiHost {
-        let (state_db_bytes, index_db_bytes) = self.db_sizes();
+        let storage = self.storage.latest().unwrap_or_default();
 
         // Process RSS via sysinfo. Refresh only the current process; this
         // avoids enumerating every process on the host on each handler call.
@@ -409,14 +332,12 @@ impl NodeReadState for SnapshotReadState {
             sys.process(p).map(|proc| proc.memory())
         });
 
-        let (disk_free_bytes, disk_total_bytes) = self.disk_space();
-
         ApiHost {
             rss_bytes,
-            state_db_bytes,
-            index_db_bytes,
-            disk_free_bytes,
-            disk_total_bytes,
+            state_db_bytes: storage.state_db_bytes,
+            index_db_bytes: storage.index_db_bytes,
+            disk_free_bytes: storage.disk_free_bytes,
+            disk_total_bytes: storage.disk_total_bytes,
             cpu_pct: None,
             net_in_bps: None,
             net_out_bps: None,
@@ -444,14 +365,13 @@ impl NodeReadState for SnapshotReadState {
             s.apply_age_ms = self.telemetry.apply_age_ms();
             s.apply_wedged = self.telemetry.apply_wedged();
         }
-        // Storage gauges (measure-first, #257): on-disk size of the two
-        // redb stores plus disk headroom around the data dir. Same
-        // per-call probes the `/host` card uses — two stat calls and a
-        // mount-table scan, cheap at dashboard / scrape cadence. Surfaced
-        // so data-dir growth (bytes per synced height) is measured, not
-        // guessed.
-        (s.state_db_bytes, s.index_db_bytes) = self.db_sizes();
-        (s.disk_free_bytes, s.disk_total_bytes) = self.disk_space();
+        // Storage probes run on a dedicated background thread. Requests
+        // read one cached sample, with absent fields until the first sample.
+        let storage = self.storage.latest().unwrap_or_default();
+        s.state_db_bytes = storage.state_db_bytes;
+        s.index_db_bytes = storage.index_db_bytes;
+        s.disk_free_bytes = storage.disk_free_bytes;
+        s.disk_total_bytes = storage.disk_total_bytes;
         // Storage-error counters (issue #281, P0 review fix): the state
         // and indexer buckets are process-global atomics in
         // `ergo_state::storage_observability` — read live here exactly

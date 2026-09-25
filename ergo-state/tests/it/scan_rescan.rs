@@ -4,16 +4,25 @@
 //! from the replayed blocks — mirroring the live block-apply path so a
 //! rescan reproduces exactly what live tracking would have produced.
 
-#![allow(clippy::result_large_err)] // redb::Error is large; test closures can't avoid it
+#![allow(clippy::result_large_err)] // RescanReadError is large; test closures can't avoid it
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use ergo_primitives::digest::{Digest32, ModifierId};
+use ergo_primitives::writer::VlqWriter;
+use ergo_ser::autolykos::AutolykosSolution;
+use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+use ergo_ser::header::{serialize_header, Header};
+use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+use ergo_state::store::{block_txs_for_wallet_at_height, StateError, StateStore};
+use ergo_state::wallet::reader::WalletReader;
 use ergo_state::wallet::scan::{
-    OwnedBlockOutput, RescanBlock, RescanTx, ScanRescanMatcher, WalletScanService,
+    OwnedBlockOutput, RescanBlock, RescanError, RescanReadError, RescanTx, ScanRescanMatcher,
+    WalletScanService,
 };
 use ergo_state::wallet::tables::{
-    scan_box_key, WALLET_SCAN_BOXES, WALLET_SCAN_INVALIDATED, WALLET_SCAN_TXS,
+    scan_box_key, WALLET_SCAN_BOXES, WALLET_SCAN_HEIGHT, WALLET_SCAN_INVALIDATED, WALLET_SCAN_TXS,
 };
 use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
 use redb::{Database, ReadableTable};
@@ -26,11 +35,11 @@ struct FakeMatcher {
 }
 
 impl ScanRescanMatcher for FakeMatcher {
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        boxes
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
+        Ok(boxes
             .iter()
             .map(|b| self.by_box_bytes.get(*b).cloned().unwrap_or_default())
-            .collect()
+            .collect())
     }
 }
 
@@ -70,6 +79,122 @@ fn scan_txs(db: &Database) -> Vec<ScanTxRecord> {
 }
 
 #[test]
+fn full_rescan_from_zero_replays_applied_blocks_without_genesis_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.redb");
+    let mut store = StateStore::open(&path).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let mut parent = ModifierId::from_bytes([0; 32]);
+    let mut header_ids = Vec::new();
+    let transactions: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/transactions_1_10.json"
+    ))
+    .unwrap();
+    for height in 1..=3 {
+        let header = Header {
+            version: 2,
+            parent_id: parent,
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: store.root_digest(),
+            timestamp: 1_000_000 + height as u64,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 16842752,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
+                nonce: [0; 8],
+            },
+        };
+        let (header_bytes, header_id) = serialize_header(&header).unwrap();
+        let header_id_bytes: [u8; 32] = *header_id.as_bytes();
+        store.store_header(&header_id_bytes, &header_bytes).unwrap();
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id,
+                transactions: vec![{
+                    let bytes = hex::decode(
+                        transactions[(height - 1) as usize]["bytes"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    ergo_ser::transaction::read_transaction(
+                        &mut ergo_primitives::reader::VlqReader::new(&bytes),
+                    )
+                    .unwrap()
+                }],
+            },
+        )
+        .unwrap();
+        let section_id = compute_section_id(
+            TYPE_BLOCK_TRANSACTIONS,
+            &header_id_bytes,
+            header.transactions_root.as_bytes(),
+        );
+        store
+            .store_block_section(&section_id, &writer.result())
+            .unwrap();
+        let expected = store.root_digest();
+        store
+            .apply_block_unchecked_for_test(height, &header_id_bytes, &expected, &[])
+            .unwrap();
+        parent = header_id;
+        header_ids.push(header_id_bytes);
+    }
+
+    let db = store.db_arc();
+    let read_db = db.clone();
+    WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        3,
+        move |height| {
+            block_txs_for_wallet_at_height(&read_db, height).map(|block| {
+                block.map(|(block_id, txs)| RescanBlock {
+                    block_id,
+                    txs: txs
+                        .into_iter()
+                        .map(|tx| RescanTx {
+                            tx_id: tx.tx_id,
+                            inputs: tx.inputs,
+                            outputs: tx
+                                .outputs
+                                .into_iter()
+                                .map(|output| OwnedBlockOutput {
+                                    box_id: output.box_id,
+                                    output_index: output.output_index,
+                                    ergo_tree_bytes: output.ergo_tree_bytes,
+                                    value: output.value,
+                                    assets: output.assets,
+                                    miner_reward_pubkey: output.miner_reward_pubkey,
+                                    box_bytes: output.box_bytes,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
+        },
+        || Ok(3),
+        || false,
+        None,
+    )
+    .unwrap();
+
+    let read = db.begin_read().unwrap();
+    let cursor = WalletReader::new(&read).scan_cursor().unwrap().unwrap();
+    assert_eq!(cursor.height, 3);
+    assert_eq!(cursor.header_id, Some(header_ids[2]));
+}
+
+#[test]
 fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
@@ -99,14 +224,14 @@ fn full_rescan_rebuilds_scan_tables_with_create_and_spend() {
         }],
     };
 
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(match h {
             1 => Some(block1.clone()),
             2 => Some(block2.clone()),
             _ => None,
         })
     };
-    let read_tip = || -> Result<u32, redb::Error> { Ok(2) };
+    let read_tip = || -> Result<u32, RescanReadError> { Ok(2) };
 
     WalletScanService::rescan_full_rebuild(
         &db,
@@ -189,8 +314,11 @@ fn full_rescan_clears_stale_scan_rows_before_rebuilding() {
             outputs: vec![out(0xA1, a_bytes)],
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            1 => Some(block1.clone()),
+            _ => None,
+        })
     };
 
     WalletScanService::rescan_full_rebuild(
@@ -229,8 +357,11 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
             outputs: vec![out(0xA1, vec![0xA1])],
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            1 => Some(block1.clone()),
+            _ => None,
+        })
     };
 
     // None matcher: the no-scans node path — scans never touched.
@@ -258,8 +389,8 @@ fn rescan_without_a_matcher_leaves_scan_tables_untouched() {
 /// returns an empty Vec regardless of input count.
 struct BadCountMatcher;
 impl ScanRescanMatcher for BadCountMatcher {
-    fn match_boxes(&self, _boxes: &[&[u8]]) -> Vec<Vec<u16>> {
-        Vec::new() // wrong length whenever the block has ≥1 output box
+    fn match_boxes(&self, _boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -270,6 +401,87 @@ fn read_invalidated(db: &Database) -> Option<bool> {
         Err(_) => return None,
     };
     t.get(()).unwrap().map(|g| g.value())
+}
+
+fn read_scan_height(db: &Database) -> Option<u32> {
+    let txn = db.begin_read().unwrap();
+    let t = match txn.open_table(WALLET_SCAN_HEIGHT) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    t.get(()).unwrap().map(|g| g.value())
+}
+
+#[test]
+fn rescan_missing_block_stops_before_advancing_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        |height| {
+            if height == 0 {
+                Ok(Some(RescanBlock {
+                    block_id: [0; 32],
+                    txs: vec![],
+                }))
+            } else {
+                Ok(None)
+            }
+        },
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(matches!(
+        result,
+        Err(RescanError::Read(RescanReadError::Missing { height: 1 }))
+    ));
+    assert_eq!(read_scan_height(&db), Some(0));
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn rescan_storage_error_is_distinct_and_keeps_cursor_before_hole() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        |height| {
+            if height == 0 {
+                Ok(Some(RescanBlock {
+                    block_id: [0; 32],
+                    txs: vec![],
+                }))
+            } else {
+                Err(RescanReadError::Storage {
+                    height,
+                    source: StateError::Serialization("synthetic read failure".to_string()),
+                })
+            }
+        },
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(matches!(
+        result,
+        Err(RescanError::Read(RescanReadError::Storage {
+            height: 1,
+            ..
+        }))
+    ));
+    assert_eq!(read_scan_height(&db), Some(0));
+    assert_eq!(read_invalidated(&db), Some(true));
 }
 
 #[test]
@@ -290,8 +502,50 @@ fn count_mismatch_leaves_wallet_invalidated_not_falsely_complete() {
             outputs: vec![out(0xA1, vec![0xA1])], // 1 box; matcher returns 0 results
         }],
     };
-    let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-        Ok(if h == 1 { Some(block1.clone()) } else { None })
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok(match h {
+            1 => Some(block1.clone()),
+            _ => None,
+        })
+    };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        read_block,
+        || Ok(1),
+        || false,
+        Some(&BadCountMatcher),
+    );
+    assert!(matches!(
+        result,
+        Err(RescanError::Matcher { height: 1, .. })
+    ));
+
+    assert_eq!(
+        read_invalidated(&db),
+        Some(true),
+        "a count-mismatch block must leave WALLET_SCAN_INVALIDATED set"
+    );
+}
+
+fn empty_block(id: u8) -> RescanBlock {
+    RescanBlock {
+        block_id: [id; 32],
+        txs: vec![],
+    }
+}
+
+#[test]
+fn successful_full_rebuild_clears_invalidation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok((h == 1).then_some(block.clone()))
     };
 
     WalletScanService::rescan_full_rebuild(
@@ -303,13 +557,116 @@ fn count_mismatch_leaves_wallet_invalidated_not_falsely_complete() {
         read_block,
         || Ok(1),
         || false,
-        Some(&BadCountMatcher),
+        None,
     )
     .unwrap();
 
-    assert_eq!(
-        read_invalidated(&db),
-        Some(true),
-        "a count-mismatch block must leave WALLET_SCAN_INVALIDATED set"
+    assert_eq!(read_invalidated(&db), Some(false));
+}
+
+#[test]
+fn missing_interior_block_aborts_and_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        Ok((h == 1).then_some(block.clone()))
+    };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        2,
+        read_block,
+        || Ok(2),
+        || false,
+        None,
     );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn partial_replay_failure_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
+        if h == 1 {
+            Ok(Some(block.clone()))
+        } else {
+            Err(RescanReadError::Storage {
+                height: h,
+                source: redb::StorageError::Io(std::io::Error::other("replay failure")).into(),
+            })
+        }
+    };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        1,
+        2,
+        read_block,
+        || Ok(2),
+        || false,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn read_tip_failure_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+    let block = empty_block(1);
+    let read_block =
+        move |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> { Ok(Some(block.clone())) };
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        read_block,
+        || {
+            Err(RescanReadError::Storage {
+                height: 1,
+                source: redb::StorageError::Io(std::io::Error::other("tip failure")).into(),
+            })
+        },
+        || false,
+        None,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(read_invalidated(&db), Some(true));
+}
+
+#[test]
+fn cancellation_invalidates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::create(dir.path().join("t.redb")).unwrap());
+
+    let result = WalletScanService::rescan_full_rebuild(
+        &db,
+        BTreeSet::new(),
+        BTreeMap::new(),
+        0,
+        1,
+        |_h| Ok(None),
+        || Ok(1),
+        || true,
+        None,
+    );
+
+    assert!(matches!(result, Err(RescanError::Cancelled { .. })));
+    assert_eq!(read_invalidated(&db), Some(true));
 }

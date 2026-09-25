@@ -2,8 +2,9 @@
 //! (Mode 2) reducer state + install-side progress flags to the wire-visible
 //! `ApiBootstrapStatus`, or `None` when the panel shouldn't be shown.
 
-use ergo_api::types::ApiBootstrapStatus;
+use ergo_api::types::{ApiBootstrapStatus, ApiPopowPhase};
 use ergo_state::ChainStateRead;
+use ergo_sync::popow_bootstrap::PopowBootstrapState;
 use ergo_sync::snapshot_bootstrap::BootstrapState;
 
 use super::super::NodeState;
@@ -36,6 +37,7 @@ fn select_bootstrap_phase(
         return ApiBootstrapPhase::PostInstallCatchup;
     }
     match reducer_state {
+        BootstrapState::Halted => ApiBootstrapPhase::Halted,
         BootstrapState::Idle | BootstrapState::Querying | BootstrapState::Selected { .. } => {
             ApiBootstrapPhase::Discovery
         }
@@ -58,7 +60,7 @@ fn select_bootstrap_phase(
 /// `None` if the operator shouldn't see a bootstrap panel right now.
 ///
 /// Visibility rules:
-/// - Not Mode 2 (utxo_bootstrap not configured): always `None`.
+/// - Neither snapshot nor NiPoPoW bootstrap configured: `None`.
 /// - Mode 2, pre-install (`best_full_block_height == 0`): `Some` —
 ///   show discovery / chunks / reconstruct / install progress.
 /// - Mode 2, post-install but still catching up (`gap > 2`): `Some`
@@ -69,7 +71,7 @@ pub(super) fn build_bootstrap_status(
     state: &mut NodeState,
     now_unix_ms: u64,
 ) -> Option<ApiBootstrapStatus> {
-    if !state.utxo_bootstrap_enabled {
+    if !state.utxo_bootstrap_enabled && state.popow_bootstrap.is_none() {
         return None;
     }
     let cs = state.store.chain_state_meta();
@@ -134,7 +136,9 @@ pub(super) fn build_bootstrap_status(
         }
     } else {
         match reducer_state {
-            BootstrapState::Idle | BootstrapState::Querying => (0, None, false),
+            BootstrapState::Halted | BootstrapState::Idle | BootstrapState::Querying => {
+                (0, None, false)
+            }
             BootstrapState::Selected {
                 height,
                 manifest_id,
@@ -151,12 +155,18 @@ pub(super) fn build_bootstrap_status(
         }
     };
 
-    // NiPoPoW + header-availability dashboard fields.
-    // popow_phase / popow_providers will report on the popow_bootstrap
-    // reducer once wired to it; until then, these stay None.
-    // header_availability + popow_dense_from_height reflect what the
-    // store reports — surfaceable today since the persistence layer
-    // is already on disk.
+    let (popow_phase, popow_abandon_reason) =
+        match state.popow_bootstrap.as_ref().map(|popow| popow.state()) {
+            None | Some(PopowBootstrapState::Idle) => (None, None),
+            Some(PopowBootstrapState::Requesting) => (Some(ApiPopowPhase::Requesting), None),
+            Some(PopowBootstrapState::BestSelected) => (Some(ApiPopowPhase::QuorumMet), None),
+            Some(PopowBootstrapState::Applied) => (Some(ApiPopowPhase::Applied), None),
+            Some(PopowBootstrapState::Abandoned { reason }) => {
+                (Some(ApiPopowPhase::Abandoned), Some(reason))
+            }
+        };
+    let popow_providers = state.popow_bootstrap.as_ref().map(|p| p.provider_count());
+
     let (header_availability, popow_dense_from_height) =
         match state.store.chain_state_meta().header_availability {
             ergo_state::chain::HeaderAvailability::Dense => (None, None),
@@ -177,8 +187,9 @@ pub(super) fn build_bootstrap_status(
         chunks_total,
         trust_check_passed,
         started_unix_ms: state.bootstrap_started_unix_ms.unwrap_or(now_unix_ms),
-        popow_phase: None,
-        popow_providers: None,
+        popow_phase,
+        popow_abandon_reason,
+        popow_providers,
         header_availability,
         popow_dense_from_height,
     })
@@ -187,6 +198,24 @@ pub(super) fn build_bootstrap_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- helpers -----
+
+    fn phase_inputs(
+        in_catchup: bool,
+        has_reconstructed_tree: bool,
+        chunk_assembly_complete: bool,
+        has_chunk_assembly: bool,
+    ) -> BootstrapPhaseInputs {
+        BootstrapPhaseInputs {
+            in_catchup,
+            has_reconstructed_tree,
+            chunk_assembly_complete,
+            has_chunk_assembly,
+        }
+    }
+
+    // ----- happy path -----
 
     #[test]
     fn build_bootstrap_status_returns_none_when_utxo_bootstrap_disabled() {
@@ -226,18 +255,30 @@ mod tests {
         );
     }
 
-    fn phase_inputs(
-        in_catchup: bool,
-        has_reconstructed_tree: bool,
-        chunk_assembly_complete: bool,
-        has_chunk_assembly: bool,
-    ) -> BootstrapPhaseInputs {
-        BootstrapPhaseInputs {
-            in_catchup,
-            has_reconstructed_tree,
-            chunk_assembly_complete,
-            has_chunk_assembly,
-        }
+    #[test]
+    fn bootstrap_status_popow_terminal_states_report_actual_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+        state.popow_bootstrap = Some(ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            2,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        ));
+        state.popow_bootstrap.as_mut().unwrap().mark_applied();
+        let applied = build_bootstrap_status(&mut state, 1_000).unwrap();
+        assert_eq!(applied.popow_phase, Some(ApiPopowPhase::Applied));
+        assert!(applied.popow_abandon_reason.is_none());
+
+        state
+            .popow_bootstrap
+            .as_mut()
+            .unwrap()
+            .mark_abandoned("store is not fresh".into());
+        let abandoned = build_bootstrap_status(&mut state, 2_000).unwrap();
+        let json = serde_json::to_value(abandoned).unwrap();
+        assert_eq!(json["popow_phase"], "abandoned");
+        assert_eq!(json["popow_abandon_reason"], "store is not fresh");
+        assert_eq!(json["popow_providers"], 0);
     }
 
     #[test]
@@ -323,6 +364,19 @@ mod tests {
         assert_eq!(
             select_bootstrap_phase(&verified, &phase_inputs(false, true, false, false)),
             ergo_api::types::ApiBootstrapPhase::Installing
+        );
+    }
+    #[test]
+    fn bootstrap_phase_local_failure_reports_halted() {
+        let inputs = BootstrapPhaseInputs {
+            in_catchup: false,
+            has_reconstructed_tree: false,
+            chunk_assembly_complete: false,
+            has_chunk_assembly: false,
+        };
+        assert_eq!(
+            select_bootstrap_phase(&BootstrapState::Halted, &inputs),
+            ergo_api::types::ApiBootstrapPhase::Halted
         );
     }
 }

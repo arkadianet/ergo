@@ -75,8 +75,7 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
     // proof apply can complete before snapshot manifest verification
     // needs a canonical header at snapshot_height. No-op
-    // unless `[node] nipopow_bootstrap = true` AND history is
-    // empty AND the reducer hasn't reached terminal state.
+    // unless NiPoPoW bootstrap is enabled and the reducer is active.
     drive_popow_bootstrap(state, now);
 
     // 0. Mode 2 consume-side discovery fan-out. No-op unless this
@@ -228,25 +227,11 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             // (best_full_block_height, assembly), per executor doc.
             //
             // M5 wallet-hook plumbing: build a `WalletWiring` (hook +
-            // rescan guard) and thread it through the executor so:
-            //   - synchronous-path forward apply commits chain +
-            //     wallet inside the same redb write_txn (truly
-            //     atomic).
-            //   - pipeline-path forward apply flushes the queued
-            //     chain batch (with fsync in IBD) BEFORE the wallet
-            //     write_txn — chain durable, then wallet. Still
-            //     two-commit, not atomic; closing this seam requires
-            //     pipeline-worker integration that does not yet exist.
-            //   - rollback path (executor →
-            //     rollback_full_chain_to_best_header → store
-            //     rollback_to) rolls back chain + wallet inside a
-            //     single write_txn; the rescan guard
-            //     unconditionally invalidates wallet scan state
-            //     when wallet history cannot be replayed (missing
-            //     section / read error), forcing a rescan on
-            //     restart.
-            // The prior post-apply hook fire on a separate write_txn
-            // is removed — it was the pre-M5 non-atomic seam.
+            // rescan guard) and thread it through the executor so chain +
+            // wallet writes commit in one redb transaction on both the
+            // synchronous and persist-pipeline paths. Rollback also rewinds
+            // wallet state atomically; missing required sections invalidate
+            // wallet scan state for a full rescan.
             let rescan_guard = crate::wallet_boot::ProdRescanGuard;
             let wallet_wiring =
                 state
@@ -322,7 +307,9 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
     } else {
         state.sync_interval_stable
     };
-    if now.duration_since(state.last_sync_broadcast) >= broadcast_interval {
+    if !super::sync_helpers::popow_blocks_sync_info(state)
+        && now.duration_since(state.last_sync_broadcast) >= broadcast_interval
+    {
         state.last_sync_broadcast = now;
 
         let connected: Vec<(PeerId, SyncVersion)> = state
@@ -394,14 +381,10 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
 ///
 /// Returns early when:
 /// * the node wasn't booted with `utxo_bootstrap = true`, or
-/// * we already have applied UTXO state (`best_full_block > 0`), or
-/// * quorum has been reached (`BootstrapState::Selected`).
+/// * we already have applied UTXO state (`best_full_block > 0`).
 ///
-/// Until part 2j lifts the activation gate this is effectively
-/// dead code in production — `utxo_bootstrap_enabled` is always
-/// false because `validate_runtime_mode_support` refuses the
-/// config that would set it true. The plumbing flips on
-/// automatically when the gate lifts.
+/// The reducer suppresses discovery after selection unless an authenticated
+/// manifest retry has exhausted its voters and needs fresh suppliers.
 fn request_snapshots_info_fan_out(state: &mut NodeState) {
     if !state.utxo_bootstrap_enabled {
         return;
@@ -409,13 +392,6 @@ fn request_snapshots_info_fan_out(state: &mut NodeState) {
     if state.store.chain_state_meta().best_full_block_height > 0 {
         return;
     }
-    if matches!(
-        state.snapshot_bootstrap.state(),
-        BootstrapState::Selected { .. }
-    ) {
-        return;
-    }
-
     // Collect eligible peers up front so the registry borrow ends
     // before the mutating `mark_queried` calls.
     let eligible: Vec<PeerId> = state
@@ -487,10 +463,10 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     use ergo_validation::popow::NipopowVerificationResult;
 
     // Activity gate: the reducer stays active while the store is
-    // still in Dense mode (no proof applied yet). We deliberately do
-    // NOT gate on `best_header_height == 0` — normal header sync can
-    // race ahead between boot and quorum-met, but apply_popow_proof
-    // only refuses to run after the mode flips to PoPowSparse.
+    // still in Dense mode (no proof applied yet). The store's
+    // fresh-only precondition rejects a Dense store whose header tip
+    // is nonzero; that refusal is handled below without changing the
+    // existing header tables.
     let store_is_dense = matches!(
         state.store.chain_state_meta().header_availability,
         ergo_state::chain::HeaderAvailability::Dense
@@ -498,12 +474,7 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
     let Some(popow) = state.popow_bootstrap.as_mut() else {
         return;
     };
-    if !store_is_dense
-        || matches!(
-            popow.state(),
-            ergo_sync::popow_bootstrap::PopowBootstrapState::Applied
-        )
-    {
+    if !store_is_dense || popow.is_terminal() {
         return;
     }
 
@@ -585,12 +556,12 @@ fn drive_popow_bootstrap(state: &mut NodeState, now: Instant) {
                 Err(e) => {
                     warn!(
                         error = %e,
-                        "NiPoPoW: apply_popow_proof failed; bootstrap aborted",
+                        "NiPoPoW: proof application refused; bootstrap abandoned",
                     );
-                    // Best-effort: clear the reducer so subsequent
-                    // ticks don't loop on the same proof.
+                    // Terminal failure releases outbound header sync without
+                    // reporting a proof that never committed as applied.
                     if let Some(popow) = state.popow_bootstrap.as_mut() {
-                        popow.mark_applied();
+                        popow.mark_abandoned(e.to_string());
                     }
                 }
             }
@@ -710,16 +681,17 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         )
     {
         let Some(bytes) = state.snapshot_bootstrap.take_verified_manifest_bytes() else {
+            halt_snapshot_bootstrap(
+                state,
+                &"verified manifest bytes missing during assembly initialization",
+            );
             return;
         };
         let expected_ids =
             match ergo_state::avl::snapshot_codec::enumerate_expected_chunk_ids(&bytes) {
                 Ok(ids) => ids,
                 Err(e) => {
-                    warn!(
-                        error = %e,
-                        "Mode 2: manifest enumeration failed; bootstrap halted (restart data_dir)",
-                    );
+                    halt_snapshot_bootstrap(state, &e);
                     return;
                 }
             };
@@ -731,6 +703,14 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
             expected_ids,
         ));
         state.pending_manifest_bytes = Some(bytes);
+    }
+
+    if state.chunk_assembly.is_some()
+        && state.reconstructed_tree.is_none()
+        && state.pending_manifest_bytes.is_none()
+    {
+        halt_snapshot_bootstrap(state, &"chunk assembly is missing its manifest handoff");
+        return;
     }
 
     // Steps 2 + 3: drive the assembly (split borrows below).
@@ -764,7 +744,7 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
         let voter_set: std::collections::HashSet<PeerId> = voters.iter().copied().collect();
         let mut pool: Vec<PeerId> = voters;
         for p in state.peer_manager.block_section_capable_peers(now) {
-            if !voter_set.contains(&p) {
+            if !voter_set.contains(&p) && !state.snapshot_bootstrap.supplier_excluded(&p) {
                 pool.push(p);
             }
         }
@@ -825,17 +805,14 @@ fn drive_chunk_download(state: &mut NodeState, now: Instant) {
                         state.reconstructed_tree = Some(tree);
                     }
                     Err(e) => {
-                        warn!(
-                            error = %e,
-                            "Mode 2: reconstruction failed; bootstrap halted (restart data_dir)",
-                        );
+                        handle_snapshot_reconstruction_error(state, e);
                     }
                 }
             }
             _ => {
-                warn!(
-                    "Mode 2: assembly complete but missing chunks or manifest bytes — \
-                     init-time bug; bootstrap halted",
+                halt_snapshot_bootstrap(
+                    state,
+                    &"assembly complete but missing chunks or manifest bytes",
                 );
             }
         }
@@ -917,15 +894,8 @@ pub(crate) fn resolve_install_anchor(
     })
 }
 
-/// Put a taken-but-not-yet-installed `reconstructed_tree` back so
-/// the next `sync_tick` can retry the install. Centralizes the
-/// restore so `install_reconstructed_snapshot`'s early returns
-/// (and PR #313's checkpoint-anchor early return in the same
-/// function) converge on one call site instead of each
-/// reimplementing `state.reconstructed_tree = Some(reconstructed)`.
-/// Deliberately NOT used by the `InstallAnchor::UnreachableGap`
-/// arm, which abandons this manifest/epoch rather than deferring
-/// a retry of it.
+/// Retain the one-shot reconstruction while header catchup or a checkpoint
+/// anchor is still pending. Recovery and local failures discard it instead.
 fn defer_reconstructed_tree(
     state: &mut NodeState,
     reconstructed: ergo_state::avl::snapshot_codec::ReconstructedTree,
@@ -933,37 +903,93 @@ fn defer_reconstructed_tree(
     state.reconstructed_tree = Some(reconstructed);
 }
 
+/// Discard an unusable epoch, such as an unreachable or reorged anchor.
+/// Supplier-only failures must preserve the authenticated epoch instead.
+pub(super) fn recover_snapshot_bootstrap(
+    state: &mut NodeState,
+    culprit: Option<PeerId>,
+) -> Vec<ergo_sync::coordinator::Action> {
+    state.chunk_assembly = None;
+    state.pending_manifest_bytes = None;
+    state.reconstructed_tree = None;
+    state.snapshot_bootstrap.reject_current_manifest(culprit);
+    culprit
+        .into_iter()
+        .map(|peer| ergo_sync::coordinator::Action::Penalize {
+            peer,
+            penalty: ergo_p2p::peer::Penalty::Misbehavior,
+        })
+        .collect()
+}
+
+pub(super) fn halt_snapshot_bootstrap(state: &mut NodeState, reason: &dyn std::fmt::Display) {
+    tracing::error!(error = %reason, "snapshot bootstrap stopped; operator intervention required");
+    state.chunk_assembly = None;
+    state.pending_manifest_bytes = None;
+    state.reconstructed_tree = None;
+    state.snapshot_bootstrap.halt();
+}
+
+/// Retry authenticated manifests with invalid metadata from another supplier;
+/// reject the epoch only after three distinct servers fail. Local errors halt.
+/// Chunks have already been consumed, so a replacement manifest starts a new assembly.
+/// Scala `avldb/.../ProxyInternalProverNode.scala:21-22` hashes balance and child
+/// labels, excluding separator keys; root authentication cannot verify separators.
+fn handle_snapshot_reconstruction_error(
+    state: &mut NodeState,
+    error: ergo_state::store::StateError,
+) {
+    if matches!(
+        error,
+        ergo_state::store::StateError::InvalidSnapshotManifest(_)
+    ) {
+        let target = state.snapshot_bootstrap.state();
+        let Some((peer, failures)) = state.snapshot_bootstrap.retry_verified_manifest() else {
+            halt_snapshot_bootstrap(
+                state,
+                &"manifest reconstruction failed without a verified supplier",
+            );
+            return;
+        };
+        state.chunk_assembly = None;
+        state.pending_manifest_bytes = None;
+        state.reconstructed_tree = None;
+        if failures >= 3 {
+            warn!(error = %error, %peer, ?target, failures,
+                "Mode 2: three distinct manifest suppliers failed; rejecting snapshot epoch");
+        } else {
+            warn!(error = %error, %peer, ?target, failures,
+                "Mode 2: invalid manifest metadata; evicting supplier and retrying the same epoch");
+        }
+        flush_actions(
+            state,
+            vec![ergo_sync::coordinator::Action::Penalize {
+                peer,
+                penalty: ergo_p2p::peer::Penalty::Misbehavior,
+            }],
+        );
+    } else {
+        // Manifest parsing and chunk authentication already succeeded at ingress.
+        // Repeating those operations or splicing arenas cannot implicate a new peer.
+        halt_snapshot_bootstrap(state, &error);
+    }
+}
+
 /// Mode 2 consume-side: install the reconstructed UTXO snapshot
 /// into the running `StateStore`. Final step of bootstrap.
 ///
-/// Re-verifies trust at install time: looks up
-/// `header.state_root` at the snapshot height again and confirms
-/// the reconstructed tree's root still matches. This catches
-/// reorgs that may have flipped the canonical header at the
-/// snapshot height between 2g's trust check and now. On
-/// mismatch, the mismatch is permanent (a code bug, not a
-/// transient condition) — the tree is put back so the function
-/// stays retry-safe, but the same check will keep failing every
-/// tick and the operator restarts with a fresh data_dir.
+/// Re-fetches the canonical header before installation. Unreachable epochs
+/// return to discovery and are excluded for the rest of this session. Local
+/// errors (including store refusal, I/O and broken invariants) stop bootstrap
+/// with an ERROR and leave peer votes untouched. Authenticated data that no
+/// longer matches the canonical root is a reorg, so its epoch is abandoned
+/// without penalizing the supplier.
 ///
-/// On success, sets `best_full_block_height = snapshot_height`
-/// and `best_full_block_id = header_id`, atomically with the
-/// AVL_NODES bulk-write and STATE_META update. The normal block-
-/// sync path then takes over from `snapshot_height + 1`.
-///
-/// Every early return below that has not moved `reconstructed`
-/// into [`defer_reconstructed_tree`] (or handed it to
-/// `install_snapshot_state` at the bottom) MUST route through
-/// that helper first. Reconstruction is one-shot: the step-3
-/// trigger above requires both `chunk_assembly` completion and
-/// `pending_manifest_bytes`, and this function's `take()` already
-/// consumed both (`take_chunks()` + `.take()`) by the time any of
-/// these arms run. Drop the tree here without restoring it and no
-/// later tick can ever rebuild it — bootstrap silently stalls
-/// forever with a verified manifest it can never install. The one
-/// deliberate exception is `InstallAnchor::UnreachableGap`: that
-/// arm is abandoning this manifest/epoch on purpose, not deferring
-/// a retry of the same one, so the stale tree must NOT come back.
+/// Reachable header gaps and pending checkpoint anchors retain the reconstructed
+/// tree for a later tick. Reconstruction consumes the manifest and chunks once;
+/// deferral must retain the tree, while recovery and halt clear the entire handoff.
+/// On success, the store atomically installs the tree and snapshot chain position,
+/// then normal block sync resumes at `snapshot_height + 1`.
 fn install_reconstructed_snapshot(state: &mut NodeState) {
     let Some(reconstructed) = state.reconstructed_tree.take() else {
         return;
@@ -980,7 +1006,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 state = ?other,
                 "Mode 2: install called without ManifestVerified — bootstrap halted",
             );
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &"install called without ManifestVerified");
+            return;
         }
     };
 
@@ -990,14 +1017,17 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
         warn!(
             reconstructed = %hex::encode(reconstructed.root_label.as_bytes()),
             manifest_id = %hex::encode(manifest_id),
-            "Mode 2: reconstructed root mismatches manifest_id (code bug); halted",
+            "Mode 2: reconstructed root mismatches manifest_id",
         );
-        return defer_reconstructed_tree(state, reconstructed);
+        halt_snapshot_bootstrap(
+            state,
+            &"reconstructed root mismatches authenticated manifest",
+        );
+        return;
     }
 
     // Re-fetch the canonical header at snapshot_height. A reorg
-    // since the earlier trust check would flip this; the install
-    // would then refuse on root mismatch and the operator restarts.
+    // since the earlier trust check can change the committed state root.
     let header_id = match resolve_install_anchor(
         state
             .store
@@ -1014,19 +1044,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             return defer_reconstructed_tree(state, reconstructed);
         }
         Ok(InstallAnchor::UnreachableGap { dense_from_height }) => {
-            // Reaching this arm at install time (rather than at
-            // manifest-verify time in `messaging/manifest.rs`) means
-            // the NiPoPoW proof landed AFTER this manifest already
-            // verified against the canonical header — a narrow
-            // tick-ordering race; Scala has no install-time check
-            // here at all. The manifest itself is not dishonest, it
-            // is just unreachable now: forward catchup can never
-            // index below `dense_from_height`. Self-heal exactly like
-            // the manifest-phase arm — drop the now-unreachable
-            // manifest and any in-flight chunk-assembly state for it,
-            // evict its voter, and fall back to discovery so a voter
-            // advertising a reachable epoch can be selected instead,
-            // rather than halting the node permanently.
+            // A proof can arrive after manifest verification. This epoch is
+            // now unreachable, so exclude it without blaming its honest server.
             warn!(
                 height = snapshot_height,
                 dense_from_height,
@@ -1035,31 +1054,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                  verified manifest is unreachable from this proof; dropping it \
                  and returning to manifest discovery for a reachable epoch.",
             );
-            state.chunk_assembly = None;
-            state.pending_manifest_bytes = None;
-            // Evict a voter for the manifest we are ACTUALLY committed
-            // to (verified > pending > selected, via
-            // `voters_for_selected_manifest`'s latched target) — not
-            // `voter_for_selected_manifest`'s live `selected` tally.
-            // `selected` is recomputed on every incoming vote even
-            // while a manifest sits `verified` (`recompute_selection`
-            // does not consult the latch), so a later quorum for a
-            // *different* manifest B can silently repoint `selected`
-            // at B while `state()` still reports A as verified. Using
-            // the live tally here would evict a B voter and clear A's
-            // latch — leaving unreachable A retryable and damaging B's
-            // still-good quorum. The latched voter list always names A.
-            match state
-                .snapshot_bootstrap
-                .voters_for_selected_manifest()
-                .into_iter()
-                .next()
-            {
-                Some(peer) => state
-                    .snapshot_bootstrap
-                    .reject_manifest_and_evict_voter(peer),
-                None => state.snapshot_bootstrap.drop_verified_manifest(),
-            }
+            let actions = recover_snapshot_bootstrap(state, None);
+            flush_actions(state, actions);
             return;
         }
         Ok(InstallAnchor::AboveTip) => {
@@ -1067,30 +1063,48 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
                 height = snapshot_height,
                 "Mode 2: install — snapshot height above best_header_height; halted",
             );
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &"snapshot height above best header tip");
+            return;
         }
         Err(e) => {
-            warn!(error = %e, "Mode 2: install — chain index lookup failed; halted");
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
     let header_bytes = match state.store.get_header(&header_id) {
         Ok(Some(b)) => b,
-        _ => {
-            warn!(
-                header_id = %hex::encode(header_id),
-                "Mode 2: install — header bytes missing; halted",
-            );
-            return defer_reconstructed_tree(state, reconstructed);
+        Ok(None) => {
+            halt_snapshot_bootstrap(state, &"snapshot header bytes missing");
+            return;
+        }
+        Err(e) => {
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
     let header = match read_header(&mut VlqReader::new(&header_bytes)) {
         Ok(h) => h,
         Err(e) => {
-            warn!(error = %e, "Mode 2: install — header parse failed; halted");
-            return defer_reconstructed_tree(state, reconstructed);
+            halt_snapshot_bootstrap(state, &e);
+            return;
         }
     };
+
+    if ergo_sync::snapshot_bootstrap::verify_manifest_against_state_root(
+        &manifest_id,
+        reconstructed.tree_height,
+        &header.state_root,
+    )
+    .is_err()
+    {
+        warn!(
+            height = snapshot_height,
+            "snapshot canonical state root changed; abandoning epoch"
+        );
+        let actions = recover_snapshot_bootstrap(state, None);
+        flush_actions(state, actions);
+        return;
+    }
 
     let snapshot_height_u32 = snapshot_height as u32;
 
@@ -1111,12 +1125,8 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             Ok(ergo_state::chain::HeightLookup::SparseGap)
             | Ok(ergo_state::chain::HeightLookup::AboveTip) => None,
             Err(e) => {
-                warn!(
-                    error = %e,
-                    "Mode 2: install — checkpoint-height chain lookup failed; \
-                     deferring (retried next tick)",
-                );
-                return defer_reconstructed_tree(state, reconstructed);
+                halt_snapshot_bootstrap(state, &e);
+                return;
             }
         };
         if let Err(e) = ergo_sync::snapshot_bootstrap::snapshot_install_anchor_check(
@@ -1228,12 +1238,7 @@ fn install_reconstructed_snapshot(state: &mut NodeState) {
             state.executor.reset_recovery_done();
         }
         Err(e) => {
-            warn!(
-                error = %e,
-                "Mode 2: install failed (reorg between 2g and 2i? \
-                 reconstruction bug?) — operator must restart \
-                 with a fresh data_dir",
-            );
+            halt_snapshot_bootstrap(state, &e);
         }
     }
 }
@@ -1329,7 +1334,7 @@ fn refresh_api_identity(state: &mut NodeState) {
 /// Every counter here is a known memory lever or leak indicator (issue
 /// #257): delivery-tracker maps, orphan buffer, peer/ban/address-book
 /// containers, mempool depth. Static cadence anchor follows the
-/// `RESCAN_IN_PROGRESS` static precedent — the action loop is the single
+/// `ACTIVE_RESCAN` static precedent — the action loop is the single
 /// caller, so a process-wide millisecond anchor is sufficient and avoids
 /// growing `NodeState`'s constructor surface again.
 fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
@@ -1404,10 +1409,19 @@ fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_reconstructed_snapshot, resolve_install_anchor, InstallAnchor};
+    use super::{
+        install_reconstructed_snapshot, recover_snapshot_bootstrap, resolve_install_anchor,
+        InstallAnchor,
+    };
+    use ergo_primitives::reader::VlqReader;
+    use ergo_ser::header::read_header;
+    use ergo_ser::popow_proof::NipopowProof;
     use ergo_state::store::StateStore;
     use ergo_state::test_helpers::nipopow_proof_dense_from_2;
+    use ergo_state::HeaderSectionStore;
     use ergo_sync::snapshot_bootstrap::BootstrapState;
+    use ergo_validation::popow::algos::{build_popow_header, pack_interlinks, update_interlinks};
+    use ergo_validation::popow::proof::check_popow_header_interlinks_proof;
 
     // ----- helpers -----
 
@@ -1434,6 +1448,87 @@ mod tests {
     /// `dense_from_height` the fixture proof commits.
     const PROOF_DENSE_FROM_HEIGHT: u32 = 2;
 
+    fn production_profile_popow_proof() -> NipopowProof {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/headers_1_2000.json"
+        ))
+        .unwrap();
+        let headers: Vec<_> = rows
+            .iter()
+            .take(11)
+            .map(|row| {
+                let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+                read_header(&mut VlqReader::new(&bytes)).unwrap()
+            })
+            .collect();
+        assert_eq!(headers.len(), 11);
+        for (index, header) in headers.iter().enumerate() {
+            assert_eq!(header.height, index as u32 + 1);
+        }
+
+        let mut interlinks = Vec::new();
+        let mut popow_headers = Vec::with_capacity(headers.len());
+        for (index, header) in headers.iter().enumerate() {
+            if index > 0 {
+                interlinks = update_interlinks(&headers[index - 1], &interlinks).unwrap();
+            }
+            let extension_fields = pack_interlinks(&interlinks);
+            popow_headers.push(
+                build_popow_header(header.clone(), interlinks.clone(), &extension_fields).unwrap(),
+            );
+        }
+        assert_eq!(popow_headers[0].interlinks_proof, vec![0u8; 8]);
+        for popow_header in popow_headers.iter().skip(1) {
+            assert!(!popow_header.interlinks.is_empty());
+            assert!(check_popow_header_interlinks_proof(popow_header));
+        }
+
+        NipopowProof {
+            m: ergo_p2p::types::P2P_NIPOPOW_PROOF_M as u32,
+            k: ergo_p2p::types::P2P_NIPOPOW_PROOF_K as u32,
+            prefix: vec![popow_headers[0].clone()],
+            suffix_head: popow_headers[1].clone(),
+            suffix_tail: headers[2..].to_vec(),
+            continuous: true,
+        }
+    }
+
+    fn fresh_popow() -> ergo_sync::popow_bootstrap::PopowBootstrap {
+        ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            2,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        )
+    }
+
+    fn sync_info_count(rx: &mut crate::peer_loop::outbound::Receiver) -> usize {
+        let mut count = 0;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.code == ergo_p2p::message::CODE_SYNC_INFO {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn reply_to_sync(
+        state: &mut crate::node::NodeState,
+        peer: ergo_p2p::peer::PeerId,
+        now: std::time::Instant,
+    ) {
+        let actions = state.coordinator.on_sync_info(
+            peer,
+            state.registry.peers[&peer].sync_version,
+            &ergo_p2p::message::SyncInfo::V1 {
+                header_ids: vec![[1; 32]],
+            },
+            &state.store,
+            now,
+        );
+        // Exercise the real dispatch boundary for reciprocal replies.
+        super::flush_actions(state, actions);
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -1456,6 +1551,100 @@ mod tests {
         let now = base + ergo_p2p::peer::INACTIVE_TIMEOUT + std::time::Duration::from_secs(100);
         super::handle_sync_tick_at(&mut state, now);
         assert_eq!(state.peer_manager.peer_count(), 0);
+    }
+
+    #[test]
+    fn sync_info_fresh_popow_waits_until_proof_applied() {
+        use ergo_p2p::peer::SyncVersion;
+        use std::time::{Duration, Instant};
+        for version in [SyncVersion::V1, SyncVersion::V2] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+            state.popow_bootstrap = Some(fresh_popow());
+            let peer = "127.0.0.1:19001".parse().unwrap();
+            let now = Instant::now();
+            let mut rx = crate::node::tests::connect_test_peer(&mut state, peer, now);
+            state.registry.peers.get_mut(&peer).unwrap().sync_version = version;
+            state.last_sync_broadcast = now - Duration::from_secs(60);
+            let last_broadcast = state.last_sync_broadcast;
+            state.enable_anchor_scheduler = true;
+
+            crate::node::sync_helpers::send_initial_sync_info(&mut state, &peer, version, now);
+            reply_to_sync(&mut state, peer, now);
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(sync_info_count(&mut rx), 0);
+            assert_eq!(state.last_sync_broadcast, last_broadcast);
+            assert!(state
+                .coordinator
+                .sync_state_mut()
+                .not_synced_or_outdated(peer, now));
+            assert!(state.registry.peers.contains_key(&peer));
+
+            let proof = production_profile_popow_proof();
+            let popow = state.popow_bootstrap.as_mut().unwrap();
+            popow.mark_requested(peer, now);
+            assert!(matches!(
+                popow.on_proof_received(peer, proof.clone()),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(
+                sync_info_count(&mut rx),
+                0,
+                "one proof must not release quorum=2"
+            );
+            let other = "127.0.0.1:19002".parse().unwrap();
+            let popow = state.popow_bootstrap.as_mut().unwrap();
+            popow.mark_requested(other, now);
+            assert!(matches!(
+                popow.on_proof_received(other, proof),
+                ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+            ));
+
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(
+                state.popow_bootstrap.as_ref().unwrap().state(),
+                ergo_sync::popow_bootstrap::PopowBootstrapState::Applied
+            );
+            assert_eq!(
+                sync_info_count(&mut rx),
+                1,
+                "apply must release periodic sync in the same tick"
+            );
+            reply_to_sync(&mut state, peer, now + Duration::from_secs(1));
+            assert_eq!(sync_info_count(&mut rx), 1);
+            crate::node::sync_helpers::send_initial_sync_info(&mut state, &peer, version, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+        }
+    }
+
+    #[test]
+    fn sync_info_without_popow_or_after_abandonment_sends_normally() {
+        use std::time::{Duration, Instant};
+        for abandoned in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+            if abandoned {
+                let mut popow = fresh_popow();
+                popow.mark_abandoned("proof could not be applied".into());
+                state.popow_bootstrap = Some(popow);
+            }
+            let peer = "127.0.0.1:19001".parse().unwrap();
+            let now = Instant::now();
+            let mut rx = crate::node::tests::connect_test_peer(&mut state, peer, now);
+            state.last_sync_broadcast = now - Duration::from_secs(60);
+            super::handle_sync_tick_at(&mut state, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+            reply_to_sync(&mut state, peer, now);
+            assert_eq!(sync_info_count(&mut rx), 1);
+            crate::node::sync_helpers::send_initial_sync_info(
+                &mut state,
+                &peer,
+                ergo_p2p::peer::SyncVersion::V2,
+                now,
+            );
+            assert_eq!(sync_info_count(&mut rx), 1);
+        }
     }
 
     #[test]
@@ -1510,6 +1699,50 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn sync_tick_dense_header_tip_advanced_abandons_popow_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let seeded = ergo_state::test_helpers::seed_dense_mainnet_headers(&mut store, 1).unwrap();
+        let (tip_height, tip_id) = *seeded.last().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(store);
+
+        let proof = production_profile_popow_proof();
+        let mut popow = ergo_sync::popow_bootstrap::PopowBootstrap::new(
+            1,
+            None,
+            ergo_chain_spec::DifficultyParams::mainnet(),
+        );
+        let peer: ergo_p2p::peer::PeerId = "127.0.0.1:19001".parse().unwrap();
+        let now = std::time::Instant::now();
+        popow.mark_requested(peer, now);
+        assert!(matches!(
+            popow.on_proof_received(peer, proof),
+            ergo_sync::popow_bootstrap::PopowProofOutcome::Verified(_)
+        ));
+        assert!(popow.quorum_reached());
+        state.popow_bootstrap = Some(popow);
+        assert!(!crate::node::sync_helpers::popow_blocks_sync_info(&state));
+
+        super::drive_popow_bootstrap(&mut state, now);
+
+        let store = state.store.as_utxo().unwrap();
+        assert_eq!(store.chain_state().best_header_height, tip_height);
+        assert_eq!(store.chain_state().best_header_id, tip_id);
+        assert!(matches!(
+            store.chain_state().header_availability,
+            ergo_state::chain::HeaderAvailability::Dense
+        ));
+        assert!(matches!(
+            state.popow_bootstrap.as_ref().unwrap().state(),
+            ergo_sync::popow_bootstrap::PopowBootstrapState::Abandoned { reason }
+                if reason.contains("store is not fresh")
+        ));
+        assert!(!crate::node::sync_helpers::popow_blocks_sync_info(&state));
+        super::drive_popow_bootstrap(&mut state, now);
+        assert!(state.popow_bootstrap.as_ref().unwrap().is_terminal());
+    }
 
     #[test]
     fn resolve_install_anchor_sparse_prefix_height_is_unreachable_not_deferred() {
@@ -1652,17 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn install_reconstructed_snapshot_unreachable_gap_evicts_latched_voter_not_selected() {
-        // CodeRabbit #319 (PRRT_kwDOSmAf_c6feH2x): the `UnreachableGap`
-        // recovery arm used `voter_for_selected_manifest()`, which reads the
-        // live `selected` tally. `selected` is recomputed on every vote
-        // regardless of whether a manifest is already `verified` — so once
-        // manifest A verifies and a later quorum selects a higher-height
-        // manifest B, `selected` silently flips to B while `state()` still
-        // reports A. Evicting "the selected manifest's voter" then evicts a
-        // B voter and clears A's latch, leaving A retryable and damaging B's
-        // still-good quorum. The fix targets `voters_for_selected_manifest()`
-        // (verified > pending > selected), which stays pinned to A.
+    fn install_reconstructed_snapshot_unreachable_gap_rejects_latched_epoch_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = popow_sparse_store(&dir);
 
@@ -1703,15 +1926,406 @@ mod tests {
                 height: DENSE_TIP_HEIGHT as i32,
                 manifest_id: manifest_b,
             },
-            "recovering from A's UnreachableGap must evict an A voter and drop \
-             A's latch, leaving B's untouched 3-vote quorum selected — the \
-             buggy `voter_for_selected_manifest()` path evicted a B voter \
-             instead, which would drop B below quorum here",
+            "rejecting unreachable A must preserve B's quorum",
         );
         assert!(
             state.reconstructed_tree.is_none(),
             "UnreachableGap abandons this manifest/epoch on purpose — the \
              stale tree for A must not come back",
         );
+    }
+
+    #[test]
+    fn recover_snapshot_bootstrap_clears_one_shot_state_and_reopens_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let manifest_id = [0xAA; 32];
+        state.snapshot_bootstrap = verified_bootstrap(52_224, manifest_id, 1);
+        for port in 1..=3u16 {
+            state.snapshot_bootstrap.mark_queried(synthetic_voter(port));
+        }
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            ergo_primitives::digest::Digest32::from_bytes([0x11; 32]),
+        ]));
+        state.pending_manifest_bytes = Some(vec![1, 2, 3]);
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
+            tree_height: 0,
+        });
+
+        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
+        let actions = recover_snapshot_bootstrap(&mut state, culprit);
+        assert!(
+            matches!(actions.as_slice(), [ergo_sync::coordinator::Action::Penalize { peer, .. }] if Some(*peer) == culprit)
+        );
+
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state.reconstructed_tree.is_none());
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        assert!(state.snapshot_bootstrap.should_query(&synthetic_voter(1)));
+        assert!(state
+            .snapshot_bootstrap
+            .take_verified_manifest_bytes()
+            .is_none());
+    }
+
+    #[test]
+    fn recover_snapshot_bootstrap_many_voters_penalizes_recorded_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let id = [0xAA; 32];
+        for port in 1..=32 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port), &[(100, id)]);
+        }
+        let server = state.snapshot_bootstrap.voters_for_selected_manifest()[1];
+        state.snapshot_bootstrap.mark_manifest_requested(
+            server,
+            100,
+            id,
+            std::time::Instant::now(),
+        );
+        state.snapshot_bootstrap.accept_verified_manifest(vec![]);
+        state.snapshot_bootstrap.take_verified_manifest_bytes();
+        let culprit = state.snapshot_bootstrap.verified_manifest_peer();
+        let actions = recover_snapshot_bootstrap(&mut state, culprit);
+        assert!(
+            matches!(actions.as_slice(), [ergo_sync::coordinator::Action::Penalize { peer, .. }] if *peer == server)
+        );
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Querying);
+        for port in 1..=32 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port), &[(100, id)]);
+        }
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+    }
+
+    #[test]
+    fn install_reconstructed_snapshot_store_refusal_halts_without_rotating_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = popow_sparse_store(&dir);
+        let canonical_id = store
+            .get_header_id_at_height(DENSE_TIP_HEIGHT)
+            .unwrap()
+            .unwrap();
+        store
+            .test_force_set_best_full_block_unsafe(canonical_id, DENSE_TIP_HEIGHT)
+            .unwrap();
+        let mut state = crate::node::tests::make_state_with_store(store);
+        let header_bytes = state.store.get_header(&canonical_id).unwrap().unwrap();
+        let header = ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(
+            &header_bytes,
+        ))
+        .unwrap();
+        let manifest_id: [u8; 32] = header.state_root.as_bytes()[..32].try_into().unwrap();
+        state.snapshot_bootstrap = verified_bootstrap(DENSE_TIP_HEIGHT as i32, manifest_id, 1);
+        for port in 1..=3u16 {
+            state.snapshot_bootstrap.mark_queried(synthetic_voter(port));
+        }
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            ergo_primitives::digest::Digest32::from_bytes([0x11; 32]),
+        ]));
+        state.pending_manifest_bytes = Some(vec![1, 2, 3]);
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes(manifest_id),
+            tree_height: header.state_root.tree_height_byte(),
+        });
+
+        let voters = state.snapshot_bootstrap.voters_for_selected_manifest();
+        install_reconstructed_snapshot(&mut state);
+        assert_eq!(
+            state.snapshot_bootstrap.voters_for_selected_manifest(),
+            voters
+        );
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state.reconstructed_tree.is_none());
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+        assert!(state
+            .snapshot_bootstrap
+            .take_verified_manifest_bytes()
+            .is_none());
+    }
+
+    #[test]
+    fn install_reconstructed_snapshot_root_mismatch_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let manifest_id = [0xAA; 32];
+        state.snapshot_bootstrap = verified_bootstrap(52_224, manifest_id, 1);
+        for port in 1..=3u16 {
+            state.snapshot_bootstrap.mark_queried(synthetic_voter(port));
+        }
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            ergo_primitives::digest::Digest32::from_bytes([0x11; 32]),
+        ]));
+        state.pending_manifest_bytes = Some(vec![1, 2, 3]);
+        state.reconstructed_tree = Some(ergo_state::avl::snapshot_codec::ReconstructedTree {
+            nodes: Vec::new(),
+            root_label: ergo_primitives::digest::Digest32::from_bytes([0xBB; 32]),
+            tree_height: 0,
+        });
+
+        install_reconstructed_snapshot(&mut state);
+
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state.reconstructed_tree.is_none());
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+    }
+
+    #[test]
+    fn drive_chunk_download_missing_manifest_handoff_halts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let manifest_id = [0xAA; 32];
+        state.snapshot_bootstrap = verified_bootstrap(52_224, manifest_id, 1);
+        state.utxo_bootstrap_enabled = true;
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            ergo_primitives::digest::Digest32::from_bytes([0x11; 32]),
+        ]));
+
+        super::drive_chunk_download(&mut state, std::time::Instant::now());
+
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state.reconstructed_tree.is_none());
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+    }
+
+    #[test]
+    fn reconstruction_local_error_halts_without_rotating_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        let voters = state.snapshot_bootstrap.voters_for_selected_manifest();
+        super::handle_snapshot_reconstruction_error(
+            &mut state,
+            ergo_state::store::StateError::Serialization("splice invariant".into()),
+        );
+        assert_eq!(state.snapshot_bootstrap.state(), BootstrapState::Halted);
+        assert_eq!(
+            state.snapshot_bootstrap.voters_for_selected_manifest(),
+            voters
+        );
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
+    }
+
+    #[test]
+    fn drive_chunk_download_excluded_supplier_skips_archive_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        let bad_server = synthetic_voter(1);
+        let now = std::time::Instant::now();
+        state
+            .peer_manager
+            .register_outbound(bad_server, now)
+            .unwrap();
+        state.peer_manager.mark_tcp_connected(&bad_server);
+        let mut spec = state.our_handshake.peer_spec.clone();
+        spec.features.push(ergo_p2p::handshake::PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        state
+            .peer_manager
+            .complete_handshake(&bad_server, spec, None, now)
+            .unwrap();
+        assert_eq!(
+            state.peer_manager.block_section_capable_peers(now),
+            vec![bad_server]
+        );
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            bad_server,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        // With no remaining voters, the archive fallback is the only candidate.
+        state.snapshot_bootstrap.evict_snapshot_supplier(bad_server);
+        state
+            .snapshot_bootstrap
+            .on_peer_disconnect(&synthetic_voter(2));
+        state
+            .snapshot_bootstrap
+            .on_peer_disconnect(&synthetic_voter(3));
+        let chunk = ergo_primitives::digest::Digest32::from_bytes([0xBB; 32]);
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![
+            chunk,
+        ]));
+        state.pending_manifest_bytes = Some(vec![]);
+        super::drive_chunk_download(&mut state, now);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            state.chunk_assembly.as_ref().unwrap().next_to_request(),
+            vec![chunk]
+        );
+    }
+
+    #[test]
+    fn manifest_retry_exhausted_voters_queries_fresh_supplier() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(100, [0xAA; 32], 1);
+        state.snapshot_bootstrap.retry_verified_manifest().unwrap();
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .on_peer_disconnect(&synthetic_voter(port));
+        }
+        let peer = synthetic_voter(4);
+        let now = std::time::Instant::now();
+        state.peer_manager.register_outbound(peer, now).unwrap();
+        state.peer_manager.mark_tcp_connected(&peer);
+        let mut spec = state.our_handshake.peer_spec.clone();
+        spec.features.push(ergo_p2p::handshake::PeerFeature::Mode {
+            state_type: 0,
+            verify_tx: true,
+            nipopow: None,
+            blocks_to_keep: -1,
+        });
+        state
+            .peer_manager
+            .complete_handshake(&peer, spec, None, now)
+            .unwrap();
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            peer,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        super::request_snapshots_info_fan_out(&mut state);
+        assert_eq!(
+            rx.try_recv().unwrap().code,
+            ergo_p2p::message::CODE_GET_SNAPSHOTS_INFO
+        );
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::Selected {
+                height: 100,
+                manifest_id: [0xAA; 32],
+            }
+        );
+        super::request_snapshots_info_fan_out(&mut state);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reconstruction_manifest_metadata_error_retries_same_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state_with_store(popow_sparse_store(&dir));
+        let height = DENSE_TIP_HEIGHT as i32;
+        let id = [0xAA; 32];
+        state.utxo_bootstrap_enabled = true;
+        state.snapshot_bootstrap = verified_bootstrap(height, id, 1);
+        let server = state.snapshot_bootstrap.verified_manifest_peer().unwrap();
+        state
+            .peer_manager
+            .register_outbound(server, std::time::Instant::now())
+            .unwrap();
+        state.snapshot_bootstrap.take_verified_manifest_bytes();
+        state.pending_manifest_bytes = Some(vec![1]);
+        state.chunk_assembly = Some(ergo_sync::snapshot_bootstrap::ChunkAssembly::new(vec![]));
+        super::handle_snapshot_reconstruction_error(
+            &mut state,
+            ergo_state::store::StateError::InvalidSnapshotManifest("separator mismatch".into()),
+        );
+        assert_eq!(
+            state.peer_manager.get(&server).unwrap().score.raw_score(),
+            10
+        );
+        assert!(state.snapshot_bootstrap.supplier_excluded(&server));
+        assert!(state.chunk_assembly.is_none());
+        assert!(state.pending_manifest_bytes.is_none());
+        assert!(state
+            .snapshot_bootstrap
+            .take_verified_manifest_bytes()
+            .is_none());
+        let (replacement, retry_height, retry_id) =
+            state.snapshot_bootstrap.should_request_manifest().unwrap();
+        assert_ne!(replacement, server);
+        assert_eq!((retry_height, retry_id), (height, id));
+        let (tx, mut rx) = crate::peer_loop::outbound::channel(1);
+        state.registry.peers.insert(
+            replacement,
+            crate::node::PeerRuntime {
+                sync_version: ergo_p2p::peer::SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        super::drive_manifest_request(&mut state, std::time::Instant::now());
+        assert_eq!(
+            rx.try_recv().unwrap().code,
+            ergo_p2p::message::CODE_GET_MANIFEST
+        );
+        assert_eq!(
+            state.snapshot_bootstrap.state(),
+            BootstrapState::ManifestRequested {
+                peer: replacement,
+                height,
+                manifest_id: id,
+            }
+        );
+    }
+
+    #[test]
+    fn reconstruction_manifest_third_distinct_server_rejects_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&dir.path().join("state.redb"));
+        let id = [0xAA; 32];
+        state.snapshot_bootstrap = verified_bootstrap(100, id, 1);
+        let mut failed = std::collections::HashSet::new();
+        for count in 1..=3 {
+            let server = state.snapshot_bootstrap.verified_manifest_peer().unwrap();
+            assert!(failed.insert(server));
+            state
+                .peer_manager
+                .register_outbound(server, std::time::Instant::now())
+                .unwrap();
+            super::handle_snapshot_reconstruction_error(
+                &mut state,
+                ergo_state::store::StateError::InvalidSnapshotManifest("separator mismatch".into()),
+            );
+            assert_eq!(
+                state.peer_manager.get(&server).unwrap().score.raw_score(),
+                10
+            );
+            state.peer_manager.disconnect(&server);
+            if count < 3 {
+                let (replacement, height, retry_id) =
+                    state.snapshot_bootstrap.should_request_manifest().unwrap();
+                assert!(!failed.contains(&replacement));
+                assert_eq!((height, retry_id), (100, id));
+                state.snapshot_bootstrap.mark_manifest_requested(
+                    replacement,
+                    height,
+                    retry_id,
+                    std::time::Instant::now(),
+                );
+                state.snapshot_bootstrap.accept_verified_manifest(vec![]);
+            }
+        }
+        for port in 1..=3 {
+            state
+                .snapshot_bootstrap
+                .on_snapshots_info(synthetic_voter(port + 10), &[(100, id)]);
+        }
+        assert!(state.snapshot_bootstrap.should_request_manifest().is_none());
     }
 }

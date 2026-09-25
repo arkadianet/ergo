@@ -937,7 +937,10 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         handle: v1_webhooks_handle,
         network,
     };
+    let v1_blocking = crate::v1::BlockingReads::new(Default::default())
+        .expect("default BlockingReadsConfig is valid");
     let v1_state = crate::v1::V1State {
+        blocking: v1_blocking.clone(),
         read: v1_read,
         chain: v1_chain,
         indexer: v1_indexer,
@@ -976,6 +979,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // `node/shutdown` is NOT on this router's T2 gate — it stays on the frozen
     // compat admin mount (see the T2 note in `operator_router`).
     let v1_operator_state = crate::v1::OperatorState {
+        blocking: v1_blocking,
         read: v1_op_read,
         chain: v1_op_chain,
         admin: v1_op_admin,

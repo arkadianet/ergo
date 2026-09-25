@@ -305,8 +305,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -367,13 +379,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the address transaction summary
+          description: Failed to assemble the address transaction summary; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable, or extra index syncing/halted
+          description: 'Chain reader unavailable, or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -478,8 +496,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -542,8 +572,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -608,8 +650,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -672,8 +726,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -747,8 +813,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -825,8 +903,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -901,8 +991,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -977,8 +1079,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1053,8 +1167,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1106,13 +1232,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the box response
+          description: Failed to assemble the box response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1159,8 +1291,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1195,8 +1339,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1231,8 +1387,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1270,13 +1438,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1316,13 +1490,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1369,8 +1549,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1405,8 +1597,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1443,8 +1647,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1484,8 +1700,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1526,13 +1754,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Block is stored but could not be serialised
+          description: Block is stored but could not be serialised; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable
+          description: 'AD-proofs pruned in UTXO/non-archival mode, or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1577,8 +1811,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1726,13 +1972,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Proof failed to serialize
+          description: Proof failed to serialize; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable
+          description: 'This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1782,8 +2034,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Interlink data not retained on this node (pruned), or chain reader unavailable
+          description: 'Interlink data not retained on this node (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -1832,8 +2096,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Stored chain record could not be serialised; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2188,6 +2464,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
   /api/v1/mining/candidate:
     get:
       tags:
@@ -2271,8 +2565,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiMinerStats'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2453,7 +2759,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2536,7 +2842,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2572,7 +2878,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2608,7 +2914,7 @@ paths:
           minimum: 0
       - name: cursor
         in: query
-        description: Opaque page cursor from a prior response
+        description: Opaque stable keyset cursor from this list; resumes after the last address in byte-wise order
         required: false
         schema:
           type: string
@@ -2847,13 +3153,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Price discovery index read failed
+          description: Price discovery index read failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index unavailable or price discovery incomplete
+          description: 'Extra index unavailable or price discovery incomplete; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -2952,13 +3264,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Registry data bug (bad identifying-token key), or box assembly failed
+          description: Registry data bug (bad identifying-token key), or box assembly failed; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted
+          description: 'No unspent box currently holds the singleton NFT (mid-reorg/uninitialized), or extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3625,8 +3943,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3758,8 +4088,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3826,8 +4168,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3917,8 +4271,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Emission schedule not wired on this node
+          description: 'Emission schedule not wired on this node; chain_reader_unavailable on a failed header read; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -3985,8 +4351,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4037,8 +4415,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4083,8 +4473,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4397,13 +4799,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the transaction response
+          description: Failed to assemble the transaction response; internal_error on read failure
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '503':
-          description: Extra index syncing/halted
+          description: 'Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4438,7 +4846,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/V1Error'
         '500':
-          description: Failed to assemble the confirmed transaction status
+          description: Failed to assemble the confirmed transaction status; internal_error on read failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Read capacity busy (overloaded, Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4476,8 +4896,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VotesHistory'
+        '500':
+          description: Internal read failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Read timed out (timeout)
           content:
             application/json:
               schema:
@@ -4892,6 +5324,7 @@ components:
         [`ApiBootstrapStatus`]. UI maps each variant to a human label and
         phase indicator.
       enum:
+      - halted
       - discovery
       - manifest_requested
       - manifest_verified
@@ -4956,6 +5389,11 @@ components:
           description: |-
             Current bootstrap phase. UI maps each variant to its human
             label and phase indicator.
+        popow_abandon_reason:
+          type:
+          - string
+          - 'null'
+          description: Reason NiPoPoW bootstrap was abandoned, when application failed.
         popow_dense_from_height:
           type:
           - integer
@@ -5545,6 +5983,7 @@ components:
       - requesting
       - quorum_met
       - applied
+      - abandoned
       - catchup
     ApiReorgHistory:
       type: object
@@ -5763,8 +6202,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            Free bytes on the filesystem holding the data dir, probed per
-            status read. `None` when the mount could not be determined. The
+            Free bytes on the filesystem holding the data dir, from the
+            background storage sampler. `None` before the first sample or when
+            the mount could not be determined. The
             `ergo_disk_free_bytes` Prometheus gauge source.
           minimum: 0
         disk_total_bytes:
@@ -5773,8 +6213,8 @@ components:
           - 'null'
           format: int64
           description: |-
-            Total bytes on the filesystem holding the data dir, probed per
-            status read. The `ergo_disk_total_bytes` Prometheus gauge source.
+            Total bytes on the filesystem holding the data dir, from the
+            background storage sampler. The `ergo_disk_total_bytes` Prometheus gauge source.
           minimum: 0
         headers_ahead_of_full_blocks:
           type: integer
@@ -5786,9 +6226,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of the indexer redb in bytes, probed per status
-            read. `None` when `[indexer] enabled = false` or the file is
-            absent. The `ergo_index_db_bytes` Prometheus gauge source.
+            On-disk size of the indexer redb in bytes, from the background
+            storage sampler. `None` before the first sample, when
+            `[indexer] enabled = false`, or when the file is absent. The `ergo_index_db_bytes` Prometheus gauge source.
           minimum: 0
         last_applied_height:
           type: integer
@@ -5925,8 +6365,9 @@ components:
           - 'null'
           format: int64
           description: |-
-            On-disk size of `state.redb` in bytes, probed per status read.
-            `None` when the file is absent (never synced / failed to open).
+            On-disk size of `state.redb` in bytes, from the background storage
+            sampler (refreshed every 10 s). `None` before the first sample or
+            when the file is absent (never synced / failed to open).
             The `ergo_state_db_bytes` Prometheus gauge source.
           minimum: 0
         storage_errors_indexer_total:

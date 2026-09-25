@@ -530,13 +530,87 @@ fn request_unknown_type_id_returns_no_action() {
     assert!(actions.is_empty(), "expected no actions, got {:?}", actions);
 }
 
+#[test]
+fn unknown_inv_type_is_rejected_before_request_registration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let id = mid(1);
+    let payload = message::serialize_inv(&InvData {
+        type_id: 100,
+        ids: vec![id],
+    })
+    .unwrap();
+
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_INV,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert!(!actions
+        .iter()
+        .any(|action| matches!(action, Action::SendToPeer { .. })));
+}
+
+#[test]
+fn unknown_modifier_type_is_rejected_before_delivery_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let id = mid(2);
+    let now = Instant::now();
+    assert_eq!(
+        state
+            .coordinator
+            .delivery_mut()
+            .request(peer, 100, &[id], now),
+        vec![id]
+    );
+    let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: 100,
+        modifiers: vec![(id, vec![1, 2, 3])],
+    })
+    .unwrap();
+
+    let actions = handle_message(&mut state, peer, message::CODE_MODIFIER, &payload, now);
+
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        Action::Penalize {
+            peer: penalized_peer,
+            penalty: Penalty::Misbehavior,
+        } if *penalized_peer == peer
+    )));
+    assert_eq!(
+        state.coordinator.delivery().status(&id),
+        ergo_p2p::delivery::ModifierStatus::Requested
+    );
+    assert!(!actions
+        .iter()
+        .any(|action| matches!(action, Action::PersistSection { .. })));
+}
+
 // ----- idle-peer progress gating (#247 item 9) -----
 
 /// Register a handshaked, registry-backed peer so `evict_timed_out` and
 /// `send_to_peer` both see it. The returned receiver must be held for the
 /// duration of the test, otherwise the outbound channel reads as closed.
 #[must_use]
-fn connect_test_peer(
+pub(super) fn connect_test_peer(
     state: &mut NodeState,
     peer: SocketAddr,
     now: Instant,
@@ -996,6 +1070,195 @@ fn peer_disconnect_drops_snapshot_bootstrap_vote() {
     );
 }
 
+#[test]
+fn inbound_manifest_rejects_malformed_bytes_before_latch() {
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let height = 52_224i32;
+    let manifest_id = mid(0xAA);
+    for port in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(port), &[(height, manifest_id)]);
+    }
+    let peer = synthetic_peer(1);
+    state
+        .snapshot_bootstrap
+        .mark_manifest_requested(peer, height, manifest_id, Instant::now());
+
+    let payload = message::serialize_manifest(&[0, 1]).unwrap();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+    assert!(state.chunk_assembly.is_none());
+    assert!(state.pending_manifest_bytes.is_none());
+    assert!(state.reconstructed_tree.is_none());
+    assert!(state.snapshot_bootstrap.should_query(&synthetic_peer(2)));
+}
+
+#[test]
+fn inbound_manifest_rejects_duplicate_expected_ids_before_latch() {
+    use ergo_state::avl::snapshot_codec::{SnapshotServer, KEY_SIZE, LABEL_SIZE};
+    use ergo_state::avl::tree::AvlTree;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let mut tree = AvlTree::new();
+    for i in 0..8u8 {
+        tree.insert([i + 0x10; 32], vec![i]);
+    }
+    let server = SnapshotServer::build(&tree, 52_224, 1).unwrap();
+    let manifest_id = *server.manifest_id.as_bytes();
+    let mut manifest = server.manifest_bytes.clone();
+    let left_label = 2 + 1 + 1 + KEY_SIZE;
+    let right_label = left_label + LABEL_SIZE;
+    let left = manifest[left_label..left_label + LABEL_SIZE].to_vec();
+    manifest[right_label..right_label + LABEL_SIZE].copy_from_slice(&left);
+
+    for port in 1..=3u16 {
+        state
+            .snapshot_bootstrap
+            .on_snapshots_info(synthetic_peer(port), &[(52_224, manifest_id)]);
+    }
+    let peer = synthetic_peer(1);
+    state
+        .snapshot_bootstrap
+        .mark_manifest_requested(peer, 52_224, manifest_id, Instant::now());
+    let payload = message::serialize_manifest(&manifest).unwrap();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+}
+
+#[test]
+fn inbound_manifest_rejects_same_root_with_different_tree_height() {
+    use ergo_primitives::digest::ADDigest;
+    use ergo_state::avl::snapshot_codec::{SnapshotServer, MAINNET_MANIFEST_DEPTH};
+    use ergo_state::avl::tree::AvlTree;
+    use ergo_state::chain::HeaderMeta;
+    use ergo_sync::snapshot_bootstrap::BootstrapState;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let snapshot_height = 5u32;
+    let mut tree = AvlTree::new();
+    tree.insert([0x10; 32], vec![0xAA]);
+    let server = SnapshotServer::build(&tree, snapshot_height, MAINNET_MANIFEST_DEPTH).unwrap();
+    let manifest_id = *server.manifest_id.as_bytes();
+    let mut state_root_bytes = [0u8; 33];
+    state_root_bytes[..32].copy_from_slice(&manifest_id);
+    state_root_bytes[32] = server.manifest_bytes[0];
+    let state_root = ADDigest::from_bytes(state_root_bytes);
+    let (header_id, header_bytes) = synthetic_header_with_state_root(snapshot_height, state_root);
+
+    {
+        let store = state.store.as_utxo_mut().unwrap();
+        store.store_header(&header_id, &header_bytes).unwrap();
+        store
+            .store_header_meta(
+                &header_id,
+                &HeaderMeta {
+                    parent_id: [0u8; 32],
+                    height: snapshot_height,
+                    cumulative_score: vec![5],
+                    pow_validity: 1,
+                    timestamp: 1_700_000_005,
+                },
+            )
+            .unwrap();
+        store
+            .test_force_set_best_header_unsafe(header_id, snapshot_height, vec![5])
+            .unwrap();
+        store
+            .test_force_put_header_chain_index(snapshot_height, &header_id)
+            .unwrap();
+        store
+            .test_force_put_headers_by_height(snapshot_height, &header_id)
+            .unwrap();
+    }
+
+    for port in 1..=3u16 {
+        state.snapshot_bootstrap.on_snapshots_info(
+            synthetic_peer(port),
+            &[(snapshot_height as i32, manifest_id)],
+        );
+    }
+    let peer = synthetic_peer(1);
+    state.snapshot_bootstrap.mark_manifest_requested(
+        peer,
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    let mut manifest = server.manifest_bytes.clone();
+    manifest[0] = manifest[0].wrapping_add(1);
+    let payload = message::serialize_manifest(&manifest).unwrap();
+
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &payload,
+        Instant::now(),
+    );
+    assert!(
+        matches!(actions.as_slice(), [Action::Penalize { peer: offender, .. }] if *offender == peer)
+    );
+    assert!(!matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+
+    state
+        .snapshot_bootstrap
+        .on_snapshots_info(peer, &[(snapshot_height as i32, manifest_id)]);
+    state.snapshot_bootstrap.mark_manifest_requested(
+        peer,
+        snapshot_height as i32,
+        manifest_id,
+        Instant::now(),
+    );
+    let valid_payload = message::serialize_manifest(&server.manifest_bytes).unwrap();
+    handle_message(
+        &mut state,
+        peer,
+        message::CODE_MANIFEST,
+        &valid_payload,
+        Instant::now(),
+    );
+    assert!(matches!(
+        state.snapshot_bootstrap.state(),
+        BootstrapState::ManifestVerified { .. }
+    ));
+}
+
 // ----- mode 2 part 2i: install retry across a deferred checkpoint anchor -----
 
 /// Round-trip an empty `AvlTree` through the manifest codec to get a real
@@ -1016,7 +1279,7 @@ fn empty_reconstructed_tree() -> ergo_state::avl::snapshot_codec::ReconstructedT
 /// PoW-valid or otherwise consensus-checked — `install_reconstructed_snapshot`
 /// only reads `(height, state_root)` off the persisted bytes via
 /// `ergo_ser::header::read_header`, it never re-validates them.
-fn synthetic_header_with_state_root(
+pub(super) fn synthetic_header_with_state_root(
     height: u32,
     state_root: ergo_primitives::digest::ADDigest,
 ) -> ([u8; 32], Vec<u8>) {
@@ -3514,6 +3777,73 @@ fn byte_throttle_over_cap_non_modifier_frame_drops_and_penalizes() {
     );
 }
 
+#[test]
+fn coalesced_over_throttle_header_is_penalized_without_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    let peer = test_peer();
+    let now = Instant::now();
+    let _rx = connect_test_peer(&mut state, peer, now);
+    let rejected_id = mid(1);
+    // A real header: admission checks that the bytes hash to the requested
+    // id, and a header that then fails validation has its delivery rolled
+    // back, so only a genuine header stays `Received`.
+    let admitted_bytes = hex::decode(POPOW_GENESIS_HEX).unwrap();
+    let admitted_id = *ergo_primitives::digest::blake2b256(&admitted_bytes).as_bytes();
+    let rejected_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        modifiers: vec![(rejected_id, vec![0u8; 1024])],
+    })
+    .unwrap();
+    let admitted_payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        modifiers: vec![(admitted_id, admitted_bytes)],
+    })
+    .unwrap();
+    let admitted_frame_bytes = (admitted_payload.len() + 9) as u64;
+    fill_byte_window_leaving(&mut state, peer, now, admitted_frame_bytes + 2);
+    assert_eq!(
+        state.coordinator.delivery_mut().request(
+            peer,
+            ModifierTypeId::Header.as_byte(),
+            &[admitted_id],
+            now
+        ),
+        vec![admitted_id]
+    );
+
+    let rejected_event_payload =
+        crate::peer_loop::MeteredPayload::for_test(rejected_payload, &state.event_byte_budget);
+    let admitted_event_payload =
+        crate::peer_loop::MeteredPayload::for_test(admitted_payload, &state.event_byte_budget);
+    super::events::handle_event_batch(
+        &mut state,
+        vec![
+            PeerEvent::Message {
+                peer,
+                code: message::CODE_MODIFIER,
+                payload: rejected_event_payload,
+            },
+            PeerEvent::Message {
+                peer,
+                code: message::CODE_MODIFIER,
+                payload: admitted_event_payload,
+            },
+        ],
+    );
+
+    assert_eq!(state.sections_received_total, 1);
+    assert_eq!(
+        state.coordinator.delivery().status(&rejected_id),
+        ergo_p2p::delivery::ModifierStatus::Unknown
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&admitted_id),
+        ergo_p2p::delivery::ModifierStatus::Received
+    );
+    assert_eq!(state.peer_manager.get(&peer).unwrap().score.raw_score(), 10);
+}
+
 // ----- duplicate inbound drop (issue #293) -----
 
 /// A `HandshakeComplete` for an address the registry already holds — a
@@ -3590,34 +3920,59 @@ async fn handshake_complete_for_registered_address_keeps_existing_runtime() {
 
 // ----- NiPoPoW proof vs the header checkpoint (ingress) -----
 
-/// Mainnet genesis and height-2 headers, hex, as served on the wire. Same
-/// vectors the `ergo-sync` popow reducer tests use; duplicated here because
-/// this test drives the node's real message dispatch rather than the reducer.
+/// Mainnet genesis header, hex, as served on the wire. The only real header
+/// that passes validation on an empty store, so delivery tests use it as a
+/// genuinely admitted header.
 const POPOW_GENESIS_HEX: &str = "010000000000000000000000000000000000000000000000000000000000000000766ab7a313cd2fb66d135b0be6662aa02dfa8e5b17342c05a04396268df0bfbb93fb06aa44413ff57ac878fda9377207d5db0e78833556b331b4d9727b3153ba18b7a08878f2a7ee4389c5a1cece1e2724abe8b8adc8916240dd1bcac069177303f1f6cee9ba2d0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8060117650100000003be7ad70c74f691345cbedba19f4844e7fc514e1188a7929f5ae261d5bb00bb6602da9385ac99014ddcffe88d2ac5f28ce817cd615f270a0a5eae58acfb9fd9f6a0000000030151dc631b7207d4420062aeb54e82b0cfb160ff6ace90ab7754f942c4c3266b";
+
+/// Mainnet height-2 header, hex, as served on the wire. Same
+/// vector the `ergo-sync` popow reducer tests use; duplicated here because
+/// this test drives the node's real message dispatch rather than the reducer.
 const POPOW_HEIGHT_2_HEX: &str = "01b0244dfc267baca974a4caee06120321562784303a8a688976ae56170e4d175b828b0f6a0e6cb98ed4649c6e4cc00599ae78755324c79a8cec51e94ecca339d7a3a11a92de9c0ba1e95068f39bc1e08afa4ca23dff16de135fac64d0cf7dd1ab6291b70477f591ee8efb8a962d36ddbe3ac57591e39fe45ffb8c51c4939e41980387d9cfe9ba2d6b46bcba6f750f5be67d89679e921b78c277c5546a08cdb0955376fa0ea271e30601176502000000033c46c7fd7085638bf4bc902badb4e5a1942d3251d92d0eddd6fbe5d57e91553703df646d7f6138aede718a2a4f1a76d4125750e8ab496b7a8a25292d07e14cbadb0000000a03d0d0191b06164a2e86a170f0d8ac96cffa2e3312f2f5b0b1c3b1e082b9a0cd";
 
 fn popow_proof_frame() -> Vec<u8> {
+    use ergo_primitives::digest::ModifierId;
     use ergo_primitives::reader::VlqReader;
-    use ergo_ser::header::read_header;
+    use ergo_ser::header::{read_header, serialize_header, Header};
     use ergo_ser::popow_header::PoPowHeader;
     use ergo_ser::popow_proof::NipopowProof;
 
-    let hdr = |hex_str: &str| {
-        let raw = hex::decode(hex_str).unwrap();
-        read_header(&mut VlqReader::new(&raw)).unwrap()
-    };
-    let popow_hdr = |h| PoPowHeader {
-        header: h,
-        interlinks: vec![],
-        interlinks_proof: vec![],
+    let raw = std::fs::read_to_string(format!(
+        "{}/../test-vectors/mainnet/headers_1_2000.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let values: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+    let headers: Vec<Header> = values
+        .iter()
+        .take(11)
+        .map(|value| {
+            let bytes = hex::decode(value["bytes"].as_str().unwrap()).unwrap();
+            read_header(&mut VlqReader::new(&bytes)).unwrap()
+        })
+        .collect();
+    assert_eq!(headers.len(), 11);
+
+    let (_bytes, genesis_id) = serialize_header(&headers[0]).unwrap();
+    let popow_hdr = |h: Header| -> PoPowHeader {
+        if h.height == 1 {
+            return PoPowHeader {
+                header: h,
+                interlinks: vec![],
+                interlinks_proof: vec![0u8; 8],
+            };
+        }
+        let links = vec![ModifierId::from_bytes(*genesis_id.as_bytes())];
+        let fields = ergo_validation::popow::algos::pack_interlinks(&links);
+        ergo_validation::popow::algos::build_popow_header(h, links, &fields).unwrap()
     };
     let proof = NipopowProof {
-        m: 6,
-        k: 10,
-        prefix: vec![popow_hdr(hdr(POPOW_GENESIS_HEX))],
-        suffix_head: popow_hdr(hdr(POPOW_HEIGHT_2_HEX)),
-        suffix_tail: vec![],
-        continuous: false,
+        m: ergo_p2p::types::P2P_NIPOPOW_PROOF_M as u32,
+        k: ergo_p2p::types::P2P_NIPOPOW_PROOF_K as u32,
+        prefix: vec![popow_hdr(headers[0].clone())],
+        suffix_head: popow_hdr(headers[1].clone()),
+        suffix_tail: headers[2..].to_vec(),
+        continuous: true,
     };
     let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
     message::serialize_nipopow_proof(&body).unwrap()
@@ -3629,6 +3984,107 @@ fn state_with_popow_bootstrap(state: &mut NodeState) {
         None,
         DifficultyParams::mainnet(),
     ));
+}
+
+#[test]
+fn popow_proof_wrong_profile_penalizes_peer_and_records_response() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+
+    let valid_frame = popow_proof_frame();
+    let body = message::deserialize_nipopow_proof(&valid_frame).unwrap();
+    let mut proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&body).unwrap();
+    proof.m = 5;
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    let wrong_frame = message::serialize_nipopow_proof(&body).unwrap();
+    let peer = test_peer();
+    let actions = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &wrong_frame,
+        Instant::now(),
+    );
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [Action::Penalize { peer: p, penalty: Penalty::Misbehavior }] if *p == peer
+        ),
+        "a first wrong-profile response must be rejected, not treated as a duplicate: {actions:?}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(popow.provider_count(), 1);
+    assert_eq!(popow.proofs_processed(), 0);
+    assert!(popow.best_proof().is_none());
+    assert!(!popow.quorum_reached());
+
+    // Both invalid and corrected retries from this provider are duplicates.
+    for frame in [wrong_frame, valid_frame] {
+        let actions = handle_message(
+            &mut state,
+            peer,
+            message::CODE_NIPOPOW_PROOF,
+            &frame,
+            Instant::now(),
+        );
+        assert!(actions.is_empty(), "duplicate response: {actions:?}");
+        let popow = state.popow_bootstrap.as_ref().unwrap();
+        assert_eq!(popow.provider_count(), 1);
+        assert_eq!(popow.proofs_processed(), 0);
+    }
+}
+
+// ----- error paths -----
+
+#[test]
+fn popow_proof_difficulty_error_penalizes_and_logs_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = make_state(&tmp.path().join("state.redb"));
+    state_with_popow_bootstrap(&mut state);
+    let frame = popow_proof_frame();
+    let body = message::deserialize_nipopow_proof(&frame).unwrap();
+    let mut proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&body).unwrap();
+    proof.suffix_tail.last_mut().unwrap().n_bits ^= 1;
+    let body = ergo_ser::popow_proof::serialize_nipopow_proof(&proof).unwrap();
+    let frame = message::serialize_nipopow_proof(&body).unwrap();
+    let log_path = tmp.path().join("difficulty.log");
+    let log_file = std::fs::File::create(&log_path).unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || log_file.try_clone().unwrap())
+        .finish();
+    let peer = test_peer();
+    let actions = tracing::subscriber::with_default(subscriber, || {
+        handle_message(
+            &mut state,
+            peer,
+            message::CODE_NIPOPOW_PROOF,
+            &frame,
+            Instant::now(),
+        )
+    });
+    assert!(matches!(actions.as_slice(),
+        [Action::Penalize { peer: p, penalty: Penalty::Misbehavior }] if *p == peer));
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("bootstrap proof rejected"), "{log}");
+    assert!(
+        log.contains("consensus difficulty mismatch at height 11"),
+        "{log}"
+    );
+    let popow = state.popow_bootstrap.as_ref().unwrap();
+    assert_eq!(popow.provider_count(), 1);
+    assert_eq!(popow.proofs_processed(), 0);
+    assert!(popow.best_proof().is_none());
+    let retry = handle_message(
+        &mut state,
+        peer,
+        message::CODE_NIPOPOW_PROOF,
+        &frame,
+        Instant::now(),
+    );
+    assert!(retry.is_empty());
 }
 
 #[test]

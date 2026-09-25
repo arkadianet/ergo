@@ -97,10 +97,13 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         std::time::Duration::from_secs(5),
     );
+    // Keep potentially blocking filesystem probes separate from wedge telemetry.
+    let live_storage =
+        crate::node::storage_probe::spawn(host_paths, std::time::Duration::from_secs(10));
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
-        host_paths,
+        live_storage,
         voting_targets_slot.clone(),
         executor.apply_phase_metrics(),
         live_telemetry,
@@ -129,10 +132,37 @@ pub(super) struct ApiBind {
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
+fn recover_interrupted_rescan(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    let state = {
+        let read = store.begin_read()?;
+        read.rescan_state()?
+    };
+    let ergo_state::wallet::RescanState::Running { from_height } = state else {
+        return Ok(());
+    };
+    let mut write = store.begin_write()?;
+    write.set_scan_invalidated(true)?;
+    write.set_rescan_state(&ergo_state::wallet::RescanState::Failed {
+        height: from_height,
+        reason: "interrupted by restart".to_string(),
+    })?;
+    write.commit()
+}
+
+fn recover_wallet_for_boot(store: &dyn ergo_state::wallet::WalletStore) -> Result<(), NodeError> {
+    recover_interrupted_rescan(store)
+        .map_err(|error| format!("wallet boot: failed to mark interrupted rescan: {error}").into())
+}
+
 /// Bind the REST API (if `[api] bind = Some(_)`): builds the Scala-compat
 /// bridge, wires the wallet admin + writer task, assembles `ServerCtx`, and
-/// starts serving. Bind failure is logged-and-degraded, not fatal — REST is
+/// starts serving. REST bind failure is logged-and-degraded, not fatal — REST is
 /// an operator surface, not a prerequisite for sync/validation availability.
+/// Wallet rescan-recovery failure is fatal: wallet tables share the node's
+/// database, and serving a partially rebuilt scan without durable invalidation
+/// would expose stale wallet data.
 ///
 /// Wallet hydration + the writer task + `live_wallet_hook` are built
 /// UNCONDITIONALLY, before the REST-bind checks below: the wallet apply
@@ -171,6 +201,9 @@ pub(super) async fn bind(
     // state behind RwLocks; the writer task is a dedicated tokio
     // task receiving commands via a channel.
     let db_arc = store.db_arc();
+    let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
+        Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
+    recover_wallet_for_boot(wallet_store.as_ref())?;
     let is_pruned = config.blocks_to_keep != -1;
     // `ChainStateAccessorImpl::tip_height()` now reads the live committed
     // tip from redb per-call (no captured value), so no boot-time tip is
@@ -254,6 +287,7 @@ pub(super) async fn bind(
     let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
         wallet: wallet_state_for_hook,
         db: db_arc.clone(),
+        store: wallet_store,
     });
 
     let Some(bind_addr) = config.api_bind else {
@@ -304,6 +338,7 @@ pub(super) async fn bind(
         name: config.node_name.clone(),
         app_version: api_info.version.clone(),
         network: api_info.network.clone(),
+        voting_length: config.chain_spec.voting.voting_length,
         launch_time_unix_ms: api_info.started_at_unix_ms,
         rest_api_url: Some(format!("http://{actual}")),
         min_relay_fee_nano_erg: config.mempool_config.min_relay_fee_nano_erg,
@@ -415,6 +450,9 @@ fn api_security(
 mod tests {
     use super::*;
     use clap::Parser;
+    use ergo_state::wallet::{
+        RedbWalletStore, RescanState, WalletRead, WalletStore, WalletStoreError, WalletWrite,
+    };
 
     // ----- helpers -----
 
@@ -432,6 +470,18 @@ mod tests {
         (dir, NodeConfig::load(cli).expect("template loads"))
     }
 
+    struct WriteFailingStore(RedbWalletStore);
+
+    impl WalletStore for WriteFailingStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.0.begin_read()
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
+        }
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -446,6 +496,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recover_interrupted_rescan_marks_failed_and_invalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        recover_interrupted_rescan(&store).unwrap();
+
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed {
+                height: 7,
+                reason: "interrupted by restart".to_string(),
+            }
+        );
+    }
+
     // ----- error paths -----
 
     #[test]
@@ -456,5 +530,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid api_key_hash"));
+    }
+
+    #[test]
+    fn wallet_rescan_recovery_failure_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        let store = WriteFailingStore(store);
+        let error = recover_wallet_for_boot(&store).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("wallet boot: failed to mark interrupted rescan"),
+            "{message}"
+        );
+        assert!(
+            message.contains("injected recovery write failure"),
+            "{message}"
+        );
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Running { from_height: 7 }
+        );
+        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
     }
 }

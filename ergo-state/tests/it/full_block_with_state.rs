@@ -231,6 +231,7 @@ fn full_block_pipeline_blocks_1_5() {
             parent: &checked_parent,
             utxo: &store,
             params: &params,
+            rule_306_max_block_size: params.max_block_size,
             voting_length: 1024,
             votes_unknown_rule_disabled: false,
             parent_extension: None,

@@ -60,19 +60,33 @@ fn note_progress(state: &mut NodeState, peer: &PeerId, now: Instant) {
     state.peer_manager.note_progress(peer, now);
 }
 
-#[tracing::instrument(
-    name = "msg",
-    level = "debug",
-    skip_all,
-    fields(peer = %peer, code = code, bytes = payload.len()),
-)]
-pub(in crate::node) fn handle_message(
+fn validate_modifier_type_prefix(payload: &[u8]) -> Result<(), message::MessageError> {
+    let Some(type_id) = payload.first().copied() else {
+        return Ok(());
+    };
+    if ModifierTypeId::from_byte(type_id).is_none() {
+        return Err(message::MessageError::UnknownModifierType(type_id));
+    }
+    Ok(())
+}
+
+pub(in crate::node) fn admit_frame(
     state: &mut NodeState,
     peer: PeerId,
     code: u8,
     payload: &[u8],
     now: Instant,
-) -> Vec<Action> {
+) -> Result<(), Vec<Action>> {
+    if matches!(code, message::CODE_INV | message::CODE_MODIFIER) {
+        if let Err(e) = validate_modifier_type_prefix(payload) {
+            warn!(peer = %peer, code = code, error = %e, "unknown modifier type");
+            return Err(vec![Action::Penalize {
+                peer,
+                penalty: Penalty::Misbehavior,
+            }]);
+        }
+    }
+
     // Per-peer throughput cap. Payload size + header bytes (9)
     // approximate the on-wire cost; precise framing size isn't
     // necessary for rate bounding. Over-limit frames drop and the
@@ -121,11 +135,30 @@ pub(in crate::node) fn handle_message(
         }
         LimiterVerdict::MessageRateExceeded | LimiterVerdict::ByteRateExceeded => {
             warn!(peer = %peer, code = code, "throttle exceeded; dropping frame");
-            return vec![Action::Penalize {
+            return Err(vec![Action::Penalize {
                 peer,
                 penalty: Penalty::Misbehavior,
-            }];
+            }]);
         }
+    }
+    Ok(())
+}
+
+#[tracing::instrument(
+    name = "msg",
+    level = "debug",
+    skip_all,
+    fields(peer = %peer, code = code, bytes = payload.len()),
+)]
+pub(in crate::node) fn handle_message(
+    state: &mut NodeState,
+    peer: PeerId,
+    code: u8,
+    payload: &[u8],
+    now: Instant,
+) -> Vec<Action> {
+    if let Err(actions) = admit_frame(state, peer, code, payload, now) {
+        return actions;
     }
     match code {
         message::CODE_SYNC_INFO => match message::deserialize_sync_info(payload) {
@@ -460,8 +493,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_MANIFEST => match message::deserialize_manifest(payload) {
             Ok(manifest_bytes) => {
                 note_progress(state, &peer, now);
-                manifest::handle_inbound_manifest(state, peer, manifest_bytes);
-                Vec::new()
+                manifest::handle_inbound_manifest(state, peer, manifest_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad Manifest");
@@ -474,8 +506,7 @@ pub(in crate::node) fn handle_message(
         message::CODE_UTXO_CHUNK => match message::deserialize_utxo_chunk(payload) {
             Ok(chunk_bytes) => {
                 note_progress(state, &peer, now);
-                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes);
-                Vec::new()
+                utxo_chunk::handle_inbound_utxo_chunk(state, peer, chunk_bytes)
             }
             Err(e) => {
                 warn!(peer = %peer, error = %e, "bad UtxoSnapshotChunk");

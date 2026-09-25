@@ -16,6 +16,10 @@ pub const PARSE_POLYNOMIAL_PER_CHUNK: u64 = 10;
 pub const EVALUATE_POLYNOMIAL_BASE: u64 = 3;
 pub const EVALUATE_POLYNOMIAL_PER_CHUNK: u64 = 3;
 
+fn jit_cost(value: u64) -> JitCost {
+    JitCost::from_jit(value.min(i32::MAX as u64))
+}
+
 /// JitCost charged for verifying `prop` ahead-of-time, before the actual
 /// sigma-proof verification runs. Mirrors the Scala interpreter's
 /// per-leaf-and-conjunction tally:
@@ -31,35 +35,43 @@ pub const EVALUATE_POLYNOMIAL_PER_CHUNK: u64 = 3;
 ///   evaluation cost on top of the conjunction sum.
 pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> JitCost {
     match prop {
-        SigmaBoolean::TrivialProp(_) => JitCost::from_jit(0),
-        SigmaBoolean::ProveDlog(_) => {
-            JitCost::from_jit(PARSE_CHALLENGE_DLOG + COMPUTE_COMMITMENTS_SCHNORR + TO_BYTES_SCHNORR)
-        }
-        SigmaBoolean::ProveDHTuple { .. } => {
-            JitCost::from_jit(PARSE_CHALLENGE_DHT + COMPUTE_COMMITMENTS_DHT + TO_BYTES_DHT)
-        }
+        SigmaBoolean::TrivialProp(_) => jit_cost(0),
+        SigmaBoolean::ProveDlog(_) => jit_cost(
+            PARSE_CHALLENGE_DLOG
+                .saturating_add(COMPUTE_COMMITMENTS_SCHNORR)
+                .saturating_add(TO_BYTES_SCHNORR),
+        ),
+        SigmaBoolean::ProveDHTuple { .. } => jit_cost(
+            PARSE_CHALLENGE_DHT
+                .saturating_add(COMPUTE_COMMITMENTS_DHT)
+                .saturating_add(TO_BYTES_DHT),
+        ),
         SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
-            let children_cost: u64 = children
-                .iter()
-                .map(|c| estimate_crypto_cost(c).value())
-                .sum();
-            JitCost::from_jit(TO_BYTES_CONJUNCTION + children_cost)
+            let children_cost = children.iter().fold(0u64, |cost, child| {
+                cost.saturating_add(estimate_crypto_cost(child).value())
+            });
+            jit_cost(TO_BYTES_CONJUNCTION.saturating_add(children_cost))
         }
         SigmaBoolean::Cthreshold { k, children } => {
-            let n_children = children.len() as u32;
-            let n_coefs = n_children.saturating_sub(*k as u32);
-            let children_cost: u64 = children
-                .iter()
-                .map(|c| estimate_crypto_cost(c).value())
-                .sum();
+            let n_children = u64::try_from(children.len()).unwrap_or(u64::MAX);
+            let n_coefs = n_children.saturating_sub(u64::from(*k));
+            let children_cost = children.iter().fold(0u64, |cost, child| {
+                cost.saturating_add(estimate_crypto_cost(child).value())
+            });
             // At k == n, Scala charges only the polynomial base costs.
             // ParsePolynomial: PerItemCost(base=10, perChunk=10, chunk=1).cost(nCoefs)
-            let parse_cost = PARSE_POLYNOMIAL_BASE + PARSE_POLYNOMIAL_PER_CHUNK * n_coefs as u64;
+            let parse_cost = PARSE_POLYNOMIAL_BASE
+                .saturating_add(PARSE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs));
             // EvaluatePolynomial: PerItemCost(base=3, perChunk=3, chunk=1).cost(nCoefs) * nChildren
-            let eval_per_child =
-                EVALUATE_POLYNOMIAL_BASE + EVALUATE_POLYNOMIAL_PER_CHUNK * n_coefs as u64;
-            let eval_cost = eval_per_child * n_children as u64;
-            JitCost::from_jit(parse_cost + eval_cost + TO_BYTES_CONJUNCTION + children_cost)
+            let eval_per_child = EVALUATE_POLYNOMIAL_BASE
+                .saturating_add(EVALUATE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs));
+            let eval_cost = eval_per_child.saturating_mul(n_children);
+            jit_cost(
+                parse_cost
+                    .saturating_add(eval_cost)
+                    .saturating_add(TO_BYTES_CONJUNCTION)
+                    .saturating_add(children_cost),
+            )
         }
     }
 }

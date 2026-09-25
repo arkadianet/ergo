@@ -1,6 +1,8 @@
 //! Production wallet boot orchestrator. Single unlock+hydrate+persist
 //! path shared by the production boot and integration tests.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::TrackedPubkeyMeta;
 use ergo_wallet::error::WalletError;
@@ -8,17 +10,54 @@ use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::{LockState, SecretStorage};
 use redb::{Database, ReadableTableMetadata, WriteTransaction};
 
-/// Rescan-in-progress flag. Set by `NodeWalletAdmin`'s Rescan dispatch;
-/// read by the chain-apply hook (via `WalletApplyHook` impl) and by
-/// rollback (via `ProdRescanGuard`). Cleared on rescan completion.
-pub static RESCAN_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Each admitted rescan owns a unique process-local identity. Rollback revokes
+/// it immediately; a replacement rescan cannot make the old task active again.
+static RESCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_RESCAN: AtomicU64 = AtomicU64::new(0);
 
-/// Start height of the in-flight rescan, set alongside [`RESCAN_IN_PROGRESS`].
-/// Read by the native `/api/v1/wallet/status` handler to surface
-/// `rescan: {type:"running", fromHeight}`. Only meaningful while
-/// `RESCAN_IN_PROGRESS` is `true`.
+/// Cheap gate for live wallet apply while a rescan owns the active identity.
+pub fn rescan_in_progress() -> bool {
+    ACTIVE_RESCAN.load(Ordering::SeqCst) != 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RescanIdentity(u64);
+
+impl RescanIdentity {
+    pub(crate) fn admit() -> Option<Self> {
+        // Never reuse an identity, including on counter exhaustion.
+        let id = RESCAN_GENERATION
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .ok()?
+            + 1;
+        ACTIVE_RESCAN
+            .compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(id))
+    }
+
+    pub(crate) fn owns(self) -> bool {
+        ACTIVE_RESCAN.load(Ordering::SeqCst) == self.0
+    }
+
+    pub(crate) fn release(self) -> bool {
+        ACTIVE_RESCAN
+            .compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+fn cancel_rescan() -> bool {
+    ACTIVE_RESCAN.swap(0, Ordering::SeqCst) != 0
+}
+
+/// Start height of the in-flight rescan. Only meaningful while
+/// [`rescan_in_progress`] is true. Admission and owner-only flag cleanup
+/// hold the wallet database writer lock so a new owner cannot lose its flags.
 pub static RESCAN_FROM_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(test)]
+pub(crate) static RESCAN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Scan-rebuild-in-progress flag. Set by the Rescan dispatch ONLY for a
 /// full rebuild (`fromHeight == 0`) that rebuilds the registered `/scan/*`
@@ -28,10 +67,11 @@ pub static RESCAN_FROM_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic:
 /// scan tables block-by-block, so a concurrent live write would race it
 /// (miss a spend against the cleared reverse index, or stale that index).
 ///
-/// Distinct from [`RESCAN_IN_PROGRESS`] on purpose: a PARTIAL rescan
-/// (`fromHeight > 0`) sets `RESCAN_IN_PROGRESS` but does NOT rebuild scans,
+/// Distinct from [`rescan_in_progress`] on purpose: a PARTIAL rescan
+/// (`fromHeight > 0`) owns an identity but does NOT rebuild scans,
 /// so live scan tracking must keep running across it. Cleared when the
-/// rescan task finishes (process-local; reads `false` after a restart).
+/// owning rescan task finishes. A cancelled task cannot clear a replacement
+/// task's flag (process-local; reads `false` after a restart).
 pub static SCAN_REBUILD_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -296,23 +336,23 @@ impl WalletBootService {
 /// Production `RescanGuard` impl. Two methods with distinct semantics:
 ///
 /// - `abort_in_progress`: called by `rollback_block_from_wallet` on
-///   every rollback (success or failure). Swaps `RESCAN_IN_PROGRESS`
-///   to `false` and writes `WALLET_SCAN_INVALIDATED = true` ONLY if
+///   every rollback (success or failure). Swaps `ACTIVE_RESCAN`
+///   to zero and writes `WALLET_SCAN_INVALIDATED = true` ONLY if
 ///   a rescan was actually running — successful rollback without an
 ///   active rescan stays consistent with the rolled-back chain and
 ///   does not need invalidation.
 /// - `force_invalidate`: called by `StateStore::rollback_to`'s
 ///   failure branches (missing block section, block-section read
-///   error). Unconditionally clears the rescan-in-progress flag and
+///   error). Unconditionally revokes the active rescan identity and
 ///   writes `WALLET_SCAN_INVALIDATED = true` — wallet history cannot
 ///   be replayed against the rolled-back chain, so invalidation IS
 ///   warranted regardless of whether a rescan was active.
 ///
 /// Operational notes:
-/// - `RESCAN_IN_PROGRESS` is a process-local atomic, not persisted;
+/// - `ACTIVE_RESCAN` is a process-local atomic, not persisted;
 ///   the swap runs immediately and is not coupled to the caller's
 ///   `&WriteTransaction`. A later commit failure leaves the flag
-///   cleared. Reads as `false` after a process restart.
+///   cleared. Reads as zero after a process restart.
 /// - `WALLET_SCAN_INVALIDATED` is durable. The insert queues on the
 ///   caller's `&WriteTransaction`, becoming effective only on
 ///   commit. While set, live wallet apply no-ops; an operator-driven
@@ -329,7 +369,7 @@ impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
     /// invalidates because the rescan was working against a chain
     /// state that's now gone.
     fn abort_in_progress(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        let was_in_progress = RESCAN_IN_PROGRESS.swap(false, std::sync::atomic::Ordering::SeqCst);
+        let was_in_progress = cancel_rescan();
         if was_in_progress {
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         }
@@ -341,7 +381,7 @@ impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
     /// history cannot be replayed — invalidation IS warranted
     /// regardless of whether a rescan was active.
     fn force_invalidate(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        RESCAN_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+        cancel_rescan();
         txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         Ok(())
     }
@@ -352,12 +392,28 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    // ----- helpers -----
+
     /// Serializes the tests in this module that touch the process-global
     /// `FAULT_INJECT` flag (directly, or indirectly via `auto_derive_and_persist`
     /// which reads it). Cargo runs tests within a binary in parallel, so without
     /// this guard the fault-injection test's armed flag can race another test's
     /// auto-derive and make it panic spuriously.
     static FAULT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ----- happy path -----
+
+    #[test]
+    fn rescan_identity_single_owner_admits_and_releases() {
+        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
+        let identity = RescanIdentity::admit().unwrap();
+        assert!(rescan_in_progress());
+        assert!(identity.owns());
+        assert!(identity.release());
+        assert!(!identity.owns());
+        assert!(!rescan_in_progress());
+        assert!(!cancel_rescan());
+    }
 
     /// Exercises the `WalletBootService` write path under fault
     /// injection: `FAULT_INJECT` makes `unlock_and_sync` panic AFTER
@@ -486,5 +542,28 @@ mod tests {
             tbl.get(()).unwrap().is_some(),
             "backfilled change address must be committed to WALLET_CHANGE_ADDRESS"
         );
+    }
+    // ----- error paths -----
+
+    #[test]
+    fn rescan_identity_second_admission_rejected() {
+        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
+        let first = RescanIdentity::admit().unwrap();
+        assert!(RescanIdentity::admit().is_none());
+        assert!(first.owns());
+        assert!(first.release());
+    }
+
+    #[test]
+    fn rescan_identity_cancelled_owner_cannot_release_successor() {
+        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
+        let first = RescanIdentity::admit().unwrap();
+        assert!(cancel_rescan());
+        let second = RescanIdentity::admit().unwrap();
+        assert_ne!(first, second);
+        assert!(!first.owns());
+        assert!(!first.release());
+        assert!(second.owns());
+        assert!(second.release());
     }
 }

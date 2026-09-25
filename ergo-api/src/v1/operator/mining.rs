@@ -19,7 +19,9 @@ use utoipa::ToSchema;
 use super::OperatorState;
 use crate::mining::MiningApiError;
 use crate::types::{ApiMinerStat, ApiMinerStats, SyncStateLabel};
+use crate::v1::blocking::ReadLane;
 use crate::v1::error::{v1_error, Reason, V1Error};
+use crate::v1::routes::chain::chain_read_failed;
 
 /// Map a [`MiningApiError`] onto the standard v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
@@ -76,7 +78,9 @@ pub(crate) struct WindowQuery {
     params(("window" = Option<u32>, Query, description = "Trailing headers to fold (default 720, clamped 1..=16384)")),
     responses(
         (status = 200, description = "Miner attribution over the trailing window", body = ApiMinerStats),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub(crate) async fn miner_stats(
@@ -84,49 +88,58 @@ pub(crate) async fn miner_stats(
     Query(q): Query<WindowQuery>,
 ) -> Response {
     let chain = match s.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let window = q.window.unwrap_or(720).clamp(1, 16_384);
-    let headers = chain.last_headers(window);
-    let blocks = headers.len() as u32;
-    let tip_height = headers.last().map(|h| h.height).unwrap_or(0);
-    // Fold by pk hex: (count, last_height). Headers arrive ascending, so a
-    // plain max keeps the latest height per miner.
-    let mut agg: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
-    for h in &headers {
-        let e = agg.entry(h.pow_solutions.pk.clone()).or_insert((0, 0));
-        e.0 += 1;
-        if h.height > e.1 {
-            e.1 = h.height;
-        }
-    }
-    let mut miners: Vec<ApiMinerStat> = agg
-        .into_iter()
-        .map(|(pk, (count, last_height))| {
-            let address = hex::decode(&pk)
-                .ok()
-                .and_then(|b| encode_p2pk_from_pubkey(s.network, &b).ok());
-            ApiMinerStat {
-                pk,
-                address,
-                count,
-                last_height,
+    s.blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let headers = match chain.try_last_headers(window) {
+                Ok(headers) => headers,
+                Err(error) => return chain_read_failed(error),
+            };
+            let blocks = headers.len() as u32;
+            let tip_height = headers.last().map(|h| h.height).unwrap_or(0);
+            // Fold by pk hex: (count, last_height). Headers arrive ascending, so a
+            // plain max keeps the latest height per miner.
+            let mut agg: std::collections::HashMap<String, (u32, u32)> =
+                std::collections::HashMap::new();
+            for h in &headers {
+                let e = agg.entry(h.pow_solutions.pk.clone()).or_insert((0, 0));
+                e.0 += 1;
+                if h.height > e.1 {
+                    e.1 = h.height;
+                }
             }
+            let mut miners: Vec<ApiMinerStat> = agg
+                .into_iter()
+                .map(|(pk, (count, last_height))| {
+                    let address = hex::decode(&pk)
+                        .ok()
+                        .and_then(|b| encode_p2pk_from_pubkey(s.network, &b).ok());
+                    ApiMinerStat {
+                        pk,
+                        address,
+                        count,
+                        last_height,
+                    }
+                })
+                .collect();
+            miners.sort_by(|a, b| {
+                b.count
+                    .cmp(&a.count)
+                    .then(b.last_height.cmp(&a.last_height))
+            });
+            Json(ApiMinerStats {
+                tip_height,
+                window,
+                blocks,
+                miners,
+            })
+            .into_response()
         })
-        .collect();
-    miners.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then(b.last_height.cmp(&a.last_height))
-    });
-    Json(ApiMinerStats {
-        tip_height,
-        window,
-        blocks,
-        miners,
-    })
-    .into_response()
+        .await
 }
 
 /// The `mining/status` aggregate. Always `200` — safe to poll from an

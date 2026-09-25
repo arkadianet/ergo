@@ -16,6 +16,7 @@ use tracing::{error, warn};
 use ergo_api::compat::types::{
     ScalaBlockSection, ScalaBlockTransactions, ScalaFullBlock, ScalaHeader, ScalaMerkleProof,
 };
+use ergo_primitives::reader::ReadError;
 use ergo_ser::modifier_id::{
     ExpectedSections, TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION, TYPE_HEADER,
 };
@@ -55,6 +56,22 @@ pub(super) fn load_headers_in_range(
         }
     }
     out
+}
+
+/// Load the same range as the compat reader, failing the whole range on a store or decode error.
+pub(super) fn try_load_headers_in_range(
+    reader: &ChainStoreReader,
+    lo: u32,
+    hi: u32,
+) -> Result<Vec<ScalaHeader>, BridgeError> {
+    let entries = reader.scan_header_chain_range(lo, hi)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (_, header_id) in entries {
+        if let Some(header) = load_and_encode_header(reader, &header_id)? {
+            out.push(header);
+        }
+    }
+    Ok(out)
 }
 
 pub(super) fn load_and_encode_header(
@@ -222,9 +239,13 @@ pub(super) fn load_and_encode_modifier_by_id(
             // All three section serializers begin with a 32-byte
             // `headerId` field (BlockTransactionsSerializer.scala:165,
             // ADProofsSerializer.scala:108, ExtensionSerializer.scala:25).
-            // Peek it without re-parsing to find the parent header.
+            // Peek it without re-parsing to find the parent header. A stored
+            // section too short to hold that prefix is corrupt, not absent.
             if section_bytes.len() < 32 {
-                return Ok(None);
+                return Err(BridgeError::Parse {
+                    what: "block section header id",
+                    source: ReadError::UnexpectedEnd { pos: 0, needed: 32 },
+                });
             }
             let mut parent_id = [0u8; 32];
             parent_id.copy_from_slice(&section_bytes[..32]);
@@ -261,8 +282,11 @@ pub(super) fn load_and_encode_modifier_by_id(
             }
         }
         // Unknown type byte — should not happen given write-time tagging
-        // and back-fill, but a foreign value would land here.
-        _ => Ok(None),
+        // and back-fill, so a foreign value is a corrupt index entry.
+        other => Err(BridgeError::Inconsistent {
+            what: "modifier type tag",
+            detail: format!("unknown type byte {other} for {}", hex::encode(id)),
+        }),
     }
 }
 
@@ -356,8 +380,9 @@ pub(super) fn build_proof_for_tx(
     // independent code path from `merkle_tree_root` (the root used by
     // block validation), so this catches any drift between the two
     // and prevents shipping a malformed proof to SPV consumers. If
-    // the check fails, surface as a clean `Ok(None)` (handler 404)
-    // and log loudly — never return a proof that would not verify.
+    // the check fails, log loudly and fail as `Inconsistent` — never
+    // return a proof that would not verify. (Compat's Option wrapper
+    // still answers 404; v1 answers 500.)
     let expected_root = *header.transactions_root.as_bytes();
     if !ergo_crypto::merkle::merkle_proof_verify(&proof, &expected_root) {
         error!(
@@ -366,7 +391,10 @@ pub(super) fn build_proof_for_tx(
             tx_id = %hex::encode(tx_id),
             "scala-compat self-check failed: proof builder/root computation drift; refusing to serve"
         );
-        return Ok(None);
+        return Err(BridgeError::Inconsistent {
+            what: "merkle membership proof",
+            detail: "proof does not verify against the header transactions root".into(),
+        });
     }
 
     Ok(Some(ScalaMerkleProof {

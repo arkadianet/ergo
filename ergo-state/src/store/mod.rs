@@ -554,7 +554,7 @@ struct UtxoMutation<'a> {
 /// the payload crosses the persist-pipeline thread boundary into
 /// `PersistJob` without lifetime or Send/Sync friction.
 #[derive(Clone)]
-pub(crate) struct WalletApplyPayload {
+pub struct WalletApplyPayload {
     pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
     pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
     pub block_txs_owned: Vec<OwnedBlockTxData>,
@@ -594,7 +594,7 @@ impl WalletApplyPayload {
     /// This reproduces the pre-scan-tracking payload-build gate exactly:
     /// before scans existed, a payload was built (and wallet apply run) only
     /// when `!trees.is_empty() || !pubkeys.is_empty()`.
-    pub(crate) fn has_wallet_tracking(&self) -> bool {
+    pub fn has_wallet_tracking(&self) -> bool {
         !self.tracked_p2pk_trees.is_empty() || !self.cached_pubkeys.is_empty()
     }
 }
@@ -603,7 +603,7 @@ impl WalletApplyPayload {
 /// serialized box so the matched box can be persisted (and rendered for
 /// `/scan/spentBoxes` after it leaves the UTXO set).
 #[derive(Clone)]
-pub(crate) struct ScanMatchRecord {
+pub struct ScanMatchRecord {
     pub box_id: [u8; 32],
     /// Ids of every registered scan whose rule matched this box.
     pub scan_ids: Vec<u16>,
@@ -1135,11 +1135,11 @@ impl StateStore {
     ///    `apply_popow_proof` writes; `HEADER_CHAIN_INDEX` would
     ///    miss the sparse prefix that real Mode 4 anchors fall
     ///    in).
-    /// 5. The reconstructed tree's root_label must equal the
-    ///    first 32 bytes of `expected_state_root` (defense-in-
+    /// 5. The reconstructed tree's full 33-byte ADDigest (root label
+    ///    plus height) must equal `expected_state_root` (defense-in-
     ///    depth — the 2g trust check already enforced this against
-    ///    the header chain, but a fresh check here protects
-    ///    against a state-machine bug between 2g and 2i).
+    ///    the header chain, but a fresh check here protects against a
+    ///    state-machine bug between 2g and 2i).
     ///
     /// Caller invariant NOT runtime-enforced (deferred to Phase 5
     /// boot-consistency check): `snapshot_height` must be aligned
@@ -1252,13 +1252,12 @@ impl StateStore {
         }
 
         // 2. Defense-in-depth root check.
-        let expected_root_prefix: [u8; 32] = expected_state_root.as_bytes()[..32]
-            .try_into()
-            .expect("ADDigest prefix is always 32 bytes");
-        if reconstructed.root_label.as_bytes() != &expected_root_prefix {
+        let reconstructed_state_root =
+            crate::avl::digest::root_digest(&reconstructed.root_label, reconstructed.tree_height);
+        if reconstructed_state_root != *expected_state_root {
             return Err(StateError::InstallSnapshotRootMismatch {
-                computed: hex::encode(reconstructed.root_label.as_bytes()),
-                expected: hex::encode(expected_root_prefix),
+                computed: hex::encode(reconstructed_state_root.as_bytes()),
+                expected: hex::encode(expected_state_root.as_bytes()),
             });
         }
 
@@ -2700,11 +2699,12 @@ impl StateStore {
     /// security argument lives one layer up.
     ///
     /// Precondition: the store is in `HeaderAvailability::Dense` mode
-    /// with `best_header_height == 0` (fresh node). Calling this on
-    /// a node that already has chain state returns
-    /// `StateError::ApplyPopowProofWrongMode` rather than
-    /// overwriting; the re-bootstrap case is operator-driven (wipe
-    /// data_dir).
+    /// with `best_header_height == 0` (fresh node). A Dense store with
+    /// an existing header tip returns `StateError::ApplyPopowProofNotFresh`;
+    /// a non-Dense store returns `StateError::ApplyPopowProofWrongMode`,
+    /// and a store with full-block state returns
+    /// `StateError::ApplyPopowProofRefused`. The re-bootstrap case is
+    /// operator-driven (wipe data_dir).
     ///
     /// Does NOT touch `CHAIN_INDEX` (full-block index) or
     /// `best_full_block_*`. The Mode 2 snapshot bootstrap remains
@@ -3718,12 +3718,10 @@ impl StateStore {
 
             // M5 final-slice atomicity: clone the wallet payload into
             // the job so the worker can apply wallet writes inside
-            // its batch's write_txn. Payload is owned data
-            // (BTreeSet/BTreeMap/Vec) — clone is cheap relative to
-            // the chain mutation itself. Without this, `apply_block`
-            // would still need to fire the wallet write on a
-            // separate post-flush write_txn (two-commit) on the
-            // pipeline path.
+            // its batch's write_txn. The payload is owned data
+            // (BTreeSet/BTreeMap/Vec) so it crosses the worker boundary;
+            // the worker invokes the wallet store against that same
+            // transaction before committing.
             let wallet_payload_owned = wallet_payload.cloned();
             let job = crate::persist::PersistJob {
                 height,
@@ -3978,52 +3976,14 @@ impl StateStore {
         // Maturity-promotion at this height is part of the same
         // atomic unit.
         if let Some(payload) = wallet_payload {
-            let bound = crate::store::owned_to_block_txs(&payload.block_txs_owned);
-            let btxs = bound.as_block_txs();
-            // A scan-only payload (no tracked trees/pubkeys) must bypass wallet
-            // apply + maturity-promotion: those advance WALLET_SCAN_HEIGHT for
-            // blocks the wallet never classified, which would then surface as a
-            // bogus walletHeight in /wallet/status + /wallet/balances.
-            if payload.has_wallet_tracking() {
-                crate::wallet::apply::apply_block_to_wallet(
-                    &write_txn,
-                    &payload.tracked_p2pk_trees,
-                    &payload.cached_pubkeys,
-                    height,
-                    header_id,
-                    &btxs,
-                )
+            let mut wallet_store =
+                crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
+            crate::wallet::WalletWrite::apply_block(&mut wallet_store, height, header_id, payload)
                 .map_err(|e| StateError::WalletApply {
                     what: "apply hook (atomic)",
                     height,
-                    source: Box::new(e),
+                    source: Box::new(e.into()),
                 })?;
-                crate::wallet::maturity::promote_matured_boxes(&write_txn, height).map_err(
-                    |e| StateError::WalletApply {
-                        what: "maturity promote (atomic)",
-                        height,
-                        source: Box::new(e),
-                    },
-                )?;
-            }
-            // Scan tracking lands in the same atomic write-txn, independent of
-            // wallet-key tracking — but only when scans are actually registered.
-            // With no scans, skipping avoids opening/creating the scan tables and
-            // the per-input spend-index probe (the scan_count==0 fast path).
-            if payload.has_registered_scans {
-                crate::wallet::apply::apply_block_to_scans(
-                    &write_txn,
-                    &payload.scan_matches,
-                    &btxs,
-                    height,
-                    header_id,
-                )
-                .map_err(|e| StateError::WalletApply {
-                    what: "scan apply (atomic)",
-                    height,
-                    source: Box::new(e),
-                })?;
-            }
         }
 
         let t0 = std::time::Instant::now();

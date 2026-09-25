@@ -93,6 +93,7 @@ fn unconfirmed_cost_matches_all_views_and_unknown_is_null() {
             app_version: "test".into(),
             network: "mainnet".into(),
             launch_time_unix_ms: 0,
+            voting_length: ergo_chain_spec::ChainSpec::mainnet().voting.voting_length,
             rest_api_url: None,
             min_relay_fee_nano_erg: 2_500_000,
         },

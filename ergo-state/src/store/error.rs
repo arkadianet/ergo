@@ -56,6 +56,9 @@ pub enum PopowByIdLookup {
 
 #[derive(Debug, Error)]
 pub enum StateError {
+    /// Invalid manifest metadata after independently authenticating every chunk.
+    #[error("invalid snapshot manifest: {0}")]
+    InvalidSnapshotManifest(String),
     #[error("redb error: {0}")]
     Db(#[source] Box<redb::Error>),
     #[error("redb database error: {0}")]
@@ -115,6 +118,16 @@ pub enum StateError {
         mode_description: String,
         best_header_height: u32,
     },
+    #[error(
+        "apply_popow_proof refused: store is not fresh \
+         (best_header_id={}, best_header_height={})",
+        hex::encode(current_header_id),
+        current_header_height
+    )]
+    ApplyPopowProofNotFresh {
+        current_header_id: [u8; 32],
+        current_header_height: u32,
+    },
     /// `apply_popow_proof` refused because the store already has
     /// full-block state applied. Reciprocal guard to
     /// `install_snapshot_state`'s own check:
@@ -170,14 +183,13 @@ pub enum StateError {
          (bootstrap requires a fresh data_dir)"
     )]
     InstallSnapshotRefused { current_height: u32 },
-    /// `install_snapshot_state` reconstructed the AVL+ root from the
-    /// snapshot chunks, but it did not equal the expected
-    /// `state_root` prefix carried by the snapshot header. Distinct
-    /// from `DigestMismatch` (steady-state apply/rollback divergence)
-    /// so operator triage can tell a Mode 2 install rejection apart
-    /// from a steady-state consensus failure.
+    /// `install_snapshot_state` reconstructed the AVL+ root and height from
+    /// the snapshot chunks, but the full 33-byte digest did not equal the
+    /// expected `state_root`. Distinct from `DigestMismatch` (steady-state
+    /// apply/rollback divergence) so operator triage can tell a Mode 2 install
+    /// rejection apart from a steady-state consensus failure.
     #[error(
-        "install_snapshot_state: reconstructed root {computed} != expected state_root prefix {expected}"
+        "install_snapshot_state: reconstructed state_root {computed} != expected state_root {expected}"
     )]
     InstallSnapshotRootMismatch { computed: String, expected: String },
     /// `install_snapshot_state` was called with a `snapshot_height`
@@ -426,17 +438,10 @@ pub enum StateError {
         #[source]
         source: ergo_validation::ActiveParamsError,
     },
-    /// Wallet apply / rollback hook (called from the chain-apply
-    /// path inside `store/mod.rs`) returned a `redb::Error`. `what`
-    /// names the specific hook (e.g. `"apply hook"`,
-    /// `"rollback"`, `"abort_in_progress"`), `height` is the block
-    /// height where the hook ran, and `source` is the underlying
-    /// redb error. Separate from `Db`/`StorageError` etc. so
-    /// operators can pattern-match wallet-side failures: the
-    /// wallet-apply seam runs in a different write transaction from
-    /// chain state, so a crash between chain commit and the wallet
-    /// write txn leaves `wallet_scan_height < chain_height` and
-    /// requires the rescan-on-restart path to recover.
+    /// Wallet apply / rollback hook failed while the chain and wallet
+    /// shared the same redb write transaction. `what` names the operation,
+    /// `height` is the block height, and `source` is the underlying store
+    /// error. A failure aborts the chain commit as well.
     #[error("wallet {what} at h={height}: {source}")]
     WalletApply {
         what: &'static str,
