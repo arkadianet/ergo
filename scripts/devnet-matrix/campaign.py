@@ -4112,6 +4112,50 @@ def _self_test_fork_workload():
     _self_test_seed_artifact()
     _self_test_switch_granularity()
     _self_test_payment_pool()
+    _self_test_lead_confirmation()
+
+
+def _self_test_lead_confirmation():
+    """A one-block lead is confirmed only by evidence the block is real:
+    the reference later, another Scala node's chain, an ordering block
+    naming it, or the reference's own mining log (rm-B-fork-stockctl-4)."""
+    from scenarios import common
+
+    def s(rust, s1, s2, o='O1', o2=None, s3=(), o3=None, **extra):
+        return dict({'ordering': o, 'rust_chain': list(rust),
+                     'scala_chain': list(s1), 'scala_ordering': o,
+                     'scala2_chain': list(s2), 'scala2_ordering': o2 or o,
+                     'scala3_chain': list(s3), 'scala3_ordering': o3 or o},
+                    **extra)
+
+    # Miner 2 mines `lead` on its tip and moves to its own new ordering
+    # block before any sample lists `lead` under O1.
+    turnover = [s(['t', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], ['t', 'a']),
+                s(['lead', 't', 'a'], ['m1', 'a'], [], o2='O2')]
+    strict = common.evaluate_fork_coherence(turnover)
+    assert len(strict['unconfirmed_one_block_leads']) == 2, strict
+    logged = common.evaluate_fork_coherence(
+        turnover, confirmations={'lead': 'reference_log'})
+    assert not logged['unconfirmed_one_block_leads'], logged
+    assert logged['lead_confirmations'] == {'reference_log': 2}, logged
+    named = common.evaluate_fork_coherence(
+        turnover, confirmations={'lead': 'named_tip'})
+    assert named['lead_confirmations'] == {'named_tip': 2}, named
+    # The Scala reference follower validated it and was sampled holding it.
+    followed = [dict(sample, scala3_chain=['lead', 't', 'a'])
+                for sample in turnover]
+    by_follower = common.evaluate_fork_coherence(followed)
+    assert by_follower['lead_confirmations'] == {'scala_chain': 2}, by_follower
+    # Evidence about ANOTHER block confirms nothing.
+    other = common.evaluate_fork_coherence(
+        turnover, confirmations={'elsewhere': 'reference_log'})
+    assert len(other['unconfirmed_one_block_leads']) == 2, other
+    # The miner log parser reads the miner's own line only.
+    assert common.mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
+        + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
 
 
 def _self_test_payment_pool():

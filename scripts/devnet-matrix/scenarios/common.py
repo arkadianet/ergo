@@ -981,6 +981,55 @@ def _millis(value):
     return value if type(value) in (int, float) else None
 
 
+# A Scala miner's own line for an input block it mined
+# (`CandidateGenerator`: "Input-block <id> mined @ height <h>!").
+_MINED_INPUT_BLOCK = re.compile(r'Input-block ([0-9a-f]{64}) mined')
+
+# The Scala nodes whose sampled chains prove an input block is real: the
+# references, and the Scala reference follower, which validated it.
+SCALA_CHAIN_NODES = ('scala', 'scala2', 'scala3')
+
+
+def mined_input_blocks(lines):
+    """Every input block a Scala miner's log says it mined. Pure."""
+    return {match.group(1) for match in map(_MINED_INPUT_BLOCK.search, lines)
+            if match}
+
+
+def scala_chain_index(series):
+    """`{(ordering, block): [sample, ...]}` over every Scala node's chain,
+    each under that node's OWN ordering id. Pure."""
+    index = {}
+    for i, sample in enumerate(series):
+        for node in SCALA_CHAIN_NODES:
+            ordering = sample.get(f'{node}_ordering')
+            for block in (sample.get(f'{node}_chain') or []) if ordering else ():
+                index.setdefault((ordering, block), []).append(i)
+    return index
+
+
+def lead_confirmation(node, ordering, lead, at, carried, scala_index,
+                      confirmations=None):
+    """Why a one-block lead is a real block, or None. Pure.
+
+    In order: the reference it led listed it later under the same
+    ordering id (`reference_later`); any Scala node's sampled chain under
+    that ordering id carried it (`scala_chain`); or `confirmations` says
+    so (`named_tip`: an ordering block names it as its input tip;
+    `reference_log`: the reference's own log says it mined it). The last
+    two exist for the lead a reference mines just before an ordering
+    turnover: it moves to the new ordering block before any sample can
+    list the block under the old one (rm-B-fork-stockctl-4).
+    """
+    window = range(at - LATER_CONFIRMATION_SAMPLES, at + LATER_CONFIRMATION_SAMPLES + 1)
+    if any(at < j <= at + LATER_CONFIRMATION_SAMPLES
+           for j in carried.get((node, ordering, lead), ())):
+        return 'reference_later'
+    if any(j in window for j in scala_index.get((ordering, lead), ())):
+        return 'scala_chain'
+    return (confirmations or {}).get(lead)
+
+
 def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
     """The snapshot a follower chain was held from, or None. Pure.
 
@@ -1008,7 +1057,7 @@ def held_from_restarted_reference(rust_chain, ordering, launch, snapshots):
     return None
 
 
-def evaluate_fork_coherence(series, snapshots=()):
+def evaluate_fork_coherence(series, snapshots=(), confirmations=None):
     """Every Rust chain must be the same HISTORY as some reference's.
 
     Membership in a union is not the property. A follower chain built
@@ -1033,7 +1082,9 @@ def evaluate_fork_coherence(series, snapshots=()):
     under `held_from_restarted_reference` instead
     (`held_from_restarted_reference()` states the rule). Nothing else is
     exempt, and every incoherent sample names the references that
-    restarted after the follower started.
+    restarted after the follower started. A one-block lead is confirmed
+    only by evidence the block is real (`lead_confirmation()`), and the
+    evidence used is counted by kind.
     """
     # Where each reference published each block, per ordering id, so a
     # lead can be confirmed against the reference it led.
@@ -1061,6 +1112,8 @@ def evaluate_fork_coherence(series, snapshots=()):
                 history.setdefault((node, ref_ordering), []).append((i, chain))
 
     incoherent, unconfirmed_leads, held, judged = [], [], [], 0
+    lead_confirmations = {}
+    scala_index = scala_chain_index(series)
     for i, sample in enumerate(series):
         ordering = sample.get('ordering')
         rust_chain = sample.get('rust_chain') or []
@@ -1085,9 +1138,11 @@ def evaluate_fork_coherence(series, snapshots=()):
             if lead is None:
                 matched = True
                 break
-            confirmations = [j for j in published.get((node, ordering, lead), ())
-                             if i < j <= i + LATER_CONFIRMATION_SAMPLES]
-            if confirmations:
+            confirmed_by = lead_confirmation(node, ordering, lead, i, published,
+                                             scala_index, confirmations)
+            if confirmed_by:
+                lead_confirmations[confirmed_by] = \
+                    lead_confirmations.get(confirmed_by, 0) + 1
                 matched = True
                 break
             lead_problem = {'sample': i, 'ordering': ordering, 'node': node,
@@ -1127,11 +1182,12 @@ def evaluate_fork_coherence(series, snapshots=()):
         'incoherent_samples': incoherent,
         'unconfirmed_one_block_leads': unconfirmed_leads,
         'held_from_restarted_reference': held,
+        'lead_confirmations': lead_confirmations,
         'later_confirmation_samples': LATER_CONFIRMATION_SAMPLES,
     }
 
 
-def compare_fork_switches(series):
+def compare_fork_switches(series, confirmations=None):
     """Did each Rust fork switch land on a chain a reference actually has?
 
     Judged as EQUALITY, not inclusion. The previous rule asked whether
@@ -1193,6 +1249,7 @@ def compare_fork_switches(series):
                     carried.setdefault((node, ref_ordering, block), []).append(i)
 
     rank = {'exact': 0, 'prefix': 1, 'one_ahead_confirmed': 2}
+    scala_index = scala_chain_index(series)
 
     def published(ordering, chain, at):
         """How a reference published `chain` near sample `at`, by the
@@ -1206,8 +1263,8 @@ def compare_fork_switches(series):
                 continue
             if lead is None:
                 kind = 'exact' if ref_chain == list(chain) else 'prefix'
-            elif any(at < k <= at + LATER_CONFIRMATION_SAMPLES
-                     for k in carried.get((node, ordering, lead), ())):
+            elif lead_confirmation(node, ordering, lead, at, carried,
+                                   scala_index, confirmations):
                 kind = 'one_ahead_confirmed'
             else:
                 continue

@@ -219,14 +219,27 @@ def run(ctx):
 
     # EVERY sampled chain must be the same HISTORY as some reference's,
     # not merely built from blocks somebody published.
+    # Evidence that a block a reference led with is real, beyond the
+    # reference listing it later: an ordering block naming it as its
+    # input tip, or the reference's own log saying it mined it.
+    confirmations = {}
+    for node, role in (ctx.roles or {}).items():
+        if lifecycle.ROLES[role].mines:
+            for block in common.mined_input_blocks(common._scala_log_lines(node)):
+                confirmations[block] = 'reference_log'
+    for block in ordering_blocks:
+        if block.get('named_input_tip'):
+            confirmations[block['named_input_tip']] = 'named_tip'
     coherence = common.evaluate_fork_coherence(
-        ctx.run.series, ctx.evidence.get('reference_snapshots') or ())
+        ctx.run.series, ctx.evidence.get('reference_snapshots') or (),
+        confirmations)
     ctx.note('chain_coherence', {
         'judged_samples': coherence['judged_samples'],
         'incoherent_samples': len(coherence['incoherent_samples']),
         'unconfirmed_one_block_leads': len(coherence['unconfirmed_one_block_leads']),
         'held_from_restarted_reference': len(
             coherence['held_from_restarted_reference']),
+        'lead_confirmations': coherence['lead_confirmations'],
         'later_confirmation_samples': coherence['later_confirmation_samples'],
         'incoherent_sample': coherence['incoherent_samples'][:5],
         'unconfirmed_sample': coherence['unconfirmed_one_block_leads'][:5],
@@ -248,7 +261,7 @@ def run(ctx):
 
     # The switches themselves, judged as applied/rolled-back SETS against
     # the chain of the reference the follower landed on.
-    comparison = common.compare_fork_switches(ctx.run.series)
+    comparison = common.compare_fork_switches(ctx.run.series, confirmations)
     ctx.note('fork_switches', {
         'rust': len(comparison['rust_switches']),
         'scala': len(comparison['scala_switches']),
