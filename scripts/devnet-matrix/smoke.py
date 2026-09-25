@@ -1513,10 +1513,15 @@ def evaluate_tip_consistency(samples, mined=None):
         confirmed = any(rust_tip in ids
                         for j, ids in scala_later.get(ordering, ())
                         if j >= i)
-        if (not confirmed and mined
-                and rust_lead_mined(s.get('scala_chain') or [],
-                                    s.get('rust_chain') or [], mined)
-                and (s.get('rust_chain') or [None])[0] == rust_tip):
+        # Rust's tip is read AFTER its chain in the same sweep, so it can
+        # be a block the chain read did not list yet
+        # (rm-B-reconstruct_rate-2562f-1, the last sample). Judged on the
+        # chain the two reads describe together.
+        rust_chain = list(s.get('rust_chain') or [])
+        if rust_tip not in rust_chain:
+            rust_chain = [rust_tip] + rust_chain
+        if (not confirmed and mined and rust_chain[0] == rust_tip
+                and rust_lead_mined(s.get('scala_chain') or [], rust_chain, mined)):
             confirmed = True
             confirmed_by_miner_log += 1
         if not confirmed:
@@ -1994,6 +1999,15 @@ def _self_test():
         'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
         + 'ab' * 32 + ' mined @ height 12!',
         'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
+    # Rust's tip is read after its chain: at the series' last sample the
+    # tip can be a block its own chain read did not list yet, and no
+    # later sample lists it. The miner's log confirms it; nothing else.
+    torn = series(['b', 'a'], ['b', 'a'])
+    torn[-1] = dict(torn[-1], rust_tip='c')
+    assert evaluate_tip_consistency(torn)['unconfirmed_count'] == 1
+    tip = evaluate_tip_consistency(torn, {'c'})
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    assert evaluate_tip_consistency(torn, {'x'})['unconfirmed_count'] == 1
 
     # Lag past the bounds fails, even though every tip is consistent.
     deep = ['t%02d' % n for n in range(30, -1, -1)]

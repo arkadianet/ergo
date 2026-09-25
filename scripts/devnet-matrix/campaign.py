@@ -4113,6 +4113,30 @@ def _self_test_fork_workload():
     _self_test_switch_granularity()
     _self_test_payment_pool()
     _self_test_lead_confirmation()
+    _self_test_header_known_first()
+
+
+def _self_test_header_known_first():
+    """An ordering block whose announcement the follower dropped because
+    it already held the header came by ordinary sync: no decision is
+    owed. Any other announced block without an outcome is still missing
+    (rm-B-reconstruct_rate-2562f-1: heights 44 and 57)."""
+    from scenarios import common
+
+    log = '\n'.join([
+        'TRACE x: input_blocks: raw announcement payload block=' + 'a' * 64 + ' payload=01',
+        'DEBUG x: input_blocks: dropped id=' + 'a' * 64 + ' reason=OrderingHeaderKnown',
+        'TRACE x: input_blocks: raw announcement payload block=' + 'b' * 64 + ' payload=01',
+        'DEBUG x: input_blocks: dropped id=' + 'c' * 64 + ' reason=OutsideHeightWindow'])
+    assert common.header_known_first(log) == {'a' * 64}
+    announced = common.announced_headers(log)
+    blocks = {44: 'a' * 64, 57: 'b' * 64}
+    loose = common.reconcile_outcomes(blocks, [], announced=announced,
+                                      known_first=common.header_known_first(log))
+    assert loose['known_before_announcement'] == [{'height': 44, 'header': 'a' * 64}]
+    assert loose['missing'] == [{'height': 57, 'header': 'b' * 64}], loose
+    strict = common.reconcile_outcomes(blocks, [], announced=announced)
+    assert len(strict['missing']) == 2 and not strict['known_before_announcement']
 
 
 def _self_test_lead_confirmation():

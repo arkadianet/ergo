@@ -1830,7 +1830,7 @@ def evaluate_post_reorg_state(chain, info, status, dropped, miner_chain=None,
 
 
 def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(),
-                       adjacent_headers=()):
+                       adjacent_headers=(), known_first=()):
     """Every ordering block in the window must have exactly one outcome.
 
     By HEADER IDENTITY only. `ordering_blocks` maps height -> header id;
@@ -1854,6 +1854,12 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
       window's own header ids and the announcement set, never against an
       index built from the same events. Each is also marked with whether
       that header was ever announced. It FAILS.
+    * `known_before_announcement` — a window block with no outcome whose
+      announcement the follower dropped because it already held the
+      header (`known_first`, from `header_known_first`): by the same
+      rule, downloaded by ordinary sync with no decision to report. An
+      announced block without that drop and without an outcome is still
+      `missing`.
     * A height the reference could not be read for is `missing`.
     """
     kinds = ('ordering_reconstructed', 'ordering_reconstruct_fallback',
@@ -1874,7 +1880,8 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
                               'height': event.get('height'),
                               'announced': (None if announced is None
                                             else header in announced)})
-    missing, duplicated, not_announced = [], [], []
+    missing, duplicated, not_announced, known_before = [], [], [], []
+    known_first = set(known_first or ())
     for height in sorted(unread_heights):
         missing.append({'height': height, 'header': None,
                         'why': 'the reference could not be read at this height'})
@@ -1883,6 +1890,8 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
         if not outcomes:
             if announced is not None and header not in announced:
                 not_announced.append({'height': height, 'header': header})
+            elif header in known_first:
+                known_before.append({'height': height, 'header': header})
             else:
                 missing.append({'height': height, 'header': header})
         elif len(outcomes) > 1:
@@ -1893,6 +1902,7 @@ def reconcile_outcomes(ordering_blocks, events, announced=None, unread_heights=(
             'with_an_outcome': sum(1 for h in window_headers if by_header.get(h)),
             'missing': missing, 'duplicated': duplicated,
             'not_announced': not_announced,
+            'known_before_announcement': known_before,
             'announcement_evidence': announced is not None,
             'unmatched': unmatched,
             'unmatched_events': len(unmatched),
@@ -1922,6 +1932,25 @@ def announced_headers(log_text):
         if i >= 0:
             ids.add(line[i + len(marker):i + len(marker) + 64])
     return ids if any_line else None
+
+
+HEADER_KNOWN_DROP = 'reason=OrderingHeaderKnown'
+
+
+def header_known_first(log_text):
+    """Ordering ids the follower dropped an announcement for because it
+    already held the header (`ergo-inputblocks` `DropReason::
+    OrderingHeaderKnown`, Scala parity: spec 9.3). Pure. Such a header
+    came by ordinary sync first, and no reconstruct-or-download decision
+    follows the announcement."""
+    ids = set()
+    for line in log_text.splitlines():
+        if HEADER_KNOWN_DROP not in line:
+            continue
+        i = line.find('dropped id=')
+        if i >= 0:
+            ids.add(line[i + len('dropped id='):i + len('dropped id=') + 64])
+    return ids
 
 
 # ----- evict: delivery and causality (pure, self-tested) -----
