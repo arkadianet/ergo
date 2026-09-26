@@ -1,9 +1,9 @@
 # Node performance workstream
 
-Integration branch: `codex/node-performance`, based on `main` at
-`1136c5dd8edfae18995c4ef71952e866c9bc6636`. Keep changes in individually
-reviewable commits. This branch is independent of the dashboard PR and is not
-deployed to the running archival node.
+Integration target: `performance-improvements`. This initial work is on
+`codex/node-performance`, based at `1136c5dd8edfae18995c4ef71952e866c9bc6636`.
+Keep changes in individually reviewable commits. This branch is independent of
+the dashboard PR and is not deployed to the running archival node.
 
 ## Extra-index reference and design
 
