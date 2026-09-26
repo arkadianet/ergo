@@ -6,6 +6,7 @@ pub(crate) mod address;
 pub(crate) mod boxes;
 pub(crate) mod meta;
 pub(crate) mod numeric;
+pub(crate) mod paging;
 pub(crate) mod segment;
 pub(crate) mod storage_rent;
 pub(crate) mod tables;
