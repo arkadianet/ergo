@@ -56,6 +56,10 @@ pub(crate) type StagedSpills = HashMap<Digest32, Segment>;
 /// end of a rollback (merge-back removes one spill per underflowed pop).
 pub(crate) type DeletedSpills = HashSet<Digest32>;
 
+#[cfg(test)]
+#[path = "segment_perf.rs"]
+mod perf;
+
 /// CUMULATIVE process-lifetime count of secondary-index (template / token)
 /// sign-flips SKIPPED because of a topology-drift gap — a `+gi` entry missing
 /// from a derived secondary segment (see [`tolerate_secondary_drift`]). Exposed
