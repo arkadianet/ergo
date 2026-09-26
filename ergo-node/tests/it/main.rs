@@ -1,6 +1,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 mod identity_live_refresh;
+mod indexer_lifecycle;
 mod mining_e2e;
 mod mode3_lifecycle;
 mod mode4_acceptance;

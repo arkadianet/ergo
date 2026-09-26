@@ -3,10 +3,9 @@
 //! read-snapshot, the action-loop join handle, the API task join
 //! handle, and the shutdown channel.
 //!
-//! [`Drop`] aborts every background task we own (inbound listener,
-//! indexer task, address-book persistence, snapshot publisher, anchor
-//! scheduler) so a partially-constructed `RunHandle` never leaks
-//! tasks on early failure.
+//! [`Drop`] cancels the indexer worker and aborts owned async background
+//! tasks (inbound listener, address-book persistence, snapshot publisher,
+//! anchor scheduler). Explicit shutdown also joins the indexer worker.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,13 +68,13 @@ pub struct RunHandle {
     /// would mean "no flag exists", which is wrong; the flag exists
     /// and is simply unused when no indexer task was spawned.
     pub(super) indexer_cancel: Arc<AtomicBool>,
-    /// Polling task handle. `Some` when the indexer is enabled in
+    /// Dedicated worker handle. `Some` when the indexer is enabled in
     /// config AND boot succeeded with a wired store (the
     /// `Halted` boot path returns a handle but no task). Awaited
     /// during shutdown so the task observes the cancel flag and
     /// drops its `IndexerStore` (releasing the redb file lock)
     /// before this future returns.
-    pub(super) indexer_task_handle: Option<JoinHandle<()>>,
+    pub(super) indexer_task_handle: Option<ergo_indexer::IndexerWorker>,
     /// JoinHandle for the Step B anchor-map background builder.
     /// Aborted on shutdown so the task doesn't outlive the action
     /// loop. `Option` so `Drop` can take it without double-awaiting.
@@ -159,14 +158,12 @@ impl RunHandle {
     ///    which is the load-bearing signal for the
     ///    AVL+undo_log+chain_index+state_meta atomic-commit invariant.
     ///
-    /// Background-task teardown (anchor builder, mining engine + its build
-    /// worker, indexer) is interleaved between steps 1 and 2: each is
-    /// cancelled and awaited under its own bounded timeout before the API
-    /// drain, so a stuck background task can't block the API/loop shutdown.
-    /// The mining build worker is awaited to completion (unbounded): shutdown
-    /// completes only when the worker is quiescent. The in-flight build bounds
-    /// the wait (~20 s worst case today, milliseconds once the per-tip base
-    /// cache serves same-tip builds). This is the truthful contract — tokio's
+    /// Background-task teardown is interleaved with these steps. Async tasks
+    /// have bounded abort fallbacks. The mining build worker and indexer worker
+    /// are cancelled and awaited to completion (unbounded): shutdown
+    /// completes only when both workers are quiescent. The mining worker drains
+    /// its current build; the indexer drains its atomic step or cancellable
+    /// rebuild chunk. This is the truthful contract — tokio's
     /// runtime drop waits for `spawn_blocking` tasks anyway, so a
     /// proceed-on-timeout design only makes the API lie while process exit
     /// still blocks. Awaiting here also prevents `DatabaseAlreadyOpen` on a
@@ -297,22 +294,22 @@ impl RunHandle {
         }
         // Drain the API + inbound surfaces with graceful semantics.
         self.drain_api_and_inbound().await;
-        // Indexer task — bounded await so a stuck task can't block
-        // shutdown indefinitely. The loop sleeps at most `poll_idle`
-        // (config default 1 s) between cancel checks, so 5 s is
-        // generous; abort fallback releases the indexer DB lock so
-        // the next boot can reopen the redb file cleanly.
-        if let Some(mut h) = self.indexer_task_handle.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
-                .await
-                .is_err()
-            {
-                warn!(
-                    timeout_s = 5,
-                    "indexer task did not stop within timeout; aborting"
-                );
-                h.abort();
-                let _ = h.await;
+        // Blocking writes cannot be aborted safely. Join the dedicated
+        // worker after its atomic step (or cancellable rebuild chunk) finishes,
+        // so explicit shutdown cannot return while it still owns DB references.
+        if let Some(worker) = self.indexer_task_handle.take() {
+            let mut joined = tokio::task::spawn_blocking(move || worker.join());
+            let result = match tokio::time::timeout(Duration::from_secs(5), &mut joined).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("waiting for in-flight indexer step to finish before shutdown completes");
+                    joined.await
+                }
+            };
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => error!("indexer worker thread panicked"),
+                Err(error) => error!(%error, "indexer worker join task failed"),
             }
         }
         // Loop completion — surfaces shutdown_cleanly result.
@@ -436,15 +433,12 @@ impl Drop for RunHandle {
         if let Some(h) = self.inbound_handle.take() {
             h.abort();
         }
-        // Indexer task: signal cancel + abort. Same persistence caveat
-        // as the action loop — we can't await the join here, so the
+        // Indexer worker: signal cancel. We can't await the join here, so the
         // indexer's redb file lock release isn't observable from this
         // path. Embedders who need clean indexer shutdown call
         // `RunHandle::shutdown().await` instead of dropping.
         self.indexer_cancel.store(true, Ordering::Release);
-        if let Some(h) = self.indexer_task_handle.take() {
-            h.abort();
-        }
+        drop(self.indexer_task_handle.take());
         // Step B anchor builder: latched cancel + abort. We can't
         // await the JoinHandle here (Drop is sync); the task is
         // observation-only and the runtime will tear it down on

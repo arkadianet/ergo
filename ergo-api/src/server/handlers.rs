@@ -514,7 +514,7 @@ ergo_solutions_invalid_pow_total {solutions_invalid_pow}
 # HELP ergo_solutions_stale_parent_total Solutions rejected as stale parent since boot.
 # TYPE ergo_solutions_stale_parent_total counter
 ergo_solutions_stale_parent_total {solutions_stale_parent}
-# HELP ergo_rss_kb Resident set size, KiB (Linux; 0 elsewhere).
+# HELP ergo_rss_kb Resident memory, KiB (working set on Windows; 0 if unavailable).
 # TYPE ergo_rss_kb gauge
 ergo_rss_kb {rss_kb}
 # HELP ergo_state_db_bytes On-disk size of state.redb (0 when absent).

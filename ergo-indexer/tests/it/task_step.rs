@@ -5,11 +5,13 @@
 //! store side effects (status flip, indexed_height advance, on-disk
 //! mutations).
 //!
-//! `step` is synchronous, so we don't need a tokio runtime here. The
-//! async `run` driver is exercised by the reorg-depth tests.
+//! Step tests are synchronous. Worker tests also exercise the driver on its
+//! dedicated thread while a single-threaded host runtime remains responsive.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
@@ -515,6 +517,142 @@ fn step_rolls_back_then_forward_applies_a_new_fork() {
 }
 
 // ---- helpers ----------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_keeps_host_runtime_responsive_and_join_drains_step() {
+    struct BlockingChain {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl IndexerChainSource for BlockingChain {
+        fn committed_tip(&self) -> ChainTip {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(std::thread::current().id());
+                // Bounded even if a test assertion panics before releasing us.
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            ChainTip {
+                height: 0,
+                header_id: Digest32::from_bytes([0; 32]),
+            }
+        }
+        fn header_id_at(&self, _: u32) -> Option<Digest32> {
+            None
+        }
+        fn full_block(&self, _: &Digest32) -> Option<IndexerFullBlock> {
+            None
+        }
+    }
+    let (handle, tmp) = open_handle();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let chain = Arc::new(BlockingChain {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let worker = IndexerTask::new(handle, chain)
+        .spawn(Arc::clone(&cancel), Duration::from_secs(60))
+        .unwrap();
+    let worker_id = tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(worker_id, std::thread::current().id());
+    let joined = tokio::task::spawn_blocking(move || worker.join());
+    // A timer on the host's ONLY runtime thread fires while the indexer's
+    // synchronous read is blocked. Join must still wait for that read.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!joined.is_finished());
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), joined)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(cancel.load(Ordering::Acquire));
+    // Worker exit releases its DB ownership before join returns.
+    IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_follows_reorg_and_cancels_long_idle_sleep() {
+    let (handle, tmp) = open_handle();
+    let header_a = Digest32::from_bytes([0x11; 32]);
+    let header_b = Digest32::from_bytes([0x22; 32]);
+    let block_a = genesis_block(header_a);
+    apply_via_handle(&handle, &block_a);
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_block(block_a);
+    chain.put_block(genesis_block(header_b));
+    chain.put_canonical(1, header_b);
+    chain.set_tip(1, header_b);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = IndexerTask::new(handle.clone(), chain)
+        .spawn(Arc::clone(&cancel), Duration::from_secs(60))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if handle_status(&handle) == IndexerStatus::CaughtUp
+                && handle
+                    .store()
+                    .unwrap()
+                    .read_meta()
+                    .unwrap()
+                    .indexed_header_id
+                    == Some(header_b)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Cancellation must not wait out the 60-second idle interval.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || worker.join()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    drop(handle);
+    let (reopened, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+    assert_eq!(
+        reopened.read_meta().unwrap().indexed_header_id,
+        Some(header_b)
+    );
+}
+
+#[test]
+fn dropping_worker_requests_cancellation() {
+    let (handle, tmp) = open_handle();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = IndexerTask::new(handle, Arc::new(ScriptedChain::new()))
+        .spawn(Arc::clone(&cancel), Duration::from_secs(60))
+        .unwrap();
+    drop(worker);
+    assert!(cancel.load(Ordering::Acquire));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match IndexerStore::open(&tmp.path().join("indexer.redb")) {
+            Ok(_) => break,
+            Err(error) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker did not release store: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
 
 fn handle_status(h: &IndexerHandle) -> IndexerStatus {
     use ergo_indexer::IndexerQuery;
