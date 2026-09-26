@@ -54,6 +54,10 @@ pub(super) fn build_subsystem(
                 )
                 .into()
             })?;
+            k256::PublicKey::from_sec1_bytes(&miner_pk).map_err(|error| -> NodeError {
+                format!("[mining] miner_public_key_hex is not a secp256k1 public key: {error}")
+                    .into()
+            })?;
             (
                 std::sync::Arc::new(ergo_mining::PinnedRewardKeySource::new(miner_pk)),
                 Some(miner_pk),
@@ -243,5 +247,44 @@ pub(super) fn spawn_engine(
         }),
         engine_handle: Some(task),
         worker_handle: Some(worker),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_reward_key_is_validated_for_programmatic_configs() {
+        let mut config =
+            crate::node::tests::cfg_with_mode(crate::config::StateType::Utxo, true, -1);
+        config.mining_config.enabled = true;
+        let targets = Default::default();
+        let (submit, _rx) = tokio::sync::mpsc::channel(1);
+        for invalid in [
+            [0u8; 33],
+            {
+                let mut key = [0xff; 33];
+                key[0] = 2;
+                key
+            },
+            {
+                let mut key = [0; 33];
+                key[0] = 2;
+                key
+            },
+        ] {
+            config.mining_config.miner_public_key_hex = Some(hex::encode(invalid));
+            let error = build_subsystem(&config, &targets, &submit, None)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("not a secp256k1 public key"));
+        }
+        config.mining_config.miner_public_key_hex =
+            Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into());
+        assert!(build_subsystem(&config, &targets, &submit, None)
+            .unwrap()
+            .handle
+            .is_some());
     }
 }

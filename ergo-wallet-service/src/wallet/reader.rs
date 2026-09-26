@@ -1,6 +1,5 @@
-//! Read-only wallet view over the redb tables. Implements the
-//! `HydrationSource` trait for boot rehydration and exposes the
-//! read-only interface used by wallet consumers.
+//! Read-only wallet view over the redb tables, with fallible reads
+//! for boot rehydration and other wallet consumers.
 
 use crate::wallet::error::WalletStoreError;
 use crate::wallet::tables::*;
@@ -472,67 +471,6 @@ impl<'tx> WalletReader<'tx> {
             // Non-empty table but no EIP-3 row — inconsistent tracking.
             None => RewardKeyResolution::Corrupt,
         }
-    }
-}
-
-// Implement HydrationSource so WalletState can hydrate from one read snapshot.
-impl<'tx> crate::state::HydrationSource for WalletReader<'tx> {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-        let tbl = match self.txn.open_table(WALLET_TRACKED_PUBKEYS) {
-            Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
-        };
-        // Collect inside the txn (can't return a borrow across the
-        // txn boundary). For typical wallet sizes (≤ tens of pubkeys)
-        // this is fine; revisit if multi-scan makes it a hot path.
-        let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, _) in iter.flatten() {
-                let k_bytes: [u8; 41] = k.value();
-                pairs.push(parse_tracked_pubkey_key(&k_bytes));
-            }
-        }
-        Box::new(pairs.into_iter())
-    }
-
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-        let tbl = match self.txn.open_table(WALLET_VISIBLE_ADDRESSES) {
-            Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
-        };
-        // Collect — redb iteration gives keys in ASC byte order,
-        // which for u32 keys = numeric ASC order natively.
-        let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, v) in iter.flatten() {
-                pairs.push((k.value(), v.value()));
-            }
-        }
-        Box::new(pairs.into_iter())
-    }
-
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        let tbl = self.txn.open_table(WALLET_CHANGE_ADDRESS).ok()?;
-        tbl.get(()).ok().flatten().map(|g| g.value())
-    }
-}
-
-impl crate::state::HydrationSource for dyn crate::wallet::WalletRead + '_ {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-        Box::new(
-            self.tracked_pubkeys_with_paths()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(index, pubkey, _)| (index, pubkey)),
-        )
-    }
-
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-        Box::new(self.visible_pubkeys().unwrap_or_default().into_iter())
-    }
-
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        self.change_address_pubkey().ok().flatten()
     }
 }
 
