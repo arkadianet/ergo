@@ -554,12 +554,27 @@ impl InProcessChainClient {
         match reason {
             "duplicate" => SubmitFailureClass::Duplicate,
             "fee" | "below_min_fee" | "insufficient_fee" => SubmitFailureClass::RejectedFee,
-            "overloaded" => SubmitFailureClass::Overloaded,
+            "overloaded" | "pool_full" | "budget_exhausted" | "ibd_gated" | "tip_unready" => {
+                SubmitFailureClass::Overloaded
+            }
             "shutting_down" => SubmitFailureClass::ShuttingDown,
             "timeout" => SubmitFailureClass::Timeout,
-            "unsupported" | "route_disabled" => SubmitFailureClass::Unsupported,
-            "internal_error" | "runtime" | "submitter" => SubmitFailureClass::Internal,
-            _ => SubmitFailureClass::RejectedInvalid,
+            "unsupported" | "route_disabled" | "disabled" => SubmitFailureClass::Unsupported,
+            "deserialize"
+            | "non_canonical"
+            | "known_invalid"
+            | "structural"
+            | "validation_failed"
+            | "script_failed"
+            | "monetary_failed"
+            | "cost_exceeded"
+            | "reemission_policy"
+            | "double_spend_loser"
+            | "size_limit"
+            | "recently_unresolved"
+            | "unresolved_input"
+            | "unresolved_data_input" => SubmitFailureClass::RejectedInvalid,
+            _ => SubmitFailureClass::Internal,
         }
     }
 
@@ -1457,26 +1472,35 @@ mod tests {
         let cases = [
             ("duplicate", SubmitFailureClass::Duplicate),
             ("deserialize", SubmitFailureClass::RejectedInvalid),
+            ("non_canonical", SubmitFailureClass::RejectedInvalid),
+            ("known_invalid", SubmitFailureClass::RejectedInvalid),
+            ("structural", SubmitFailureClass::RejectedInvalid),
             ("validation_failed", SubmitFailureClass::RejectedInvalid),
             ("script_failed", SubmitFailureClass::RejectedInvalid),
             ("monetary_failed", SubmitFailureClass::RejectedInvalid),
             ("cost_exceeded", SubmitFailureClass::RejectedInvalid),
             ("reemission_policy", SubmitFailureClass::RejectedInvalid),
             ("below_min_fee", SubmitFailureClass::RejectedFee),
-            ("pool_full", SubmitFailureClass::RejectedInvalid),
+            ("pool_full", SubmitFailureClass::Overloaded),
             ("double_spend_loser", SubmitFailureClass::RejectedInvalid),
             ("size_limit", SubmitFailureClass::RejectedInvalid),
+            ("recently_unresolved", SubmitFailureClass::RejectedInvalid),
             ("unresolved_input", SubmitFailureClass::RejectedInvalid),
             ("unresolved_data_input", SubmitFailureClass::RejectedInvalid),
-            ("budget_exhausted", SubmitFailureClass::RejectedInvalid),
-            ("disabled", SubmitFailureClass::RejectedInvalid),
-            ("ibd_gated", SubmitFailureClass::RejectedInvalid),
-            ("tip_unready", SubmitFailureClass::RejectedInvalid),
+            ("budget_exhausted", SubmitFailureClass::Overloaded),
+            ("disabled", SubmitFailureClass::Unsupported),
+            ("ibd_gated", SubmitFailureClass::Overloaded),
+            ("tip_unready", SubmitFailureClass::Overloaded),
             ("overloaded", SubmitFailureClass::Overloaded),
             ("shutting_down", SubmitFailureClass::ShuttingDown),
             ("timeout", SubmitFailureClass::Timeout),
             ("route_disabled", SubmitFailureClass::Unsupported),
             ("internal_error", SubmitFailureClass::Internal),
+            ("runtime", SubmitFailureClass::Internal),
+            ("submitter", SubmitFailureClass::Internal),
+            ("insert_collision", SubmitFailureClass::Internal),
+            ("unknown_admission_state", SubmitFailureClass::Internal),
+            ("", SubmitFailureClass::Internal),
         ];
         for (reason, expected) in cases {
             assert_eq!(
