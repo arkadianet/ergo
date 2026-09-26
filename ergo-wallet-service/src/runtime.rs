@@ -22,6 +22,7 @@ use crate::wallet::{
 pub const DEFAULT_SYNC_BATCH: u32 = 256;
 pub const MAX_SYNC_BATCH: u32 = 65_536;
 pub const MAX_BLOCKS_PER_REQUEST: u32 = 1_024;
+const MAX_STALE_TIP_RETRIES: usize = 3;
 
 #[derive(Debug, Error)]
 pub enum WalletServiceError {
@@ -401,10 +402,22 @@ impl WalletService {
         cursor: ChainCursor,
         limit: u32,
     ) -> Result<(ChainCursor, VecDeque<(u32, RescanBlock)>), ChainClientError> {
-        let response = self.chain.blocks_since(BlocksSinceRequest {
+        let request = BlocksSinceRequest {
             cursor: cursor.clone(),
             limit: limit.min(MAX_BLOCKS_PER_REQUEST),
-        })?;
+        };
+        // A committed block can invalidate a coherent page while it is being
+        // read. Nothing from that page has been applied, so retry the same
+        // cursor. Bound the retries so cancellation and failures still return.
+        let mut retries = 0;
+        let response = loop {
+            match self.chain.blocks_since(request.clone()) {
+                Err(ChainClientError::StaleTip { .. }) if retries < MAX_STALE_TIP_RETRIES => {
+                    retries += 1;
+                }
+                result => break result?,
+            }
+        };
         let forward = match response {
             BlocksSinceResponse::Forward(forward) => forward,
             BlocksSinceResponse::Ancestor(ancestor) => {
@@ -1114,6 +1127,104 @@ mod tests {
     struct RecordingChain {
         inner: FakeChain,
         cursors: Arc<Mutex<Vec<ChainCursor>>>,
+    }
+
+    struct TransientStaleChain {
+        inner: FakeChain,
+        stale_responses: usize,
+        requests: AtomicUsize,
+    }
+
+    impl ChainClient for TransientStaleChain {
+        fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+            self.inner.committed_tip()
+        }
+        fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
+            self.inner.snapshot()
+        }
+        fn blocks_since(
+            &self,
+            request: BlocksSinceRequest,
+        ) -> Result<BlocksSinceResponse, ChainClientError> {
+            if self.requests.fetch_add(1, Ordering::SeqCst) < self.stale_responses {
+                return Err(ChainClientError::StaleTip {
+                    expected: CommittedTip::new(1, [1; 32]),
+                    actual: self.inner.tip.clone(),
+                });
+            }
+            self.inner.blocks_since(request)
+        }
+        fn lookup_utxo(
+            &self,
+            box_id: [u8; 32],
+            expected_tip: CommittedTip,
+        ) -> Result<UtxoLookup, ChainClientError> {
+            self.inner.lookup_utxo(box_id, expected_tip)
+        }
+        fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+            self.inner.submit(request)
+        }
+    }
+
+    #[test]
+    fn rescan_retries_transient_tip_advance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("wallet.redb")).unwrap());
+        let store = Arc::new(RedbWalletStore::new(db));
+        let chain = Arc::new(TransientStaleChain {
+            inner: FakeChain {
+                tip: CommittedTip::new(2, [2; 32]),
+                blocks: (1..=2)
+                    .map(|height| ChainBlock {
+                        block_id: [height as u8; 32],
+                        height,
+                        parent_id: [height as u8 - 1; 32],
+                        transactions: Vec::new(),
+                    })
+                    .collect(),
+            },
+            stale_responses: 1,
+            requests: AtomicUsize::new(0),
+        });
+        let service = WalletService::new(store.clone(), chain.clone());
+        let report = service.rescan_full().unwrap();
+        assert_eq!(report.blocks_processed, 2);
+        assert!(report.completed);
+        assert_eq!(chain.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store.read().unwrap().rescan_state().unwrap(),
+            RescanState::Idle
+        );
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn rescan_bounds_repeated_stale_tip_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("wallet.redb")).unwrap());
+        let store = Arc::new(RedbWalletStore::new(db));
+        let chain = Arc::new(TransientStaleChain {
+            inner: FakeChain {
+                tip: CommittedTip::new(2, [2; 32]),
+                blocks: Vec::new(),
+            },
+            stale_responses: usize::MAX,
+            requests: AtomicUsize::new(0),
+        });
+        let service = WalletService::new(store.clone(), chain.clone());
+        assert!(matches!(
+            service.rescan_full(),
+            Err(WalletServiceError::Chain(ChainClientError::StaleTip { .. }))
+        ));
+        assert_eq!(
+            chain.requests.load(Ordering::SeqCst),
+            MAX_STALE_TIP_RETRIES + 1
+        );
+        assert!(matches!(
+            store.read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed { .. }
+        ));
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
     }
 
     impl ChainClient for RecordingChain {

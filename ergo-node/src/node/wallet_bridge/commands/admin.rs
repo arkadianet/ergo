@@ -253,32 +253,34 @@ fn begin_rescan_process(
 }
 
 #[allow(clippy::result_large_err)]
+pub(super) fn rescan_tip(ctx: &WriterContext<'_>) -> Result<u32, WalletAdminError> {
+    if !ctx
+        .chain
+        .read_block_at_supported()
+        .map_err(map_rescan_read_error)?
+    {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read not available on this backend".to_string(),
+        ));
+    }
+    if ctx.chain.is_pruned() {
+        return Err(WalletAdminError::RestorePruningUnsupported);
+    }
+    ctx.chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))
+}
+
+#[allow(clippy::result_large_err)]
 pub(crate) async fn rescan(
     ctx: &WriterContext<'_>,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    let supported = match ctx.chain.read_block_at_supported() {
-        Ok(supported) => supported,
-        Err(e) => {
-            let _ = reply.send(Err(map_rescan_read_error(e)));
-            return;
-        }
-    };
-    if !supported {
-        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
-            "chain block-read not available on this backend".to_string(),
-        )));
-        return;
-    }
-    if ctx.chain.is_pruned() {
-        let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
-        return;
-    }
-    let tip_h = match ctx.chain.tip_height() {
+    let tip_h = match rescan_tip(ctx) {
         Ok(height) => height,
-        Err(e) => {
-            let _ = reply.send(Err(WalletAdminError::Internal(e.to_string())));
+        Err(error) => {
+            let _ = reply.send(Err(error));
             return;
         }
     };

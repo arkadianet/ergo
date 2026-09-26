@@ -98,6 +98,10 @@ and the in-process chain client. Full runtime relocation is transitional.
   `SecretStorage`, `WalletState` lock, command dispatch, signing/admin
   adaptation, rescan task flags, and API trait implementation. Do not describe
   full runtime relocation as complete.
+- **Derived-key recovery.** Key derivation checks that history can be read
+  before changing the tracked keys, then starts a supervised full rescan.
+  Wallet operations remain fenced until the rebuild succeeds; unsupported
+  or pruned backends reject derivation before persisting a new key.
 - **In-process chain adapter.** `InProcessChainClient` returns owned,
   identity-checked block data from the committed state reader and routes
   submission through `NodeSubmit`; the service itself has no node/API
