@@ -1005,7 +1005,6 @@ dependencies = [
  "ergo-wallet-service",
  "ergo_avltree_rust",
  "hex",
- "k256",
  "lru",
  "num-bigint",
  "proptest",

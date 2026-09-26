@@ -36,7 +36,6 @@ blake2            = { workspace = true }
 bytes             = { workspace = true }
 crossbeam-channel = { workspace = true }
 hex               = { workspace = true }
-k256              = { workspace = true, features = ["arithmetic"] }
 lru               = { workspace = true }
 num-bigint        = { workspace = true }
 redb              = { workspace = true, features = ["logging"] }
