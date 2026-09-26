@@ -564,7 +564,12 @@ Work the list in order; stop at the first decisive answer.
    probably rejecting something valid (reject-valid). Capture the block id
    + rejection reason — that pair is the bug report. Check
    `sync_wedged` too: a wedge is a different failure (see Troubleshooting)
-   that also presents as a stall.
+   that also presents as a stall. The last rejection and session counter are
+   retained after processing resumes. Once `best_full_block_height` exceeds
+   the rejected block's nonzero height, the dashboard labels it historical
+   and `/health` returns to its sync-derived status. Header progress or elapsed
+   time alone never clears the rejection alarm. This indicates local chain
+   progress, not independent confirmation that the rejected block was invalid.
 3. **`header_mismatch`: ask a third node.** The event names `height`,
    `ours`, `theirs`. Query any independent node (public explorer, a second
    Scala node) for the header id at that height:

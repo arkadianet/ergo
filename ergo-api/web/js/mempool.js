@@ -18,6 +18,7 @@ let lastFullAt = 0;
 let refreshTimer = null;
 let refreshing = false;
 let syncState = null;
+let lastTransactions = [];
 
 const mempoolWs = createChannelSub({
   id: 'mempool-panel',
@@ -44,13 +45,15 @@ function span(text, color) {
 
 function txidNode(t) {
   const w = document.createElement('span');
+  w.className = 'ex-hash';
   // Links into the explorer's tx view — the ungated detail route resolves
   // unconfirmed txs too, so the link works for pool entries. Row expansion
   // still works: the drawer toggle only fires outside `.copy`/anchor targets.
   const a = document.createElement('a');
   a.className = 'ex-link';
   a.href = `#explorer/tx/${t.tx_id}`;
-  a.textContent = t.tx_id;
+  a.textContent = truncMiddle(t.tx_id, 10, 10);
+  a.title = t.tx_id;
   w.append(a, ' ', copyBtn(t.tx_id));
   return w;
 }
@@ -187,14 +190,34 @@ export function mount(el) {
       <p data-empty-copy>Your node's mempool is empty. New transactions will appear here as they arrive.</p>
       <a class="btn btn--ghost" href="#explorer">Explore applied blocks →</a>
     </div>
+    <div class="filter-bar" data-filters hidden>
+      <label class="filter-bar__search">Find a transaction<input class="input" type="search" data-search placeholder="Transaction ID or source" autocomplete="off"></label>
+      <button class="btn btn--ghost" type="button" data-clear-filter hidden>Clear search</button>
+    </div>
+    <div class="list-meta" data-list-meta hidden><span data-results role="status"></span><span>Fees in ERG · fee rate in nanoERG/byte</span></div>
     <div data-table hidden></div>`;
   table = makeTable(el.querySelector('[data-table]'), COLS, {
     rowKey: (r) => r.tx_id,
     renderDetail,
     initialSort: { key: 'feeb', dir: -1 },
     label: 'Pending transactions',
+    emptyMessage: 'No transactions match this search. Clear the search to see all pending transactions.',
   });
   el.querySelector('[data-refresh]').addEventListener('click', fullRefresh);
+  el.querySelector('[data-search]').addEventListener('input', filterTransactions);
+  el.querySelector('[data-clear-filter]').addEventListener('click', () => {
+    el.querySelector('[data-search]').value = '';
+    el.querySelector('[data-search]').focus();
+    filterTransactions();
+  });
+}
+
+function filterTransactions() {
+  const query = root.querySelector('[data-search]').value.trim().toLowerCase();
+  const matches = lastTransactions.filter(t => [t.tx_id, srcText(t)].some(v => v.toLowerCase().includes(query)));
+  root.querySelector('[data-clear-filter]').hidden = !query;
+  root.querySelector('[data-results]').textContent = `${num(matches.length)} of ${num(lastTransactions.length)} loaded transactions`;
+  table.update(matches);
 }
 
 export function onFast({ status }) {
@@ -239,6 +262,8 @@ async function fullRefresh() {
     const empty = summary.size === 0 && txs.length === 0;
     root.querySelector('[data-empty]').hidden = !empty;
     root.querySelector('[data-table]').hidden = empty;
+    root.querySelector('[data-filters]').hidden = empty;
+    root.querySelector('[data-list-meta]').hidden = empty;
     root.querySelector('[data-fee-panel]').hidden = !txs.length;
     const set = (sel, t) => {
       const e = root.querySelector(sel);
@@ -283,7 +308,8 @@ async function fullRefresh() {
       set('[data-max]', '');
     }
 
-    table.update(txs);
+    lastTransactions = txs;
+    filterTransactions();
     lastFullAt = Date.now();
   } finally {
     refreshing = false;

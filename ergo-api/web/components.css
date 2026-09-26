@@ -385,9 +385,8 @@ code {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 .dtable__c {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 .dtable__c--r {
@@ -628,7 +627,8 @@ code {
     display: none;
   }
   .dtable__row {
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: stretch;
     gap: var(--space-1);
     padding: var(--space-5);
@@ -636,8 +636,10 @@ code {
   .dtable__c {
     flex: none !important; /* Desktop pixel widths must not become mobile row heights. */
     display: flex;
-    justify-content: space-between;
-    gap: var(--space-5);
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+    gap: 5px;
     white-space: normal;
     overflow: visible;
     text-overflow: clip;
@@ -645,8 +647,9 @@ code {
     overflow-wrap: anywhere;
   }
   .dtable__c > * { min-width: 0; overflow-wrap: anywhere; }
+  .dtable__c:first-child { grid-column: 1 / -1; }
   .dtable__c::before { flex: none; }
-  .dtable__togglecell { flex: none; align-self: flex-end; }
+  .dtable__togglecell { grid-column: 1 / -1; justify-self: end; }
   .dtable__toggle { width: 40px; height: 36px; }
   .dtable__c::before {
     content: attr(data-label);

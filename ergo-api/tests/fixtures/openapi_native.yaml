@@ -32,6 +32,48 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/ApiRecentBlock'
+  /api/v1/diagnostics/activity:
+    get:
+      tags:
+      - node
+      operationId: activity_handler
+      parameters:
+      - name: session
+        in: query
+        description: Session ID from the previous page; required with a nonzero since cursor
+        required: false
+        schema:
+          type: string
+      - name: since
+        in: query
+        description: Exclusive sequence cursor (decimal); default 0
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: Records per page, 1–500; default 256
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Bounded session log history; oldest first. Follow nextSeq while hasMore, and surface gap/reset/droppedTotal. Not the durable file archive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiActivityPage'
+        '400':
+          description: Invalid cursor or limit
+        '403':
+          description: Operator API key required
+        '503':
+          description: Capture unavailable or temporarily busy
+      security:
+      - ApiKeyAuth: []
   /api/v1/difficulty/history:
     get:
       tags:
@@ -1087,6 +1129,87 @@ components:
         total:
           type: integer
           format: int32
+          minimum: 0
+    ApiActivityPage:
+      type: object
+      required:
+      - sessionId
+      - oldestSeq
+      - latestSeq
+      - nextSeq
+      - hasMore
+      - gap
+      - reset
+      - capacity
+      - byteCapacity
+      - retained
+      - droppedTotal
+      - records
+      properties:
+        byteCapacity:
+          type: integer
+          minimum: 0
+        capacity:
+          type: integer
+          minimum: 0
+        droppedTotal:
+          type: string
+          description: Capture never waits on a reader; contention losses are explicit.
+        gap:
+          type: boolean
+          description: Some requested records have already been evicted.
+        hasMore:
+          type: boolean
+        latestSeq:
+          type: string
+        nextSeq:
+          type: string
+          description: Resume from this cursor, not latestSeq, while hasMore is true.
+        oldestSeq:
+          type: string
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiActivityRecord'
+        reset:
+          type: boolean
+          description: Session mismatch or a cursor beyond the current session; page starts over.
+        retained:
+          type: integer
+          minimum: 0
+        sessionId:
+          type: string
+          description: Changes on process restart. Cursors are meaningful only in this session.
+    ApiActivityRecord:
+      type: object
+      required:
+      - seq
+      - unixMs
+      - level
+      - target
+      - message
+      - fields
+      - truncated
+      properties:
+        fields:
+          type: object
+          additionalProperties: {}
+          propertyNames:
+            type: string
+        level:
+          type: string
+        message:
+          type: string
+        seq:
+          type: string
+        target:
+          type: string
+        truncated:
+          type: boolean
+          description: Oversized values/fields were omitted or shortened for this view.
+        unixMs:
+          type: integer
+          format: int64
           minimum: 0
     ApiBlockApplyError:
       type: object
@@ -2475,8 +2598,9 @@ components:
             description: |-
               The most recent block this node REJECTED during apply — a consensus
               fork-from-network signal (the node refused a block its peers may have
-              accepted). `None` when no rejection has occurred this session. A
-              persistent `Some(_)` is an operator page.
+              accepted). `None` when no rejection has occurred this session. Retained
+              after recovery for diagnosis: a known nonzero rejected height below
+              `best_full_block_height` is historical, not an active rejection alarm.
         last_reorg_depth:
           type:
           - integer

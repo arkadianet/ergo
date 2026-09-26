@@ -34,6 +34,12 @@ glanceable, not an audit log — durable signals live on `/metrics` and
 `/api/v1/node/status` (e.g. a `shadowDivergence` may age out of the ring
 under heavy block flow while `ergo_node_shadow_diverged` stays latched).
 
+The dashboard's **Activity & logs** page also provides the separate operator-key
+protected structured log history at `GET /api/v1/diagnostics/activity`. Its
+session/cursor and retention contract is documented in [Logging](logging.md#dashboard-activity-and-logs).
+It does not share coarse-feed or WebSocket sequence numbers. The public coarse
+feed remains unchanged.
+
 ## WebSocket channels (`GET /api/v1/ws`)
 
 Subscribe with `{"op":"subscribe","channels":[…]}`. Channels:

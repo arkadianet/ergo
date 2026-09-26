@@ -30,7 +30,8 @@
 //! always present and append after the Scala fields; the Scala-parity
 //! fields (`msg` / `b` / `h` / `pk` / `proof`) keep their exact names,
 //! types, and encoding, and a client that ignores unknown fields
-//! (Lithos / Rigel / ErgoStratum) is unaffected.
+//! (Lithos / Rigel / ErgoStratum) is unaffected. The optional `metrics`
+//! extension supplies template observations for the operator dashboard.
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -89,6 +90,24 @@ pub struct WorkMessageJson {
     /// a legacy / Scala candidate that omits it (defaults to `false`).
     #[serde(default)]
     pub clean_jobs: bool,
+
+    /// Node-specific template observations. Omitted by older nodes / Scala.
+    /// All values belong to this work message's final assembled template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<CandidateMetricsJson>,
+}
+
+/// Template metrics, additive to Scala's WorkMessage fields. Fees use an exact
+/// nanoERG decimal string so browser clients cannot lose integer precision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CandidateMetricsJson {
+    pub transaction_count: u32,
+    pub selected_transaction_count: u32,
+    pub fees_nano_erg: String,
+    pub transactions_size_bytes: u64,
+    pub max_block_size_bytes: u64,
+    pub validation_cost: u64,
+    pub max_block_cost: u64,
 }
 
 /// JSON payload accepted by `POST /mining/solution`. Autolykos v2 form
@@ -216,6 +235,7 @@ mod tests {
             proof: None,
             template_seq: 7,
             clean_jobs: true,
+            metrics: None,
         };
         let j = serde_json::to_value(&m).expect("serialize");
         assert_eq!(j["msg"], serde_json::Value::String("aa".repeat(32)));
@@ -251,6 +271,10 @@ mod tests {
         assert!(parsed.proof.is_none());
         assert_eq!(parsed.template_seq, 0, "missing template_seq defaults to 0");
         assert!(!parsed.clean_jobs, "missing clean_jobs defaults to false");
+        assert!(
+            parsed.metrics.is_none(),
+            "legacy candidates have no metrics"
+        );
     }
 
     #[test]

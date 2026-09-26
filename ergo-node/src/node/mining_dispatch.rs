@@ -193,6 +193,37 @@ impl MiningTipSnapshot {
             && self.best_header_height < self.best_full_height + MINING_SYNC_TOLERANCE
     }
 
+    /// Explain a closed startup latch without mistaking its fresh-block
+    /// precondition for a height gap. A restart can have identical persisted
+    /// tips and still need a new, recent block before mining starts.
+    fn startup_wait_message(&self, offline_generation: bool) -> String {
+        if self.nearly_synced() {
+            if offline_generation {
+                return format!(
+                    "waiting for mining startup (headers={} applied={}); offline generation is enabled",
+                    self.best_header_height, self.best_full_height,
+                );
+            }
+            format!(
+                "waiting for a recent block after startup (headers={} applied={}); \
+                 mining starts after a newly applied block has a recent timestamp. \
+                 Search indexing does not block mining",
+                self.best_header_height, self.best_full_height,
+            )
+        } else {
+            let fresh_block = if offline_generation {
+                ""
+            } else {
+                " and a recent block has been applied since startup"
+            };
+            format!(
+                "node still catching up (headers={} applied={}); mining starts once \
+                 headers are fewer than {} blocks ahead of applied blocks{}",
+                self.best_header_height, self.best_full_height, MINING_SYNC_TOLERANCE, fresh_block,
+            )
+        }
+    }
+
     /// The current best-full tip id (the candidate's parent).
     pub(super) fn best_full_id(&self) -> [u8; 32] {
         self.best_full_id
@@ -442,6 +473,7 @@ fn devnet_header_inventory(network: ergo_chain_spec::Network, id: [u8; 32]) -> O
 pub(super) fn handle_mining_request(
     state: &mut NodeState,
     mining_handle: Option<&ergo_mining::handle::MiningHandle>,
+    offline_generation: bool,
     req: crate::mining_bridge::MiningRequest,
 ) {
     let handle = match mining_handle {
@@ -510,16 +542,7 @@ pub(super) fn handle_mining_request(
     // one-way latch on "nearly synced" and not a live `headers == bodies`
     // test.
     if !handle.best_tip().synced {
-        let cs = state.store.chain_state_meta();
-        let msg = format!(
-            "node still catching up (best_header={}@{} best_full={}@{}); \
-             mining starts once the header chain is within {} blocks of the applied chain",
-            hex::encode(cs.best_header_id),
-            cs.best_header_height,
-            hex::encode(cs.best_full_block_id),
-            cs.best_full_block_height,
-            MINING_SYNC_TOLERANCE,
-        );
+        let msg = MiningTipSnapshot::capture(state).startup_wait_message(offline_generation);
         match req {
             crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
@@ -828,6 +851,47 @@ mod tests {
     const INTERVAL_MS: u64 = 120_000;
     /// An arbitrary "now" well clear of the epoch so subtraction is meaningful.
     const NOW_MS: u64 = 1_800_000_000_000;
+
+    #[test]
+    fn startup_wait_distinguishes_persisted_tip_from_catch_up() {
+        let persisted = synced_tip(1, 1_881_253);
+        assert!(!mining_started_latch(false, persisted, false, true, false));
+        let message = persisted.startup_wait_message(false);
+        assert!(message.starts_with("waiting for a recent block after startup"));
+        assert!(!message.contains("still catching up"));
+
+        // Five headers ahead passes the height gate, six does not. Both
+        // responses must still explain the fresh-application precondition.
+        assert!(header_ahead_tip(1, 100, 5)
+            .startup_wait_message(false)
+            .starts_with("waiting for a recent block after startup"));
+        let behind = header_ahead_tip(1, 100, 6).startup_wait_message(false);
+        assert!(behind.starts_with("node still catching up"));
+        assert!(behind.contains("fewer than 6 blocks"));
+        assert!(behind.contains("recent block has been applied since startup"));
+        assert!(MiningTipSnapshot::default()
+            .startup_wait_message(false)
+            .starts_with("node still catching up"));
+    }
+
+    #[test]
+    fn offline_startup_wait_does_not_require_a_fresh_block() {
+        let behind = header_ahead_tip(1, 100, 6);
+        assert!(!mining_started_latch(false, behind, false, false, true));
+        let message = behind.startup_wait_message(true);
+        assert!(message.starts_with("node still catching up"));
+        assert!(message.contains("fewer than 6 blocks"));
+        assert!(!message.contains("recent block"));
+
+        let persisted = synced_tip(1, 100);
+        assert!(mining_started_latch(false, persisted, false, false, true));
+        assert!(!persisted
+            .startup_wait_message(true)
+            .contains("recent block"));
+        assert!(!MiningTipSnapshot::default()
+            .startup_wait_message(true)
+            .contains("recent block"));
+    }
 
     #[test]
     fn tip_is_fresh_tip_at_the_two_interval_boundary_is_fresh() {

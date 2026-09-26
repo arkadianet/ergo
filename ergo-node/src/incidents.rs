@@ -23,6 +23,7 @@ use std::time::Instant;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
 /// Ring capacity: ~500 structured events is minutes-to-hours of context
@@ -149,8 +150,56 @@ impl Visit for FieldCollector {
 /// triggering snapshots on first-sight ERRORs. Install once.
 pub struct CaptureLayer;
 
-impl<S: Subscriber> Layer<S> for CaptureLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+// Bounded diagnostic span context. Event-local fields take precedence over
+// inner span fields, which take precedence over outer span fields.
+struct ActivitySpan {
+    fields: serde_json::Map<String, serde_json::Value>,
+    truncated: bool,
+}
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for CaptureLayer {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let mut collector = FieldCollector {
+            fields: serde_json::Map::new(),
+        };
+        attrs.record(&mut collector);
+        let (fields, truncated) = crate::activity::span_fields(&collector.fields);
+        span.extensions_mut()
+            .insert(ActivitySpan { fields, truncated });
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let mut collector = FieldCollector {
+            fields: serde_json::Map::new(),
+        };
+        values.record(&mut collector);
+        let mut extensions = span.extensions_mut();
+        if let Some(saved) = extensions.get_mut::<ActivitySpan>() {
+            let mut fields = saved.fields.clone();
+            fields.extend(collector.fields);
+            let (fields, truncated) = crate::activity::span_fields(&fields);
+            saved.fields = fields;
+            saved.truncated |= truncated;
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         // INFO-and-above only (design contract): DEBUG/TRACE mechanics
         // stay out of the forensic ring regardless of output-layer filters.
         if matches!(event.metadata().level(), &Level::TRACE | &Level::DEBUG) {
@@ -179,6 +228,21 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
         for (k, v) in collector.fields {
             obj.insert(k, v);
         }
+
+        // The event/incident object remains unchanged. The UI includes span
+        // identity too, so two different blocks/peers cannot group accidentally.
+        let mut activity = serde_json::Map::new();
+        let mut context_truncated = false;
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope.from_root() {
+                if let Some(saved) = span.extensions().get::<ActivitySpan>() {
+                    activity.extend(saved.fields.clone());
+                    context_truncated |= saved.truncated;
+                }
+            }
+        }
+        activity.extend(obj.clone());
+        crate::activity::record(&activity, context_truncated);
 
         if *event.metadata().level() == Level::ERROR {
             let meta = event.metadata();

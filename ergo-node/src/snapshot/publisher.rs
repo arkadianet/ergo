@@ -29,6 +29,7 @@ pub struct SnapshotPublisher {
     last_block_progress_at: Instant,
     last_header_height: u32,
     last_full_block_height: u32,
+    activity_primed: bool,
 }
 
 impl SnapshotPublisher {
@@ -45,6 +46,7 @@ impl SnapshotPublisher {
             last_block_progress_at: started_at,
             last_header_height: 0,
             last_full_block_height: 0,
+            activity_primed: false,
         }
     }
 
@@ -133,6 +135,12 @@ impl SnapshotPublisher {
         info.uptime_seconds = now.duration_since(self.started_at).as_secs();
 
         let snap = build_snapshot(parts, info, effective_progress_age_ms);
+        let prior = self.handle.load();
+        crate::activity::status_transitions(
+            self.activity_primed.then_some(&prior.status),
+            &snap.status,
+        );
+        self.activity_primed = true;
         self.handle.store(std::sync::Arc::new(snap));
     }
 }
@@ -526,6 +534,88 @@ mod tests {
         let snap2 = publisher2.handle().load_full();
         assert!(snap2.status.last_block_apply_error.is_none());
         assert_ne!(snap2.health.status, HealthStatus::Rejecting);
+    }
+
+    #[test]
+    fn block_rejection_health_recovers_with_applied_progress_and_retains_history() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let error = ergo_api::types::ApiBlockApplyError {
+            block_id: "ab".repeat(32),
+            height: 500,
+            reason: "ADProofs hash mismatch".into(),
+            age_ms: 10_800_000,
+        };
+        // Age and downloaded headers do not clear an unresolved rejection.
+        // Equal height is conservative; committed progress must pass it.
+        // A rollback or a newer rejection restores the active warning.
+        for (applied, rejected, expected) in [
+            (499, 500, HealthStatus::Rejecting),
+            (500, 500, HealthStatus::Rejecting),
+            (501, 500, HealthStatus::Ok),
+            (499, 500, HealthStatus::Rejecting),
+            (501, 502, HealthStatus::Rejecting),
+            (501, 0, HealthStatus::Rejecting),
+        ] {
+            let mut parts = make_parts(600, applied, &[]);
+            parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
+                height: rejected,
+                ..error.clone()
+            });
+            parts.block_apply_errors_total = 1;
+            publisher.publish(parts);
+            let snap = publisher.handle().load_full();
+            assert_eq!(snap.health.status, expected);
+            let retained = snap.status.last_block_apply_error.as_ref().unwrap();
+            assert_eq!(retained.block_id, error.block_id);
+            assert_eq!(retained.height, rejected);
+            assert_eq!(retained.reason, error.reason);
+            assert_eq!(snap.status.block_apply_errors_total, 1);
+        }
+    }
+
+    #[test]
+    fn historical_rejection_does_not_mask_current_health_faults() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(600, 600, &[]);
+        parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
+            block_id: "ab".repeat(32),
+            height: 500,
+            reason: "tx invalid".into(),
+            age_ms: 10_800_000,
+        });
+        parts.peer_count = 0;
+        let error = parts.last_block_apply_error.clone();
+        publisher.publish(parts);
+        assert_eq!(
+            publisher.handle().load_full().health.status,
+            HealthStatus::Disconnected
+        );
+
+        let mut stalled = make_parts(610, 600, &[]);
+        stalled.last_block_apply_error = error.clone();
+        publisher.last_block_progress_at = Instant::now() - Duration::from_secs(121);
+        publisher.publish(stalled);
+        assert_eq!(
+            publisher.handle().load_full().health.status,
+            HealthStatus::Stalled
+        );
+
+        let mut parts = make_parts(600, 600, &[]);
+        parts.last_block_apply_error = error;
+        parts.sync_wedged = Some(ergo_api::types::ApiSyncWedged {
+            stuck_block_id: "cd".repeat(32),
+            stuck_height: 600,
+            fork_below_height: 300,
+            max_rollback_depth: 200,
+            age_ms: 0,
+        });
+        publisher.publish(parts);
+        assert_eq!(
+            publisher.handle().load_full().health.status,
+            HealthStatus::Wedged
+        );
     }
 
     /// The terminal deep-fork wedge threads from `SnapshotParts` through

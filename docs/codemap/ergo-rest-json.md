@@ -11,7 +11,7 @@
 - `DecodeMode` (enum) — `src/decode.rs:444` — the central contract: `Submit` (wallet→node, strict + canonicalize) vs `Preserve` (on-chain bytes, verbatim). Every decoder branches on this; read it before any decoder.
 - `decode_scala_transaction` / `decode_scala_full_block` — `src/decode.rs:49,833` — the two top-level entry points (JSON tx-submit, and `POST /blocks` full-block ingest).
 - `ScalaFullBlock` / `ScalaHeader` — `src/types.rs:23,42` — the read-side DTO shapes; field order mirrors Scala emission so captured-fixture diffs read cleanly.
-- `WorkMessageJson` — `src/mining.rs:37` — the `/mining/candidate` wire shape; Scala `WorkMessage` fields plus this node's `template_seq`/`clean_jobs` pool extensions.
+- `WorkMessageJson` — `src/mining.rs` — the `/mining/candidate` wire shape; Scala `WorkMessage` fields plus this node's `template_seq`/`clean_jobs` pool extensions and optional template `metrics`.
 
 ## Modules
 - `src/lib.rs` — crate root: declares the 3 modules and re-exports `decode::*` + `types::*` at the crate top level.
@@ -46,4 +46,4 @@
 - **Bounded numeric decodes.** `nBits` (u64 JSON) rejects values `> u32::MAX` rather than truncating; context-extension entry count rejects `> u8::MAX`; fixed-length fields (digest32, stateRoot 33B, votes 3B, PoW pk/w 33B, nonce 8B) length-check before copy.
 - **Full-block boundary check.** `decode_scala_full_block` rejects a body whose blockTransactions/extension/adProofs `headerId` does not match the computed header id (case-insensitive hex compare) before any section reaches the apply path.
 - **PoW solution layout is version-keyed.** v1 headers decode `AutolykosSolution::V1{pk,w,nonce,d}` with `d` as a signed-two's-complement BigInt (mirrors `BigInt::to_signed_bytes_be`, preserving the leading `0x00` disambiguator); everything else decodes `V2{pk,nonce}` and ignores the Scala `w`/`d` artifacts.
-- **Mining DTO Scala parity.** `WorkMessageJson` keeps Scala's `msg`/`b`/`h`/`pk`/`proof` names/types/encoding (`b` is decimal-BigInt string; `proof` omitted when `None`); the node-only `template_seq`/`clean_jobs` are appended and `#[serde(default)]` so legacy/Scala candidates still deserialize.
+- **Mining DTO Scala parity.** `WorkMessageJson` keeps Scala's `msg`/`b`/`h`/`pk`/`proof` names/types/encoding (`b` is a bare JSON integer; `proof` omitted when `None`). Node-only extensions default when absent, so legacy/Scala candidates still deserialize. Optional `metrics` are frozen with the served job after selection and trimming: selected mempool count, total count including system transactions, fees as an exact nanoERG string (excluding emission and rent self-claims), serialized transaction-section bytes, and validation cost in block-cost units with both protocol limits. No additional validation or scanning is done on API reads.

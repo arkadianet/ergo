@@ -35,6 +35,7 @@
       <a class="side__link" href="#mining" data-section="mining"><span class="side__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 20.5 12 13"/><path d="M9 4.5C12.5 3 17 3.7 19.5 6.2 17 6 13.6 6.6 11.2 9c-2.4 2.4-3 5.8-2.8 8.3C5.9 14.8 5.2 10.3 6.7 6.8 7.3 5.9 8.1 5 9 4.5Z"/></svg></span>Mining</a>
       <a class="side__link" href="#voting" data-section="voting"><span class="side__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.4 12.4 2.5 2.5 4.9-5.4"/></svg></span>Voting</a>
       <a class="side__link" href="#wallet" data-section="wallet"><span class="side__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="6" width="17" height="13" rx="2.5"/><path d="M3.5 10h17"/><path d="M14.5 14.5h3"/></svg></span>Wallet</a>
+      <a class="side__link" href="#activity" data-section="activity"><span class="side__glyph" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h5m5 0h6M4 18h16"/><circle cx="11.5" cy="12" r="2.5"/></svg></span>Activity &amp; logs</a>
     </div>
     <div class="side__foot">
       <div class="side__tools" id="node-tools">
@@ -52,8 +53,8 @@
   </nav>
   <main class="main" id="main-content" tabindex="-1">
     <div class="workspace-bar">
-      <button class="workspace-search" id="global-search" type="button"><span aria-hidden="true">⌕</span><span>Search the chain</span><kbd>/</kbd></button>
-      <span class="workspace-context">Independent by design.</span>
+      <nav class="workspace-location" aria-label="Location"><a href="#overview">Node workspace</a><span aria-hidden="true">/</span><span id="workspace-page">Overview</span></nav>
+      <button class="workspace-search" id="global-search" type="button" aria-haspopup="dialog"><span aria-hidden="true">⌕</span><span>Search or jump to…</span><kbd>/</kbd></button>
     </div>
     <div class="banner banner--err connection-banner" id="connection-banner" role="status" hidden>Connection lost. Values below may be out of date. Reconnecting automatically.</div>
     <section id="section-overview" class="section" aria-label="Overview"></section>
@@ -63,6 +64,7 @@
     <section id="section-mining" class="section" aria-label="Mining" hidden></section>
     <section id="section-voting" class="section" aria-label="Voting" hidden></section>
     <section id="section-wallet" class="section" aria-label="Wallet" hidden></section>
+    <section id="section-activity" class="section" aria-label="Activity and logs" hidden></section>
   </main>
 </div>
 <dialog id="settings-dialog" class="dialog"></dialog>

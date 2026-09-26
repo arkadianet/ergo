@@ -4,6 +4,7 @@
 //! supporting modules tests and embedders need. The binary
 //! (`src/main.rs`) is a thin wrapper around [`run`].
 
+mod activity;
 pub mod anchor_map;
 pub mod anchor_scheduler;
 pub mod api_bridge;

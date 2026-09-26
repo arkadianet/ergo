@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ergo_api::mining::{MiningApiError, NodeMining};
-use ergo_rest_json::mining::{AutolykosSolutionJson, WorkMessageJson};
+use ergo_rest_json::mining::{AutolykosSolutionJson, CandidateMetricsJson, WorkMessageJson};
 use tokio::sync::{mpsc, oneshot};
 
 /// Project a typed mining `WorkMessage` to its JSON wire shape, stamping the
@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 /// served template's identity. Lives in the node bridge (which owns both the
 /// typed and JSON sides) so `ergo-mining` stays free of the JSON / presentation
 /// DTOs. The Scala-parity fields (`msg` / `b` / `h` / `pk` / `proof`) are
-/// untouched; the two extension fields are always present.
+/// untouched; template metrics are copied from the same frozen work message.
 pub(crate) fn work_message_to_json(
     w: ergo_mining::work_message::WorkMessage,
     template_seq: u64,
@@ -39,6 +39,15 @@ pub(crate) fn work_message_to_json(
         proof: None,
         template_seq,
         clean_jobs,
+        metrics: Some(CandidateMetricsJson {
+            transaction_count: w.metrics.transaction_count,
+            selected_transaction_count: w.metrics.selected_transaction_count,
+            fees_nano_erg: w.metrics.fees_nano_erg.to_string(),
+            transactions_size_bytes: w.metrics.transactions_size_bytes,
+            max_block_size_bytes: w.metrics.max_block_size_bytes,
+            validation_cost: w.metrics.validation_cost,
+            max_block_cost: w.metrics.max_block_cost,
+        }),
     }
 }
 
@@ -352,6 +361,7 @@ mod tests {
             proof: None,
             template_seq: 0,
             clean_jobs: false,
+            metrics: None,
         }
     }
 
@@ -426,6 +436,15 @@ mod tests {
             target: num_bigint::BigUint::from(123_456_789u64),
             height: 1_786_188,
             pk: [0x02; 33],
+            metrics: ergo_mining::work_message::CandidateMetrics {
+                transaction_count: 5,
+                selected_transaction_count: 3,
+                fees_nano_erg: 9_007_199_254_740_993,
+                transactions_size_bytes: 1234,
+                max_block_size_bytes: 524_288,
+                validation_cost: 4321,
+                max_block_cost: 1_000_000,
+            },
         };
         let v = serde_json::to_value(work_message_to_json(w, 42, true)).unwrap();
         assert_eq!(v["msg"], serde_json::Value::String("ab".repeat(32)));
@@ -438,16 +457,29 @@ mod tests {
         // identity's values.
         assert_eq!(v["template_seq"], serde_json::Value::Number(42.into()));
         assert_eq!(v["clean_jobs"], serde_json::Value::Bool(true));
-        // Pin that the extension added EXACTLY these two keys and changed no
-        // existing one: the legacy shape (proof omitted) is msg/b/h/pk, and the
-        // full object is those four plus the two extensions — six keys, no more.
+        assert_eq!(v["metrics"]["fees_nano_erg"], "9007199254740993");
+        assert_eq!(v["metrics"]["transaction_count"], 5);
+        assert_eq!(v["metrics"]["selected_transaction_count"], 3);
+        assert_eq!(v["metrics"]["transactions_size_bytes"], 1234);
+        assert_eq!(v["metrics"]["max_block_size_bytes"], 524_288);
+        assert_eq!(v["metrics"]["validation_cost"], 4321);
+        assert_eq!(v["metrics"]["max_block_cost"], 1_000_000);
+        // The original fields retain their encodings; metrics are additive.
         let obj = v.as_object().expect("object");
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["b", "clean_jobs", "h", "msg", "pk", "template_seq"],
-            "exactly the legacy fields (msg/b/h/pk) plus the two extensions",
+            vec![
+                "b",
+                "clean_jobs",
+                "h",
+                "metrics",
+                "msg",
+                "pk",
+                "template_seq"
+            ],
+            "legacy fields plus pool identity and template metrics",
         );
     }
 

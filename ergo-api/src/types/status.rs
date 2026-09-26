@@ -31,8 +31,9 @@ pub struct ApiStatus {
     pub bootstrap: Option<ApiBootstrapStatus>,
     /// The most recent block this node REJECTED during apply — a consensus
     /// fork-from-network signal (the node refused a block its peers may have
-    /// accepted). `None` when no rejection has occurred this session. A
-    /// persistent `Some(_)` is an operator page.
+    /// accepted). `None` when no rejection has occurred this session. Retained
+    /// after recovery for diagnosis: a known nonzero rejected height below
+    /// `best_full_block_height` is historical, not an active rejection alarm.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_block_apply_error: Option<ApiBlockApplyError>,
     /// Monotonic count of block-apply rejections since node start (the
