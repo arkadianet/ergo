@@ -5322,3 +5322,200 @@ fn admission_does_not_resurrect_a_chain_output_the_committed_block_consumed() {
         "a box the committed block consumed is not spendable through the stale chain"
     );
 }
+
+// ----- SyncInfo after a requested header delivery (Scala parity) -----
+
+/// Which path asked the peer for the header the scenario delivers.
+#[derive(Clone, Copy, Debug)]
+enum HeaderAsk {
+    /// The peer's header `Inv`, through the coordinator.
+    Inv,
+    /// An input block announced at `full + 2`: the processor holds it and
+    /// fetches the ordering header it sits on from the announcer
+    /// (`RequestOrderingHeader`).
+    InputBlockAhead,
+}
+
+/// Deliver a header `Modifier` frame from `peer` through the per-message
+/// path, or as two identical frames through the coalesced header batch.
+fn deliver_header_frame(
+    state: &mut NodeState,
+    peer: std::net::SocketAddr,
+    payload: &[u8],
+    coalesced: bool,
+) {
+    if coalesced {
+        let events = (0..2)
+            .map(|_| crate::peer_loop::PeerEvent::Message {
+                peer,
+                code: ergo_p2p::message::CODE_MODIFIER,
+                payload: crate::peer_loop::MeteredPayload::for_test(
+                    payload.to_vec(),
+                    &state.event_byte_budget,
+                ),
+            })
+            .collect();
+        crate::node::events::handle_event_batch(state, events);
+    } else {
+        let actions = send_to(state, peer, ergo_p2p::message::CODE_MODIFIER, payload);
+        crate::node::flush_actions(state, actions);
+    }
+}
+
+/// Drain every frame queued for a peer, keeping the SyncInfo payloads.
+fn drain_sync_infos(rx: &mut crate::peer_loop::outbound::Receiver) -> Vec<Vec<u8>> {
+    let mut syncs = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        if frame.code == ergo_p2p::message::CODE_SYNC_INFO {
+            syncs.push(frame.payload.to_vec());
+        }
+    }
+    syncs
+}
+
+/// Scala answers a peer that delivered a header it requested with a
+/// SyncInfo, whether or not the header advanced its best header, and its
+/// relay filter for input blocks and ordering announcements reads the
+/// height that SyncInfo reports. With input blocks on, an ordering-block
+/// announcement applies the block's header through the reconstruction
+/// handoff, and it often arrives before the header we requested, so that
+/// delivery advances nothing.
+///
+/// Mainnet blocks 1-4 are applied and block 5's header is requested from
+/// the peer (`ask`). The peer's code-106 announcement of block 5 then
+/// applies the header, and only after that does the requested header
+/// arrive. The handoff must leave the request outstanding and send no
+/// SyncInfo itself; the delivery then gets exactly one, which reports
+/// block 5 as our tip and stamps the peer's sync time.
+fn announced_then_requested_header_scenario(ask: HeaderAsk, coalesced: bool) {
+    use ergo_p2p::delivery::ModifierStatus;
+    use ergo_p2p::message;
+    use ergo_p2p::types::{InvData, ModifierTypeId, ModifiersData};
+
+    let case = format!("{ask:?}, coalesced: {coalesced}");
+    let dir = tempfile::tempdir().unwrap();
+    let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+    let now = Instant::now();
+    let (peer, mut rx) = handshake_peer(
+        &mut state,
+        19707,
+        ergo_p2p::handshake::Version::SUBBLOCKS,
+        now,
+    );
+    let target = blocks.last().unwrap();
+
+    let actions = match ask {
+        HeaderAsk::Inv => {
+            let inv = message::serialize_inv(&InvData {
+                type_id: ModifierTypeId::Header.as_byte(),
+                ids: vec![target.header_id],
+            })
+            .unwrap();
+            send_to(&mut state, peer, message::CODE_INV, &inv)
+        }
+        HeaderAsk::InputBlockAhead => {
+            let ahead = ts::announcement(target.header_id, target.height + 1, 11, None);
+            send_to(
+                &mut state,
+                peer,
+                message::CODE_INPUT_BLOCK,
+                &message::serialize_input_block(&ahead).unwrap(),
+            )
+        }
+    };
+    let asked: Vec<[u8; 32]> = sent_frames(&actions, message::CODE_REQUEST_MODIFIER)
+        .iter()
+        .filter_map(|p| message::deserialize_inv(p).ok())
+        .filter(|inv| inv.type_id == ModifierTypeId::Header.as_byte())
+        .flat_map(|inv| inv.ids)
+        .collect();
+    assert_eq!(
+        asked,
+        vec![target.header_id],
+        "{case}: block 5's header is requested from the peer"
+    );
+    crate::node::flush_actions(&mut state, actions);
+
+    // The announcement of block 5 applies its header first.
+    let mut ann = ts::ordering_announcement([0u8; 32], target.height, 1, Vec::new());
+    ann.header = target.header.clone();
+    ann.non_broadcasted_transactions = target.transactions.clone();
+    ann.extension_fields = mainnet_extension_fields(target);
+    let actions = send_to(
+        &mut state,
+        peer,
+        message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+        &message::serialize_ordering_block_announcement_msg(&ann).unwrap(),
+    );
+    crate::node::flush_actions(&mut state, actions);
+    assert_eq!(
+        state.store.chain_state_meta().best_header_height,
+        target.height,
+        "{case}: the announcement applied block 5's header"
+    );
+    assert_eq!(
+        state.coordinator.delivery().status(&target.header_id),
+        ModifierStatus::Requested,
+        "{case}: the handoff leaves the request to the peer outstanding"
+    );
+    assert!(
+        drain_sync_infos(&mut rx).is_empty(),
+        "{case}: the announcement itself sends no SyncInfo"
+    );
+    assert!(
+        state
+            .coordinator
+            .sync_state_mut()
+            .not_synced_or_outdated(peer, Instant::now()),
+        "{case}: nor stamps the peer's sync time"
+    );
+
+    // The requested header arrives and advances nothing.
+    let payload = message::serialize_modifiers(&ModifiersData {
+        type_id: ModifierTypeId::Header.as_byte(),
+        modifiers: vec![(target.header_id, target.header_bytes.clone())],
+    })
+    .unwrap();
+    deliver_header_frame(&mut state, peer, &payload, coalesced);
+    assert_eq!(
+        state.store.chain_state_meta().best_header_height,
+        target.height,
+        "{case}: the delivery does not move the best header"
+    );
+    let syncs = drain_sync_infos(&mut rx);
+    assert_eq!(
+        syncs.len(),
+        1,
+        "{case}: the requested delivery gets exactly one SyncInfo"
+    );
+    let message::SyncInfo::V2 { headers } = message::deserialize_sync_info(&syncs[0]).unwrap()
+    else {
+        panic!("{case}: expected a V2 SyncInfo");
+    };
+    assert_eq!(
+        *ergo_primitives::digest::blake2b256(&headers[0]).as_bytes(),
+        target.header_id,
+        "{case}: the SyncInfo reports block 5 as our tip"
+    );
+    assert!(
+        !state
+            .coordinator
+            .sync_state_mut()
+            .not_synced_or_outdated(peer, Instant::now()),
+        "{case}: the SyncInfo stamps the peer's sync time"
+    );
+}
+
+#[test]
+fn inv_requested_header_applied_by_announcement_sends_one_sync_info() {
+    for coalesced in [false, true] {
+        announced_then_requested_header_scenario(HeaderAsk::Inv, coalesced);
+    }
+}
+
+#[test]
+fn input_block_ordering_header_applied_by_announcement_sends_one_sync_info() {
+    for coalesced in [false, true] {
+        announced_then_requested_header_scenario(HeaderAsk::InputBlockAhead, coalesced);
+    }
+}
