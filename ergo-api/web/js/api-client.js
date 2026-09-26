@@ -126,6 +126,8 @@ export const api = {
   recentBlocks: (n = 10) => getJson(`/api/v1/blocks/recent?n=${n}`),
   // Operator event feed (bounded ring tail). `since` = last-seen seq.
   events: (since = 0) => getJson(`/api/v1/events${since ? `?since=${since}` : ''}`),
+  // Structured logs share the operator gate and stale-key response protection.
+  activity: (session, since = '0') => walletReq(`/api/v1/diagnostics/activity?limit=256${session ? `&session=${encodeURIComponent(session)}&since=${encodeURIComponent(since)}` : ''}`),
   // Mining surface — routes mount only when mining is wired (404 = off).
   // candidate is cheap on repeat calls (same-tip template cache node-side).
   miningCandidate: getMiningCandidate,

@@ -47,6 +47,21 @@ fn event(seq: u64, kind: &str) -> ApiNodeEvent {
 struct FeedStub;
 
 impl NodeReadState for FeedStub {
+    fn activity(
+        &self,
+        session: Option<&str>,
+        since: u64,
+        limit: usize,
+    ) -> Option<ergo_api::types::ApiActivityPage> {
+        assert_eq!(session, Some("fixture"));
+        assert_eq!(since, 4);
+        assert_eq!(limit, 10);
+        Some(serde_json::from_value(serde_json::json!({
+            "sessionId": "fixture", "oldestSeq": "1", "latestSeq": "5", "nextSeq": "5", "hasMore": false,
+            "gap": false, "reset": false, "capacity": 2048, "byteCapacity": 4194304, "retained": 5, "droppedTotal": "0",
+            "records": [{"seq":"5", "unixMs": 123, "level":"WARN", "target":"ergo_node", "message":"fixture evidence", "fields":{"code":"test"}, "truncated":false}]
+        })).unwrap())
+    }
     fn events(&self) -> ApiNodeEvents {
         ApiNodeEvents {
             latest_seq: 3,
@@ -139,6 +154,104 @@ impl NodeReadState for FeedStub {
             peer_count: 0,
         }
     }
+}
+
+fn activity_app(configured: bool, read: Arc<dyn NodeReadState>) -> axum::Router {
+    use ergo_api::auth::ApiSecurity;
+    use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+    router_with_mempool_and_wallet_and_security(
+        ServerCtx {
+            read,
+            compat: None,
+            submit: None,
+            indexer: None,
+            mempool: Arc::new(ergo_api::traits::NoopMempoolView::new()),
+            network: ergo_ser::address::NetworkPrefix::Mainnet,
+            chain_params: None,
+            mining: None,
+            emission: None,
+            emission_scripts: None,
+            utxo_reads_supported: true,
+            local_reverse_proxy: false,
+        },
+        None,
+        Arc::new(ergo_api::wallet::NoopWalletAdmin),
+        configured.then(|| Arc::new(ApiSecurity::new(ApiSecurity::hash_key(b"operator")).unwrap())),
+    )
+}
+
+#[tokio::test]
+async fn activity_requires_a_configured_valid_operator_key() {
+    for (configured, key) in [(false, "operator"), (true, ""), (true, "wrong")] {
+        let response = activity_app(configured, Arc::new(FeedStub))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/diagnostics/activity")
+                    .header("api_key", key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&bytes).contains("fixture evidence"));
+    }
+}
+
+#[tokio::test]
+async fn activity_forwards_exact_resume_and_never_caches_evidence() {
+    let response = activity_app(true, Arc::new(FeedStub))
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/diagnostics/activity?session=fixture&since=4&limit=10")
+                .header("api_key", "operator")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["records"][0]["seq"], "5");
+    assert_eq!(body["nextSeq"], "5");
+}
+
+#[tokio::test]
+async fn activity_rejects_bad_cursors_and_reports_unavailable_as_unavailable() {
+    for query in [
+        "?since=1",
+        "?since=no",
+        "?since=-1",
+        "?limit=0",
+        "?limit=501",
+        "?session=&since=1",
+    ] {
+        let response = activity_app(true, Arc::new(FeedStub))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/diagnostics/activity{query}"))
+                    .header("api_key", "operator")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let response = activity_app(true, Arc::new(DefaultStub))
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/diagnostics/activity")
+                .header("api_key", "operator")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 async fn get_json(app: axum::Router, path: &str) -> serde_json::Value {

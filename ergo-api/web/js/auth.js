@@ -170,8 +170,8 @@ export function initAuth(chip, dialog) {
   dialog.innerHTML = `
     <form method="dialog" class="dialog__body">
       <h3 class="micro-label">Authorize</h3>
-      <p class="dialog__note">The operator <code>api_key</code> authorizes write
-        actions (voting, wallet). It is held only in this tab
+      <p class="dialog__note">The operator <code>api_key</code> authorizes protected
+        features (logs, voting, wallet). It is held only in this tab
         (<code>sessionStorage</code>), sent as the <code>api_key</code> request
         header — never written to disk. This is not the wallet password.</p>
       <p class="dialog__note" data-configure-key hidden></p>

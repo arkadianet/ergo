@@ -143,6 +143,8 @@ async fn spa_css_carries_spa_security_headers() {
 #[tokio::test]
 async fn spa_js_carries_spa_security_headers() {
     assert_spa_security_headers("/js/app.js").await;
+    assert_spa_security_headers("/js/activity.js").await;
+    assert_spa_security_headers("/js/activity-model.js").await;
 }
 
 #[tokio::test]

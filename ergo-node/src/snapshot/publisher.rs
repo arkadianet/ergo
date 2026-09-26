@@ -29,6 +29,7 @@ pub struct SnapshotPublisher {
     last_block_progress_at: Instant,
     last_header_height: u32,
     last_full_block_height: u32,
+    activity_primed: bool,
 }
 
 impl SnapshotPublisher {
@@ -45,6 +46,7 @@ impl SnapshotPublisher {
             last_block_progress_at: started_at,
             last_header_height: 0,
             last_full_block_height: 0,
+            activity_primed: false,
         }
     }
 
@@ -133,6 +135,12 @@ impl SnapshotPublisher {
         info.uptime_seconds = now.duration_since(self.started_at).as_secs();
 
         let snap = build_snapshot(parts, info, effective_progress_age_ms);
+        let prior = self.handle.load();
+        crate::activity::status_transitions(
+            self.activity_primed.then_some(&prior.status),
+            &snap.status,
+        );
+        self.activity_primed = true;
         self.handle.store(std::sync::Arc::new(snap));
     }
 }

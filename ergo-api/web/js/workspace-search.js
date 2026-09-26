@@ -3,6 +3,7 @@
 // and Escape dismissal; results are ordinary keyboard-accessible buttons.
 const destinations = [
   ['overview', 'Overview', 'Node health and chain progress'],
+  ['activity', 'Activity & logs', 'Current issues, grouped events and diagnostic evidence'],
   ['explorer', 'Explorer', 'Blocks, transactions, addresses and assets'],
   ['peers', 'Peers', 'Network connections and peer details'],
   ['mempool', 'Mempool', 'Pending transactions and fees'],

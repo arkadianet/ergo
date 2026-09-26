@@ -724,6 +724,14 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/fonts/jetbrains-mono.woff2", get(jetbrains_mono_woff2))
         .route("/fonts/inter-variable.woff2", get(inter_variable_woff2))
         .route("/js/app.js", get(|| async { js(JS_APP) }))
+        .route(
+            "/js/activity.js",
+            get(|| async { js(crate::web::JS_ACTIVITY) }),
+        )
+        .route(
+            "/js/activity-model.js",
+            get(|| async { js(crate::web::JS_ACTIVITY_MODEL) }),
+        )
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
         .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
         .route("/js/format.js", get(|| async { js(JS_FORMAT) }))
@@ -787,6 +795,12 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         operator,
         &mut inventory,
         rust_api::legacy_router(read.clone()),
+    );
+
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        rust_api::activity_router(read.clone(), security.clone()),
     );
 
     let operator = route_registry::merge_family_router(

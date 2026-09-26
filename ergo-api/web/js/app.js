@@ -28,9 +28,10 @@ import * as mempool from './mempool.js';
 import * as mining from './mining.js';
 import * as voting from './voting.js';
 import * as wallet from './wallet.js';
+import * as activity from './activity.js';
 
-const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting', 'wallet'];
-const renderers = { overview, explorer, peers, mempool, mining, voting, wallet };
+const SECTIONS = ['overview', 'explorer', 'peers', 'mempool', 'mining', 'voting', 'wallet', 'activity'];
+const renderers = { overview, explorer, peers, mempool, mining, voting, wallet, activity };
 const mounted = new Set();
 let current = null;
 // Tip/mempool/peers come from WS; /info is rarely needed for the chrome.
@@ -122,7 +123,7 @@ async function slow() {
 
 function show(s, tail) {
   const r = renderers[s];
-  const pageName = s.charAt(0).toUpperCase() + s.slice(1);
+  const pageName = s === 'activity' ? 'Activity & logs' : s.charAt(0).toUpperCase() + s.slice(1);
   document.getElementById('workspace-page').textContent = pageName;
   document.title = `${pageName} · Ergo Node`;
   if (current === s) {

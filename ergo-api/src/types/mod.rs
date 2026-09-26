@@ -23,6 +23,7 @@
 //! Numeric fields on this surface (e.g. `ApiPeer.score`, heights,
 //! timestamps, n_bits) are JSON numbers, not hex.
 
+mod activity;
 mod chain_refs;
 mod events;
 mod identity;
@@ -32,6 +33,7 @@ mod peers;
 mod status;
 mod voting;
 
+pub use activity::*;
 pub use chain_refs::*;
 pub use events::*;
 pub use identity::*;

@@ -162,6 +162,9 @@ export function eventDescription(event) {
 
 export function nodeEvents(feed, { reachable } = {}) {
   const host = element('div', 'ov-node-events');
+  const activityLink = element('a', 'ex-link', 'Open activity & logs ↗');
+  activityLink.href = '#activity';
+  host.append(activityLink);
   const known = Array.isArray(feed?.events);
   const events = known ? feed.events.filter((e) => e.kind !== 'blockApplied').slice(-3).reverse() : [];
   if (!events.length) {
