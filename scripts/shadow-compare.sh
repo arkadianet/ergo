@@ -77,16 +77,15 @@ list_scenarios() {
 }
 
 select_scenarios() {
-    local out=()
+    FILTERS=()
     for key in "$@"; do
         if [ -z "${SCENARIOS[$key]:-}" ]; then
             echo "error: unknown scenario '$key'; valid: ${SLOW_SCENARIOS[*]}" >&2
             echo "       run '$0 --list' for the test names" >&2
             exit 2
         fi
-        out+=("${SCENARIOS[$key]}")
+        FILTERS+=("${SCENARIOS[$key]}")
     done
-    printf '%s\n' "${out[@]}"
 }
 
 # ----- isolated build + temp environment -----
@@ -153,7 +152,7 @@ case "${1:-}" in
             echo "error: --all takes no arguments; name the scenarios instead" >&2
             exit 2
         fi
-        mapfile -t FILTERS < <(select_scenarios "${SLOW_SCENARIOS[@]}")
+        select_scenarios "${SLOW_SCENARIOS[@]}"
         ;;
     "")
         # No arguments: the negative controls only. Deliberately the default —
@@ -170,7 +169,7 @@ case "${1:-}" in
         exit 0
         ;;
     *)
-        mapfile -t FILTERS < <(select_scenarios "$@")
+        select_scenarios "$@"
         ;;
 esac
 

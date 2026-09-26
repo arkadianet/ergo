@@ -300,19 +300,15 @@ them):
 | `shadow_synthetic_smoke_agrees_embedded_and_daemon` | A harness-built chain where every classification branch is reachable deterministically: `Owned`/`Confirmed`, `MinerReward`/`Immature`, a spend, a token-bearing box, a box paid to an untracked key (both paths must ignore it), and a seeded scan so `WALLET_SCAN_BOXES`/`_INDEX`/`_TXS` are non-empty on both sides. |
 | `shadow_reorg_rewinds_and_reapplies_on_both_sides` | A real fork: the node rolls back with its own `rollback_to` and re-derives the fork with a different solution nonce (so genuinely different block ids); the daemon must take the node's `Ancestor` answer, rewind, and follow. Compared before the reorg and after both sides follow the fork. |
 | `shadow_survives_a_node_and_daemon_restart` | Both redb databases are closed and re-opened — the node's `StateStore` and the daemon's `RedbWalletStore` — and the node's served API is torn down and rebuilt. Asserts neither the chain height nor either durable cursor moved, and that a caught-up pass completes having applied **zero** blocks: a restart that silently replayed the chain would be a rescan wearing a restart's clothes. |
-| `shadow_daemon_rescan_from_zero_reproduces_the_embedded_state` | The durable `scan_invalidated` flag is set (what a rescan request and every fail-closed fence leave behind) and the next real pass rebuilds the whole wallet from genesis over HTTP, clearing the flag, landing on exactly the state the embedded side reached incrementally. |
+| `shadow_daemon_rescan_from_zero_reproduces_the_embedded_state` | Full-rescan preparation resets the durable cursor and invalidates the wallet. The next real pass must replay every block from genesis over HTTP, clear the flag, and reproduce the embedded state. The processed-block count is asserted so an idle pass cannot satisfy the test. |
 
-**Two harness constraints worth knowing about, both discovered by making the
-scenarios fail loudly rather than quietly:**
+**Recovery and restart checks:**
 
-- *The daemon must not be polled mid-reorg.* `StandaloneSyncer` treats a
-  durable cursor **above** the node's reported tip as a terminal
-  `SyncError::Protocol` ("wallet cursor N is ahead of node tip M"), not as a
-  rewind. A node that has rolled back but not yet re-applied presents exactly
-  that state, so the reorg scenario advances the node to the same height before
-  the daemon looks again. That is also true in production, where a node's
-  rollback and re-apply happen inside one action-loop turn — but it means a
-  daemon pointed at a node that is *mid-reorg* stops rather than waits.
+- *The daemon can be polled mid-reorg.* A durable cursor above the node's
+  reported tip produces a retryable `StaleTip`, preserving the wallet cursor.
+  The reorg scenario polls at the rollback height, then retries the same
+  daemon after the replacement fork catches up and checks that it rewinds
+  and applies the new chain.
 - *A restart has to release every handle.* redb takes an exclusive `flock` on
   the file, so a close/re-open only succeeds once the last `Arc<Database>` is
   dropped. The harness's `EmbeddedFiles` and `DaemonSide::store` are both held

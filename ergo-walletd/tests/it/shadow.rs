@@ -1789,6 +1789,14 @@ impl DaemonSide {
             .persist_scan_invalidation(true)
             .expect("daemon scan invalidation persists");
     }
+
+    fn prepare_full_rescan(&self) {
+        let mut write = self.store().begin_write().expect("daemon rescan write");
+        write
+            .prepare_rescan(0, true)
+            .expect("full rescan preparation");
+        write.commit().expect("full rescan preparation commits");
+    }
 }
 
 // =========================================================================
@@ -1993,14 +2001,8 @@ impl Shadow {
     /// Advance the embedded side by exactly one block, with the daemon left
     /// behind on purpose.
     ///
-    /// Needed by the reorg scenario, and the reason is a real daemon
-    /// behaviour rather than a harness convenience: `StandaloneSyncer` treats
-    /// a durable cursor *above* the node's reported tip as a terminal
-    /// `SyncError::Protocol` ("wallet cursor N is ahead of node tip M"), not as
-    /// a rewind. A node that rolled back and had not yet re-applied presents
-    /// exactly that state, so the daemon must not be polled mid-reorg — which
-    /// is also true in production, where the node's rollback and re-apply
-    /// happen inside one action-loop turn.
+    /// The reorg scenario polls once at the rollback height, then advances
+    /// the replacement fork before retrying the daemon's stale cursor.
     fn advance_embedded_one(&mut self, nonce: u8) {
         let next = self.embedded.height() + 1;
         assert!(
@@ -2348,8 +2350,8 @@ fn shadow_sweep_digest_1_1000_agrees_embedded_and_daemon() {
     //
     // The regression guard for the per-height comparison. The durable
     // `scan_invalidated` flag is a real compared field *and* it is reconciled:
-    // the very next sync pass sees it, rebuilds the wallet from genesis and
-    // clears it. So a divergence injected here is invisible to any comparison
+    // the next sync pass clears it. So a divergence injected here is invisible
+    // to any comparison
     // made after that pass — a tip-only sweep would finish green for a wallet
     // that spent a pass out of sync. The comparison at the injection height has
     // to see it first, and it has to name the field.
@@ -2368,8 +2370,18 @@ fn shadow_sweep_digest_1_1000_agrees_embedded_and_daemon() {
          `scan_invalidated`; the panic was: {message}"
     );
 
-    // Carry on: the next pass reconciles the flag by rebuilding from genesis,
-    // and every remaining height is compared again, so a sweep that "repaired"
+    // Explicitly reset the cursor: invalidation alone resumes from that cursor.
+    shadow.daemon.prepare_full_rescan();
+    let replay = shadow
+        .daemon
+        .syncer()
+        .sync_once()
+        .expect("mid-sweep rescan");
+    assert_eq!(replay.blocks_processed, DIVERGENCE_AT);
+    assert!(replay.completed);
+
+    // Carry on after rebuilding from genesis. Every remaining height is
+    // compared again, so a sweep that "repaired"
     // the injected divergence by silently resyncing it away is not accepted.
     assert_eq!(
         shadow.advance_to_compared(TIP, 0, CONTEXT),
@@ -2539,13 +2551,16 @@ fn shadow_reorg_rewinds_and_reapplies_on_both_sides() {
     // old tip, which is exactly the production situation.
     shadow.embedded.rollback_to(ANCESTOR);
     assert_eq!(shadow.embedded.height(), ANCESTOR);
+    let error = shadow.daemon.syncer().sync_once().unwrap_err();
+    assert!(
+        error.retryable(),
+        "mid-reorg node tip must be recoverable: {error}"
+    );
 
     // Re-derive the fork. Same transactions, different solution nonce, so the
     // headers — and therefore the block ids the node will now serve — differ
-    // from the ones the daemon already applied. The daemon is not polled
-    // until the node is back at the same height: polling in between would hit
-    // the terminal "cursor above tip" protocol error rather than the rewind
-    // path this scenario exists to compare (see `advance_embedded_one`).
+    // from the ones the daemon already applied. Once the replacement fork
+    // catches up, retrying the same daemon must take the rewind path.
     while shadow.embedded.height() < BLOCKS {
         shadow.advance_embedded_one(FORK_NONCE);
     }
@@ -2669,9 +2684,8 @@ fn shadow_survives_a_node_and_daemon_restart() {
     shadow.compare("restart: after both sides restarted", 3);
 }
 
-/// Daemon rescan-from-zero: the durable `scan_invalidated` flag is set (what a
-/// rescan request and every fail-closed fence leaves behind), and the real
-/// `StandaloneSyncer` must rebuild the whole wallet from genesis through the
+/// Daemon rescan-from-zero: the durable cursor is reset and invalidated.
+/// The real `StandaloneSyncer` must rebuild the whole wallet from genesis through the
 /// real HTTP path — clearing the flag on success — landing on exactly the state
 /// the embedded side reached incrementally.
 ///
@@ -2687,9 +2701,8 @@ fn shadow_daemon_rescan_from_zero_reproduces_the_embedded_state() {
     shadow.advance_to(BLOCKS, 0);
     shadow.compare("rescan: before the rescan", 3);
 
-    // The durable flag, not an in-memory hint: this is what a real
-    // `POST /wallet/rescan` and every fail-closed fence persist.
-    shadow.daemon.invalidate();
+    // Use the full-rescan preparation path, including its durable cursor reset.
+    shadow.daemon.prepare_full_rescan();
     assert!(
         shadow
             .daemon
@@ -2701,9 +2714,15 @@ fn shadow_daemon_rescan_from_zero_reproduces_the_embedded_state() {
         "the invalidation flag must be durable before the rescan pass"
     );
 
-    // The next real pass sees the flag, runs `prepare_rescan(0, true)`, and
-    // replays every block from height 1.
-    shadow.daemon.sync_until_caught_up();
+    // Require actual replay: comparing unchanged state at the tip is vacuous.
+    let replay = shadow
+        .daemon
+        .syncer()
+        .sync_once()
+        .expect("full rescan pass");
+    assert_eq!(replay.blocks_processed, BLOCKS);
+    assert_eq!(replay.from_height, 0);
+    assert!(replay.completed);
     shadow.compare("rescan: after rebuilding from genesis", 3);
 
     let read = shadow.daemon.store().read().expect("post-rescan read");
