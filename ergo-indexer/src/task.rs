@@ -24,11 +24,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ergo_ser::transaction::Transaction;
 
-use crate::apply::{apply_block_with_scratch, IndexerBlock};
+use crate::apply::{apply_block_in_transaction, IndexerBlock};
 use crate::error::{HeightOverflowContext, IndexerError};
 use crate::handle::IndexerHandle;
 use crate::rollback::rollback_one_block;
@@ -81,7 +81,7 @@ pub trait IndexerChainSource: Send + Sync {
 pub enum IndexerPoll {
     /// Caught up. Status was set to `CaughtUp`.
     Idle,
-    /// Forward-applied the block at this height.
+    /// Committed forward progress through this height.
     Applied(u64),
     /// Rolled back the tip; the height in the variant is the height
     /// that was rolled back (post-rollback tip is `height - 1`).
@@ -98,7 +98,7 @@ pub enum IndexerPoll {
 
 /// Polling task. Holds the indexer handle (status + height mirror), an
 /// `Arc` to a chain source, and a long-lived `BlockApplyScratch` reused
-/// across every `apply_block_with_scratch` call so per-block / per-tx
+/// across every block apply so per-block / per-tx
 /// allocations amortize over the run.
 pub struct IndexerTask<C: IndexerChainSource> {
     handle: IndexerHandle,
@@ -133,6 +133,22 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// Order: reorg check → caught-up check → forward
     /// load+verify+apply.
     pub fn step(&mut self) -> IndexerPoll {
+        self.step_with_budget(1, Duration::ZERO, 0)
+    }
+
+    /// Catch up in a bounded atomic batch. Limits are checked between blocks;
+    /// one slow/large block still finishes atomically. Rollback remains per block.
+    /// The driver uses this method while `step()` retains single-block semantics.
+    pub fn step_batch(&mut self) -> IndexerPoll {
+        self.step_with_budget(16, Duration::from_millis(50), 8 * 1024 * 1024)
+    }
+
+    fn step_with_budget(
+        &mut self,
+        max_blocks: usize,
+        time_budget: Duration,
+        byte_budget: u64,
+    ) -> IndexerPoll {
         let store = match self.handle.store() {
             Some(s) => s,
             None => {
@@ -252,7 +268,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             None => return IndexerPoll::Race,
         };
 
-        let block = match self.chain.full_block(&header_id) {
+        let mut block = match self.chain.full_block(&header_id) {
             Some(b) => b,
             None => {
                 return IndexerPoll::SectionRetry {
@@ -262,22 +278,76 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             }
         };
 
-        if self.chain.header_id_at(next_h32) != Some(header_id) {
+        if self.chain.header_id_at(next_h32) != Some(header_id) || block.header_id != header_id {
             return IndexerPoll::Race;
         }
-
-        let indexer_block = IndexerBlock {
-            height: block.height,
-            header_id: block.header_id,
-            transactions: &block.transactions,
-        };
-        match apply_block_with_scratch(&store, &meta, &indexer_block, &mut self.scratch) {
-            Ok(next_meta) => {
-                self.handle.set_indexed_height(next_meta.indexed_height);
-                IndexerPoll::Applied(next_meta.indexed_height)
-            }
-            Err(e) => IndexerPoll::Halted(e),
+        if self.cancel.load(Ordering::Acquire) {
+            return IndexerPoll::Idle;
         }
+
+        let mut write = match store.begin_write() {
+            Ok(write) => write,
+            Err(error) => return IndexerPoll::Halted(error),
+        };
+        // Same quick-repair transaction and Eventual durability as single-block
+        // apply. A crash exposes the old checkpoint or the whole committed batch.
+        write.set_durability(redb::Durability::Eventual);
+        let start = Instant::now();
+        let mut next = meta;
+        let mut bytes = 0_u64;
+        for applied_count in 1..=max_blocks {
+            let indexed = IndexerBlock {
+                height: block.height,
+                header_id: block.header_id,
+                transactions: &block.transactions,
+            };
+            let applied = match apply_block_in_transaction(
+                &write,
+                store.rollback_window(),
+                &next,
+                &indexed,
+                &mut self.scratch,
+            ) {
+                Ok(applied) => applied,
+                Err(error) => return IndexerPoll::Halted(error), // abort all uncommitted rows
+            };
+            next = applied.meta;
+            bytes += applied.serialized_bytes;
+            if applied.secondary_repair_pending
+                || applied_count == max_blocks
+                || next.indexed_height >= u64::from(tip.height)
+                || start.elapsed() >= time_budget
+                || bytes >= byte_budget
+                || self.cancel.load(Ordering::Acquire)
+            {
+                break;
+            }
+            let height = (next.indexed_height + 1) as u32; // bounded by the captured u32 tip
+            let Some(id) = self.chain.header_id_at(height) else {
+                break;
+            };
+            let Some(loaded) = self.chain.full_block(&id) else {
+                break;
+            };
+            if self.chain.header_id_at(height) != Some(id)
+                || loaded.header_id != id
+                || self.chain.header_id_at(next.indexed_height as u32) != next.indexed_header_id
+            {
+                return IndexerPoll::Race; // discard the entire batch on a fork flip
+            }
+            if self.cancel.load(Ordering::Acquire) || start.elapsed() >= time_budget {
+                break;
+            }
+            block = loaded;
+        }
+        if self.chain.header_id_at(next.indexed_height as u32) != next.indexed_header_id {
+            return IndexerPoll::Race;
+        }
+        if let Err(error) = write.commit() {
+            return IndexerPoll::Halted(error.into());
+        }
+        self.handle.set_indexed_height(next.indexed_height);
+        IndexerPoll::Applied(next.indexed_height)
     }
 
     fn do_rollback(
@@ -334,7 +404,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             if cancel.load(Ordering::Acquire) {
                 return;
             }
-            match self.step() {
+            match self.step_batch() {
                 IndexerPoll::Idle => {
                     section_retry_count = 0;
                     if !sleep_or_cancel(poll_idle, &cancel).await {
@@ -384,6 +454,10 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 /// SectionMissing.
 pub const MAX_SECTION_RETRIES: u32 = 5;
 const SECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
+#[path = "task_batch_tests.rs"]
+mod batch_tests;
 
 /// Returns `true` if the sleep elapsed; `false` if the cancel flag
 /// flipped during sleep. Used by the driver loop to exit promptly on
