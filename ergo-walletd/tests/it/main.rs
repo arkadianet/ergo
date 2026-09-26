@@ -8,6 +8,7 @@ mod http_client;
 mod node_api;
 mod routes;
 mod scan_registry_rewind;
+mod shadow;
 mod store_reopen;
 mod support;
 mod sync;
