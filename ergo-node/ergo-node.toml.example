@@ -221,8 +221,9 @@ public_bind = false
 # claim_storage_rent = false
 # max_storage_rent_claims = 4096
 
-# Cache the hydrated AVL working set between candidate builds, keyed on
-# the committed tip: the first build per block pays the full hydration,
+# Default false: load authenticated AVL paths on demand, without retaining
+# the full UTXO tree between builds. True enables the alternative full-tree
+# cache, keyed on the committed tip: the first build pays full hydration,
 # same-tip rebuilds are near-instant. Holds the full UTXO node graph
 # resident (multi-GB on mainnet archival) — enable only on a mining
 # node with RAM headroom. See docs/configuration.md.
