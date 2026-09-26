@@ -1,11 +1,13 @@
 // Header discovery has no trustworthy final height. Its ring is categorical;
 // blocks and the optional index have measurable, independently named targets.
+import { hasActiveNodeIssue } from './node-guidance.js';
+
 export function syncLayers({ status, sync, indexer, indexerHealth, identity, reachable }) {
   const percent = (value, target) => Number.isFinite(value) && value >= 0 && target > 0
     ? Math.max(0, Math.min(100, value / target * 100)) : null;
   const height = status?.best_full_block_height ?? sync?.best_full_block_height;
   const target = status?.best_header_height ?? sync?.best_header_height;
-  const blocked = status?.sync_wedged || status?.apply_wedged || status?.last_storage_error || status?.last_block_apply_error || status?.shadow?.diverged;
+  const blocked = hasActiveNodeIssue(status);
   const blockPercent = percent(height, target);
   const indexPercent = percent(indexer?.indexedHeight, indexer?.fullHeight ?? height);
   const halted = indexer?.status === 'halted' || indexerHealth?.status === 'halted';

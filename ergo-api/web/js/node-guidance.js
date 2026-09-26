@@ -1,11 +1,26 @@
 // Status interpretation is separate from presentation so degraded and unknown
 // states can be checked without a live node. No claim of overall health follows
 // merely from API connectivity or a completed block-sync percentage.
+export function blockRejectionState(status) {
+  const error = status?.last_block_apply_error;
+  if (!error) return 'none';
+  const applied = status.best_full_block_height;
+  // Match the health probe: only committed blocks beyond the rejected height
+  // establish progress. Age, header height and an at-tip label alone do not.
+  return Number.isSafeInteger(error.height) && error.height > 0 &&
+    Number.isSafeInteger(applied) && applied > error.height ? 'historical' : 'unresolved';
+}
+
+export function hasActiveNodeIssue(status) {
+  return !!(status?.sync_wedged || status?.apply_wedged || status?.last_storage_error ||
+    blockRejectionState(status) === 'unresolved' || status?.shadow?.diverged);
+}
+
 export function nodeGuidance({ reachable, status, indexer, indexerHealth, identity }) {
   const result = (tone, title, detail, action, destination) => ({ tone, title, detail, action, destination });
   if (reachable === false) return result('warn', 'Reconnect to your node', 'These values are from the last response. Check that the node is running and that its API is reachable. This page retries automatically.', null, null);
   if (!status) return result('neutral', 'Getting a live picture', 'Waiting for the first status response. No health assessment is available yet.', null, null);
-  if (status.sync_wedged || status.apply_wedged || status.last_storage_error || status.last_block_apply_error || status.shadow?.diverged) return result('error', 'Review reported issues', 'The node has reported a processing, storage or validation issue. Check the diagnostic message and node logs before taking recovery action.', 'Review diagnostics', 'diagnostics');
+  if (hasActiveNodeIssue(status)) return result('error', 'Review reported issues', 'The node has reported a processing, storage or validation issue. Check the diagnostic message and node logs before taking recovery action.', 'Review diagnostics', 'diagnostics');
   if (status.peer_count === 0 || status.sync_state === 'disconnected') return result('warn', 'Restore network connectivity', 'The API is responding, but the node has no peer connections. Inspect the peer list and your network configuration.', 'Inspect peers', 'peers');
   if (status.sync_state === 'stalled') return result('warn', 'Investigate the sync stall', 'The node reports that sync has stopped progressing. Start with peer connectivity, then check the node logs.', 'Inspect peers', 'peers');
   if (indexer?.status === 'halted' || indexerHealth?.status === 'halted') return result('error', 'Search indexing is halted', 'Address, box and token lookups may be unavailable. Review the index diagnostics; block sync and indexing are separate processes.', 'Review index diagnostics', 'diagnostics');

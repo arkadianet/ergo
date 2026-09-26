@@ -34,3 +34,14 @@ test('rounding never turns incomplete measured progress into 100 percent', () =>
   const layers = syncLayers({ ...ready, indexer: { status: 'syncing', indexedHeight: 999999, fullHeight: 1000000 } });
   assert.equal(layers[2].text, '99.99%');
 });
+
+test('the block ring recovers only after applied blocks pass the rejection height', () => {
+  const status = { ...ready.status, last_block_apply_error: { height: 100, age_ms: 10_800_000 } };
+  assert.equal(syncLayers({ ...ready, status })[1].state, 'error');
+  status.best_header_height = 101;
+  assert.equal(syncLayers({ ...ready, status })[1].state, 'error');
+  status.best_full_block_height = 101;
+  assert.equal(syncLayers({ ...ready, status })[1].state, 'done');
+  assert.equal(syncLayers({ ...ready, status: { ...status, apply_wedged: true } })[1].state, 'error');
+  assert.equal(syncLayers({ ...ready, status, reachable: false })[1].state, 'stale');
+});

@@ -59,10 +59,14 @@ pub(super) fn build_snapshot(
         difficulty: decode_compact_bits(best_full_block_n_bits).to_string(),
     };
 
-    // An outstanding block-apply rejection overrides the sync-derived
-    // health below (a node refusing blocks its peers accept is not healthy,
-    // however it looks on the sync axis).
-    let rejecting = p.last_block_apply_error.is_some();
+    // Retain the rejection for diagnosis, but stop treating it as an active
+    // fault once committed blocks advance beyond its height. Elapsed time or
+    // downloaded headers alone never establish recovery. A rollback below
+    // that height makes the rejection unresolved again.
+    let rejecting = p
+        .last_block_apply_error
+        .as_ref()
+        .is_some_and(|error| error.height == 0 || p.best_full_block_height <= error.height);
     // Terminal deep-fork wedge: strictly worse than Rejecting (nothing can
     // ever apply again without a resync), so it wins the overlay.
     let wedged = p.sync_wedged.is_some();

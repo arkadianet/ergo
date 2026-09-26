@@ -6,7 +6,7 @@ import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
 import { fetchOwnPk, ownPkHex } from './miners.js';
 import { createChannelSub } from './ws-client.js';
-import { nodeGuidance } from './node-guidance.js';
+import { blockRejectionState, hasActiveNodeIssue, nodeGuidance } from './node-guidance.js';
 import { recentChain, nodeEvents } from './chain-activity.js';
 import { syncLayers } from './sync-rings.js';
 import { miningWork } from './mining-work.js';
@@ -217,6 +217,24 @@ export function mount(el) {
       </div>
     </section>
     <div class="ov-alerts" data-node-alerts role="status" hidden></div>
+    <details class="ov-diagnostics" data-node-diagnostics hidden>
+      <summary><span class="ov-diagnostics__title" data-diagnostics-title></span><span class="ov-diagnostics__meta" data-diagnostics-meta></span></summary>
+      <div class="ov-diagnostics__body">
+        <dl class="ov-diagnostics__status">
+          <dt>API</dt><dd data-diagnostic-connection></dd><dt>Chain</dt><dd data-diagnostic-chain></dd>
+          <dt>Headers</dt><dd data-diagnostic-headers></dd><dt>Applied</dt><dd data-diagnostic-applied></dd>
+          <dt>Peers</dt><dd data-diagnostic-peers></dd><dt>Search index</dt><dd data-diagnostic-index></dd>
+        </dl>
+        <p class="ov-diagnostics__issues" data-diagnostic-issues></p>
+        <p data-diagnostic-index-issues hidden></p>
+        <section data-rejection-details hidden>
+          <h3>Last block rejection</h3><p class="muted" data-rejection-meta></p>
+          <p data-rejection-progress></p>
+          <dl><dt>Block ID</dt><dd><code data-rejection-id></code></dd><dt>Reason</dt><dd data-rejection-reason></dd></dl>
+          <p class="muted">Retained for diagnosis. Chain progress does not establish why this block was rejected; the node logs contain the validation context.</p>
+        </section>
+      </div>
+    </details>
     <div class="kpi">
       ${KPI.map(
         ([k, l, href]) =>
@@ -241,10 +259,12 @@ export function mount(el) {
   el.querySelector('[data-guidance-action]').onclick = () => {
     const destination = el.querySelector('[data-guidance-action]').dataset.destination;
     if (destination === 'diagnostics') {
-      if (viewMode !== 'cockpit') el.querySelector('[data-view="cockpit"]').click();
-      const alerts = el.querySelector('[data-node-alerts]');
-      const target = !alerts.hidden ? alerts : el.querySelector('.ov-pipeline');
-      if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'center', behavior: 'instant' }); }
+      const details = el.querySelector('[data-node-diagnostics]');
+      details.hidden = false;
+      details.open = true;
+      const summary = details.querySelector('summary');
+      summary.focus({ preventScroll: true });
+      summary.scrollIntoView({ block: 'start', behavior: 'instant' });
     } else if (destination) location.hash = destination;
   };
   // Authorize prompt: visible only while no api_key is set. Built once; the
@@ -360,7 +380,7 @@ export function onFast({ status, info, reachable }) {
   recordProgress(blkH);
   paintSyncSummary(blkH, hdrH, guidance);
   paintSyncRings();
-  paintAlerts();
+  paintAlerts(guidance);
   paintDerived();
 
   setText('[data-k="peers"]', num(s?.peer_count));
@@ -382,24 +402,61 @@ export function onFast({ status, info, reachable }) {
   setText('[data-index-note]', idx ? `Indexed ${num(idx.indexedHeight)} of ${num(idx.fullHeight ?? blkH)} applied blocks` : 'Address, box and token lookups need the index');
 }
 
-function paintAlerts() {
+function paintAlerts(guidance) {
   const host = root.querySelector('[data-node-alerts]');
   if (!host) return;
   const s = state.status;
+  const rejection = blockRejectionState(s);
   const alerts = [];
   if (s?.sync_wedged) alerts.push('Chain sync is blocked by a deep fork. Review the node logs and recovery procedure before taking action.');
   if (s?.apply_wedged) alerts.push('A block is taking longer than the node’s processing threshold. Inspect the node logs.');
   if (s?.last_storage_error) alerts.push(`Storage error reported: ${s.last_storage_error}`);
-  if (s?.last_block_apply_error) alerts.push(`Last reported block validation error${s.last_block_apply_error.height != null ? ` at height ${num(s.last_block_apply_error.height)}` : ''}. Check the node logs for details and recovery status.`);
+  if (rejection === 'unresolved') alerts.push(`Block validation rejected a block${s.last_block_apply_error.height != null ? ` at height ${num(s.last_block_apply_error.height)}` : ''}. Recovery is not yet confirmed. Review the rejection details below and the node logs.`);
   if (s?.shadow?.diverged) alerts.push('Shadow validation reports a chain divergence from the reference node. Review the validation logs.');
   const text = alerts.join('\n');
   if (host.textContent !== text) host.textContent = text;
   host.hidden = !alerts.length;
+  const details = root.querySelector('[data-node-diagnostics]');
+  details.hidden = rejection === 'none' && guidance?.destination !== 'diagnostics';
+  if (details.hidden) return;
+  const historical = rejection === 'historical';
+  const onlyHistory = historical && guidance?.destination !== 'diagnostics';
+  details.dataset.state = hasActiveNodeIssue(s) ? 'unresolved' : 'info';
+  setText('[data-diagnostics-title]', onlyHistory ? 'Past block rejection · chain advanced' : 'Node diagnostics');
+  setText('[data-diagnostics-meta]', onlyHistory ? `Height ${num(s.last_block_apply_error.height)} · details` : 'Status, progress & reported issues');
+  setText('[data-diagnostic-connection]', state.reachable === false ? 'Unreachable · last reported values' : state.reachable === true ? 'Connected' : 'Unconfirmed');
+  setText('[data-diagnostic-chain]', ({ at_tip: 'At chain tip', syncing: 'Syncing', stalled: 'Stalled', disconnected: 'Disconnected' })[s?.sync_state] || s?.sync_state || 'Unavailable');
+  setText('[data-diagnostic-headers]', num(s?.best_header_height));
+  setText('[data-diagnostic-applied]', num(s?.best_full_block_height));
+  setText('[data-diagnostic-peers]', num(s?.peer_count));
+  const index = state._slow?.indexerHealth || state._slow?.indexer;
+  setText('[data-diagnostic-index]', index ? `${index.status === 'caughtUp' ? 'Ready' : index.status} · ${num(index.indexedHeight)} / ${num(index.fullHeight)} blocks` : 'Unavailable');
+  const indexIssues = [];
+  if (index?.haltReason) indexIssues.push(`Index halt reason: ${index.haltReason}.`);
+  if (index?.repair?.pending) indexIssues.push(`Index repair in progress · ${num(index.repair.nextGi)} boxes processed.`);
+  if (index?.repair?.skipped > 0) indexIssues.push(`Index repair skipped ${num(index.repair.skipped)} boxes. Review the indexer logs.`);
+  setText('[data-diagnostic-index-issues]', indexIssues.join(' '));
+  root.querySelector('[data-diagnostic-index-issues]').hidden = !indexIssues.length;
+  const diagnosticIssues = [...alerts];
+  if (s?.sync_wedged) diagnosticIssues.push(`Fork below height ${num(s.sync_wedged.fork_below_height)}; rollback window ${num(s.sync_wedged.max_rollback_depth)} blocks.`);
+  if (s?.shadow?.diverged) diagnosticIssues.push(`Reference comparison: ${s.shadow.diverged.kind} at height ${num(s.shadow.diverged.height)}.`);
+  setText('[data-diagnostic-issues]', diagnosticIssues.join('\n') || (state.reachable === false ? 'Connection unavailable; diagnostic values are from the last response.' : onlyHistory ? 'No active node processing alarm is reported.' : guidance?.detail || 'No additional diagnostic message was returned.'));
+  root.querySelector('[data-rejection-details]').hidden = rejection === 'none';
+  if (rejection === 'none') return;
+  const error = s.last_block_apply_error;
+  const age = Number.isFinite(error.age_ms) && error.age_ms >= 0 ? `${dur(Math.floor(error.age_ms / 1000))} ago` : 'Time unavailable';
+  const count = s.block_apply_errors_total;
+  setText('[data-rejection-meta]', `Height ${num(error.height)} · ${age}${Number.isSafeInteger(count) && count > 0 ? ` · ${num(count)} rejection${count === 1 ? '' : 's'} this session` : ''}`);
+  setText('[data-rejection-progress]', historical
+    ? `Last reported applied height: ${num(s.best_full_block_height)} — ${num(s.best_full_block_height - error.height)} blocks beyond this rejection. This past event is not an active sync warning.`
+    : `Last reported applied height: ${num(s.best_full_block_height)}. Applied blocks have not been confirmed beyond the rejected height.`);
+  setText('[data-rejection-id]', error.block_id || 'Unavailable');
+  setText('[data-rejection-reason]', error.reason || 'No reason returned. Check the node logs.');
 }
 
 function paintSyncSummary(blkH, hdrH, guidance = null) {
   const s = state.status;
-  const kind = state.reachable === false ? 'unreachable' : s?.sync_wedged || s?.apply_wedged || s?.last_storage_error || s?.last_block_apply_error || s?.shadow?.diverged ? 'alarm' : s?.bootstrap ? 'bootstrap' : s?.sync_state || 'loading';
+  const kind = state.reachable === false ? 'unreachable' : hasActiveNodeIssue(s) ? 'alarm' : s?.bootstrap ? 'bootstrap' : s?.sync_state || 'loading';
   const messages = {
     loading: ['Connecting', 'Waiting for sync status', 'Progress will appear when the node responds.'],
     unreachable: ['Connection lost', 'Your node is unreachable', 'Showing the last received data. Check that the node is running.'],

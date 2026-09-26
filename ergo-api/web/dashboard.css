@@ -1701,6 +1701,23 @@ kbd { font: 11px var(--mono); padding: 2px 6px; border: 1px solid var(--bd2); bo
 .ov-sync__insights strong { font-size: 18px; font-weight: 500; color: var(--tx); letter-spacing: -.02em; }
 .ov-sync[data-sync-tone='alarm'] { --sync-color: var(--red); }
 .ov-alerts { padding: 16px 20px; white-space: pre-line; overflow-wrap: anywhere; line-height: 1.7; color: var(--red); border-left: 3px solid var(--red); background: color-mix(in srgb, var(--red) 7%, var(--s1)); border-radius: 4px; }
+.ov-diagnostics { min-width: 0; border: 1px solid var(--bd2); border-radius: 10px; background: var(--s1); font-size: 12px; overflow-wrap: anywhere; }
+.ov-diagnostics[data-state='unresolved'] { border-left: 3px solid var(--red); }
+.ov-diagnostics summary { padding: 14px 18px; cursor: pointer; }
+.ov-diagnostics summary::marker { color: var(--tx3); }
+.ov-diagnostics__title { font-weight: 600; }
+.ov-diagnostics__meta { color: var(--tx3); margin-left: 16px; font-size: 11px; }
+.ov-diagnostics__body { padding: 16px 18px; border-top: 1px solid var(--bd2); line-height: 1.6; }
+.ov-diagnostics__body dl { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 8px 16px; margin: 14px 0; }
+.ov-diagnostics__body dt { color: var(--tx3); }
+.ov-diagnostics__body dd { margin: 0; }
+.ov-diagnostics__body h3 { font-size: 13px; margin: 20px 0 6px; }
+.ov-diagnostics__issues { white-space: pre-line; }
+.ov-diagnostics__body .ov-diagnostics__status { grid-template-columns: repeat(3, 80px minmax(0, 1fr)); margin-top: 0; padding-bottom: 16px; border-bottom: 1px solid var(--bd2); }
+@media (max-width: 760px) {
+  .ov-diagnostics__meta { display: block; margin: 6px 0 0; }
+  .ov-diagnostics__body .ov-diagnostics__status { grid-template-columns: 80px minmax(0, 1fr); }
+}
 .filter-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin: 24px 0 14px; }
 .filter-bar label { display: grid; gap: 7px; font-size: 12px; color: var(--tx2); }
 .filter-bar__search { flex: 1; min-width: 180px; }
@@ -1803,7 +1820,7 @@ a.btn { text-decoration: none; }
 .pg-description { font-size: 13px; max-width: 70ch; margin-top: 8px; }
 .pg-head { padding-block: 4px 12px; margin-bottom: 14px; }
 #section-overview { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; align-items: stretch; }
-.ov-top, .ov-body, .ov-alerts, .ov-prompt { grid-column: 1 / -1; }
+.ov-top, .ov-body, .ov-alerts, .ov-diagnostics, .ov-prompt { grid-column: 1 / -1; }
 .ov-top { padding: 4px 0 8px; align-items: flex-start; }
 .ov-eyebrow { font-size: 10px; letter-spacing: .17em; color: var(--accent); margin-bottom: 10px; }
 .ov-intro { font-size: 13px; color: var(--tx2); margin: 8px 0 0; line-height: 1.6; }
