@@ -28,9 +28,6 @@ use crate::store::{
     STATE_META, UNDO_LOG,
 };
 
-#[cfg(test)]
-static WALLET_APPLY_TEST_LOCK: Mutex<()> = Mutex::new(());
-
 /// Shared commit progress + error state used as a real barrier between the
 /// persist worker and any caller of `flush()`.
 ///
@@ -787,23 +784,7 @@ impl PersistPipeline {
         if jobs.is_empty() {
             return Ok(0.0);
         }
-        if !crate::wallet::wait_for_wallet_finalization(
-            crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-        ) {
-            return Err(PersistBatchError::unobserved(
-                "wallet_finalization",
-                "wallet finalization did not clear before persist deadline".to_string(),
-            ));
-        }
-        let _chain_apply_guard = crate::wallet::chain_apply_read_guard();
-        if !crate::wallet::wait_for_wallet_finalization(
-            crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-        ) {
-            return Err(PersistBatchError::unobserved(
-                "wallet_finalization",
-                "wallet finalization did not clear before persist deadline".to_string(),
-            ));
-        }
+        let _chain_apply_guard = crate::wallet::chain_apply_guard_after_wallet_finalization();
 
         let mut write_txn = crate::begin_write_qr(db)
             .observe_persist_error(failure_context, "background_persist_begin_write")?;
@@ -1619,7 +1600,7 @@ mod tests {
 
     #[test]
     fn queued_job_survives_wallet_finalization_fence() {
-        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let (_dir, pipeline) = fresh_pipeline(2);
         crate::wallet::set_wallet_finalization_in_progress(true);
         pipeline.send(minimal_job(1)).unwrap();
@@ -1635,8 +1616,54 @@ mod tests {
     }
 
     #[test]
+    fn finalization_timeout_keeps_pipeline_usable_and_invalidates_wallet() {
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let pipeline = PersistPipeline::new(Arc::clone(&db), path, 2, 1024, -1, None);
+        let generation = crate::wallet::wallet_apply_generation();
+        crate::wallet::set_wallet_finalization_in_progress(true);
+        pipeline
+            .send(job_with_tracked_output(1, vec![0], [0xA1; 32], 1_000_000))
+            .unwrap();
+        let result = pipeline
+            .result_rx
+            .recv_timeout(Duration::from_secs(15))
+            .unwrap();
+        crate::wallet::set_wallet_finalization_in_progress(false);
+        assert!(matches!(result, PersistResult::Ok { .. }));
+        assert!(crate::wallet::wallet_apply_generation() > generation);
+        assert!(crate::wallet::wallet_apply_fenced());
+        pipeline.send(minimal_job(2)).unwrap();
+        assert!(
+            pipeline.flush().is_none(),
+            "timeout must not poison CommitWatch"
+        );
+        let read = db.begin_read().unwrap();
+        assert!(read
+            .open_table(CHAIN_INDEX)
+            .unwrap()
+            .get(2)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            read.open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
+                .unwrap()
+                .get(())
+                .unwrap()
+                .map(|row| row.value()),
+            Some(true)
+        );
+        if let Ok(boxes) = read.open_table(crate::wallet::tables::WALLET_BOXES) {
+            assert!(boxes.get([0xA1; 32]).unwrap().is_none());
+        }
+        crate::wallet::unfence_wallet_apply();
+    }
+
+    #[test]
     fn queued_chain_only_job_invalidates_on_generation_change() {
-        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
@@ -1663,7 +1690,7 @@ mod tests {
 
     #[test]
     fn queued_payload_crossing_partial_rescan_invalidates() {
-        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
@@ -1711,7 +1738,7 @@ mod tests {
     /// without needing fixture-heavy CheckedBlock construction.
     #[test]
     fn worker_applies_wallet_payload_inside_batch_txn() {
-        let _guard = WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         use crate::wallet::tables::WALLET_BOXES;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");

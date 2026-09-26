@@ -1271,7 +1271,7 @@ fn handle_message_emits_span_with_peer_and_code() {
 
 // ----- mode_label_for: future-mode arms -----
 
-fn cfg_with_mode(
+pub(super) fn cfg_with_mode(
     state_type: crate::config::StateType,
     vt: bool,
     btk: i32,

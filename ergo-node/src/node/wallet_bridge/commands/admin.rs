@@ -1742,10 +1742,10 @@ mod attempt_limiter_tests {
     use super::AttemptLimiter;
     use ergo_state::wallet::{RedbWalletStore, WalletStore};
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    static RESCAN_GUARD: Mutex<()> = Mutex::new(());
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as RESCAN_GUARD;
 
     #[test]
     fn allows_below_budget_and_locks_at_max_failures() {
@@ -1815,9 +1815,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn explicit_rescan_clears_stale_fail_closed_guards() {
-        let _guard = RESCAN_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RESCAN_GUARD.blocking_lock();
         crate::wallet_boot::begin_wallet_session();
         crate::wallet_boot::latch_rescan_fail_closed();
         let (_dir, store) = tempfile::tempdir()
@@ -1838,9 +1836,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn partial_rescan_does_not_fence_wallet_apply_generation() {
-        let _guard = RESCAN_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RESCAN_GUARD.blocking_lock();
         crate::wallet_boot::begin_wallet_session();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
@@ -1905,9 +1901,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn rescan_generation_change_latches_and_reasserts_invalidation() {
-        let _guard = RESCAN_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RESCAN_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
@@ -2003,6 +1997,7 @@ mod scan_recovery_tests {
 
     #[test]
     fn rescan_start_failure_persists_invalidation() {
+        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
         let (_dir, store) = recording_store(false);
         super::fail_rescan_start_with_invalidation(&store);
         assert!(store.read().unwrap().scan_invalidated().unwrap());
