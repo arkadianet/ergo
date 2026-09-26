@@ -77,6 +77,13 @@ justify that complexity yet.
 
 ## Follow-up gates
 
+The live RSS sampler now uses the existing `sysinfo` dependency off Linux,
+refreshing only this process. Windows reports working-set bytes converted to
+KiB, consistent with the host endpoint; Linux retains `smaps_rollup`. This fixes
+the misleading zero in `/metrics` on Windows. It measures total resident memory,
+not ownership by the AVL cache, mining graph or redb caches, and does not itself
+reduce memory consumption.
+
 - Validate each change against indexer apply, rollback, duplicate-token and
   repair tests. Preserve on-disk encoding and schema version.
 - Measure a fixed historical block interval before claiming end-to-end gains.
