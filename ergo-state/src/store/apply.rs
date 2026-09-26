@@ -192,25 +192,8 @@ impl StateStore {
     ) -> Result<(), StateError> {
         let wallet_apply_generation = crate::wallet::wallet_apply_generation();
         let synchronous = self.persist_pipeline.is_none();
-        if synchronous
-            && !crate::wallet::wait_for_wallet_finalization(
-                crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-            )
-        {
-            return Err(StateError::InvalidPrecondition {
-                what: "wallet finalization did not clear before apply deadline",
-            });
-        }
-        let _chain_apply_guard = synchronous.then(crate::wallet::chain_apply_read_guard);
-        if synchronous
-            && !crate::wallet::wait_for_wallet_finalization(
-                crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-            )
-        {
-            return Err(StateError::InvalidPrecondition {
-                what: "wallet finalization did not clear before apply deadline",
-            });
-        }
+        let _chain_apply_guard =
+            synchronous.then(crate::wallet::chain_apply_guard_after_wallet_finalization);
         let header = block.header();
         let height = header.height();
         let header_id = *header.header_id();
@@ -357,25 +340,8 @@ impl StateStore {
     ) -> Result<(), StateError> {
         let wallet_apply_generation = crate::wallet::wallet_apply_generation();
         let synchronous = self.persist_pipeline.is_none();
-        if synchronous
-            && !crate::wallet::wait_for_wallet_finalization(
-                crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-            )
-        {
-            return Err(StateError::InvalidPrecondition {
-                what: "wallet finalization did not clear before apply deadline",
-            });
-        }
-        let _chain_apply_guard = synchronous.then(crate::wallet::chain_apply_read_guard);
-        if synchronous
-            && !crate::wallet::wait_for_wallet_finalization(
-                crate::wallet::WALLET_FINALIZATION_WAIT_TIMEOUT,
-            )
-        {
-            return Err(StateError::InvalidPrecondition {
-                what: "wallet finalization did not clear before apply deadline",
-            });
-        }
+        let _chain_apply_guard =
+            synchronous.then(crate::wallet::chain_apply_guard_after_wallet_finalization);
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
                 what: "apply_block called before initialize_genesis",

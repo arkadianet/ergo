@@ -285,38 +285,16 @@ pub(super) async fn bind(
                 tracing::warn!(%error, "wallet boot: could not open wallet store read");
                 NodeError::from(format!("wallet boot: wallet store read failed: {error}"))
             })?;
-            let tracked_count = read
-                .tracked_pubkeys_with_paths()
+            let hydration = ergo_state::wallet::hydration::HydrationSnapshot::load(read.as_ref())
                 .map_err(|error| {
-                    tracing::warn!(%error, "wallet boot: tracked-key hydration read failed");
-                    NodeError::from(format!(
-                        "wallet boot: wallet tracked-key read failed: {error}"
-                    ))
-                })?
-                .len();
-            read.visible_pubkeys().map_err(|error| {
-                tracing::warn!(%error, "wallet boot: visible-address hydration read failed");
-                NodeError::from(format!(
-                    "wallet boot: wallet visible-address read failed: {error}"
-                ))
-            })?;
-            read.change_address_pubkey().map_err(|error| {
-                tracing::warn!(%error, "wallet boot: change-address hydration read failed");
-                NodeError::from(format!(
-                    "wallet boot: wallet change-address read failed: {error}"
-                ))
+                NodeError::from(format!("wallet boot: hydration read failed: {error}"))
             })?;
             state
-                .hydrate_from_reader(read.as_ref(), network_prefix)
+                .hydrate_from_reader(&hydration, network_prefix)
                 .map_err(|error| {
                     tracing::warn!(%error, "wallet boot: hydration from wallet store failed");
                     NodeError::from(format!("wallet boot: wallet hydration failed: {error}"))
                 })?;
-            if tracked_count > 0 && state.cached_pubkeys().is_empty() {
-                return Err(NodeError::from(
-                    "wallet boot: hydration produced no tracked keys".to_string(),
-                ));
-            }
             Arc::new(parking_lot::RwLock::new(state))
         };
         let wallet_state_for_hook = Arc::clone(&wallet_state);
@@ -530,9 +508,9 @@ mod tests {
     use ergo_state::store::StateStore;
     use ergo_state::wallet::types::TrackedPubkeyMeta;
     use ergo_state::wallet::{RedbWalletStore, RescanState, WalletStore};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    static RECOVERY_GUARD: Mutex<()> = Mutex::new(());
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as RECOVERY_GUARD;
 
     fn new_store() -> (tempfile::TempDir, RedbWalletStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -544,9 +522,7 @@ mod tests {
 
     #[test]
     fn recover_interrupted_rescan_marks_failed_and_reasserts_invalidation() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let (_dir, store) = new_store();
         let mut write = store.begin_write().unwrap();
@@ -575,9 +551,7 @@ mod tests {
 
     #[test]
     fn recover_failed_or_invalidated_state_is_unsafe_on_boot() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let (_dir, store) = new_store();
         let mut write = store.begin_write().unwrap();
@@ -616,9 +590,7 @@ mod tests {
 
     #[test]
     fn recover_cursor_behind_committed_tip_is_unsafe_on_boot() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
@@ -656,9 +628,7 @@ mod tests {
 
     #[test]
     fn recover_cursor_ahead_committed_tip_is_unsafe_on_boot() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
@@ -696,9 +666,7 @@ mod tests {
 
     #[test]
     fn recover_missing_cursor_with_wallet_facts_is_unsafe_on_boot() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
@@ -732,9 +700,7 @@ mod tests {
 
     #[test]
     fn recover_missing_cursor_without_wallet_facts_is_safe_on_boot() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
@@ -755,9 +721,7 @@ mod tests {
 
     #[test]
     fn recover_scan_only_cursor_lag_is_safe() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
@@ -781,9 +745,7 @@ mod tests {
 
     #[test]
     fn clean_idle_store_clears_stale_process_guards() {
-        let _guard = RECOVERY_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = RECOVERY_GUARD.blocking_lock();
         let (_dir, store) = new_store();
         crate::wallet_boot::latch_rescan_fail_closed();
         recover_interrupted_rescan(&store).unwrap();

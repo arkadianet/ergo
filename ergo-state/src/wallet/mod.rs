@@ -102,6 +102,31 @@ pub fn wait_for_wallet_finalization(timeout: Duration) -> bool {
     true
 }
 
+/// Give wallet finalization a bounded opportunity to finish, then let chain
+/// persistence proceed with the wallet fenced. Callers must persist that fence
+/// in the same transaction as the chain update, even without a wallet payload.
+pub fn chain_apply_guard_after_wallet_finalization() -> RwLockReadGuard<'static, ()> {
+    let started = Instant::now();
+    loop {
+        wait_for_wallet_finalization(
+            WALLET_FINALIZATION_WAIT_TIMEOUT.saturating_sub(started.elapsed()),
+        );
+        let guard = chain_apply_read_guard();
+        if !wallet_finalization_in_progress() {
+            return guard;
+        }
+        if started.elapsed() >= WALLET_FINALIZATION_WAIT_TIMEOUT {
+            advance_wallet_apply_generation();
+            fence_wallet_apply();
+            tracing::warn!("wallet finalization timed out; continuing chain persistence with wallet invalidated");
+            return guard;
+        }
+        // A finalizer started between the wait and taking the lock. Release
+        // the read lock so its owner can acquire the write lock and finish.
+        drop(guard);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalletScanCursor {
     pub height: u32,

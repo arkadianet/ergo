@@ -324,13 +324,13 @@ pub(crate) async fn get_private_key_impl(
 mod tests {
     use super::*;
     use ergo_state::wallet::{RedbWalletStore, WalletStore};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as TEST_GUARD;
 
     #[test]
     fn tracked_key_mutation_advances_generation_and_invalidates() {
-        let _guard = TEST_GUARD.lock().unwrap();
+        let _guard = TEST_GUARD.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store = RedbWalletStore::new(db);
