@@ -289,8 +289,11 @@ pub fn build_and_publish(
     // Minimal builds freeze nothing from the pool and never touch the
     // indexer: the emission-only template needs neither, and skipping both
     // is what makes the minimal publish fast.
+    // The intent already owns a frozen snapshot. Borrow it for a full build;
+    // cloning it would copy every entry's vectors and materialized output boxes.
+    let empty_mempool = MempoolReadSnapshot::empty();
     let (mempool, eligible_rent_boxes) = match mode {
-        BuildMode::Minimal => (MempoolReadSnapshot::empty(), Vec::new()),
+        BuildMode::Minimal => (&empty_mempool, Vec::new()),
         BuildMode::Full => {
             // Storage-rent eligibility, resolved HERE so each box is materialized
             // against THIS committed snapshot — never a newer live view (a box
@@ -306,7 +309,7 @@ pub fn build_and_publish(
             } else {
                 Vec::new()
             };
-            ((*intent.mempool).clone(), eligible)
+            (intent.mempool.as_ref(), eligible)
         }
     };
 

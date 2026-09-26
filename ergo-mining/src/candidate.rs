@@ -164,7 +164,7 @@ pub fn generate_candidate<V: CandidateStateView>(
     view: &V,
     network: ergo_chain_spec::Network,
     mode: BuildMode,
-    mempool: MempoolReadSnapshot,
+    mempool: &MempoolReadSnapshot,
     miner_pk: &[u8; 33],
     monetary: &MonetarySettings,
     reemission: Option<&ReemissionSettings>,
@@ -554,7 +554,7 @@ pub fn generate_candidate<V: CandidateStateView>(
 
         let selected = select_user_txs(
             &mut overlay,
-            &mempool,
+            mempool,
             &ctx,
             &params,
             last_headers.as_slice(),
@@ -1222,7 +1222,7 @@ mod tests {
                 &view,
                 ergo_chain_spec::Network::Mainnet,
                 mode,
-                MempoolReadSnapshot::empty(),
+                &MempoolReadSnapshot::empty(),
                 &[0x02; 33],
                 &MonetarySettings::mainnet(),
                 None,
