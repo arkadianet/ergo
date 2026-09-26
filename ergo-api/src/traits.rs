@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ergo_indexer_types::{BoxId, TxId};
 use ergo_ser::ergo_box::ErgoBox;
+use ergo_wallet_protocol::chain as wallet_chain_wire;
 
 use crate::compat::types::{ScalaFullBlock, ScalaTransactionInput};
 use crate::types::{
@@ -97,6 +98,141 @@ pub trait NodeReadState: Send + Sync {
         ApiVotes::default()
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum WalletChainError {
+    #[error("the wallet chain operation is unsupported")]
+    Unsupported,
+    #[error("the wallet chain submission is overloaded: {0}")]
+    Overloaded(String),
+    #[error("the wallet chain submission is shutting down: {0}")]
+    ShuttingDown(String),
+    #[error("the wallet chain submission timed out: {0}")]
+    Timeout(String),
+    #[error("the committed chain tip moved")]
+    StaleTip {
+        expected: wallet_chain_wire::ChainTip,
+        actual: wallet_chain_wire::ChainTip,
+    },
+    #[error("chain history is pruned")]
+    HistoryPruned { minimum_height: u32 },
+    #[error("the requested box is not in the committed UTXO set")]
+    BoxNotFound,
+    #[error("the chain request is invalid: {0}")]
+    Invalid(String),
+    #[error("the chain request failed: {0}")]
+    Internal(String),
+    #[error("the chain request failed: {0}")]
+    Failure(String),
+}
+
+impl WalletChainError {
+    pub fn stale_tip(
+        expected: wallet_chain_wire::ChainTip,
+        actual: wallet_chain_wire::ChainTip,
+    ) -> Self {
+        Self::StaleTip { expected, actual }
+    }
+
+    pub fn history_pruned(minimum_height: u32) -> Self {
+        Self::HistoryPruned { minimum_height }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid(message.into())
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+pub trait WalletChain: Send + Sync {
+    fn tip(&self) -> Result<wallet_chain_wire::ChainTip, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn snapshot(&self) -> Result<wallet_chain_wire::ChainSnapshot, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn blocks_since(
+        &self,
+        request: wallet_chain_wire::BlocksSinceRequest,
+    ) -> Result<wallet_chain_wire::BlocksSinceResponse, WalletChainError>;
+
+    fn box_lookup(
+        &self,
+        _request: wallet_chain_wire::BoxLookupRequest,
+    ) -> Result<wallet_chain_wire::BoxLookupResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn submit(
+        &self,
+        _request: wallet_chain_wire::SubmitRequest,
+    ) -> Result<wallet_chain_wire::SubmitResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn committed_tip(&self) -> Result<wallet_chain_wire::ChainTip, WalletChainError> {
+        self.tip()
+    }
+
+    fn chain_snapshot(&self) -> Result<wallet_chain_wire::ChainSnapshot, WalletChainError> {
+        self.snapshot()
+    }
+
+    fn lookup_box(
+        &self,
+        request: wallet_chain_wire::BoxLookupRequest,
+    ) -> Result<wallet_chain_wire::BoxLookupResponse, WalletChainError> {
+        self.box_lookup(request)
+    }
+
+    fn submit_transaction(
+        &self,
+        request: wallet_chain_wire::SubmitRequest,
+    ) -> Result<wallet_chain_wire::SubmitResponse, WalletChainError> {
+        self.submit(request)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct NoopWalletChain;
+
+impl WalletChain for NoopWalletChain {
+    fn tip(&self) -> Result<wallet_chain_wire::ChainTip, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn snapshot(&self) -> Result<wallet_chain_wire::ChainSnapshot, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn blocks_since(
+        &self,
+        _request: wallet_chain_wire::BlocksSinceRequest,
+    ) -> Result<wallet_chain_wire::BlocksSinceResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn box_lookup(
+        &self,
+        _request: wallet_chain_wire::BoxLookupRequest,
+    ) -> Result<wallet_chain_wire::BoxLookupResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+
+    fn submit(
+        &self,
+        _request: wallet_chain_wire::SubmitRequest,
+    ) -> Result<wallet_chain_wire::SubmitResponse, WalletChainError> {
+        Err(WalletChainError::Unsupported)
+    }
+}
+
+pub type DefaultWalletChain = NoopWalletChain;
 
 /// Submission boundary the node implements for the API server.
 ///

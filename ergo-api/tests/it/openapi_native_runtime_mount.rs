@@ -453,6 +453,7 @@ fn ctx(submit: Option<Arc<dyn NodeSubmit>>) -> ServerCtx {
         read: read(),
         compat: None,
         submit,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
@@ -469,6 +470,7 @@ fn fully_wired_ctx() -> ServerCtx {
         read: read(),
         compat: Some(Arc::new(StubCompat)),
         submit: Some(submit()),
+        wallet_chain: None,
         indexer: Some(Arc::new(StubIndexer)),
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,
@@ -639,7 +641,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
     let scala_documented = scala_openapi_operations();
     assert_eq!(inventory.rust, rust_documented);
     assert_eq!(inventory.scala, scala_documented);
-    assert_eq!(inventory.rust.len(), 180);
+    assert_eq!(inventory.rust.len(), 185);
     assert_eq!(inventory.scala.len(), 125);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 

@@ -58,6 +58,7 @@ mod v1_operator_routes;
 mod v1_prices_routes;
 mod v1_scan_accounts_routes;
 mod v1_script_routes;
+mod v1_wallet_chain_routes;
 mod wallet_lock_matrix;
 mod wallet_reads;
 mod wallet_send_oracle;

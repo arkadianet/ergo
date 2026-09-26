@@ -31,6 +31,7 @@ pub mod chain_client;
 pub mod chain_snapshot;
 pub use chain_client::{
     ChainClientAdapter, InProcessChainClient, IntoChainSubmitter, NodeChainClient,
+    WalletChainAdapter,
 };
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
@@ -1008,7 +1009,7 @@ pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
 pub struct ChainStateAccessorImpl {
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
-    wallet_store: Arc<dyn ergo_state::wallet::WalletStore>,
+    wallet_store: Option<Arc<dyn ergo_state::wallet::WalletStore>>,
     is_pruned: bool,
     /// EIP-27 re-emission rules (mainnet) or `None` (testnet). See
     /// [`ChainStateAccessor::reemission_rules`].
@@ -1024,7 +1025,20 @@ impl ChainStateAccessorImpl {
     ) -> Self {
         Self {
             reader,
-            wallet_store,
+            wallet_store: Some(wallet_store),
+            is_pruned,
+            reemission,
+        }
+    }
+
+    pub fn chain_only(
+        reader: ergo_state::reader::ChainStoreReader,
+        is_pruned: bool,
+        reemission: Option<ergo_validation::ReemissionRuleInputs>,
+    ) -> Self {
+        Self {
+            reader,
+            wallet_store: None,
             is_pruned,
             reemission,
         }
@@ -1033,8 +1047,13 @@ impl ChainStateAccessorImpl {
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
-        let read = self
-            .wallet_store
+        let wallet_store =
+            self.wallet_store
+                .as_ref()
+                .ok_or(ergo_state::store::StateError::InternalInvariant {
+                    what: "chain-only accessor cannot read wallet scan height",
+                })?;
+        let read = wallet_store
             .read()
             .map_err(ergo_state::store::StateError::from)?;
         Ok(read

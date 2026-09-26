@@ -550,6 +550,7 @@ fn build_app_with_mempool(
             read,
             compat: None,
             submit: None,
+            wallet_chain: None,
             indexer: Some(indexer),
             mempool,
             network: NetworkPrefix::Mainnet,

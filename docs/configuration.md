@@ -139,15 +139,17 @@ beyond loopback.
 ### Security notes for the API
 
 The `api_key` gate is narrow by design, matching the Scala reference
-node: it protects only the `/wallet/*` routes and the
-`/node/shutdown` route. The gate covers those whole path prefixes —
-an unknown subpath under `/wallet/` or `/node/` rejects on the key
-first (mirroring Scala's `pathPrefix(...) & withAuth`), while any
-other unmatched path is a plain, ungated `404`. Every other route is
-unauthenticated regardless
+node: it protects the `/wallet/*` routes, the `/node/shutdown` route, and
+the authenticated wallet-facing `/api/v1/chain/{tip,snapshot,boxes,blocks-since,transactions}`
+routes. The legacy gate covers the whole `/wallet/` and `/node/` path
+prefixes — an unknown subpath under those prefixes rejects on the key
+first (mirroring Scala's `pathPrefix(...) & withAuth`), while any other
+unmatched path is a plain, ungated `404`. The v1 chain router applies its
+T1 key check to its five concrete routes; loopback policy remains the
+existing auth-layer policy. Other routes are unauthenticated regardless
 of bind scope — including transaction submission
 (`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/*`, `/emission/*`, all read endpoints, and
+`POST /blocks`, `/mining/*`, `/emission/*`, all other read endpoints, and
 `/metrics`.
 
 Consequences:
