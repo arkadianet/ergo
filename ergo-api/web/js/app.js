@@ -18,6 +18,7 @@
 //                 the current tail. Sections without sub-routes never see it.
 import { startRouter } from './router.js';
 import { initSettings, applyPrefs } from './settings.js';
+import { initWorkspaceSearch } from './workspace-search.js';
 import { initAuth } from './auth.js';
 import { api } from './api-client.js';
 import * as overview from './overview.js';
@@ -45,6 +46,7 @@ let lastInfoAt = 0;
 let slowInFlight = null;
 let fastInFlight = false;
 let lastStatusAt = 0;
+let pendingChainQuery = null;
 
 function setConn(ok) {
   const dot = document.getElementById('conn-dot');
@@ -120,6 +122,9 @@ async function slow() {
 
 function show(s, tail) {
   const r = renderers[s];
+  const pageName = s.charAt(0).toUpperCase() + s.slice(1);
+  document.getElementById('workspace-page').textContent = pageName;
+  document.title = `${pageName} · Ergo Node`;
   if (current === s) {
     // Same section, new sub-path (deep-link navigation within the section).
     if (r && r.onRoute) r.onRoute(tail || '');
@@ -142,6 +147,11 @@ function show(s, tail) {
   }
   if (r.onShow) r.onShow();
   if (r.onRoute) r.onRoute(tail || '');
+  if (s === 'explorer' && pendingChainQuery != null) {
+    const query = pendingChainQuery;
+    pendingChainQuery = null;
+    explorer.searchQuery(query);
+  }
   window.scrollTo({ top: 0, behavior: 'instant' });
   slow(); // immediate first paint for the entered section
   fast(); // don't show an old status when switching sections
@@ -173,21 +183,24 @@ function boot() {
     const expanded = document.querySelector('.side').classList.toggle('side--open');
     navToggle.setAttribute('aria-expanded', String(expanded));
   });
-  const search = () => {
-    const r = renderers[current];
-    if (r?.isBusy?.() || document.querySelector('dialog[open]')) return;
-    if (current !== 'explorer') location.hash = 'explorer';
-    setTimeout(() => { if (current === 'explorer') explorer.focusSearch(); }, 0);
-  };
-  document.getElementById('global-search')?.addEventListener('click', search);
+  const search = initWorkspaceSearch({
+    trigger: document.getElementById('global-search'),
+    canOpen: () => !renderers[current]?.isBusy?.() && !document.querySelector('dialog[open]'),
+    navigate: section => { location.hash = section; },
+    search: query => {
+      if (current === 'explorer') explorer.searchQuery(query);
+      else { pendingChainQuery = query; location.hash = 'explorer'; }
+    },
+  });
   startRouter(SECTIONS, show, beforeLeave);
-  // "/" from anywhere jumps to the explorer omnibox (GitHub-style). Ignored
+  // "/" opens workspace search without leaving the page. Ignored
   // while typing in a field or while a dialog is open, so it never swallows a
   // literal slash the user is entering.
   document.addEventListener('keydown', (e) => {
-    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const command = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.altKey;
+    if (!command && (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey)) return;
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if (!command && t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (document.querySelector('dialog[open]')) return;
     // Never initiate navigation away from a busy section: on the wallet
     // mnemonic gate, '/' would raise the leave-confirm where Enter (the

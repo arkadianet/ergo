@@ -9,6 +9,24 @@ use num_bigint::BigUint;
 
 use crate::error::MiningError;
 
+/// Observations of the final assembled template, after fee-transaction trimming.
+/// Frozen with the work message so API readers never combine different jobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CandidateMetrics {
+    /// All transactions, including emission, rent self-claim and fee collection.
+    pub transaction_count: u32,
+    /// Mempool transactions retained in the final template.
+    pub selected_transaction_count: u32,
+    /// Fee-collection transaction output value; excludes emission and rent claims.
+    pub fees_nano_erg: u64,
+    /// Serialized BlockTransactions section including framing (rule 306).
+    pub transactions_size_bytes: u64,
+    pub max_block_size_bytes: u64,
+    /// Sum of validated transaction costs in block-cost units, not JIT units.
+    pub validation_cost: u64,
+    pub max_block_cost: u64,
+}
+
 /// Work message handed to an external miner: everything needed to mine an
 /// Autolykos v2 solution against the current candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +40,7 @@ pub struct WorkMessage {
     pub height: u32,
     /// Compressed secp256k1 miner pubkey the candidate was built for.
     pub pk: [u8; 33],
+    pub metrics: CandidateMetrics,
 }
 
 /// Autolykos v2 solution posted by an external miner, decoded to typed form.

@@ -47,9 +47,11 @@ use crate::compat::traits::NodeChainQuery;
 use crate::traits::ChainParamsView;
 use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
 use crate::web::{
-    JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
-    JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
-    JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WS_CLIENT,
+    JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHAIN_ACTIVITY, JS_CHART, JS_EXPLORER, JS_FEE_STATS,
+    JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_REWARD, JS_MINING_WORK,
+    JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT,
+    JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WORKSPACE_SEARCH,
+    JS_WS_CLIENT,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
@@ -732,6 +734,20 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/js/sparkline.js", get(|| async { js(JS_SPARKLINE) }))
         .route("/js/chart.js", get(|| async { js(JS_CHART) }))
         .route("/js/overview.js", get(|| async { js(JS_OVERVIEW) }))
+        .route(
+            "/js/chain-activity.js",
+            get(|| async { js(JS_CHAIN_ACTIVITY) }),
+        )
+        .route(
+            "/js/node-guidance.js",
+            get(|| async { js(JS_NODE_GUIDANCE) }),
+        )
+        .route("/js/sync-rings.js", get(|| async { js(JS_SYNC_RINGS) }))
+        .route("/js/storage-rent.js", get(|| async { js(JS_STORAGE_RENT) }))
+        .route(
+            "/js/workspace-search.js",
+            get(|| async { js(JS_WORKSPACE_SEARCH) }),
+        )
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
         .route("/js/token-meta.js", get(|| async { js(JS_TOKEN_META) }))
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
@@ -740,6 +756,11 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
+        .route("/js/mining-work.js", get(|| async { js(JS_MINING_WORK) }))
+        .route(
+            "/js/mining-reward.js",
+            get(|| async { js(JS_MINING_REWARD) }),
+        )
         .route("/js/ws-client.js", get(|| async { js(JS_WS_CLIENT) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))

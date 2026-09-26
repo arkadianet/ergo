@@ -86,15 +86,14 @@ export function mount(el_) {
     </div>
     <div class="ov-prompt banner banner--info" data-wallet-prompt hidden></div>
     <section class="panel" data-wallet-preauth hidden>
-      <div class="panel__head"><div class="panel__title">Node wallet</div></div>
+      <div class="panel__head"><h2 class="panel__title">Your wallet, on your node</h2><span class="pill">Operator access required</span></div>
       <div class="panel__body w-preauth">
-        <p>The embedded wallet lives entirely on this node — keys never leave the machine.
-        Authorizing with the operator <code>api_key</code> unlocks:</p>
-        <ul>
-          <li><b>Balances &amp; addresses</b> — confirmed / unconfirmed ERG and tokens, derived receive addresses</li>
-          <li><b>Send payments</b> — build, sign, and broadcast transactions with local key material</li>
-          <li><b>Mining rewards</b> — sweep matured miner rewards to a P2PK address (EIP-27-correct)</li>
-          <li><b>Recovery &amp; rescan</b> — initialize / restore from a mnemonic, rescan the chain for wallet history</li>
+        <p>Manage your funds using the wallet built into this node. Authorize to view your wallet and access its controls; wallet unlocking is a separate step.</p>
+        <ul class="w-features">
+          <li><b>Balances &amp; addresses</b><span>Review confirmed and pending ERG, tokens, and receiving addresses.</span></li>
+          <li><b>Send payments</b><span>Build and review transactions before signing and broadcasting.</span></li>
+          <li><b>Mining rewards</b><span>Collect matured mining rewards into a receiving address.</span></li>
+          <li><b>Recovery &amp; rescan</b><span>Restore an existing wallet or scan the chain for its history.</span></li>
         </ul>
         <p class="muted">The key is held in this browser session only and sent solely to this node.</p>
       </div>

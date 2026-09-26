@@ -112,9 +112,9 @@ pub(super) async fn action_loop(
     // Set by the votes-changed arm; consumed in the post-arm mining block to
     // force a same-tip rebuild this iteration (so a vote change applies now).
     let mut mining_votes_dirty = false;
-    // Startup priming: publish the initial BestTip + (if the node is already
-    // nearly synced) the first BuildIntent, so an idle caught-up node serves a
-    // candidate without waiting for an unrelated state change.
+    // Startup priming publishes the persisted BestTip. Normal online mining
+    // still waits for a freshly applied, recent block to open its startup
+    // latch; offline generation and an empty devnet have explicit exceptions.
     if let Some(wiring) = mining.as_ref() {
         let prev = mining_last_tip.best_full_id();
         mining_last_tip = signal_mining_engine(

@@ -4,8 +4,16 @@ import { api } from './api-client.js';
 import { lineChart, barChart } from './chart.js';
 import { num, bytes, dur } from './format.js';
 import { subscribe, promptAuthorize } from './auth.js';
-import { minerNode, fetchOwnPk, ownPkHex } from './miners.js';
+import { fetchOwnPk, ownPkHex } from './miners.js';
 import { createChannelSub } from './ws-client.js';
+import { nodeGuidance } from './node-guidance.js';
+import { recentChain, nodeEvents } from './chain-activity.js';
+import { syncLayers } from './sync-rings.js';
+import { miningWork } from './mining-work.js';
+import { miningReward } from './mining-reward.js';
+import { createRentSource, rentForecastView } from './storage-rent.js';
+
+const rentSource = createRentSource(api);
 
 const HISTORY_LEN = 60;
 const WS_STALE_MS = 35_000;
@@ -80,8 +88,10 @@ function paintDerived() {
     setText('[data-k="up"]', dur(Math.max(0, Math.floor((Date.now() - started) / 1000))));
   }
   const pace = state.reachable === false ? null : recentPace();
-  setText('[data-sync-pace]', pace ? `${pace.rate.toFixed(1)} blocks/s` : 'Measuring…');
-  setText('[data-sync-pace-note]', state.reachable === false ? 'Unavailable while disconnected' : pace ? `Observed over ${pace.seconds}s · not an ETA` : 'Requires 10 seconds of continuous data');
+  const atTip = state.reachable !== false && state.status?.sync_state === 'at_tip';
+  setText('[data-pace-label]', atTip ? 'Chain activity' : 'Processing pace');
+  setText('[data-sync-pace]', state.reachable === false ? 'Unavailable' : atTip ? 'Following the chain' : pace ? `${pace.rate.toFixed(1)} blocks/s` : 'Measuring…');
+  setText('[data-sync-pace-note]', state.reachable === false ? 'Unavailable while disconnected' : atTip ? 'Idle time between blocks is normal' : pace ? `Observed over ${pace.seconds}s · not an ETA` : 'Requires 10 seconds of continuous data');
   const duration = state.status?.last_apply_duration_ms;
   setText('[data-apply-duration]', state.status?.last_applied_height > 0 && duration != null ? `${num(duration)} ms` : '—');
 }
@@ -162,9 +172,9 @@ export function mount(el) {
   el.innerHTML = `
     <div class="pg-head pg-head--flush ov-top">
       <div>
-        <div class="ov-eyebrow">THE ERGO NETWORK / YOUR NODE</div>
-        <h1 class="pg-title">Your node. In focus.</h1>
-        <p class="ov-intro">An independent view of the chain. Every block, verified by you.</p>
+        <div class="ov-eyebrow">NODE WORKSPACE</div>
+        <h1 class="pg-title">Overview</h1>
+        <p class="ov-intro">Chain progress, service readiness and recent activity.</p>
         <div class="ov-ident" data-ident hidden>
           <span class="ov-ident__mode" data-ident-mode>—</span>
           <span class="ov-ident__chips" data-ident-chips></span>
@@ -176,28 +186,32 @@ export function mount(el) {
       </div>
     </div>
     <section class="ov-sync" aria-label="Synchronization status" data-sync-tone="loading">
+      <div class="ov-sync__summary">
       <div class="ov-sync__top">
         <div>
           <div class="ov-sync__status" role="status" data-sync-label>Connecting to your node</div>
           <h2 data-sync-title>Waiting for sync status</h2>
           <p data-sync-copy>Progress will appear when the node responds.</p>
+          <button class="btn btn--ghost ov-sync__action" type="button" data-guidance-action hidden></button>
         </div>
         <div class="ov-sync__percent">
-          <svg class="ov-orbit" viewBox="0 0 220 220" aria-hidden="true">
-            <circle class="ov-orbit__ticks" cx="110" cy="110" r="105" pathLength="100"/>
-            <circle class="ov-orbit__base" cx="110" cy="110" r="91"/>
-            <circle class="ov-orbit__value" data-sync-ring cx="110" cy="110" r="91" pathLength="100" stroke-dasharray="0 100"/>
+          <svg class="ov-orbit ov-orbit--layers" viewBox="0 0 220 220" role="img" aria-label="Waiting for sync stage data" data-sync-rings>
+            ${[['headers', 99], ['blocks', 90], ['index', 81]].map(([id, radius]) => `<circle class="ov-orbit__base" cx="110" cy="110" r="${radius}"/><circle class="ov-orbit__value" data-ring="${id}" data-state="unknown" cx="110" cy="110" r="${radius}" pathLength="100" stroke-dasharray="0 100"/>`).join('')}
           </svg>
-          <div class="ov-orbit__label"><span class="ov-orbit__caption">CHAIN SYNC</span><strong data-sync-percent>—</strong><span>of known headers</span></div>
+          <div class="ov-orbit__label"><span class="ov-orbit__caption">BLOCKS</span><strong data-sync-percent>—</strong><span>of headers</span></div>
         </div>
+      </div>
+      <div class="ov-ring-legend" aria-label="Sync stages, outer to inner">
+        ${[['headers', 'Headers', 'Outer'], ['blocks', 'Blocks', 'Middle'], ['index', 'Search index', 'Inner']].map(([id, label, position]) => `<div data-ring-legend="${id}" data-state="unknown"><span class="ov-ring-legend__name">${label}<small>${position}</small></span><strong data-ring-state="${id}">Unavailable</strong></div>`).join('')}
       </div>
       <div class="gauge ov-sync__track" role="progressbar" aria-label="Blocks applied against known headers" aria-valuemin="0" aria-valuemax="100" data-sync-progress><div class="gauge__fill" data-sync-fill></div></div>
       <div class="ov-sync__bottom">
         <span><b data-k="height">—</b> <span class="muted">blocks applied /</span> <b data-sync-target>—</b></span>
         <span data-sync-remaining>Waiting for data</span>
       </div>
+      </div>
       <div class="ov-sync__insights">
-        <div><span class="ov-insight-label">Processing pace</span><strong data-sync-pace>Measuring…</strong><span data-sync-pace-note>Requires 10 seconds of continuous data</span></div>
+        <div><span class="ov-insight-label" data-pace-label>Processing pace</span><strong data-sync-pace>Measuring…</strong><span data-sync-pace-note>Requires 10 seconds of continuous data</span></div>
         <div><span class="ov-insight-label">Last block processing</span><strong data-apply-duration>—</strong><span>Time spent applying one block</span></div>
         <div><span class="ov-insight-label">Search index</span><strong data-index-state>Checking…</strong><span data-index-note>Address, box and token lookup availability</span></div>
       </div>
@@ -224,6 +238,15 @@ export function mount(el) {
       renderBody();
     };
   });
+  el.querySelector('[data-guidance-action]').onclick = () => {
+    const destination = el.querySelector('[data-guidance-action]').dataset.destination;
+    if (destination === 'diagnostics') {
+      if (viewMode !== 'cockpit') el.querySelector('[data-view="cockpit"]').click();
+      const alerts = el.querySelector('[data-node-alerts]');
+      const target = !alerts.hidden ? alerts : el.querySelector('.ov-pipeline');
+      if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: 'center', behavior: 'instant' }); }
+    } else if (destination) location.hash = destination;
+  };
   // Authorize prompt: visible only while no api_key is set. Built once; the
   // subscription just toggles visibility as the auth state changes.
   const prompt = root.querySelector('[data-auth-prompt]');
@@ -331,9 +354,12 @@ export function onFast({ status, info, reachable }) {
   const blkH = displayHeight();
   const rawHdrH = s?.best_header_height ?? null;
   const hdrH = rawHdrH != null ? Math.max(rawHdrH, blkH ?? 0) : null;
+  const idx = state._slow?.indexer;
+  const guidance = nodeGuidance({ reachable: state.reachable, status: s, indexer: idx, indexerHealth: state._slow?.indexerHealth, identity: state.identity });
   setText('[data-k="height"]', num(blkH));
   recordProgress(blkH);
-  paintSyncSummary(blkH, hdrH);
+  paintSyncSummary(blkH, hdrH, guidance);
+  paintSyncRings();
   paintAlerts();
   paintDerived();
 
@@ -351,7 +377,6 @@ export function onFast({ status, info, reachable }) {
     setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
   }
   setText('[data-s="up"]', 'Since last restart');
-  const idx = state._slow?.indexer;
   const idxState = state.reachable === false ? 'Last known data' : idx?.status === 'caughtUp' ? 'Available' : idx?.status === 'halted' ? 'Needs attention' : idx ? 'Catching up' : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
   setText('[data-index-state]', idxState);
   setText('[data-index-note]', idx ? `Indexed ${num(idx.indexedHeight)} of ${num(idx.fullHeight ?? blkH)} applied blocks` : 'Address, box and token lookups need the index');
@@ -372,7 +397,7 @@ function paintAlerts() {
   host.hidden = !alerts.length;
 }
 
-function paintSyncSummary(blkH, hdrH) {
+function paintSyncSummary(blkH, hdrH, guidance = null) {
   const s = state.status;
   const kind = state.reachable === false ? 'unreachable' : s?.sync_wedged || s?.apply_wedged || s?.last_storage_error || s?.last_block_apply_error || s?.shadow?.diverged ? 'alarm' : s?.bootstrap ? 'bootstrap' : s?.sync_state || 'loading';
   const messages = {
@@ -395,8 +420,29 @@ function paintSyncSummary(blkH, hdrH) {
     setText('[data-sync-title]', 'Continuing with ordinary header sync');
     setText('[data-sync-copy]', s.bootstrap.popow_abandon_reason || 'The bootstrap proof could not be applied.');
   } else {
-    setText('[data-sync-copy]', copy);
+    const idx = state._slow?.indexer;
+    const searchCopy = state.identity?.extra_index_enabled === false
+      ? 'Block sync is current. Address, box and token searches require the optional search index.'
+      : idx?.status === 'syncing'
+        ? 'Block sync is current. Address, box and token searches are still indexing.'
+        : idx?.status === 'caughtUp'
+          ? 'Block sync and chain search are ready.'
+          : 'Block sync is current. Search index availability is not yet confirmed.';
+    setText('[data-sync-copy]', kind === 'at_tip' ? searchCopy : copy);
   }
+  // Guidance shares the status summary. Routine progress needs no second
+  // headline or call to action; reported issues keep their concrete next step.
+  const needsAction = guidance && (guidance.tone === 'warn' || guidance.tone === 'error' || guidance.destination === 'diagnostics');
+  if (needsAction && kind !== 'unreachable') {
+    root.querySelector('.ov-sync').dataset.syncTone = guidance.tone === 'error' ? 'alarm' : 'attention';
+    setText('[data-sync-label]', 'Needs attention');
+    setText('[data-sync-title]', guidance.title);
+    setText('[data-sync-copy]', guidance.detail);
+  }
+  const action = root.querySelector('[data-guidance-action]');
+  action.hidden = !needsAction || !guidance.action;
+  action.textContent = needsAction ? guidance.action || '' : '';
+  action.dataset.destination = needsAction ? guidance.destination || '' : '';
   const pct = blkH != null && hdrH > 0 ? Math.max(0, Math.min(100, blkH / hdrH * 100)) : null;
   // Never round an incomplete chain up to 100%.
   const displayPct = pct == null ? null : Math.floor(pct * 100) / 100;
@@ -407,7 +453,19 @@ function paintSyncSummary(blkH, hdrH) {
   if (displayPct == null) progress.removeAttribute('aria-valuenow');
   else progress.setAttribute('aria-valuenow', String(displayPct));
   root.querySelector('[data-sync-fill]').style.width = `${pct ?? 0}%`;
-  root.querySelector('[data-sync-ring]')?.setAttribute('stroke-dasharray', `${pct ?? 0} 100`);
+}
+
+function paintSyncRings() {
+  const layers = syncLayers({ ...state, ...state._slow });
+  for (const layer of layers) {
+    const ring = root.querySelector(`[data-ring="${layer.id}"]`);
+    ring.dataset.state = layer.state;
+    const unknown = layer.percent == null || layer.state === 'disabled';
+    ring.setAttribute('stroke-dasharray', unknown ? '1 3' : `${layer.percent} 100`);
+    root.querySelector(`[data-ring-legend="${layer.id}"]`).dataset.state = layer.state;
+    setText(`[data-ring-state="${layer.id}"]`, layer.text);
+  }
+  root.querySelector('[data-sync-rings]').setAttribute('aria-label', layers.map((l) => `${l.label}, ${l.position} ring: ${l.text}`).join('. '));
 }
 
 // ---- data + quadrant (4 s) ----
@@ -436,19 +494,19 @@ export async function onSlow() {
     ]);
   if (tip) state.tip = tip;
   if (rewardAddr?.rewardAddress) state.miningReward = rewardAddr.rewardAddress;
-  if (candidate) {
+  if (miningOn) state.miningWork = candidate;
+  if (candidate?.ok && candidate.data) {
+    const work = candidate.data;
     // Track template turnover so the panel can show "refreshed Xs ago" —
     // template_seq bumps whenever the node rebuilds work for the miner.
-    if (state.miningSeq !== candidate.template_seq) {
-      state.miningSeq = candidate.template_seq;
+    const identity = `${work.msg}:${work.template_seq}`;
+    if (state.miningSeq !== identity) {
+      state.miningSeq = identity;
       state.miningSeqAt = Date.now();
     }
-    state.miningCandidate = candidate;
   } else if (miningOn) {
-    // 503 window (no candidate / not synced / generation race): clear the
-    // stale work rather than keep presenting old heights as current — the
-    // panel renders its "no work available" state instead.
-    state.miningCandidate = null;
+    state.miningSeq = null;
+    state.miningSeqAt = null;
   }
 
   // Mining-panel enrichment (mining nodes only): refetch the 720-block
@@ -497,6 +555,8 @@ export async function onSlow() {
   }
 
   state._slow = { sync, indexer, indexerHealth, mempool, recent, host, events };
+  rentSource.refresh({ tip: tip?.best_full_block, indexer: indexerHealth, identity: state.identity, reachable: state.reachable })
+    .then(() => renderBody());
   renderBody();
   // Charts view: refresh the server-history series when the tip advanced.
   if (viewMode === 'charts') refreshChartData();
@@ -552,6 +612,23 @@ function pipeRow(label, valTxt, frac, color) {
   return row;
 }
 
+function stageRow(label, height, status, tone = 'neutral') {
+  const row = document.createElement('tr');
+  const name = document.createElement('th');
+  name.scope = 'row';
+  name.textContent = label;
+  const value = document.createElement('td');
+  value.className = 'ov-stages__height';
+  value.textContent = num(height);
+  const detail = document.createElement('td');
+  detail.className = 'ov-stages__state';
+  detail.dataset.tone = tone;
+  detail.textContent = state.reachable === false && height != null ? 'Last known' : status;
+  if (state.reachable === false) detail.dataset.tone = 'neutral';
+  row.append(name, value, detail);
+  return row;
+}
+
 function kv(label, value, color) {
   const r = document.createElement('div');
   r.className = 'ov-kv';
@@ -576,6 +653,17 @@ function miningSectionFoot() {
   return foot;
 }
 
+function networkContext() {
+  const context = document.createElement('div');
+  context.className = 'ov-chain-context ov-network-context';
+  const diff = parseDiff(state.tip?.best_header?.difficulty);
+  context.append(
+    kv('Header difficulty', fmtDiff(diff)),
+    kv('Est. network hashrate', diff != null ? fmtHr(deriveHr(diff, state.info)) : '—'),
+  );
+  return context;
+}
+
 function renderBody() {
   if (!root) return;
   const host = root.querySelector('.ov-body');
@@ -584,7 +672,9 @@ function renderBody() {
   // dumps the user's focus to <body> on every 4s tick (the body now holds
   // links — recent blocks, mining reward, event heights). Defer the rebuild
   // to the next tick instead; one stale tick loses to keyboard usability.
-  if (host.contains(document.activeElement)) return;
+  if (host.contains(document.activeElement) || host.querySelector('.ov-block-bar:hover')) return;
+  const workDetailsOpen = host.querySelector('.mining-work__details')?.open || false;
+  const rentDetailsOpen = host.querySelector('.ov-rent__explanation')?.open || false;
   host.replaceChildren();
   if (viewMode === 'charts') {
     renderCharts(host);
@@ -594,27 +684,46 @@ function renderBody() {
   const heading = document.createElement('div');
   heading.className = 'ov-section-heading';
   const headingTitle = document.createElement('h2');
-  headingTitle.textContent = 'Behind the blocks';
+  headingTitle.textContent = 'Inside your node';
   const headingNote = document.createElement('span');
-  headingNote.textContent = 'Local verification & chain activity';
+  headingNote.textContent = state.reachable === false ? 'Connection lost · data may be stale' : 'Applied blocks & operational state';
   heading.append(headingTitle, headingNote);
   host.append(heading);
   const grid = document.createElement('div');
-  grid.className = 'quad';
+  grid.className = 'quad ov-workspace';
+  // Independent columns let short operational panels stay compact instead of
+  // inheriting the height of the neighboring block/activity lists.
+  const operations = document.createElement('div');
+  const activity = document.createElement('div');
+  operations.className = activity.className = 'ov-column';
+  grid.append(operations, activity);
 
   // Sync
   {
-    const { panel: p, body } = panel('Sync pipeline');
+    const { panel: p, body } = panel('Chain stages');
     p.classList.add('ov-pipeline');
     const sync = slow.sync;
     const idx = slow.indexer;
-    const hdrH = sync?.best_header_height ?? 0;
-    const blkH = sync?.best_full_block_height ?? 0;
-    body.append(
-      pipeRow('Headers', sync ? num(hdrH) : '—', sync?.headers_chain_synced ? 1 : 0, 'var(--green)'),
-      pipeRow('Blocks applied', sync ? num(blkH) : '—', hdrH > 0 ? blkH / hdrH : 0, 'var(--green)'),
-      pipeRow('Search index', idx ? num(idx.indexedHeight) : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable', idx && hdrH > 0 ? idx.indexedHeight / hdrH : 0, 'var(--blue)'),
+    const hdrH = sync?.best_header_height ?? null;
+    const blkH = sync?.best_full_block_height ?? null;
+    const blockGap = hdrH > 0 && blkH != null ? Math.max(0, hdrH - blkH) : null;
+    const indexTarget = idx?.fullHeight ?? blkH;
+    const indexGap = indexTarget != null && idx?.indexedHeight != null ? Math.max(0, indexTarget - idx.indexedHeight) : null;
+    const indexHalted = idx?.status === 'halted' || slow.indexerHealth?.status === 'halted';
+    const indexReady = idx?.status === 'caughtUp' && !indexHalted;
+    const indexStatus = indexHalted ? 'Halted' : indexReady ? 'Ready' : idx?.status === 'syncing' ? (indexGap > 0 ? `${num(indexGap)} behind` : 'Indexing') : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
+    const stages = document.createElement('table');
+    stages.className = 'ov-stages';
+    stages.setAttribute('aria-label', 'Chain stage heights and status');
+    stages.innerHTML = '<thead><tr><th scope="col">Stage</th><th scope="col">Height</th><th scope="col">Status</th></tr></thead>';
+    const rows = document.createElement('tbody');
+    rows.append(
+      stageRow('Headers', hdrH, sync?.headers_chain_synced === true ? 'Synced' : sync?.headers_chain_synced === false ? 'Discovering' : 'Unavailable', sync?.headers_chain_synced === true ? 'ok' : 'neutral'),
+      stageRow('Blocks', blkH, blockGap == null ? 'Waiting for headers' : blockGap > 0 ? `${num(blockGap)} behind` : 'At headers', blockGap === 0 ? 'ok' : 'neutral'),
+      stageRow('Search index', idx?.indexedHeight ?? null, indexStatus, indexHalted ? 'error' : indexReady ? 'ok' : 'neutral'),
     );
+    stages.append(rows);
+    body.append(stages);
     // Extra-index health (self-repair markers from /api/v1/indexer/status).
     // Silent when healthy: rows appear only when there is something an
     // operator needs to see — a rebuild running, an honestly-incomplete
@@ -639,83 +748,29 @@ function renderBody() {
     const foot = document.createElement('div');
     foot.className = 'ov-foot';
     foot.textContent = sync
-      ? `Download window ${num(sync.download_window)} · ${num(sync.pending_blocks)} pending blocks`
-      : '—';
+      ? `Download queue: ${num(sync.pending_blocks)} blocks · window ${num(sync.download_window)}`
+      : 'Download queue unavailable';
     body.append(foot);
-    grid.append(p);
+    operations.append(p);
   }
   // Chain
   {
-    const { panel: p, body } = panel('Recently applied blocks', '#explorer');
-    const tip = state.tip;
-    if (tip?.best_full_block) {
-      const date = new Date(tip.best_full_block.timestamp_unix_ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-      body.append(kv('Local chain date', date, 'var(--tx2)'));
-    }
-    const list = document.createElement('div');
-    list.className = 'ov-recent';
-    const recent = slow.recent;
-    if (Array.isArray(recent) && recent.length) {
-      for (const b of recent.slice(0, 4)) {
-        const row = document.createElement('div');
-        row.className = 'ov-recent__r';
-        const h = document.createElement('span');
-        // Height links into the explorer's block view (deep-linkable).
-        const a = document.createElement('a');
-        a.className = 'ex-link';
-        a.href = `#explorer/block/${b.header_id}`;
-        a.textContent = num(b.height);
-        h.append(a);
-        const m = document.createElement('span');
-        m.textContent = `${b.txs} tx · ${bytes(b.size_bytes)}`;
-        if (b.miner_address) {
-          m.append(document.createTextNode(' · '), minerNode(b.miner_address, b.miner_pk, { head: 4, tail: 4 }));
-        }
-        row.append(h, m);
-        list.append(row);
-      }
-    }
-    body.append(list);
-    const context = document.createElement('div');
-    context.className = 'ov-chain-context';
-    const diff = parseDiff(state.tip?.best_header?.difficulty);
-    context.append(
-      kv('Header difficulty', fmtDiff(diff)),
-      kv('Network hashrate · estimated', diff != null ? fmtHr(deriveHr(diff, state.info)) : '—'),
-    );
-    body.append(context);
-    grid.append(p);
+    const { panel: p, body } = panel('Recent chain activity', '#explorer');
+    p.classList.add('ov-chain-panel');
+    body.append(recentChain(slow.recent, state));
+    activity.append(p);
   }
 
   host.append(grid);
 
-  // Mining + Events row: Mining renders only on mining-enabled nodes (the
-  // /mining routes 404 elsewhere); Events takes the full width when alone.
-  const duo = document.createElement('div');
-  duo.className = 'ov-duo';
+  // Operational panels stack independently of chain activity. Mining routes
+  // are only queried on mining-enabled nodes; other nodes get a discovery link.
   if (state.identity?.mining) {
-    const { panel: p, body } = panel('Mining');
-    const c = state.miningCandidate;
+    const { panel: p, body } = panel('Mining & network');
     // Middle-ellipsize long ids; short/odd strings render verbatim rather
     // than as duplicated slices.
     const midTrunc = (s, head, tail) => (s && s.length > head + tail + 1 ? `${s.slice(0, head)}…${s.slice(-tail)}` : s || '—');
-    if (c) {
-      body.append(kv('work height', num(c.h), 'var(--tx2)'));
-      if (state.miningSeqAt) {
-        body.append(
-          kv(
-            `template #${num(c.template_seq)}`,
-            `refreshed ${dur(Math.max(0, Math.floor((Date.now() - state.miningSeqAt) / 1000)))} ago`,
-            'var(--tx2)',
-          ),
-        );
-      }
-      if (c.pk) body.append(kv('miner pk', midTrunc(c.pk, 10, 8), 'var(--tx3)'));
-    } else {
-      // Candidate 503s while the node has no work to hand out (syncing /
-      // candidate generation race) — say so instead of showing stale work.
-      body.append(kv('Work status', state.status?.sync_state === 'syncing' ? 'Waiting for chain sync' : 'No candidate available', 'var(--yellow)'));
-    }
+    body.append(miningWork(state.miningWork, { observedAt: state.miningSeqAt, detailsOpen: workDetailsOpen }));
     if (state.miningReward) {
       const r = document.createElement('div');
       r.className = 'ov-kv';
@@ -731,9 +786,7 @@ function renderBody() {
       body.append(r);
     }
     if (state.emission) {
-      const base = Number(state.emission.minerReward) / 1e9;
-      const re = Number(state.emission.reemitted || 0) / 1e9;
-      body.append(kv('Reward at local height', re ? `${base} + ${re} ERG` : `${base} ERG`, 'var(--tx2)'));
+      body.append(miningReward(state.emission, 'local'));
     }
     if (state.minerStats && ownPkHex()) {
       const mine = state.minerStats.miners.find((mm) => mm.pk === ownPkHex());
@@ -741,73 +794,26 @@ function renderBody() {
         kv(`your blocks · last ${num(state.minerStats.blocks)}`, String(mine?.count || 0), 'var(--tx2)'),
       );
     }
-    body.append(miningSectionFoot());
-    duo.append(p);
+    body.append(networkContext(), miningSectionFoot());
+    operations.append(p);
   } else if (state.identity && !state.identity.mining) {
     // Non-mining node: a one-line stub instead of hiding the panel — the
     // Mining section (network landscape) is still worth discovering. No
     // mining fetches happen in this state (see the miningOn gates above).
-    const { panel: p, body } = panel('Mining');
+    const { panel: p, body } = panel('Mining & network');
     body.append(kv('mining', 'disabled', 'var(--tx3)'));
-    body.append(miningSectionFoot());
-    duo.append(p);
+    body.append(networkContext(), miningSectionFoot());
+    operations.append(p);
   }
 
-  // Events feed: tail of the node's bounded event ring, newest first.
-  // Silent kinds map to colored pills; block heights deep-link into the
-  // explorer.
+  // Block activity lives in the chain panel. Keep other retained events
+  // separate so a stream of blocks cannot bury peer, index and reorg details.
+  host.append(rentForecastView(rentSource.get(), rentDetailsOpen));
   {
-    const feed = slow.events;
-    if (feed && Array.isArray(feed.events) && feed.events.length) {
-      const { panel: p, body } = panel('Node activity');
-      const list = document.createElement('div');
-      list.className = 'ov-events';
-      for (const e of feed.events.slice(-5).reverse()) {
-        const row = document.createElement('div');
-        row.className = 'ov-events__r';
-        const pill = document.createElement('span');
-        pill.className = 'pill';
-        const text = document.createElement('span');
-        text.className = 'ov-events__t';
-        if (e.kind === 'blockApplied') {
-          pill.classList.add('pill--ok');
-          pill.textContent = 'block';
-          const a = document.createElement('a');
-          a.className = 'ex-link';
-          a.href = `#explorer/block/${e.headerId}`;
-          a.textContent = num(e.height);
-          text.append(a, ` · ${num(e.txs)} tx · ${bytes(e.sizeBytes)}`);
-        } else if (e.kind === 'reorg') {
-          pill.classList.add('pill--err');
-          pill.textContent = 'reorg';
-          text.textContent = `tip replaced at ${num(e.height)}`;
-        } else if (e.kind === 'peerConnected') {
-          pill.textContent = 'peer +';
-          text.textContent = e.addr || '';
-        } else if (e.kind === 'peerDisconnected') {
-          pill.classList.add('pill--warn');
-          pill.textContent = 'peer −';
-          text.textContent = e.addr || '';
-        } else if (e.kind === 'indexerStatus') {
-          pill.classList.add('pill--warn');
-          pill.textContent = 'index';
-          text.textContent = e.detail || '';
-        } else {
-          pill.textContent = e.kind;
-        }
-        const when = document.createElement('span');
-        when.className = 'ov-events__w';
-        when.textContent = e.unixMs ? `${dur(Math.max(0, Math.floor((Date.now() - e.unixMs) / 1000)))} ago` : '';
-        row.append(pill, text, when);
-        list.append(row);
-      }
-      body.append(list);
-      duo.append(p);
-    }
-  }
-  if (duo.childElementCount) {
-    duo.classList.toggle('ov-duo--solo', duo.childElementCount === 1);
-    host.append(duo);
+    const { panel: p, body } = panel('Node events');
+    p.classList.add('ov-event-panel');
+    body.append(nodeEvents(slow.events, state));
+    host.append(p);
   }
 
   // sysbar

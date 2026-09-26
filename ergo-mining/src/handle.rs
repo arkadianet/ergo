@@ -957,6 +957,7 @@ mod tests {
             target: num_bigint::BigUint::from(1u8),
             height: 1,
             pk,
+            metrics: Default::default(),
         };
         (candidate, work)
     }

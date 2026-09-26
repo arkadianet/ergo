@@ -67,7 +67,7 @@ use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
 use crate::storage_rent_claim::build_budget_bounded_rent_claim;
 use crate::tx_selection::block_cost_safety_gap;
-use crate::work_message::WorkMessage;
+use crate::work_message::{CandidateMetrics, WorkMessage};
 use ergo_validation::pre_header::{
     build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
 };
@@ -479,6 +479,8 @@ pub fn generate_candidate<V: CandidateStateView>(
             (None, 0, CostAccumulator::new(block_cap))
         };
     let emission_cost = emission_cost_acc.total_block_cost();
+    let mut final_validation_cost = emission_cost;
+    let mut final_section_size = None;
     timings.emission = phase_start.elapsed();
 
     // 9b–9e. Block enrichment — skipped wholesale in a Minimal build: no
@@ -661,6 +663,8 @@ pub fn generate_candidate<V: CandidateStateView>(
             if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
+                final_validation_cost = total_cost;
+                final_section_size = Some(section_size as u64);
                 break checked_fee;
             }
             user_checked.pop();
@@ -672,6 +676,14 @@ pub fn generate_candidate<V: CandidateStateView>(
 
     // 9f. Assemble the final tx list in block order:
     //     emission, rent, user txs, fee.
+    let selected_transaction_count = user_checked.len() as u32;
+    let fees_nano_erg = checked_fee.as_ref().map_or(0, |fee| {
+        fee.transaction()
+            .output_candidates
+            .iter()
+            .map(|o| o.value)
+            .sum()
+    });
     let mut checked: Vec<CheckedTransaction> = Vec::with_capacity(3 + user_checked.len());
     checked.extend(checked_emission);
     if let Some(cr) = checked_rent {
@@ -689,6 +701,12 @@ pub fn generate_candidate<V: CandidateStateView>(
         return Ok(None);
     }
     let raw_txs: Vec<Transaction> = checked.iter().map(|c| c.transaction().clone()).collect();
+    // Full builds already measured the final section in the trim loop. Minimal
+    // builds measure their emission-only section once, outside the serve path.
+    let transactions_size_bytes = match final_section_size {
+        Some(size) => size,
+        None => block_transactions_section_size(&raw_txs, pre_header.version)? as u64,
+    };
 
     // 10. Dry-run AVL+ to obtain new_state_root + raw_proof_bytes.
     let phase_start = std::time::Instant::now();
@@ -777,6 +795,15 @@ pub fn generate_candidate<V: CandidateStateView>(
         target: target.clone(),
         height: candidate_height,
         pk: *miner_pk,
+        metrics: CandidateMetrics {
+            transaction_count: raw_txs.len() as u32,
+            selected_transaction_count,
+            fees_nano_erg,
+            transactions_size_bytes,
+            max_block_size_bytes: active_params.max_block_size as u64,
+            validation_cost: final_validation_cost,
+            max_block_cost: active_params.max_block_cost as u64,
+        },
     };
 
     // 16. Pack the cached candidate.
