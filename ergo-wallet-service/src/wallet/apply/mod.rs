@@ -528,7 +528,7 @@ pub mod scan_tracking;
 
 pub use scan_tracking::{
     apply_block_to_scans, apply_block_to_scans_rescan, clear_scan_registry, clear_scan_tracking,
-    rollback_scans_from_block,
+    rewind_scans_from_height, rollback_scans_from_block,
 };
 
 #[cfg(test)]

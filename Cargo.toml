@@ -10,6 +10,7 @@ members = [
     "ergo-validation",
     "ergo-wallet",
     "ergo-wallet-service",
+    "ergo-walletd",
     "ergo-wallet-protocol",
     "ergo-state",
     "ergo-p2p",
@@ -41,6 +42,7 @@ ergo-compiler      = { path = "ergo-compiler" }
 ergo-validation    = { path = "ergo-validation" }
 ergo-wallet        = { path = "ergo-wallet" }
 ergo-wallet-service = { path = "ergo-wallet-service" }
+ergo-walletd         = { path = "ergo-walletd" }
 ergo-wallet-protocol = { path = "ergo-wallet-protocol" }
 ergo-state         = { path = "ergo-state" }
 ergo-p2p           = { path = "ergo-p2p" }
@@ -51,6 +53,10 @@ ergo-indexer-types = { path = "ergo-indexer-types" }
 ergo-indexer       = { path = "ergo-indexer" }
 ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
+# Only ever pulled in as a dev-dependency (ergo-walletd's real-node
+# integration test). It is the workspace binary crate, so it is not referenced
+# by any member's normal `[dependencies]`.
+ergo-node          = { path = "ergo-node" }
 
 # Cryptography
 aes-gcm  = "0.10"
@@ -67,6 +73,7 @@ hmac     = "0.12"
 num-bigint  = "0.4"
 num-integer = "0.1"
 num-traits  = "0.2"
+libc        = "0.2"
 
 # Encoding / parsing
 flate2 = "1"
@@ -103,7 +110,9 @@ rayon = "1.11"
 
 # HTTP
 axum            = "0.7"
+hyper           = { version = "1", features = ["http1", "server"] }
 tower           = "0.5"
+hyper-util      = { version = "0.1", features = ["http1", "server", "tokio"] }
 tower-http      = "0.5"
 http-body-util  = "0.1"
 # The v1 webhooks outbound delivery client (features set at the member —

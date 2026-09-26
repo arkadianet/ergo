@@ -14,6 +14,19 @@
 /.serena/
 /.claude/scheduled_tasks.lock
 
+# ergo-walletd runtime state. The shipped sample defaults to
+# ./ergo-walletd-data, ./node-api-key and ./ergo-walletd.sock (see
+# ergo-walletd/ergo-walletd.toml). The key file is a credential, the data
+# dir is a redb DB, and the socket is a device node — none of them belong
+# in the tree. `*.sock` / `*.sock.owner` are repo-relative so a socket
+# written next to a test fixture is covered too, not just the top-level
+# default; `.owner` is the guard marker the daemon leaves beside the
+# socket it owns.
+/node-api-key
+/ergo-walletd-data/
+*.sock
+*.sock.owner
+
 # Large test vector range extractions (regenerable via extract_all_cost_vectors.sh).
 # Pattern: 6-digit endpoints are range extractions; short endpoints are hand-curated.
 test-vectors/mainnet/transactions_*_[0-9][0-9][0-9][0-9][0-9][0-9]*.json

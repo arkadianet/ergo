@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::wallet::apply::{
     apply_block_to_scans, apply_block_to_scans_rescan, apply_block_to_wallet,
     apply_block_to_wallet_rescan, clear_scan_registry, clear_scan_tracking, owned_to_block_txs,
-    rollback_block_from_wallet, rollback_scans_from_block, set_scan_cursor,
+    rewind_scans_from_height, rollback_block_from_wallet, rollback_scans_from_block,
+    set_scan_cursor,
 };
 pub use crate::wallet::error::WalletStoreError;
 use crate::wallet::maturity::{
@@ -133,6 +135,14 @@ pub trait WalletWrite {
         start_height: u32,
         scan_rebuild: bool,
     ) -> Result<(), WalletStoreError>;
+    /// Rewind wallet and scan state to a retained common ancestor, so the
+    /// caller can resume at `ancestor_height + 1` without clearing the whole
+    /// wallet. `ancestor_header_id` is `None` only for the genesis sentinel.
+    fn rewind_to_ancestor(
+        &mut self,
+        ancestor_height: u32,
+        ancestor_header_id: Option<&[u8; 32]>,
+    ) -> Result<(), WalletStoreError>;
     fn apply_rescan_block(
         &mut self,
         height: u32,
@@ -176,17 +186,47 @@ pub trait WalletStore: Send + Sync {
 #[derive(Clone)]
 pub struct RedbWalletStore {
     db: Arc<Database>,
+    standalone: bool,
 }
 
 impl RedbWalletStore {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            standalone: false,
+        }
+    }
+
+    pub fn open_standalone(path: impl AsRef<Path>) -> Result<Self, WalletStoreError> {
+        let db = Arc::new(Database::create(path.as_ref())?);
+        crate::wallet::migrate_standalone_schema(&db)?;
+        Ok(Self {
+            db,
+            standalone: true,
+        })
+    }
+
+    pub fn from_standalone_db(db: Arc<Database>) -> Result<Self, WalletStoreError> {
+        crate::wallet::migrate_standalone_schema(&db)?;
+        Ok(Self {
+            db,
+            standalone: true,
+        })
     }
 
     pub fn attach_write_transaction(txn: &WriteTransaction) -> RedbWalletWrite<'_> {
         RedbWalletWrite {
             owned: None,
             borrowed: Some(txn),
+            standalone: false,
+        }
+    }
+
+    pub fn attach_standalone_write_transaction(txn: &WriteTransaction) -> RedbWalletWrite<'_> {
+        RedbWalletWrite {
+            owned: None,
+            borrowed: Some(txn),
+            standalone: true,
         }
     }
 }
@@ -195,6 +235,7 @@ impl WalletStore for RedbWalletStore {
     fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
         Ok(Box::new(RedbWalletRead {
             txn: self.db.begin_read()?,
+            standalone: self.standalone,
         }))
     }
 
@@ -202,6 +243,7 @@ impl WalletStore for RedbWalletStore {
         Ok(Box::new(RedbWalletWrite {
             owned: Some(begin_write_quick(&self.db)?),
             borrowed: None,
+            standalone: self.standalone,
         }))
     }
 }
@@ -210,6 +252,7 @@ impl WalletStore for Database {
     fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
         Ok(Box::new(RedbWalletRead {
             txn: self.begin_read()?,
+            standalone: false,
         }))
     }
 
@@ -217,12 +260,14 @@ impl WalletStore for Database {
         Ok(Box::new(RedbWalletWrite {
             owned: Some(begin_write_quick(self)?),
             borrowed: None,
+            standalone: false,
         }))
     }
 }
 
 struct RedbWalletRead {
     txn: ReadTransaction,
+    standalone: bool,
 }
 
 impl RedbWalletRead {
@@ -237,7 +282,44 @@ impl WalletRead for RedbWalletRead {
     }
 
     fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, WalletStoreError> {
-        self.reader().chain_index_header(height).map_err(Into::into)
+        match self.txn.open_table(CHAIN_INDEX) {
+            Ok(table) => {
+                if let Some(bytes) = table.get(height as u64)? {
+                    if bytes.value().len() != 32 {
+                        return Err(WalletStoreError::decode(
+                            "chain index header row is not 32 bytes",
+                        ));
+                    }
+                    let mut header_id = [0u8; 32];
+                    header_id.copy_from_slice(bytes.value());
+                    return Ok(Some(header_id));
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if self.standalone {
+            match self
+                .txn
+                .open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
+            {
+                Ok(table) => {
+                    if let Some(bytes) = table.get(height as u64)? {
+                        if bytes.value().len() != 32 {
+                            return Err(WalletStoreError::decode(
+                                "standalone applied-header row is not 32 bytes",
+                            ));
+                        }
+                        let mut header_id = [0u8; 32];
+                        header_id.copy_from_slice(bytes.value());
+                        return Ok(Some(header_id));
+                    }
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(None)
     }
 
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError> {
@@ -370,7 +452,23 @@ impl WalletRead for RedbWalletRead {
     }
 
     fn committed_tip(&self) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
-        committed_tip_in(&self.txn).map_err(|error| WalletStoreError::Decode(error.to_string()))
+        match committed_tip_in(&self.txn) {
+            Ok(Some(tip)) => Ok(Some(tip)),
+            Ok(None) if self.standalone => {
+                let cursor = self.scan_cursor()?;
+                Ok(cursor.and_then(|cursor| {
+                    cursor.header_id.map(|header_id| (cursor.height, header_id))
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(_) if self.standalone => {
+                let cursor = self.scan_cursor()?;
+                Ok(cursor.and_then(|cursor| {
+                    cursor.header_id.map(|header_id| (cursor.height, header_id))
+                }))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn scan_boxes_with_tip(
@@ -469,6 +567,7 @@ impl WalletRead for RedbWalletRead {
 pub struct RedbWalletWrite<'a> {
     owned: Option<WriteTransaction>,
     borrowed: Option<&'a WriteTransaction>,
+    standalone: bool,
 }
 
 #[allow(clippy::result_large_err)]
@@ -493,8 +592,14 @@ fn read_wallet_cursor(txn: &WriteTransaction) -> Result<Option<WalletScanCursor>
 fn read_chain_index_header(
     txn: &WriteTransaction,
     height: u32,
+    standalone: bool,
 ) -> Result<Option<[u8; 32]>, redb::Error> {
-    let table = match txn.open_table(CHAIN_INDEX) {
+    let table = if standalone {
+        txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
+    } else {
+        txn.open_table(CHAIN_INDEX)
+    };
+    let table = match table {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -506,7 +611,7 @@ fn read_chain_index_header(
     if bytes.len() != 32 {
         return Err(redb::Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("chain index row at {height} is not 32 bytes"),
+            format!("applied-header row at {height} is not 32 bytes"),
         )));
     }
     let mut header_id = [0u8; 32];
@@ -526,6 +631,7 @@ fn wallet_apply_continuity(
     txn: &WriteTransaction,
     height: u32,
     header_id: &[u8; 32],
+    standalone: bool,
 ) -> Result<WalletCursorContinuity, redb::Error> {
     if height == 0 {
         return Ok(WalletCursorContinuity::HeaderMismatch);
@@ -541,7 +647,7 @@ fn wallet_apply_continuity(
     if height != expected_height {
         return Ok(WalletCursorContinuity::Gap);
     }
-    if read_chain_index_header(txn, height)?.as_ref() != Some(header_id) {
+    if read_chain_index_header(txn, height, standalone)?.as_ref() != Some(header_id) {
         return Ok(WalletCursorContinuity::HeaderMismatch);
     }
     if let Some(cursor) = cursor {
@@ -553,7 +659,9 @@ fn wallet_apply_continuity(
             let Some(cursor_header_id) = cursor.header_id else {
                 return Ok(WalletCursorContinuity::HeaderMismatch);
             };
-            if read_chain_index_header(txn, cursor.height)?.as_ref() != Some(&cursor_header_id) {
+            if read_chain_index_header(txn, cursor.height, standalone)?.as_ref()
+                != Some(&cursor_header_id)
+            {
                 return Ok(WalletCursorContinuity::HeaderMismatch);
             }
         }
@@ -568,6 +676,107 @@ impl<'a> RedbWalletWrite<'a> {
             .or(self.borrowed)
             .expect("wallet write transaction missing")
     }
+}
+
+/// Decode a 32-byte applied-header row, reporting a redb error (not a silent
+/// `None`) when the row is the wrong width — a corrupt index must fail the
+/// caller rather than degrade into "no header recorded here".
+#[allow(clippy::result_large_err)]
+fn applied_header_id(bytes: &[u8], height: u64) -> Result<[u8; 32], redb::Error> {
+    if bytes.len() != 32 {
+        return Err(redb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("standalone applied-header row at {height} is not 32 bytes"),
+        )));
+    }
+    let mut header_id = [0u8; 32];
+    header_id.copy_from_slice(bytes);
+    Ok(header_id)
+}
+
+/// Write *both* directions of the standalone applied-header index inside the
+/// caller's transaction: `height -> block id` and `block id -> height`.
+#[allow(clippy::result_large_err)]
+fn put_applied_header(
+    txn: &WriteTransaction,
+    height: u32,
+    block_id: &[u8; 32],
+) -> Result<(), redb::Error> {
+    txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)?
+        .insert(height as u64, block_id.as_slice())?;
+    txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)?
+        .insert(*block_id, height as u64)?;
+    Ok(())
+}
+
+/// Drop *both* directions of the standalone applied-header index for one
+/// height (single-block rollback).
+#[allow(clippy::result_large_err)]
+fn remove_applied_header(txn: &WriteTransaction, height: u32) -> Result<(), redb::Error> {
+    let block_id = {
+        let mut applied = txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)?;
+        let row = applied.remove(height as u64)?;
+        let block_id = match row {
+            Some(row) => Some(applied_header_id(row.value(), height as u64)?),
+            None => None,
+        };
+        block_id
+    };
+    if let Some(block_id) = block_id {
+        txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)?
+            .remove(block_id)?;
+    }
+    Ok(())
+}
+
+/// Truncate the standalone applied-header index to `[0, from_height)`, keeping
+/// both directions consistent. Used by rescan preparation and reorg rewinds.
+#[allow(clippy::result_large_err)]
+pub(crate) fn clear_standalone_headers(
+    txn: &WriteTransaction,
+    from_height: u32,
+) -> Result<(), redb::Error> {
+    let mut applied = txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)?;
+    let mut index = txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)?;
+    let rows: Vec<(u64, [u8; 32])> = applied
+        .iter()?
+        .map(|entry| {
+            let (key, value) = entry?;
+            let height = key.value();
+            Ok((height, applied_header_id(value.value(), height)?))
+        })
+        .collect::<Result<_, redb::Error>>()?;
+    for (height, block_id) in rows {
+        if height < from_height as u64 {
+            continue;
+        }
+        index.remove(block_id)?;
+        applied.remove(height)?;
+    }
+    Ok(())
+}
+
+/// Standalone duplicate detection: refuse a block id that is already recorded
+/// at a *different* height. The reverse index makes this a point lookup
+/// (O(log n)); re-scanning the whole forward table here would make every
+/// applied block cost O(n) and a full rescan quadratic.
+#[allow(clippy::result_large_err)]
+fn ensure_unique_applied_header(
+    txn: &WriteTransaction,
+    height: u32,
+    block_id: &[u8; 32],
+) -> Result<(), WalletStoreError> {
+    let index = txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)?;
+    let Some(row) = index.get(block_id)? else {
+        return Ok(());
+    };
+    let existing = row.value();
+    if existing != height as u64 {
+        return Err(WalletStoreError::decode(format!(
+            "standalone block id was already applied at height {existing}"
+        )));
+    }
+    Ok(())
 }
 
 struct RollbackGuard {
@@ -886,6 +1095,9 @@ impl WalletWrite for RedbWalletWrite<'_> {
         start_height: u32,
         scan_rebuild: bool,
     ) -> Result<(), WalletStoreError> {
+        if self.standalone {
+            clear_standalone_headers(self.txn(), start_height)?;
+        }
         if start_height == 0 {
             self.set_scan_invalidated(true)?;
             if scan_rebuild {
@@ -1048,17 +1260,10 @@ impl WalletWrite for RedbWalletWrite<'_> {
                     "rescan boundary cursor {height} has no header identity"
                 ))
             })?;
-            let table = self.txn().open_table(crate::wallet::tables::CHAIN_INDEX)?;
-            let bytes = table.get(height as u64)?.ok_or_else(|| {
-                WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
-            })?;
-            if bytes.value().len() != 32 {
-                return Err(WalletStoreError::Decode(format!(
-                    "chain index row at {height} is not 32 bytes"
-                )));
-            }
-            let mut indexed_id = [0; 32];
-            indexed_id.copy_from_slice(bytes.value());
+            let indexed_id = read_chain_index_header(self.txn(), height, self.standalone)?
+                .ok_or_else(|| {
+                    WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
+                })?;
             if indexed_id != cursor_id {
                 return Err(WalletStoreError::Decode(format!(
                     "rescan boundary cursor identity changed at {height}"
@@ -1070,6 +1275,61 @@ impl WalletWrite for RedbWalletWrite<'_> {
         Ok(())
     }
 
+    fn rewind_to_ancestor(
+        &mut self,
+        ancestor_height: u32,
+        ancestor_header_id: Option<&[u8; 32]>,
+    ) -> Result<(), WalletStoreError> {
+        let cursor = read_wallet_cursor(self.txn())?
+            .ok_or_else(|| WalletStoreError::decode("wallet rewind has no durable scan cursor"))?;
+        if cursor.height == ancestor_height {
+            let matches = match (cursor.header_id.as_ref(), ancestor_header_id) {
+                (None, None) => true,
+                (Some(current), Some(ancestor)) => current == ancestor,
+                _ => false,
+            };
+            if matches {
+                return Ok(());
+            }
+            return Err(WalletStoreError::decode(format!(
+                "wallet rewind ancestor identity changed at height {ancestor_height}"
+            )));
+        }
+        if cursor.height < ancestor_height {
+            return Err(WalletStoreError::decode(format!(
+                "wallet rewind ancestor {} is ahead of cursor {}",
+                ancestor_height, cursor.height
+            )));
+        }
+        if ancestor_height == 0 {
+            if ancestor_header_id.is_some() {
+                return Err(WalletStoreError::decode(
+                    "genesis wallet rewind must not carry a header identity",
+                ));
+            }
+        } else {
+            let Some(expected) = ancestor_header_id else {
+                return Err(WalletStoreError::decode(format!(
+                    "wallet rewind ancestor {ancestor_height} has no header identity"
+                )));
+            };
+            if read_chain_index_header(self.txn(), ancestor_height, self.standalone)?.as_ref()
+                != Some(expected)
+            {
+                return Err(WalletStoreError::decode(format!(
+                    "wallet rewind ancestor {ancestor_height} is outside retained applied history"
+                )));
+            }
+        }
+        let start_height = ancestor_height
+            .checked_add(1)
+            .ok_or_else(|| WalletStoreError::decode("wallet rewind ancestor height overflows"))?;
+        set_scan_cursor(self.txn(), ancestor_height, ancestor_header_id)?;
+        self.prepare_rescan(start_height, false)?;
+        rewind_scans_from_height(self.txn(), start_height)?;
+        Ok(())
+    }
+
     fn apply_rescan_block(
         &mut self,
         height: u32,
@@ -1078,6 +1338,17 @@ impl WalletWrite for RedbWalletWrite<'_> {
         block: &crate::wallet::scan::RescanBlock,
         scan_records: Option<&[crate::wallet::types::ScanMatchRecord]>,
     ) -> Result<(), WalletStoreError> {
+        if self.standalone {
+            let cursor = read_wallet_cursor(self.txn())?
+                .ok_or_else(|| WalletStoreError::decode("standalone wallet cursor is missing"))?;
+            if cursor.height.saturating_add(1) != height {
+                return Err(WalletStoreError::decode(format!(
+                    "standalone wallet cursor {} cannot apply height {height}",
+                    cursor.height
+                )));
+            }
+            ensure_unique_applied_header(self.txn(), height, &block.block_id)?;
+        }
         let bound: Vec<Vec<crate::wallet::apply::BlockOutput<'_>>> = block
             .txs
             .iter()
@@ -1118,6 +1389,9 @@ impl WalletWrite for RedbWalletWrite<'_> {
         if let Some(records) = scan_records {
             apply_block_to_scans_rescan(self.txn(), records, &txs, height, &block.block_id)?;
         }
+        if self.standalone {
+            put_applied_header(self.txn(), height, &block.block_id)?;
+        }
         Ok(())
     }
 
@@ -1142,7 +1416,7 @@ impl WalletWrite for RedbWalletWrite<'_> {
         let bound = owned_to_block_txs(&payload.block_txs_owned);
         let txs = bound.as_block_txs();
         let apply_wallet = if payload.has_wallet_tracking() {
-            match wallet_apply_continuity(self.txn(), height, header_id)? {
+            match wallet_apply_continuity(self.txn(), height, header_id, self.standalone)? {
                 WalletCursorContinuity::Contiguous => true,
                 WalletCursorContinuity::Gap if payload.allow_non_contiguous_wallet => false,
                 WalletCursorContinuity::Gap => {
@@ -1182,6 +1456,10 @@ impl WalletWrite for RedbWalletWrite<'_> {
         if payload.has_registered_scans {
             apply_block_to_scans(self.txn(), &payload.scan_matches, &txs, height, header_id)?;
         }
+        if self.standalone && apply_wallet {
+            ensure_unique_applied_header(self.txn(), height, header_id)?;
+            put_applied_header(self.txn(), height, header_id)?;
+        }
         Ok(())
     }
 
@@ -1197,6 +1475,9 @@ impl WalletWrite for RedbWalletWrite<'_> {
         rollback_block_from_wallet(self.txn(), height, &block_txs, &guard)?;
         unpromote_matured_boxes(self.txn(), height.saturating_sub(1))?;
         rollback_scans_from_block(self.txn(), &block_txs, height)?;
+        if self.standalone {
+            remove_applied_header(self.txn(), height)?;
+        }
         if invalidate {
             self.set_scan_invalidated(true)?;
             clear_scan_tracking(self.txn())?;
@@ -1259,6 +1540,56 @@ mod tests {
             allow_non_contiguous_wallet: false,
         };
         (payload, txs)
+    }
+
+    #[test]
+    fn standalone_store_persists_applied_header_cursor_across_reopen() {
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        let header_id = [0x42; 32];
+        {
+            let store = RedbWalletStore::open_standalone(&path).unwrap();
+            let mut write = store.begin_write().unwrap();
+            write.prepare_rescan(0, false).unwrap();
+            write
+                .apply_rescan_block(
+                    1,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &crate::wallet::scan::RescanBlock {
+                        block_id: header_id,
+                        txs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+            write.commit().unwrap();
+            assert_eq!(
+                store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+                1
+            );
+        }
+        let reopened = RedbWalletStore::open_standalone(&path).unwrap();
+        let read = reopened.read().unwrap();
+        assert_eq!(
+            read.scan_cursor().unwrap().unwrap(),
+            crate::wallet::WalletScanCursor {
+                height: 1,
+                header_id: Some(header_id),
+            }
+        );
+        assert_eq!(read.chain_index_header(1).unwrap(), Some(header_id));
+        let txn = reopened.db.begin_read().unwrap();
+        assert!(txn
+            .open_table(crate::wallet::tables::WALLET_SCHEMA_VERSION_TABLE)
+            .unwrap()
+            .get(())
+            .unwrap()
+            .map(|row| row.value())
+            .is_some());
     }
 
     #[test]
@@ -1617,5 +1948,261 @@ mod tests {
         write.set_scan_invalidated(true).unwrap();
         write.commit().unwrap();
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn standalone_rejects_a_block_id_reused_at_another_height() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        let block_id = [0x77; 32];
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        write
+            .apply_rescan_block(
+                1,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &crate::wallet::scan::RescanBlock {
+                    block_id,
+                    txs: Vec::new(),
+                },
+                None,
+            )
+            .unwrap();
+        write.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        assert!(write
+            .apply_rescan_block(
+                2,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &crate::wallet::scan::RescanBlock {
+                    block_id,
+                    txs: Vec::new(),
+                },
+                None,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn standalone_rewind_uses_the_ancestor_and_drops_later_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        for height in 1..=3u32 {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &crate::wallet::scan::RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.rewind_to_ancestor(1, Some(&[1; 32])).unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 1);
+        assert_eq!(read.chain_index_header(1).unwrap(), Some([1; 32]));
+        assert_eq!(read.chain_index_header(2).unwrap(), None);
+        assert_eq!(read.chain_index_header(3).unwrap(), None);
+        assert!(read.scan_invalidated().unwrap());
+        drop(read);
+        // Truncation must drop the reverse index too, otherwise a block that
+        // was rolled out of the forward table would still look "already
+        // applied" when the replacement fork re-applies it.
+        let mut write = store.begin_write().unwrap();
+        for height in 2..=3u32 {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &crate::wallet::scan::RescanBlock {
+                        block_id: [0xF0 + height as u8; 32],
+                        txs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.commit().unwrap();
+        assert_eq!(applied_header_rows(&store), 3);
+    }
+
+    fn applied_header_rows(store: &RedbWalletStore) -> u64 {
+        let txn = store.db.begin_read().unwrap();
+        txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
+            .unwrap()
+            .len()
+            .unwrap()
+    }
+
+    fn applied_header_id_rows(db: &Database) -> u64 {
+        let txn = db.begin_read().unwrap();
+        txn.open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)
+            .unwrap()
+            .len()
+            .unwrap()
+    }
+
+    /// Large-history duplicate detection: the block-id -> height reverse index
+    /// must make the check a point lookup. The test measures the indexed path
+    /// against a local replica of the removed O(n)-per-block full scan over the
+    /// same table, so reintroducing the scan fails the 10x margin instead of
+    /// silently making a full rescan quadratic again.
+    #[test]
+    fn standalone_duplicate_detection_is_index_backed_at_scale() {
+        const BLOCKS: u32 = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        let store = RedbWalletStore::open_standalone(&path).unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        for height in 1..=BLOCKS {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &crate::wallet::scan::RescanBlock {
+                        block_id: id_for(height),
+                        txs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.commit().unwrap();
+        assert_eq!(applied_header_rows(&store), BLOCKS as u64);
+        assert_eq!(
+            applied_header_id_rows(&store.db),
+            BLOCKS as u64,
+            "reverse index must have one row per applied header"
+        );
+
+        let txn = store.db.begin_write().unwrap();
+        {
+            {
+                let index = txn
+                    .open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)
+                    .unwrap();
+                assert_eq!(index.get(&id_for(7)).unwrap().unwrap().value(), 7);
+            }
+            let started = std::time::Instant::now();
+            // The same id at a different height is still a duplicate.
+            assert!(ensure_unique_applied_header(&txn, BLOCKS + 1, &id_for(7)).is_err());
+            // An unseen id is accepted for a fresh height.
+            ensure_unique_applied_header(&txn, BLOCKS + 1, &[0x5A; 32]).unwrap();
+            // Re-applying the same id at its own height is a no-op, not a dup.
+            ensure_unique_applied_header(&txn, 7, &id_for(7)).unwrap();
+            let indexed = started.elapsed();
+
+            // Replica of the removed full-table duplicate scan.
+            let started = std::time::Instant::now();
+            let mut scanned_matches = 0usize;
+            {
+                let table = txn
+                    .open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
+                    .unwrap();
+                for entry in table.iter().unwrap() {
+                    let (key, value) = entry.unwrap();
+                    if key.value() != (BLOCKS + 1) as u64 && value.value() == id_for(7).as_slice() {
+                        scanned_matches += 1;
+                    }
+                }
+            }
+            let scanned = started.elapsed();
+            assert_eq!(scanned_matches, 1);
+            assert!(
+                indexed * 10 < scanned,
+                "duplicate detection must not scan the applied-header table: \
+                 indexed={indexed:?} scanned={scanned:?}"
+            );
+        }
+        txn.abort().unwrap();
+    }
+
+    /// A store written before the reverse index existed (or one whose index
+    /// was cleared out of band) must not silently lose duplicate detection:
+    /// the open-time migration rebuilds it from the forward table.
+    #[test]
+    fn standalone_open_rebuilds_a_missing_block_id_index() {
+        const BLOCKS: u32 = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.redb");
+        {
+            let store = RedbWalletStore::open_standalone(&path).unwrap();
+            let mut write = store.begin_write().unwrap();
+            write.prepare_rescan(0, true).unwrap();
+            for height in 1..=BLOCKS {
+                write
+                    .apply_rescan_block(
+                        height,
+                        &BTreeSet::new(),
+                        &BTreeMap::new(),
+                        &crate::wallet::scan::RescanBlock {
+                            block_id: id_for(height),
+                            txs: Vec::new(),
+                        },
+                        None,
+                    )
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+        // Simulate an older build: drop the derived reverse index.
+        {
+            let db = Database::open(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut index = txn
+                    .open_table(crate::wallet::tables::WALLET_APPLIED_HEADER_IDS)
+                    .unwrap();
+                let keys: Vec<[u8; 32]> = index
+                    .iter()
+                    .unwrap()
+                    .map(|entry| entry.unwrap().0.value())
+                    .collect();
+                for key in keys {
+                    index.remove(key).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+        {
+            let store = RedbWalletStore::open_standalone(&path).unwrap();
+            assert_eq!(applied_header_id_rows(&store.db), BLOCKS as u64);
+        }
+        // Duplicate detection works again after the rebuild.
+        let store = RedbWalletStore::open_standalone(&path).unwrap();
+        let mut write = store.begin_write().unwrap();
+        assert!(write
+            .apply_rescan_block(
+                BLOCKS + 1,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &crate::wallet::scan::RescanBlock {
+                    block_id: id_for(4),
+                    txs: Vec::new(),
+                },
+                None,
+            )
+            .is_err());
+    }
+
+    fn id_for(height: u32) -> [u8; 32] {
+        let mut block_id = [0u8; 32];
+        block_id[..4].copy_from_slice(&height.to_be_bytes());
+        block_id[4..8].copy_from_slice(b"wltd");
+        block_id
     }
 }

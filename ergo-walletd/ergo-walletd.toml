@@ -1,0 +1,66 @@
+# Ergo standalone wallet daemon — reference config.
+#
+# Run with:
+#
+#   ergo-walletd --config ergo-walletd.toml
+#
+# Every key is documented by type in
+# ../docs/configuration.md#ergo-walletdtoml-the-standalone-wallet-daemon.
+#
+# This daemon is WATCH-ONLY and READ-ONLY. It has no signing key, no send
+# route, and no submit path; it tracks the public keys listed in the descriptor
+# file and reports what it finds in confirmed blocks.
+
+network  = "mainnet"             # "mainnet" | "testnet" (required identity;
+                                 # default "mainnet"). Decides the address
+                                 # prefix used for every address the local API
+                                 # returns, and must match the network
+                                 # `node_url` serves.
+data_dir = "./ergo-walletd-data" # Holds wallet.redb, the daemon's only
+                                 # database. Created on first start.
+node_url = "http://127.0.0.1:9099" # The node's operator API base URL. The daemon
+                                 # reads /api/v1/chain/* from it and nothing
+                                 # else. http(s) only, no credentials, query,
+                                 # or fragment.
+api_key_file = "./node-api-key"  # File holding the node's `api_key` request
+                                 # header value. Must be a regular file that is
+                                 # NOT readable by group or other (chmod 600);
+                                 # the daemon refuses to start otherwise and
+                                 # never logs the value.
+descriptor_file = "./descriptors.toml" # Public descriptor file: compressed
+                                 # secp256k1 public keys, derivation paths, and
+                                 # labels. Any secret field is a hard error.
+sync_interval = "15s"            # How often the sync loop runs. Accepts plain
+                                 # seconds or a duration string ("500ms",
+                                 # "30s", "2m").
+sync_batch = 256                 # Apply budget: max blocks APPLIED per sync
+                                 # pass (1..=1024). Not a request size — a pass
+                                 # may reach the tip through many HTTP calls.
+blocks_page = 1                  # Request budget: max blocks asked for in ONE
+                                 # blocks-since call (1..=1024). This is what
+                                 # bounds a single response body, and it is
+                                 # independent of sync_batch: the wire form
+                                 # hex-encodes every output box, so a page of N
+                                 # blocks costs roughly twice their bytes and
+                                 # must fit the daemon's 8 MiB response cap.
+                                 # 1 is the largest page whose *worst legal*
+                                 # body provably fits: one block at the
+                                 # documented 2 MiB maxBlockSize is 4 MiB of
+                                 # hex, so two would be 8 MiB before any JSON
+                                 # envelope. A block too large for even a
+                                 # one-block page is a terminal, named error —
+                                 # the daemon never retries with a smaller
+                                 # page.
+
+# ---------------------------------------------------------------------------
+# Local read-only API listener. At least one of the two is required. Specify
+# them here in [api] or as top-level keys (`unix_socket` / `tcp_fallback`),
+# never both forms at once.
+# ---------------------------------------------------------------------------
+[api]
+# Owner-only (0o600) Unix socket. The daemon writes a "<socket>.owner" marker
+# so a stale socket is reclaimed but a live one is never stolen.
+unix_socket = "./ergo-walletd.sock"
+# Optional loopback-only TCP listener; a non-loopback address is rejected at
+# load, so the read API is never exposed to the network by configuration.
+# tcp_fallback = "127.0.0.1:3033"

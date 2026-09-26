@@ -34,6 +34,8 @@ pub enum WalletServiceError {
     Rescan(#[from] RescanError),
     #[error("invalid wallet request: {0}")]
     InvalidRequest(String),
+    #[error("wallet rewind boundary is outside retained history: {0}")]
+    RewindUnavailable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +139,57 @@ impl WalletService {
 
     pub fn box_by_id(&self, box_id: &[u8; 32]) -> Result<Option<WalletBox>, WalletServiceError> {
         Ok(self.store.read()?.box_by_id(box_id)?)
+    }
+
+    /// Watch-only read projection: by-id lookups never expose immature or
+    /// spent boxes. The list counterpart is [`Self::confirmed_boxes`].
+    pub fn confirmed_box_by_id(
+        &self,
+        box_id: &[u8; 32],
+    ) -> Result<Option<WalletBox>, WalletServiceError> {
+        Ok(self
+            .store
+            .read()?
+            .box_by_id(box_id)?
+            .filter(|wallet_box| matches!(wallet_box.status, crate::wallet::BoxStatus::Confirmed)))
+    }
+
+    /// Rewind wallet and scan state to a retained common ancestor. The next
+    /// rescan starts at `ancestor.height + 1`; no full rebuild is performed.
+    pub fn rewind_to_ancestor(
+        &self,
+        ancestor: crate::chain::ChainCursor,
+    ) -> Result<(), WalletServiceError> {
+        let read = self.store.read()?;
+        let cursor = read.scan_cursor()?.ok_or_else(|| {
+            WalletServiceError::RewindUnavailable("wallet cursor is missing".to_string())
+        })?;
+        if cursor.height < ancestor.height {
+            return Err(WalletServiceError::RewindUnavailable(format!(
+                "ancestor {} is ahead of wallet cursor {}",
+                ancestor.height, cursor.height
+            )));
+        }
+        if ancestor.height == 0 && ancestor.header_id != crate::chain::GENESIS_CURSOR_ID {
+            return Err(WalletServiceError::RewindUnavailable(
+                "genesis ancestor does not use the genesis cursor identity".to_string(),
+            ));
+        }
+        if ancestor.height > 0 {
+            let indexed = read.chain_index_header(ancestor.height)?;
+            if indexed != Some(ancestor.header_id) {
+                return Err(WalletServiceError::RewindUnavailable(format!(
+                    "ancestor {ancestor_height} is not in the applied-header index",
+                    ancestor_height = ancestor.height
+                )));
+            }
+        }
+        drop(read);
+        let ancestor_header_id = (ancestor.height > 0).then_some(ancestor.header_id);
+        let mut write = self.store.begin_write()?;
+        write.rewind_to_ancestor(ancestor.height, ancestor_header_id.as_ref())?;
+        write.commit()?;
+        Ok(())
     }
 
     pub fn transactions(&self) -> Result<Vec<WalletTransaction>, WalletServiceError> {
@@ -696,7 +749,7 @@ impl WalletService {
         Ok(result)
     }
 
-    fn convert_block(&self, block: ChainBlock) -> Result<RescanBlock, WalletServiceError> {
+    pub fn convert_block(&self, block: ChainBlock) -> Result<RescanBlock, WalletServiceError> {
         let transactions = block
             .transactions
             .into_iter()

@@ -392,6 +392,11 @@ pub struct ChainOutput {
     pub bytes: String,
 }
 
+/// Transaction identity plus the structured inputs and canonical output boxes
+/// needed by a wallet rescan. The current chain protocol does not carry raw
+/// transaction bytes, so a consumer can verify the transaction id against the
+/// ids embedded in its output boxes but cannot recompute it from a serialized
+/// transaction here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainTransaction {
@@ -401,6 +406,10 @@ pub struct ChainTransaction {
     pub outputs: Vec<ChainOutput>,
 }
 
+/// Structured block identity, height, parent, and transactions. Raw header
+/// bytes are intentionally absent from this protocol version; consumers can
+/// validate the supplied header id, height, and parent continuity, but cannot
+/// independently recompute the header id without a raw-header extension.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainBlock {
