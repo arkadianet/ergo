@@ -190,7 +190,7 @@ pub fn apply_block_with_scratch(
                     source: e,
                 })?
                 .as_digest();
-            let tx_size = serialized_tx_size(tx)?;
+            let tx_size = serialized_tx_size(&mut scratch.writer, tx)?;
 
             // Step 1: spend inputs (skip on genesis).
             if block_height > 1 {
@@ -363,6 +363,14 @@ pub fn apply_block_with_scratch(
                         source: e,
                     }
                 })?;
+                // box_id_with leaves the canonical box bytes in the writer.
+                // Capture their length before the indexed-row encoder reuses it.
+                let box_bytes_len = i32::try_from(scratch.writer.len()).map_err(|_| {
+                    IndexerError::LengthExceedsI32 {
+                        context: "serialized_box",
+                        len: scratch.writer.len(),
+                    }
+                })?;
                 let global = next.global_box_index as i64;
                 let indexed = IndexedErgoBox {
                     inclusion_height: block_height,
@@ -393,17 +401,6 @@ pub fn apply_block_with_scratch(
                 // If the same block later spends this box, the
                 // matching `remove_unspent` fires when the input is
                 // processed by a subsequent transaction.
-                let sealed_bytes = ergo_ser::ergo_box::serialize_ergo_box(&indexed.box_data)
-                    .map_err(|e| IndexerError::Serialize {
-                        context: "serialize_ergo_box for storage_rent",
-                        source: e,
-                    })?;
-                let box_bytes_len: i32 = i32::try_from(sealed_bytes.len()).map_err(|_| {
-                    IndexerError::LengthExceedsI32 {
-                        context: "serialized_box",
-                        len: sealed_bytes.len(),
-                    }
-                })?;
                 storage_rent_insert(
                     &mut storage_rent_table,
                     candidate.creation_height,
@@ -612,13 +609,14 @@ pub fn apply_block_with_scratch(
     Ok(next)
 }
 
-fn serialized_tx_size(tx: &Transaction) -> Result<i32, IndexerError> {
-    let mut w = VlqWriter::new();
-    write_transaction(&mut w, tx).map_err(|e| IndexerError::Serialize {
+fn serialized_tx_size(w: &mut VlqWriter, tx: &Transaction) -> Result<i32, IndexerError> {
+    // Transaction IDs use bytes-to-sign, whereas the stored size includes proofs.
+    w.clear();
+    write_transaction(w, tx).map_err(|e| IndexerError::Serialize {
         context: "tx serialize",
         source: e,
     })?;
-    let len = w.result().len();
+    let len = w.len();
     i32::try_from(len).map_err(|_| IndexerError::LengthExceedsI32 { context: "tx", len })
 }
 
@@ -793,6 +791,41 @@ mod tests {
         }
         .box_id()
         .unwrap()
+    }
+
+    #[test]
+    fn transaction_size_reuses_writer_without_stale_bytes_and_includes_proofs() {
+        let mut writer = VlqWriter::new();
+        // Alternate large and small transactions to catch stale buffer tails.
+        for proof_len in [4096, 4, 8192, 0] {
+            let tx = Transaction {
+                inputs: vec![Input {
+                    box_id: BoxId::from_bytes([0xAA; 32]),
+                    spending_proof: SpendingProof::new(
+                        vec![0xBB; proof_len],
+                        ContextExtension::empty(),
+                    )
+                    .unwrap(),
+                }],
+                data_inputs: vec![],
+                output_candidates: vec![cand_with(1_000_000, tree_true(), 1, vec![])],
+            };
+            let mut expected = VlqWriter::new();
+            write_transaction(&mut expected, &tx).unwrap();
+            transaction_id_with(&mut writer, &tx).unwrap();
+            let unsigned_len = writer.len();
+            assert_eq!(
+                serialized_tx_size(&mut writer, &tx).unwrap() as usize,
+                expected.len()
+            );
+            assert_eq!(writer.as_slice(), expected.as_slice());
+            if proof_len > 0 {
+                assert!(
+                    writer.len() > unsigned_len,
+                    "size must include spending proofs"
+                );
+            }
+        }
     }
 
     /// If `scratch.input_tokens` bleeds from tx-0 to tx-1 of the same
