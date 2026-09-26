@@ -10,41 +10,6 @@ use redb::WriteTransaction;
 use std::sync::{Mutex, MutexGuard};
 use tokio::task::{JoinError, JoinHandle};
 
-pub(crate) struct WalletHydrationSource<'a> {
-    reader: &'a dyn ergo_state::wallet::WalletRead,
-}
-
-impl<'a> WalletHydrationSource<'a> {
-    pub(crate) fn new(reader: &'a dyn ergo_state::wallet::WalletRead) -> Self {
-        Self { reader }
-    }
-}
-
-impl ergo_wallet_service::state::HydrationSource for WalletHydrationSource<'_> {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-        Box::new(
-            self.reader
-                .tracked_pubkeys_with_paths()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(index, pubkey, _)| (index, pubkey)),
-        )
-    }
-
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-        Box::new(
-            self.reader
-                .visible_pubkeys()
-                .unwrap_or_default()
-                .into_iter(),
-        )
-    }
-
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        self.reader.change_address_pubkey().ok().flatten()
-    }
-}
-
 /// Rescan-in-progress flag. Set by `NodeWalletAdmin`'s Rescan dispatch;
 /// read by the chain-apply hook (via `WalletApplyHook` impl) and by
 /// rollback (via `ProdRescanGuard`). Cleared on normal completion; retained
@@ -378,6 +343,9 @@ pub(crate) fn finalize_rescan_guard(
     keep_blocked: bool,
     panicking: bool,
 ) {
+    // Serialize generation validation and unfencing with chain persistence's
+    // timeout handoff. A late finalizer must not clear a newer invalidation.
+    let _chain_apply_guard = ergo_state::wallet::chain_apply_write_guard();
     let generation_changed = {
         let _transition = rescan_transition_lock();
         let changed = ergo_state::wallet::wallet_apply_generation() != start_generation;
@@ -412,6 +380,11 @@ pub(crate) fn finalize_rescan_guard(
 /// tables are empty.
 #[cfg(test)]
 pub static FAULT_INJECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Serialize unit tests that mutate the process-wide wallet/rescan state.
+#[cfg(test)]
+pub(crate) static GLOBAL_RESCAN_TEST_GUARD: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 pub struct WalletBootService;
 
@@ -461,23 +434,14 @@ impl WalletBootService {
                 let read = store
                     .read()
                     .map_err(|e| WalletError::SecretFile(format!("wallet store read: {e}")))?;
-                let already_persisted = !read
-                    .tracked_pubkeys_with_paths()
-                    .map_err(|e| {
-                        WalletError::SecretFile(format!("wallet store tracked keys: {e}"))
-                    })?
-                    .is_empty();
+                let hydration = ergo_state::wallet::hydration::HydrationSnapshot::load(
+                    read.as_ref(),
+                )
+                .map_err(|e| WalletError::SecretFile(format!("wallet store hydration: {e}")))?;
 
-                if already_persisted {
-                    read.visible_pubkeys().map_err(|e| {
-                        WalletError::SecretFile(format!("wallet store visible addresses: {e}"))
-                    })?;
-                    read.change_address_pubkey().map_err(|e| {
-                        WalletError::SecretFile(format!("wallet store change address: {e}"))
-                    })?;
-                    // Step 5a: hydrate from the store snapshot (the persisted state is the source of truth).
-                    state
-                        .hydrate_from_reader(&WalletHydrationSource::new(read.as_ref()), network)?;
+                if !hydration.is_empty() {
+                    // Step 5a: hydrate only after all persisted data has been read successfully.
+                    state.hydrate_from_reader(&hydration, network)?;
                     drop(read);
                 } else {
                     drop(read);
@@ -711,7 +675,7 @@ mod tests {
     /// which reads it). Cargo runs tests within a binary in parallel, so without
     /// this guard the fault-injection test's armed flag can race another test's
     /// auto-derive and make it panic spuriously.
-    static FAULT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::GLOBAL_RESCAN_TEST_GUARD as FAULT_GUARD;
 
     fn store_with_cursor_zero() -> (tempfile::TempDir, RedbWalletStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -742,7 +706,7 @@ mod tests {
 
     #[test]
     fn unlock_store_read_failure_clears_unlocked_state() {
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let mut storage = ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet"));
         storage
@@ -773,7 +737,7 @@ mod tests {
 
     #[test]
     fn shutdown_requests_active_rescan_cancellation() {
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         begin_wallet_session();
         clear_rescan_guards();
         let (_dir, store) = store_with_cursor_zero();
@@ -793,7 +757,7 @@ mod tests {
 
     #[test]
     fn finalization_blocks_successor_until_ownership_clears() {
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         begin_wallet_session();
         clear_rescan_guards();
         let (_dir, store) = store_with_cursor_zero();
@@ -819,8 +783,29 @@ mod tests {
     }
 
     #[test]
+    fn late_finalizer_preserves_invalidation_after_chain_timeout() {
+        let _guard = FAULT_GUARD.blocking_lock();
+        begin_wallet_session();
+        clear_rescan_guards();
+        let (_dir, store) = store_with_cursor_zero();
+        let _ = begin_rescan_process(0, &store, 0).unwrap();
+        let generation = ergo_state::wallet::wallet_apply_generation();
+        ergo_state::wallet::set_wallet_finalization_in_progress(true);
+        let chain_guard = ergo_state::wallet::chain_apply_guard_after_wallet_finalization();
+        store.persist_scan_invalidation(true).unwrap();
+        drop(chain_guard);
+        finalize_rescan_guard(generation, true, &store, false, false);
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        assert!(ergo_state::wallet::wallet_apply_fenced());
+        assert!(RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+        assert!(!RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
+        assert!(!ergo_state::wallet::wallet_finalization_in_progress());
+        clear_rescan_guards();
+    }
+
+    #[test]
     fn rollback_requests_cancellation_for_active_rescan() {
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         begin_wallet_session();
         clear_rescan_guards();
         let (_cursor_dir, cursor_store) = store_with_cursor_zero();
@@ -848,7 +833,7 @@ mod tests {
         // Hold the guard for the whole arm→panic→disarm window so no parallel
         // test's auto-derive sees FAULT_INJECT armed. Recover from a poisoned
         // lock (a prior panicking test still ran inside the guard by design).
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
         let mut storage = ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet"));
@@ -897,7 +882,7 @@ mod tests {
     fn unlock_backfills_missing_change_address_for_old_wallet() {
         // Serialize against the fault-injection test: this test's first unlock
         // runs auto_derive_and_persist, which reads FAULT_INJECT.
-        let _guard = FAULT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FAULT_GUARD.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
         let mut storage = ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet"));

@@ -14,6 +14,7 @@
 //! file. After rehydration, the wallet is in Locked state regardless
 //! of how it shut down — operator must Unlock to populate the prover.
 
+/// Storage-backed callers first load a fallible `wallet::hydration::HydrationSnapshot`.
 pub trait HydrationSource {
     fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_>;
 

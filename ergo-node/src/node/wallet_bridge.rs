@@ -1622,11 +1622,9 @@ mod support;
 #[cfg(test)]
 mod command_fencing_tests {
     use super::*;
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as GUARD;
     use ergo_api::wallet::WalletAdmin;
     use ergo_state::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
-    use tokio::sync::Mutex;
-
-    static GUARD: Mutex<()> = Mutex::const_new(());
 
     #[tokio::test]
     async fn normal_commands_are_fenced_but_rescan_is_allowed() {
@@ -1762,10 +1760,8 @@ mod command_fencing_tests {
 #[cfg(test)]
 mod scan_invalidation_tests {
     use super::*;
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as INVALIDATION_GUARD;
     use ergo_state::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
-    use std::sync::Mutex;
-
-    static INVALIDATION_GUARD: Mutex<()> = Mutex::new(());
 
     fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
         let dir = tempfile::tempdir().unwrap();
@@ -1783,9 +1779,7 @@ mod scan_invalidation_tests {
 
     #[test]
     fn mark_scan_invalidated_sets_the_flag() {
-        let _guard = INVALIDATION_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = INVALIDATION_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let (_d, db) = temp_db();
         assert!(!flag_set(&db), "flag starts clear");
@@ -1801,9 +1795,7 @@ mod scan_invalidation_tests {
 
     #[test]
     fn wallet_state_hook_snapshots_trees_and_pubkeys_together() {
-        let _guard = INVALIDATION_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = INVALIDATION_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let state = Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
             false,
@@ -1824,9 +1816,7 @@ mod scan_invalidation_tests {
 
     #[test]
     fn match_boxes_registry_load_failure_invalidates_for_rescan() {
-        let _guard = INVALIDATION_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = INVALIDATION_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
         let (_d, db) = temp_db();
         // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
