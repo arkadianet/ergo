@@ -68,6 +68,28 @@
     "test-vectors/ergo-sigma/verify/deserialize-subst-request.json": "9961ed4568462431454ce5687e3b77cb537a105ba5b5255d9500fdcdbe6a2a63",
     "test-vectors/ergo-sigma/verify/fix-cases.json": "c0120ddebe63d240311ccdd61987ff501f783a769c8649a9260db508dbf283bf",
     "test-vectors/ergo-sigma/verify/fix-requests.jsonl": "33690278a22b450b0f31e71a3b83e116a5d39545f5124d3ee40cd65f01343188",
-    "test-vectors/ergo-sigma/verify/fix-responses.jsonl": "0ad5ed978771e7b0af3c2aaa5c66d243d7b898bb9f759155c55b58e44f0fed5b"
+    "test-vectors/ergo-sigma/verify/fix-responses.jsonl": "0ad5ed978771e7b0af3c2aaa5c66d243d7b898bb9f759155c55b58e44f0fed5b",
+    "test-vectors/ergo-sigma/verify/rent-cases.json": "e531942119a3f65a64c8c79492db1da3ce1494701a678ea90debc1d834d141e3",
+    "test-vectors/ergo-sigma/verify/rent-requests.jsonl": "dc9ce4bfb13882058678a78e65891154fa169198916d15802aca1cf7b8ceef72",
+    "test-vectors/ergo-sigma/verify/rent-responses.jsonl": "f5fc59c037900f934d6a1dc28b52597a7d0c0f073b90986a62b3a3e9bc01d3b8"
+  },
+  "rent_run": {
+    "files": [
+      "test-vectors/ergo-sigma/verify/rent-requests.jsonl",
+      "test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+      "test-vectors/ergo-sigma/verify/rent-cases.json"
+    ],
+    "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+    "artifacts": "sigma-state 6.0.2 from Maven Central; ergo-core, ergo-wallet and avldb 6.0.2 built from ergo 2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1 (tag v6.0.2) with sbt publishLocal",
+    "script_git_sha": "025af12",
+    "script_sha256": "5ff2c2d1b45b4989fda7602a18aee099469757d37700184c38027dfa3c336d49",
+    "scala_cli": "1.13.0",
+    "jvm": "OpenJDK 11.0.32.1",
+    "timestamp_utc": "2026-09-25T13:12:21Z",
+    "selected": 10,
+    "executed": 10,
+    "skipped": 0,
+    "failed": 0,
+    "reproduction_check": "The same setup regenerated requests.jsonl and fix-requests.jsonl; all 22 responses match every checked-in field."
   }
 }
