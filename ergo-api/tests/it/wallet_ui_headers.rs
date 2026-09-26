@@ -148,6 +148,8 @@ async fn spa_js_carries_spa_security_headers() {
 #[tokio::test]
 async fn wallet_js_module_carries_spa_security_headers() {
     assert_spa_security_headers("/js/wallet.js").await;
+    assert_spa_security_headers("/js/wallet-builder.js").await;
+    assert_spa_security_headers("/js/wallet-transaction.js").await;
 }
 
 #[tokio::test]

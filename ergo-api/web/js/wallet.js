@@ -12,10 +12,12 @@
 // unloads the document. Server-supplied strings are written via textContent
 // only — never innerHTML.
 import { api } from './api-client.js';
-import { subscribe, promptAuthorize, CONFIGURE_API_KEY } from './auth.js';
-import { erg, num, truncMiddle, nanoErgFromDecimal } from './format.js';
+import { subscribe, promptAuthorize, CONFIGURE_API_KEY, getApiKey } from './auth.js';
+import { erg, num, truncMiddle } from './format.js';
 import { copyBtn } from './table.js';
-import { fetchTokenMeta, tokenName, tokenAmt, getDecimals, decimalize, maxDecimalString, parseTokenAmount } from './token-meta.js';
+import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
+import { createWalletBuilder } from './wallet-builder.js';
+import { decimal } from './wallet-transaction.js';
 
 let root = null;
 let authUnsub = null;
@@ -25,25 +27,22 @@ let authUnsub = null;
 let mnemonicGateOpen = false;
 // True while an init/restore/unlock/send POST is in flight.
 let submitInFlight = false;
-// The open send-confirm <dialog> (appended to document.body), tracked so it can
-// be removed on section exit and never linger over another section.
-let confirmDlg = null;
 // Panes are built once and visibility-toggled so a refresh never wipes input;
 // these flags also gate the rebuild and are reset by scrubSecrets().
 let onboardRendered = false;
-let sendRendered = false;
 let keysRendered = false;
 let unlockRendered = false;
 // Last-fetched wallet token balances ({tokenId, amount}), so the send form's
 // token picker can offer "what you actually have" instead of a blank hex
 // field. Refreshed every refreshBalances() poll tick.
 let myAssets = [];
-// True after the latest refreshBalances() has awaited fetchTokenMeta for
-// myAssets. Available panels must not list tokens until this is true so
-// names/decimals render instead of hex/raw.
-let tokenMetaReady = false;
+let builder = null, walletBalance = null, walletStatus = null;
+let activeTab = 'assets', assetPage = 0, activityPage = 0, generation = 0, refreshing = false;
+let assetsRendered = false;
+let metadataCheckedAt = 0;
+let walletAccessKey = '';
+const PAGE_SIZE = 12;
 
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const EXT_WARNING =
   'Any browser extension with access to this page can read the mnemonic while ' +
   'it is on screen. Prefer a clean browser profile; never reuse a mnemonic ' +
@@ -81,7 +80,7 @@ export function mount(el_) {
     <div class="pg-head">
       <div>
         <h1 class="pg-title">Wallet</h1>
-        <p class="pg-description">Balances, receiving addresses and payments managed by your node.</p>
+        <p class="pg-description">Your assets. Your addresses. Every transaction, under your control.</p>
       </div>
     </div>
     <div class="ov-prompt banner banner--info" data-wallet-prompt hidden></div>
@@ -98,33 +97,63 @@ export function mount(el_) {
         <p class="muted">The key is held in this browser session only and sent solely to this node.</p>
       </div>
     </section>
-    <div class="w-wrap" data-wallet-app hidden>
+    <div class="wallet-workspace" data-wallet-app hidden>
       <div class="banner banner--warn" data-scan-banner hidden></div>
       <section class="panel" data-onboard-panel hidden>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot panel__dot--orange"></span>Set up wallet</div></div>
+        <div class="panel__head"><h2 class="panel__title">Set up wallet</h2></div>
         <div class="panel__body" data-onboard-body></div>
       </section>
-      <section class="panel" data-status-panel>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot" data-status-dot></span>Wallet status</div><div class="panel__right" data-status-right></div></div>
-        <div class="panel__body" data-status-body></div>
+      <section class="wallet-hero" data-status-panel>
+        <div class="wallet-hero__balance">
+          <div class="wallet-eyebrow">YOUR NODE WALLET <span data-status-dot></span></div>
+          <span class="wallet-hero__label">Available balance</span>
+          <div class="wallet-hero__amount"><strong data-wallet-amount>—</strong><span>ERG</span></div>
+          <div class="wallet-hero__actions" data-wallet-actions></div>
+          <div class="wallet-hero__breakdown" data-wallet-breakdown></div>
+        </div>
+        <div class="wallet-hero__status">
+          <div class="wb-heading"><h2>Wallet access</h2><div data-status-right></div></div>
+          <div data-status-body></div>
+        </div>
       </section>
-      <section class="panel" data-balances-panel>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot panel__dot--blue"></span>Balances</div><div class="panel__right" data-balances-right></div></div>
+      <div class="wallet-tabs" role="tablist" aria-label="Wallet sections" data-wallet-tabs></div>
+      <section class="panel wallet-view" data-balances-panel data-wallet-view="assets" id="wallet-assets" role="tabpanel" aria-labelledby="wallet-tab-assets">
+        <div class="panel__head"><h2 class="panel__title">Your assets</h2><div data-balances-right></div></div>
         <div class="panel__body" data-balances-body></div>
       </section>
-      <section class="panel" data-addresses-panel>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot panel__dot--green"></span>Addresses</div><div class="panel__right" data-addresses-right></div></div>
-        <div class="panel__body" data-addresses-body></div>
-      </section>
-      <section class="panel" data-send-panel hidden>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot panel__dot--orange"></span>Send payment</div></div>
+      <section class="panel wallet-view" data-send-panel data-wallet-view="build" id="wallet-build" role="tabpanel" aria-labelledby="wallet-tab-build" hidden>
+        <div class="panel__head"><h2 class="panel__title">Build a transaction</h2><span class="muted">Compose → Review → Confirm</span></div>
         <div class="panel__body" data-send-body></div>
       </section>
-      <section class="panel" data-keys-panel hidden>
-        <div class="panel__head"><div class="panel__title"><span class="panel__dot panel__dot--green"></span>Keys</div></div>
+      <section class="panel wallet-view" data-addresses-panel data-wallet-view="receive" id="wallet-receive" role="tabpanel" aria-labelledby="wallet-tab-receive" hidden>
+        <div class="panel__head"><h2 class="panel__title">Receive ERG &amp; tokens</h2><div data-addresses-right></div></div>
+        <div class="panel__body" data-addresses-body></div>
+      </section>
+      <section class="panel wallet-view" data-wallet-view="activity" id="wallet-activity" role="tabpanel" aria-labelledby="wallet-tab-activity" hidden>
+        <div class="panel__head"><h2 class="panel__title">Wallet activity</h2><span class="muted">Confirmed on chain</span></div>
+        <div class="panel__body" data-activity-body></div>
+      </section>
+      <section class="panel wallet-view" data-keys-panel data-wallet-view="manage" id="wallet-manage" role="tabpanel" aria-labelledby="wallet-tab-manage" hidden>
+        <div class="panel__head"><h2 class="panel__title">Wallet management</h2></div>
         <div class="panel__body" data-keys-body></div>
       </section>
     </div>`;
+  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['manage', 'Manage']]) {
+    const tab = el('button', { type: 'button', role: 'tab', id: 'wallet-tab-' + id,
+      'aria-controls': 'wallet-' + id, 'aria-selected': id === activeTab ? 'true' : 'false',
+      tabindex: id === activeTab ? '0' : '-1', text: title, onclick: () => selectTab(id) });
+    tab.addEventListener('keydown', e => {
+      const tabs = [...q('[data-wallet-tabs]').children], index = tabs.indexOf(tab);
+      const next = e.key === 'ArrowRight' ? (index + 1) % tabs.length : e.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : -1;
+      if (next < 0) return;
+      e.preventDefault(); tabs[next].click(); tabs[next].focus();
+    });
+    q('[data-wallet-tabs]').append(tab);
+  }
+  q('[data-wallet-actions]').append(
+    el('button', { class: 'btn btn--primary', type: 'button', text: '↗ Build transaction', onclick: () => selectTab('build') }),
+    el('button', { class: 'btn', type: 'button', text: '↓ Receive', onclick: () => selectTab('receive') }),
+  );
   const prompt = q('[data-wallet-prompt]');
   prompt.append(
     el('span', { text: 'Authorize with the operator api_key to use the wallet.' }),
@@ -173,12 +202,15 @@ export function canLeave() {
         'generated recovery phrase) may be lost. Leave anyway?',
     );
   }
+  if (builder?.isDirty()) return window.confirm('Leave the wallet and discard the transaction draft?');
   return true;
 }
 
 // ── auth gate + secret scrub ─────────────────────────────────────────────────
 function renderAuthGate(s) {
   if (!root) return;
+  const key = getApiKey();
+  if (key !== walletAccessKey) { scrubSecrets(); walletAccessKey = key; }
   const blocked = s === 'none' || s === 'invalid' || s === 'unconfigured';
   q('[data-wallet-prompt] span').textContent = s === 'unconfigured'
     ? CONFIGURE_API_KEY : 'Authorize with the operator api_key to use the wallet.';
@@ -194,19 +226,18 @@ function renderAuthGate(s) {
 
 function scrubSecrets() {
   if (!root) return;
-  // Remove any open send-confirm dialog so it can't linger over (or submit
-  // from) another section. remove() does not fire 'close', so doSend won't run.
-  if (confirmDlg) {
-    confirmDlg.remove();
-    confirmDlg = null;
-  }
+  generation++;
+  builder?.dispose(); builder = null;
+  walletBalance = walletStatus = null; assetsRendered = false;
+  q('[data-wallet-amount]').textContent = '—';
+  q('[data-wallet-breakdown]').replaceChildren();
+  for (const sel of ['[data-balances-body]', '[data-addresses-body]', '[data-activity-body]', '[data-status-body]']) q(sel)?.replaceChildren();
   for (const inp of root.querySelectorAll('input[type="password"]')) inp.value = '';
   const pre = q('[data-mnemonic]');
   if (pre) pre.textContent = '';
   mnemonicGateOpen = false;
-  onboardRendered = sendRendered = keysRendered = unlockRendered = false;
+  onboardRendered = keysRendered = unlockRendered = false;
   myAssets = [];
-  tokenMetaReady = false;
   // Drop memoised panes so a re-entry rebuilds them fresh (no lingering
   // password / mnemonic / send draft in a detached-but-retained input).
   for (const sel of ['[data-onboard-body]', '[data-send-body]', '[data-keys-body]']) {
@@ -229,7 +260,10 @@ function renderStatusPanel(s) {
   dot.className = 'panel__dot ' + (s.isUnlocked ? 'panel__dot--green' : s.isInitialized ? 'panel__dot--orange' : '');
   const body = q('[data-status-body]');
   const right = q('[data-status-right]');
-  right.replaceChildren();
+  if (right.dataset.access !== String(s.isUnlocked)) {
+    right.replaceChildren();
+    right.dataset.access = String(s.isUnlocked);
+  }
 
   let kvWrap = q('[data-status-kv]');
   if (!kvWrap) {
@@ -238,31 +272,19 @@ function renderStatusPanel(s) {
     body.append(kvWrap);
   }
 
-  const changeAddrText = el('span', { text: truncMiddle(s.changeAddress || '', 10, 8) || '—' });
-  const changeAddr = el('div', { class: 'v v--hash', style: 'display:flex;align-items:center;justify-content:flex-end;gap:6px' }, changeAddrText);
-  if (s.changeAddress) {
-    changeAddr.title = s.changeAddress;
-    changeAddr.append(copyBtn(s.changeAddress));
-  }
-  const kv = el('div', { class: 'kv' });
-  kv.append(
-    el('div', { class: 'k', text: 'initialized' }),
-    el('div', { class: `v ${s.isInitialized ? 'v--green' : 'v--dim'}`, text: s.isInitialized ? 'ready' : 'not set up' }),
-    el('div', { class: 'k', text: 'unlocked' }),
-    el('div', { class: `v ${s.isUnlocked ? 'v--green' : 'v--dim'}`, text: s.isUnlocked ? 'unlocked' : 'locked' }),
-    el('div', { class: 'k', text: 'change address' }),
-    changeAddr,
-    el('div', { class: 'k', text: 'wallet height' }),
-    el('div', { class: 'v', text: num(s.walletHeight) }),
+  const kv = el('div', { class: 'wallet-access' },
+    el('strong', { class: s.isUnlocked ? 'wallet-access__ready' : '', text: s.isUnlocked ? 'Unlocked & ready' : 'Wallet locked' }),
+    el('p', { class: 'wb-note', text: s.isUnlocked ? 'Keys remain on your node. Every payment starts with an unsigned review.' : 'Unlock to view assets and prepare transactions.' }),
+    kvRows([['Scanned through block', num(s.walletHeight)], ['Change address', truncMiddle(s.changeAddress || '', 12, 8) || '—']]),
   );
-  if (s.error) kv.append(el('div', { class: 'k', text: 'error' }), el('div', { class: 'v v--red', text: s.error }));
+  if (s.error) kv.append(el('div', { class: 'banner banner--warn', text: s.error }));
   kvWrap.replaceChildren(kv);
 
   if (s.isUnlocked) {
     const uw = q('[data-unlock-wrap]');
     if (uw) uw.remove();
     unlockRendered = false;
-    right.append(el('button', { class: 'btn btn--danger btn--sm', text: 'Lock', onclick: lockWallet }));
+    if (!right.querySelector('button')) right.append(el('button', { class: 'btn btn--danger btn--sm', text: 'Lock', onclick: lockWallet }));
   } else if (!unlockRendered) {
     const old = q('[data-unlock-wrap]');
     if (old) old.remove();
@@ -329,66 +351,119 @@ function renderScanBanner(s) {
 
 // ── reads: balances + addresses ──────────────────────────────────────────────
 function lockedNotes() {
-  q('[data-balances-body]').replaceChildren(el('div', { class: 'muted', text: 'Unlock the wallet to view balances.' }));
-  q('[data-addresses-body]').replaceChildren(el('div', { class: 'muted', text: 'Unlock the wallet to view addresses.' }));
+  builder?.dispose(); builder = null;
+  walletBalance = null; myAssets = []; assetsRendered = false;
+  q('[data-wallet-amount]').textContent = '—';
+  q('[data-wallet-breakdown]').replaceChildren();
+  for (const [sel, text] of [['[data-balances-body]', 'Unlock to view your assets.'], ['[data-addresses-body]', 'Unlock to view receiving addresses.'], ['[data-activity-body]', 'Unlock to view wallet activity.'], ['[data-send-body]', 'Unlock to build a transaction.'], ['[data-keys-body]', 'Unlock to manage this wallet.']]) q(sel).replaceChildren(el('p', { class: 'wb-note', text }));
+  keysRendered = false;
   q('[data-balances-right]').textContent = '';
   q('[data-addresses-right]').textContent = '';
-  q('[data-keys-panel]').hidden = true;
-  myAssets = [];
-  tokenMetaReady = false;
-  syncTokenPickers();
 }
 
-async function refreshBalances() {
-  const res = await api.wallet.balances();
-  if (res.status === 403) return;
+function selectTab(id, focus = false) {
+  activeTab = id;
+  q('[data-wallet-app]').classList.toggle('wallet-workspace--compact', id !== 'assets');
+  for (const tab of q('[data-wallet-tabs]').children) {
+    const selected = tab.id === 'wallet-tab-' + id;
+    tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+    if (selected && focus) tab.focus();
+  }
+  for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = panel.dataset.walletView !== id;
+  if (id === 'activity' && walletStatus?.isUnlocked) refreshActivity();
+}
+
+async function refreshBalances(epoch = generation) {
+  const res = await api.wallet.balance();
+  if (epoch !== generation || res.status === 403) return;
   const body = q('[data-balances-body]');
-  const right = q('[data-balances-right]');
   if (!res.ok) {
-    right.textContent = '';
-    body.replaceChildren(el('div', { class: 'muted', text: res.reason || `balances unavailable (${res.status})` }));
-    myAssets = [];
-    tokenMetaReady = false;
-    syncTokenPickers();
+    walletBalance = null; myAssets = []; assetsRendered = false;
+    q('[data-wallet-amount]').textContent = '—';
+    q('[data-wallet-breakdown]').replaceChildren(el('span', { text: 'Balance unavailable' }));
+    body.replaceChildren(el('p', { class: 'banner banner--warn', text: res.data?.detail || res.reason || 'Balance unavailable. Retrying…' }));
+    builder?.update(null, walletStatus);
     return;
   }
-  const b = res.data;
-  right.textContent = `height ${num(b.height)}`;
-  body.replaceChildren(kvRows([['confirmed', `${erg(b.balance)} ERG`, 'v--green']]));
-  const assets = b.assets || [];
-  myAssets = assets;
-  tokenMetaReady = false;
-  // Best-effort name/decimals resolution (needs the extra index; a syncing
-  // or absent index just leaves ids/raw amounts, same as the explorer).
-  await fetchTokenMeta(assets.map((a) => a.tokenId));
-  tokenMetaReady = true;
-  if (assets.length) {
-    const tokKv = el('div', { class: 'kv' });
-    for (const a of assets) {
-      const name = tokenName(a.tokenId);
-      const label = el('span', { class: name ? '' : 'v--hash', text: name || truncMiddle(a.tokenId, 10, 8) });
-      label.title = a.tokenId;
-      const kCell = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, label, copyBtn(a.tokenId));
-      tokKv.append(kCell, el('div', { class: 'v', text: tokenAmt(a.tokenId, a.amount) }));
-    }
-    body.append(el('div', { class: 'muted', text: `tokens (${assets.length})` }), tokKv);
-  } else {
-    body.append(el('div', { class: 'muted', text: 'no tokens' }));
+  walletBalance = res.data; myAssets = walletBalance.assets || [];
+  q('[data-wallet-amount]').textContent = decimal(walletBalance.nanoErg.available);
+  const b = walletBalance.nanoErg;
+  q('[data-wallet-breakdown]').replaceChildren(...[
+    ['Confirmed', decimal(b.confirmed) + ' ERG'],
+    ['Re-emission reserve', decimal(b.reserved) + ' ERG'],
+    ['Immature rewards', decimal(b.immature) + ' ERG'],
+  ].map(([label, value]) => el('div', {}, el('span', { text: label }), el('strong', { text: value }))));
+  if (walletBalance.unconfirmed) {
+    const p = walletBalance.unconfirmed;
+    q('[data-wallet-breakdown]').append(el('div', { class: 'wallet-pending' },
+      el('span', { text: 'Pending · direct wallet transfers' }),
+      el('strong', { text: '+' + decimal(p.incomingNanoErg) + ' / −' + decimal(p.outgoingNanoErg) + ' ERG' })));
   }
-  syncTokenPickers();
-  body.append(
-    el(
-      'div',
-      { style: 'margin-top:12px' },
-      el('button', {
-        class: 'btn btn--sm',
-        type: 'button',
-        text: 'Retrieve matured rewards',
-        title: 'Sweep matured mining-reward boxes into your address, paying EIP-27 re-emission',
-        onclick: retrieveMaturedRewards,
-      }),
-    ),
-  );
+  q('[data-balances-right]').textContent = num(myAssets.length) + ' token types';
+  if (!assetsRendered) {
+    const search = el('input', { type: 'search', class: 'input', 'data-asset-search': true, placeholder: 'Search by token name or ID', 'aria-label': 'Search wallet assets', oninput: () => { assetPage = 0; renderAssets(); } });
+    body.replaceChildren(el('div', { class: 'wallet-assets-toolbar' }, search, el('span', { class: 'muted', 'data-asset-count': true })),
+      el('p', { class: 'wb-note', 'data-asset-note': true }), el('div', { 'data-asset-list': true }),
+      el('div', { class: 'wallet-pagination', 'data-asset-pages': true }));
+    assetsRendered = true;
+  }
+  renderAssets(); builder?.update(walletBalance, walletStatus);
+  if (Date.now() - metadataCheckedAt > 60_000) {
+    metadataCheckedAt = Date.now();
+    await fetchTokenMeta(myAssets.map(a => a.tokenId));
+  }
+  if (epoch !== generation) return;
+  renderAssets();
+}
+
+function renderAssets() {
+  if (!assetsRendered || !q('[data-asset-list]')) return;
+  const search = q('[data-asset-search]').value.trim().toLowerCase();
+  const list = myAssets.filter(a => (a.tokenId + ' ' + tokenName(a.tokenId)).toLowerCase().includes(search));
+  const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  assetPage = Math.min(assetPage, pages - 1);
+  const listHost = q('[data-asset-list]');
+  const signature = JSON.stringify([search, assetPage, myAssets, myAssets.map(a => getTokenMeta(a.tokenId))]);
+  if (listHost.dataset.signature === signature) return;
+  listHost.dataset.signature = signature;
+  const unknown = myAssets.filter(a => !getTokenMeta(a.tokenId)).length;
+  q('[data-asset-note]').textContent = unknown ? 'Some token metadata is unavailable. Those balances are shown in raw units until metadata resolves; verify tokens by their ID.' : 'Token names are supplied by their issuers. Verify the token ID before making a payment.';
+  q('[data-asset-count]').textContent = search ? list.length + ' matches' : 'Confirmed holdings';
+  const rows = list.slice(assetPage * PAGE_SIZE, (assetPage + 1) * PAGE_SIZE).map(a => {
+    const meta = getTokenMeta(a.tokenId);
+    const send = el('button', { class: 'btn btn--sm', type: 'button', text: 'Send', 'aria-label': 'Send ' + (tokenName(a.tokenId) || a.tokenId), onclick: () => { selectTab('build'); builder?.addToken(a.tokenId); } });
+    return el('div', { class: 'wallet-asset' },
+      el('span', { class: 'wallet-asset__mark', 'aria-hidden': true, text: a.tokenId.slice(0, 2).toUpperCase() }),
+      el('div', { class: 'wallet-asset__identity' }, el('a', { href: '#explorer/token/' + a.tokenId, text: tokenName(a.tokenId) || 'Token · ' + a.tokenId.slice(0, 8) }),
+        el('div', {}, el('code', { title: a.tokenId, text: truncMiddle(a.tokenId, 18, 12) }), copyBtn(a.tokenId))),
+      el('div', { class: 'wallet-asset__amount' }, el('strong', { text: decimal(a.amount, meta?.decimals || 0) }), el('small', { text: meta ? (meta.decimals ? meta.decimals + ' decimals' : 'Whole units') : 'Raw units · metadata unavailable' })), send);
+  });
+  q('[data-asset-list]').replaceChildren(...(rows.length ? rows : [el('div', { class: 'wallet-empty', text: search ? 'No tokens match your search.' : 'No tokens in this wallet yet. Your ERG balance is shown above.' })]));
+  const prev = el('button', { class: 'btn btn--sm', type: 'button', text: 'Previous', disabled: assetPage === 0, onclick: () => { assetPage--; renderAssets(); } });
+  const next = el('button', { class: 'btn btn--sm', type: 'button', text: 'Next', disabled: assetPage + 1 >= pages, onclick: () => { assetPage++; renderAssets(); } });
+  q('[data-asset-pages]').replaceChildren(el('span', { text: list.length ? (assetPage * PAGE_SIZE + 1) + '–' + Math.min((assetPage + 1) * PAGE_SIZE, list.length) + ' of ' + list.length : '0 assets' }), prev, next);
+}
+
+async function refreshActivity(epoch = generation) {
+  const page = activityPage;
+  const res = await api.wallet.transactions(page * PAGE_SIZE, PAGE_SIZE);
+  if (epoch !== generation || page !== activityPage || !walletStatus?.isUnlocked) return;
+  const body = q('[data-activity-body]');
+  if (!res.ok) { body.replaceChildren(el('p', { class: 'wb-note', text: res.data?.detail || res.reason || 'Activity unavailable.' })); return; }
+  const items = res.data.items || [];
+  const signature = JSON.stringify([page, res.data]);
+  if (body.dataset.signature === signature && body.childElementCount) return;
+  body.dataset.signature = signature;
+  const rows = items.map(t => el('div', { class: 'wallet-activity-row' },
+    el('a', { class: 'wallet-activity-id', href: '#explorer/tx/' + t.txId, text: truncMiddle(t.txId, 18, 12), title: t.txId }),
+    el('span', { text: 'Block ' + num(t.blockHeight) }),
+    el('span', { text: t.walletInputBoxIds.length + ' wallet inputs · ' + t.walletOutputBoxIds.length + ' wallet outputs' }),
+    el('a', { href: '#explorer/tx/' + t.txId, text: 'Details ↗' })));
+  body.replaceChildren(el('p', { class: 'wb-note', text: 'Confirmed transactions involving this wallet. Open details for inputs, outputs and fees; search indexing may still be catching up.' }),
+    ...rows, ...(rows.length ? [] : [el('div', { class: 'wallet-empty', text: 'No confirmed wallet transactions on this page.' })]),
+    el('div', { class: 'wallet-pagination' }, el('span', { text: num(res.data.total) + ' transactions' }),
+      el('button', { class: 'btn btn--sm', type: 'button', text: 'Previous', disabled: !page, onclick: () => { activityPage--; refreshActivity(); } }),
+      el('button', { class: 'btn btn--sm', type: 'button', text: 'Next', disabled: (page + 1) * PAGE_SIZE >= res.data.total, onclick: () => { activityPage++; refreshActivity(); } })));
 }
 
 // Sweep matured miner-reward boxes into the wallet address (EIP-27-correct:
@@ -441,41 +516,46 @@ async function retrieveMaturedRewards() {
   refreshBalances();
 }
 
-async function refreshAddresses() {
+async function refreshAddresses(epoch = generation) {
   const res = await api.wallet.addresses();
-  if (res.status === 403) return;
+  if (epoch !== generation || res.status === 403) return;
   const body = q('[data-addresses-body]');
-  const right = q('[data-addresses-right]');
-  if (!res.ok) {
-    right.textContent = '';
-    body.replaceChildren(el('div', { class: 'muted', text: res.reason || `addresses unavailable (${res.status})` }));
-    return;
-  }
+  if (!res.ok) { body.replaceChildren(el('p', { class: 'wb-note', text: res.reason || 'Addresses unavailable.' })); return; }
   const list = res.data || [];
-  right.textContent = String(list.length);
+  q('[data-addresses-right]').textContent = list.length + ' tracked';
   populateChangeSelect(list);
-  if (!list.length) {
-    body.replaceChildren(el('div', { class: 'muted', text: 'no addresses' }));
-    return;
-  }
-  const wrap = el('div', { class: 'w-list' });
-  for (const addr of list) wrap.append(el('div', { class: 'w-addr', text: addr }));
-  body.replaceChildren(wrap);
+  // Keep copy feedback/focus stable during background polling.
+  const signature = JSON.stringify([list, walletStatus?.changeAddress]);
+  if (body.dataset.addressSignature === signature && body.childElementCount) return;
+  body.dataset.addressSignature = signature;
+  body.replaceChildren(el('p', { class: 'wb-note', text: 'Use a tracked address below to receive ERG or tokens on this node’s network. Copy the full address and verify it in the sending wallet.' }),
+    ...list.map((addr, i) => el('div', { class: 'wallet-receive-card' },
+      el('div', { class: 'wb-heading' }, el('strong', { text: 'Address ' + (i + 1) }), el('span', { class: 'pill', text: addr === walletStatus?.changeAddress ? 'Current change address' : 'Tracked address' })),
+      el('code', { class: 'wallet-receive-address', text: addr }),
+      el('div', { class: 'wb-actions' }, addressCopyButton(addr), el('a', { class: 'btn btn--sm', href: '#explorer/address/' + addr, text: 'View in explorer ↗' })))));
+  if (!list.length) body.append(el('p', { class: 'wb-note', text: 'No tracked addresses. Create one from Manage.' }));
+}
+
+function addressCopyButton(address) {
+  const button = el('button', { class: 'btn', type: 'button', text: 'Copy address' });
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(address);
+      button.textContent = 'Address copied';
+    } catch { button.textContent = 'Select the address to copy manually'; }
+    setTimeout(() => { button.textContent = 'Copy address'; }, 2000);
+  });
+  return button;
 }
 
 // ── onboarding: init / restore ───────────────────────────────────────────────
 function setOnboarding(on) {
-  q('[data-onboard-panel]').hidden = !on;
+  q('[data-onboard-panel]').hidden = on === false;
   q('[data-status-panel]').hidden = on;
-  q('[data-balances-panel]').hidden = on;
-  q('[data-addresses-panel]').hidden = on;
-  q('[data-send-panel]').hidden = on;
-  if (on) {
-    sendRendered = keysRendered = unlockRendered = false;
-    q('[data-keys-panel]').hidden = true;
-  } else {
-    onboardRendered = false;
-  }
+  q('[data-wallet-tabs]').hidden = on;
+  for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = on || panel.dataset.walletView !== activeTab;
+  if (on) { keysRendered = unlockRendered = false; }
+  else onboardRendered = false;
 }
 
 function showOnboard() {
@@ -652,367 +732,19 @@ function buildRestoreForm() {
 
 // ── send payment ─────────────────────────────────────────────────────────────
 function showSendPanel() {
-  if (sendRendered) return;
-  buildSendForm();
-  sendRendered = true;
-}
-
-function setSendEnabled(unlocked) {
-  const panel = q('[data-send-panel]');
-  const btn = q('[data-send-submit]');
-  const note = q('[data-send-locked]');
-  if (panel) panel.classList.toggle('w-panel--locked', !unlocked);
-  if (btn) btn.disabled = !unlocked;
-  if (note) note.hidden = unlocked;
-}
-
-function showSendMsg(kind, text) {
-  const m = q('[data-send-msg]');
-  if (!m) return;
-  m.className = `banner banner--${kind}`;
-  m.textContent = text;
-  m.hidden = false;
-}
-
-function buildSendForm() {
-  const body = q('[data-send-body]');
-  body.replaceChildren();
-  const rows = el('div', { 'data-send-rows': true, class: 'w-list' }, recipientRow());
-  const addBtn = el('button', { class: 'btn', type: 'button', text: '+ recipient', onclick: () => rows.append(recipientRow()) });
-  const submit = el('button', { 'data-send-submit': true, class: 'btn btn--primary', type: 'button', text: 'Review & send', onclick: onReviewSend });
-  const locked = el('div', { 'data-send-locked': true, class: 'muted', hidden: true, text: 'Unlock the wallet to send.' });
-  const msg = el('div', { 'data-send-msg': true, class: 'banner', hidden: true });
-  body.append(rows, el('div', { class: 'w-row' }, addBtn, submit), locked, msg);
-}
-
-function recipientRow() {
-  const addr = el('input', {
-    class: 'input w-r-addr',
-    'data-r-addr': true,
-    placeholder: 'recipient address (9…)',
-    autocomplete: 'off',
-    spellcheck: 'false',
+  if (builder) return;
+  const key = getApiKey(), epoch = generation;
+  builder = createWalletBuilder(q('[data-send-body]'), {
+    api: api.wallet,
+    active: () => epoch === generation && key === getApiKey() && !q('[data-wallet-app]').hidden,
+    onBusy: busy => { submitInFlight = busy; },
+    onSent: () => refresh(),
   });
-  const value = el('input', {
-    class: 'input w-r-value',
-    'data-r-value': true,
-    placeholder: 'amount (ERG)',
-    inputmode: 'decimal',
-    autocomplete: 'off',
-  });
-  const sending = el('div', { class: 'w-tokens', 'data-tokens-sending': true });
-  const available = el('div', { class: 'w-token-avail', 'data-tokens-available': true, hidden: true });
-  const addTok = el('button', {
-    class: 'btn btn--sm',
-    type: 'button',
-    'data-add-token': true,
-    text: 'Add token',
-    onclick: (ev) => {
-      const recipient = ev.target.closest('[data-recipient]');
-      const panel = recipient.querySelector('[data-tokens-available]');
-      const open = panel.hidden;
-      panel.hidden = !open;
-      if (open) rebuildAvailablePanel(recipient);
-    },
-  });
-  const remove = el('button', {
-    class: 'btn btn--sm',
-    type: 'button',
-    text: 'remove recipient',
-    onclick: (ev) => ev.target.closest('[data-recipient]').remove(),
-  });
-  return el(
-    'div',
-    { class: 'w-recipient', 'data-recipient': true },
-    el('div', { class: 'w-row' }, addr, remove),
-    el('div', { class: 'w-row' }, value),
-    sending,
-    el('div', { class: 'w-row' }, addTok),
-    available,
-  );
-}
-
-function tokenDisplayName(tokenId) {
-  return tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
-}
-
-function sendingLabel(tokenId) {
-  const name = tokenName(tokenId);
-  const shortId = truncMiddle(tokenId, 8, 6);
-  return name ? `${name} · ${shortId}` : shortId;
-}
-
-function availableLabel(a) {
-  return `${tokenDisplayName(a.tokenId)} · avail ${tokenAmt(a.tokenId, a.amount)}`;
-}
-
-function allocatedIds(recipientEl) {
-  return new Set(
-    Array.from(recipientEl.querySelectorAll('[data-token][data-token-id]')).map((n) => n.getAttribute('data-token-id')),
-  );
-}
-
-function availableAssetsFor(recipientEl) {
-  const skip = allocatedIds(recipientEl);
-  return myAssets.filter((a) => a.tokenId && !skip.has(a.tokenId));
-}
-
-function rebuildAvailablePanel(recipientEl) {
-  const panel = recipientEl.querySelector('[data-tokens-available]');
-  if (!panel || panel.hidden) return;
-  panel.replaceChildren();
-  if (!tokenMetaReady) {
-    panel.append(el('div', { class: 'muted', text: 'Loading token names…' }));
-    return;
-  }
-  if (!myAssets.length) {
-    panel.append(el('div', { class: 'muted', text: 'No tokens in this wallet' }));
-    return;
-  }
-  const list = availableAssetsFor(recipientEl);
-  if (!list.length) {
-    panel.append(el('div', { class: 'muted', text: 'All tokens already added to this recipient' }));
-    return;
-  }
-  for (const a of list) {
-    panel.append(
-      el('button', {
-        class: 'btn btn--sm w-token-avail__row',
-        type: 'button',
-        'data-avail-token': a.tokenId,
-        text: availableLabel(a),
-        title: a.tokenId,
-        onclick: () => allocateToken(recipientEl, a.tokenId),
-      }),
-    );
-  }
-}
-
-function allocateToken(recipientEl, tokenId) {
-  if (allocatedIds(recipientEl).has(tokenId)) return;
-  recipientEl.querySelector('[data-tokens-sending]').append(allocatedTokenRow(tokenId));
-  const panel = recipientEl.querySelector('[data-tokens-available]');
-  panel.hidden = true;
-}
-
-function fillMaxForToken(tokenId, amtInput) {
-  const a = myAssets.find((x) => x.tokenId === tokenId);
-  if (!a) return;
-  amtInput.value = maxDecimalString(a.amount, getDecimals(tokenId));
-}
-
-function markStaleIfNeeded(row, tokenId) {
-  const stale = row.querySelector('.w-token__stale');
-  const gone = !myAssets.some((a) => a.tokenId === tokenId);
-  if (stale) stale.hidden = !gone;
-}
-
-function allocatedTokenRow(tokenId) {
-  const label = el('span', { class: 'w-token__label', text: sendingLabel(tokenId), title: tokenId });
-  const stale = el('span', { class: 'muted w-token__stale', hidden: true, text: 'no longer in wallet balance' });
-  const amt = el('input', {
-    class: 'input w-t-amt',
-    'data-t-amt': true,
-    placeholder: 'amount',
-    inputmode: 'decimal',
-    autocomplete: 'off',
-  });
-  const maxBtn = el('button', {
-    class: 'btn btn--sm',
-    type: 'button',
-    text: 'max',
-    title: 'Fill the full available balance',
-    onclick: () => fillMaxForToken(tokenId, amt),
-  });
-  const rm = el('button', {
-    class: 'btn btn--sm',
-    type: 'button',
-    text: '×',
-    onclick: (ev) => {
-      const recipient = ev.target.closest('[data-recipient]');
-      ev.target.closest('[data-token]').remove();
-      rebuildAvailablePanel(recipient);
-    },
-  });
-  // Single-unit holdings (NFTs / amount === 1): there is nothing to choose —
-  // prefill max so the operator only confirms, not types "1".
-  const held = myAssets.find((x) => x.tokenId === tokenId);
-  if (held && held.amount === 1) fillMaxForToken(tokenId, amt);
-  const row = el('div', { class: 'w-token w-row', 'data-token': true, 'data-token-id': tokenId }, label, stale, amt, maxBtn, rm);
-  markStaleIfNeeded(row, tokenId);
-  return row;
-}
-
-function syncTokenPickers() {
-  if (!root) return;
-  for (const recipient of root.querySelectorAll('[data-recipient]')) {
-    rebuildAvailablePanel(recipient);
-    for (const row of recipient.querySelectorAll('[data-token][data-token-id]')) {
-      const tokenId = row.getAttribute('data-token-id');
-      markStaleIfNeeded(row, tokenId);
-      const label = row.querySelector('.w-token__label');
-      if (label && tokenMetaReady) label.textContent = sendingLabel(tokenId);
-    }
-  }
-}
-
-// Parse recipient rows into the /wallet/payment/send body. Amounts are parsed
-// with exact BigInt arithmetic (decimal-aware per-token, via each token's
-// resolved EIP-4 decimals) and rejected if they exceed the safe JSON integer
-// range (the wire format is a JSON number), so nothing is silently corrupted
-// by float math.
-function collectRequests() {
-  const recipients = Array.from(root.querySelectorAll('[data-recipient]'));
-  if (!recipients.length) return { error: 'Add at least one recipient.' };
-  const requests = [];
-  let totalNano = 0n;
-  // Requested total per tokenId across the WHOLE send (every recipient), so
-  // a user splitting one token across several recipients still gets an
-  // honest over-balance warning instead of finding out only after a server
-  // round trip.
-  const tokenTotals = new Map();
-  for (const [i, row] of recipients.entries()) {
-    const address = row.querySelector('[data-r-addr]').value.trim();
-    const ergStr = row.querySelector('[data-r-value]').value.trim();
-    if (!address) return { error: `Recipient ${i + 1}: address is required.` };
-    let value;
-    try {
-      value = nanoErgFromDecimal(ergStr);
-    } catch {
-      return { error: `Recipient ${i + 1}: enter a valid ERG amount (max 9 decimals).` };
-    }
-    if (value <= 0n) return { error: `Recipient ${i + 1}: amount must be greater than 0.` };
-    if (value > MAX_SAFE) return { error: `Recipient ${i + 1}: amount is too large to submit safely.` };
-    totalNano += value;
-    const assets = [];
-    for (const [j, t] of Array.from(row.querySelectorAll('[data-token]')).entries()) {
-      const tokenId = (t.getAttribute('data-token-id') || '').trim();
-      const amtStr = t.querySelector('[data-t-amt]').value.trim();
-      if (!tokenId && !amtStr) continue;
-      if (!tokenId) return { error: `Recipient ${i + 1}, token ${j + 1}: token is required.` };
-      if (!/^[0-9a-fA-F]{64}$/.test(tokenId)) {
-        return { error: `Recipient ${i + 1}, token ${j + 1}: tokenId must be a 64-char hex id.` };
-      }
-      const decimals = getDecimals(tokenId);
-      let amount;
-      try {
-        amount = parseTokenAmount(amtStr, decimals);
-      } catch (e) {
-        return { error: `Recipient ${i + 1}, token ${j + 1}: ${e.message}.` };
-      }
-      if (amount <= 0n) return { error: `Recipient ${i + 1}, token ${j + 1}: amount must be greater than 0.` };
-      if (amount > MAX_SAFE) {
-        return { error: `Recipient ${i + 1}, token ${j + 1}: amount is too large to submit safely.` };
-      }
-      tokenTotals.set(tokenId, (tokenTotals.get(tokenId) || 0n) + amount);
-      assets.push({ tokenId, amount: Number(amount) });
-    }
-    requests.push({ address, value: Number(value), assets });
-  }
-  // Best-effort over-balance check against the last-known wallet snapshot —
-  // a UX nicety, not a security boundary (the server has the true balance).
-  for (const [tokenId, total] of tokenTotals) {
-    const owned = myAssets.find((a) => a.tokenId === tokenId);
-    if (owned && Number.isSafeInteger(owned.amount) && total > BigInt(owned.amount)) {
-      const d = getDecimals(tokenId);
-      const label = tokenName(tokenId) || truncMiddle(tokenId, 8, 6);
-      return {
-        error: `${label}: requesting ${d > 0 ? decimalize(Number(total), d) : total.toString()}, but the wallet holds only ${tokenAmt(tokenId, owned.amount)}.`,
-      };
-    }
-  }
-  return { requests, totalNano };
-}
-
-function onReviewSend() {
-  const m = q('[data-send-msg]');
-  if (m) m.hidden = true;
-  const { requests, totalNano, error } = collectRequests();
-  if (error) {
-    showSendMsg('err', error);
-    return;
-  }
-  showConfirm(requests, totalNano);
-}
-
-function showConfirm(requests, totalNano) {
-  const lines = el('div', { class: 'kv' });
-  for (const req of requests) {
-    const addrText = el('span', { class: 'v--hash', text: truncMiddle(req.address, 10, 8) });
-    const k = el('div', { class: 'k', style: 'display:flex;align-items:center;gap:6px' }, addrText, copyBtn(req.address));
-    k.title = req.address;
-    const valueCell = el('div', { class: 'v' }, el('div', { text: `${erg(req.value)} ERG` }));
-    if (req.assets.length) {
-      const assetList = el('ul', { class: 'w-confirm-assets' });
-      for (const a of req.assets) {
-        assetList.append(
-          el('li', {
-            text: `${sendingLabel(a.tokenId)} · ${tokenAmt(a.tokenId, a.amount)}`,
-            title: a.tokenId,
-          }),
-        );
-      }
-      valueCell.append(assetList);
-    }
-    lines.append(k, valueCell);
-  }
-  const dlg = el('dialog', { class: 'dialog' });
-  const form = el(
-    'form',
-    { method: 'dialog', class: 'dialog__body' },
-    el('h3', { class: 'micro-label', text: 'Confirm payment' }),
-    el('div', { class: 'muted', text: `${requests.length} recipient${requests.length > 1 ? 's' : ''} · total ${erg(totalNano)} ERG (plus network fee)` }),
-    lines,
-    el(
-      'div',
-      { class: 'dialog__actions' },
-      el('button', { class: 'btn', value: 'cancel', type: 'submit', text: 'Cancel' }),
-      el('button', { class: 'btn btn--primary', value: 'confirm', type: 'submit', text: 'Confirm send' }),
-    ),
-  );
-  dlg.append(form);
-  document.body.append(dlg);
-  confirmDlg = dlg;
-  dlg.addEventListener('close', () => {
-    confirmDlg = null;
-    if (dlg.returnValue === 'confirm') doSend(requests);
-    dlg.remove();
-  });
-  dlg.showModal();
-}
-
-async function doSend(requests) {
-  const btn = q('[data-send-submit]');
-  if (btn) btn.disabled = true;
-  submitInFlight = true;
-  showSendMsg('info', 'Building, signing and submitting — this can take a few seconds…');
-  const res = await api.wallet.send(requests);
-  submitInFlight = false;
-  if (res.status === 403) return;
-  if (res.ok) {
-    const txId = res.data && res.data.txId;
-    // Rebuild the form so the same draft can't be resubmitted, then re-show
-    // the success message (buildSendForm replaces the message element).
-    buildSendForm();
-    setSendEnabled(true);
-    showSendMsg('ok', `Submitted. txId: ${txId || ''}`);
-  } else {
-    // Prefer `detail` (e.g. "transaction rejected: output N: box size …") over the
-    // opaque `reason` code (`bad_request`) — same pattern as retrieve-rewards.
-    const reason = res.reason || `send failed (${res.status})`;
-    const detail = res.data && res.data.detail;
-    if (reason === 'wallet_locked') {
-      showSendMsg('err', 'Wallet is locked — unlock it above and try again. Your draft is preserved.');
-    } else {
-      showSendMsg('err', `Send failed: ${detail || reason}`);
-    }
-    if (btn) btn.disabled = false;
-  }
+  builder.update(walletBalance, walletStatus);
 }
 
 // ── keys: derive + change address ────────────────────────────────────────────
 function showKeysPanel() {
-  q('[data-keys-panel]').hidden = false;
   if (keysRendered) return;
   buildKeysForm();
   keysRendered = true;
@@ -1029,18 +761,22 @@ function showKeyMsg(sel, kind, text) {
 function buildKeysForm() {
   const body = q('[data-keys-body]');
   body.replaceChildren();
-  const deriveBtn = el('button', { class: 'btn', type: 'button', text: 'Derive next key', onclick: deriveNextKey });
+  const deriveBtn = el('button', { class: 'btn', type: 'button', text: 'Create receiving address', onclick: deriveNextKey });
   const deriveMsg = el('div', { 'data-derive-msg': true, class: 'banner', hidden: true });
   const select = el('select', { 'data-change-select': true, class: 'select' });
   const changeBtn = el('button', { class: 'btn', type: 'button', text: 'Set change address', onclick: updateChangeAddress });
   const changeMsg = el('div', { 'data-change-msg': true, class: 'banner', hidden: true });
   body.append(
-    el('div', { class: 'w-label', text: 'Derive a new address' }),
+    el('p', { class: 'wb-note', text: 'Create tracked receiving addresses and choose where transaction change returns. Changes here affect future builds.' }),
+    el('div', { class: 'w-label', text: 'Create another receiving address' }),
     el('div', { class: 'w-row' }, deriveBtn),
     deriveMsg,
     el('div', { class: 'w-label', text: 'Change address (must be a tracked address)' }),
     el('div', { class: 'w-row' }, select, changeBtn),
     changeMsg,
+    el('div', { class: 'wallet-management-rewards' }, el('h3', { text: 'Mining rewards' }),
+      el('p', { class: 'wb-note', text: 'Collect matured rewards into your wallet. Preview shows the fee, required re-emission payment, and amount you receive before confirmation.' }),
+      el('button', { class: 'btn', type: 'button', text: 'Preview reward retrieval', onclick: retrieveMaturedRewards })),
   );
 }
 
@@ -1083,31 +819,27 @@ function populateChangeSelect(list) {
 
 // ── refresh ──────────────────────────────────────────────────────────────────
 async function refresh() {
-  if (!root || q('[data-wallet-app]').hidden) return;
-  const res = await api.wallet.status();
-  if (res.status === 403) return; // auth subscription re-prompts
-  if (!res.ok) {
-    q('[data-status-body]').replaceChildren(
-      el('div', { class: 'muted', text: res.status === 0 ? 'Node unreachable — retrying…' : `/wallet/status returned ${res.status} (${res.reason || 'error'}).` }),
-    );
-    return;
-  }
-  const s = res.data;
-  renderScanBanner(s);
-  if (!s.isInitialized) {
-    setOnboarding(true);
-    showOnboard();
-    return;
-  }
-  setOnboarding(false);
-  renderStatusPanel(s);
-  showSendPanel();
-  setSendEnabled(s.isUnlocked);
-  if (s.isUnlocked) {
-    refreshBalances();
-    refreshAddresses();
-    showKeysPanel();
-  } else {
-    lockedNotes();
-  }
+  if (!root || q('[data-wallet-app]').hidden || refreshing) return;
+  refreshing = true;
+  const epoch = generation;
+  try {
+    const res = await api.wallet.status();
+    if (epoch !== generation || res.status === 403) return;
+    if (!res.ok) {
+      builder?.update(walletBalance, { ...walletStatus, isUnlocked: false });
+      walletStatus = null; unlockRendered = false;
+      q('[data-status-body]').replaceChildren(el('p', { class: 'banner banner--warn', text: 'Wallet status unavailable. Reconnecting…' }));
+      return;
+    }
+    walletStatus = res.data;
+    renderScanBanner(walletStatus);
+    if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }
+    setOnboarding(false); renderStatusPanel(walletStatus);
+    if (walletStatus.isUnlocked) {
+      showSendPanel(); showKeysPanel(); builder.update(walletBalance, walletStatus);
+      await Promise.all([refreshBalances(epoch), refreshAddresses(epoch), ...(activeTab === 'activity' ? [refreshActivity(epoch)] : [])]);
+    } else {
+      lockedNotes();
+    }
+  } finally { refreshing = false; }
 }

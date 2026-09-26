@@ -84,7 +84,7 @@ async function walletReq(path, opts = {}) {
   const key = getApiKey();
   if (key) headers['api_key'] = key;
   try {
-    const r = await fetch(path, { cache: 'no-store', ...opts, headers });
+    const r = await fetch(path, { cache: 'no-store', ...(opts.method ? {} : { signal: AbortSignal.timeout(12000) }), ...opts, headers });
     let data = null;
     let reason = null;
     const text = await r.text();
@@ -97,6 +97,7 @@ async function walletReq(path, opts = {}) {
       }
     }
     report(r.status, true, key, data?.reason);
+    if (key !== getApiKey()) return { ok: false, status: 0, data: null, reason: 'Authorization changed. Try again.' };
     return { ok: r.ok, status: r.status, data, reason };
   } catch (e) {
     return { ok: false, status: 0, data: null, reason: String(e) };
@@ -157,6 +158,11 @@ export const api = {
     unlock: (pass) => walletPost('/wallet/unlock', { pass }),
     lock: () => walletReq('/wallet/lock'),
     balances: () => walletReq('/wallet/balances'),
+    balance: () => walletReq('/api/v1/wallet/balance?includeUnconfirmed=true'),
+    transactions: (offset = 0, limit = 12) => walletReq(`/api/v1/wallet/transactions?offset=${offset}&limit=${limit}`),
+    build: (intent) => walletPost('/api/v1/wallet/transactions/build', intent),
+    sign: (unsignedTransaction) => walletPost('/api/v1/wallet/transactions/sign', { unsignedTransaction }),
+    submitSigned: (signedTransaction) => walletPost('/api/v1/wallet/transactions/send', { type: 'signed', signedTransaction }),
     addresses: () => walletReq('/wallet/addresses'),
     deriveNextKey: () => walletReq('/wallet/deriveNextKey'),
     updateChangeAddress: (address) => walletPost('/wallet/updateChangeAddress', { address }),
