@@ -56,7 +56,6 @@ use ergo_sync::coordinator::Action;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use super::peer_actions::flush_actions;
 use super::NodeState;
 
 /// The action loop's half of the off-loop mining wiring: a `MiningHandle`
@@ -415,26 +414,6 @@ pub(super) fn signal_mining_engine(
     now
 }
 
-/// Announce accepted devnet blocks immediately, including height one.
-/// An empty Scala peer cannot consume a genesis header via its SyncV2
-/// continuation shortcut, which requires an already-stored parent.
-fn devnet_header_inventory(network: ergo_chain_spec::Network, id: [u8; 32]) -> Option<Vec<u8>> {
-    if network != ergo_chain_spec::Network::Devnet {
-        return None;
-    }
-    let inventory = ergo_p2p::types::InvData {
-        type_id: ergo_p2p::types::ModifierTypeId::Header.as_byte(),
-        ids: vec![id],
-    };
-    match ergo_p2p::message::serialize_inv(&inventory) {
-        Ok(payload) => Some(payload),
-        Err(error) => {
-            warn!(%error, "devnet: failed to serialize mined header inventory");
-            None
-        }
-    }
-}
-
 /// Skips everything (and replies `Unavailable`) when `mining_handle`
 /// is `None` — defensive guard for the case where the channel sender
 /// leaks past the configured-disabled gate (the bridge isn't built
@@ -703,9 +682,8 @@ pub(super) fn handle_mining_request(
                 return;
             }
             // 4. Drive validation + apply through the executor's
-            //    AssembleBlock path. Returns follow-up actions
-            //    (Send / Penalize); mining doesn't trigger network
-            //    I/O so any follow-ups are discarded.
+            //    AssembleBlock path. Route follow-up actions through the
+            //    same outbound dispatch used by peer-received blocks.
             let rescan_guard = crate::wallet_boot::ProdRescanGuard;
             let wallet_wiring =
                 state
@@ -722,37 +700,14 @@ pub(super) fn handle_mining_request(
                 Instant::now(),
                 wallet_wiring,
             );
-            // Best-effort routing: peer messages emitted as side-
-            // effects (e.g. Inv broadcasts from a downstream chain
-            // hook) ride the same dispatch the event-batch path
-            // uses.
-            flush_actions(state, follow_ups);
-
-            // 5. Confirm the new tip is what we just applied. If
-            //    the executor's apply path failed or the block was
-            //    rejected, best_full_block_height won't have
-            //    advanced and we surface a generic Internal error.
-            let new_tip = state.store.chain_state_meta().best_full_block_id;
-            if new_tip == header_id {
-                if let Some(payload) = devnet_header_inventory(handle.network(), header_id) {
-                    let actions = state
-                        .registry
-                        .peers
-                        .keys()
-                        .copied()
-                        .map(|peer| Action::SendToPeer {
-                            peer,
-                            code: ergo_p2p::message::CODE_INV,
-                            payload: payload.clone(),
-                        })
-                        .collect();
-                    flush_actions(state, actions);
-                }
+            // Relay only after successful apply, excluding local feedback from
+            // the remote drain before flushing any follow-up actions.
+            if super::block_relay::relay_local_apply(state, header_id, follow_ups) {
                 let _ = reply.send(Ok(()));
             } else {
                 warn!(
                     expected = %hex::encode(header_id),
-                    observed = %hex::encode(new_tip),
+                    observed = %hex::encode(state.store.chain_state_meta().best_full_block_id),
                     "mining: block submission did not advance tip — likely validation rejection downstream",
                 );
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(
@@ -772,24 +727,6 @@ mod tests {
     use super::*;
 
     // ----- happy path -----
-
-    #[test]
-    fn devnet_mined_header_inventory_announces_header() {
-        let payload = devnet_header_inventory(ergo_chain_spec::Network::Devnet, [7; 32]).unwrap();
-        let inv = ergo_p2p::message::deserialize_inv(&payload).unwrap();
-        assert_eq!(inv.type_id, 101);
-        assert_eq!(inv.ids, vec![[7; 32]]);
-    }
-
-    #[test]
-    fn public_networks_devnet_inventory_is_absent() {
-        for network in [
-            ergo_chain_spec::Network::Mainnet,
-            ergo_chain_spec::Network::Testnet,
-        ] {
-            assert!(devnet_header_inventory(network, [7; 32]).is_none());
-        }
-    }
 
     #[test]
     fn mempool_refresh_due_when_never_fired() {

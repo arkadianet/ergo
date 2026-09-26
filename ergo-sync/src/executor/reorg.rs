@@ -184,18 +184,6 @@ impl SyncExecutor {
         }
     }
 
-    /// Try to apply the next sequential block(s) directly from the store.
-    /// Uses the in-memory header_index for O(1) height→header_id lookups.
-    /// Applies as many consecutive blocks as possible in one tick.
-    /// Drain pending block applies in a tight loop until no progress is made.
-    ///
-    /// Emits no entries to the action transcript by design: every effect is
-    /// a state mutation on `SyncCoordinator` (`sync_state.best_full_block`,
-    /// `assembly`) observable via getters. Spec §3's "ordered emission,
-    /// testable" property covers transcript-emitted variants
-    /// (`SendToPeer`/`Penalize`/`PersistSection`/`AssembleBlock`); chained
-    /// block-apply is a state event, not an external effect. Returning
-    /// `()` rather than `Vec<Action>` keeps that contract honest.
     /// Shared apply-failure handler for a block `process_block` rejected.
     ///
     /// A definitive validation verdict ([`is_validation_verdict`]) means the
@@ -261,6 +249,9 @@ impl SyncExecutor {
         }
     }
 
+    /// Apply consecutive stored blocks until no progress can be made.
+    /// Records successful ids in height order for `take_applied_blocks`;
+    /// rollback itself records nothing. Callers drain feedback after the batch.
     pub fn try_apply_next_blocks(
         &mut self,
         store: &mut ergo_state::StateBackendKind,
@@ -404,6 +395,7 @@ impl SyncExecutor {
                     guard.success(processed.height);
                     self.update_block_context_cache(&processed);
                     coordinator.on_block_applied(processed.header_id, processed.height);
+                    self.record_applied_block(processed.header_id);
                     progressed = true;
                     if processed.height % 100 == 0 {
                         info!(height = processed.height, "block applied");

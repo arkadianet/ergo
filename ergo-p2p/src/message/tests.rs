@@ -1,6 +1,25 @@
 use super::*;
 use ergo_primitives::vlq::VlqError;
 
+// ----- happy path -----
+
+#[test]
+fn single_modifier_size_boundary_matches_encoder() {
+    let limit = MAX_MODIFIER_WITH_RESERVE - MODIFIERS_HEADER_RESERVE - MODIFIER_ENTRY_RESERVE;
+    for size in [0, limit, limit + 1] {
+        let data = ModifiersData {
+            type_id: ModifierTypeId::ADProofs.as_byte(),
+            modifiers: vec![([1; 32], vec![0; size])],
+        };
+        assert_eq!(
+            single_modifier_fits(size),
+            serialize_modifiers(&data).is_ok(),
+            "section bytes={size}"
+        );
+    }
+    assert!(!single_modifier_fits(usize::MAX));
+}
+
 #[test]
 fn inv_roundtrip() {
     let data = InvData {

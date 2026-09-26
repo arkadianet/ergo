@@ -4450,3 +4450,817 @@ mod post_header_sync {
         }
     }
 }
+
+mod block_relay {
+    use super::super::block_relay::Announcement;
+    use super::*;
+    use ergo_primitives::digest::ModifierId;
+    use ergo_primitives::reader::VlqReader;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::header::{read_header, serialize_header};
+    use ergo_ser::modifier_id::ExpectedSections;
+    use ergo_state::ChainStateRead;
+
+    // ----- helpers -----
+
+    fn wall_clock_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    // Synthetic genesis isolates successful full-block application from PoW.
+    // The executor still parses sections and checks the resulting state root.
+    fn prepare_block(state: &mut NodeState, timestamp: u64) -> ([u8; 32], ExpectedSections) {
+        let store = state.store.as_utxo_mut().unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let (_, bytes) = synthetic_header_with_state_root(1, store.root_digest());
+        let mut header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+        header.timestamp = timestamp;
+        let (bytes, id) = serialize_header(&header).unwrap();
+        let id = *id.as_bytes();
+        let sections = ExpectedSections::from_header(&id, &[0; 32], &[0; 32], &[0; 32]);
+        store
+            .store_validated_header(
+                &id,
+                &bytes,
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: [0; 32],
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        let mut writer = VlqWriter::new();
+        ergo_ser::block_transactions::write_block_transactions(
+            &mut writer,
+            &ergo_ser::block_transactions::BlockTransactions {
+                header_id: ModifierId::from_bytes(id),
+                transactions: vec![ergo_ser::transaction::Transaction {
+                    inputs: vec![],
+                    data_inputs: vec![],
+                    output_candidates: vec![],
+                }],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section_typed(&sections.transactions_id, &writer.result(), 102)
+            .unwrap();
+        let mut writer = VlqWriter::new();
+        ergo_ser::extension::write_extension(
+            &mut writer,
+            &ergo_ser::extension::Extension {
+                header_id: ModifierId::from_bytes(id),
+                fields: vec![],
+            },
+        )
+        .unwrap();
+        store
+            .store_block_section_typed(&sections.extension_id, &writer.result(), 108)
+            .unwrap();
+        (id, sections)
+    }
+
+    fn apply(state: &mut NodeState, id: [u8; 32]) -> Vec<Action> {
+        let actions = state.executor.execute(
+            Action::AssembleBlock { header_id: id },
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, id);
+        actions
+    }
+
+    fn inventories(rx: &mut crate::peer_loop::outbound::Receiver) -> Vec<(u8, Vec<[u8; 32]>)> {
+        let mut result = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            assert_eq!(frame.code, message::CODE_INV);
+            let inv = message::deserialize_inv(&frame.payload).unwrap();
+            result.push((inv.type_id, inv.ids));
+        }
+        result
+    }
+
+    fn prepare_mainnet_catch_up(store: &mut ergo_state::store::StateStore) -> Vec<[u8; 32]> {
+        use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
+        use ergo_ser::extension::{write_extension, Extension, ExtensionField};
+        use ergo_validation::popow::algos::{pack_interlinks, update_interlinks};
+        store
+            .initialize_genesis(&crate::genesis::mainnet_genesis_boxes())
+            .unwrap();
+        let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let txs: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/transactions_1_10.json"
+        ))
+        .unwrap();
+        let mut ids = Vec::new();
+        let mut prev = None;
+        let mut links = Vec::new();
+        for height in 1..=10 {
+            let row = &headers[height - 1];
+            let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+            let id: [u8; 32] = hex::decode(row["id"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+            if let Some(parent) = prev.as_ref() {
+                links = update_interlinks(parent, &links).unwrap();
+            }
+            store
+                .store_validated_header(
+                    &id,
+                    &bytes,
+                    &ergo_state::chain::HeaderMeta {
+                        parent_id: *header.parent_id.as_bytes(),
+                        height: header.height,
+                        cumulative_score: vec![height as u8],
+                        pow_validity: 1,
+                        timestamp: header.timestamp,
+                    },
+                    Some((height as u32, vec![height as u8])),
+                )
+                .unwrap();
+            let tx_row = txs
+                .iter()
+                .find(|t| t["height"].as_u64() == Some(height as u64))
+                .unwrap();
+            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(
+                &hex::decode(tx_row["bytes"].as_str().unwrap()).unwrap(),
+            ))
+            .unwrap();
+            let sections = ExpectedSections::from_header(
+                &id,
+                header.transactions_root.as_bytes(),
+                header.extension_root.as_bytes(),
+                header.ad_proofs_root.as_bytes(),
+            );
+            let mut w = VlqWriter::new();
+            write_block_transactions(
+                &mut w,
+                &BlockTransactions {
+                    header_id: ModifierId::from_bytes(id),
+                    transactions: vec![tx],
+                },
+            )
+            .unwrap();
+            store
+                .store_block_section_typed(&sections.transactions_id, &w.result(), 102)
+                .unwrap();
+            let mut w = VlqWriter::new();
+            write_extension(
+                &mut w,
+                &Extension {
+                    header_id: ModifierId::from_bytes(id),
+                    fields: pack_interlinks(&links)
+                        .into_iter()
+                        .map(|(key, value)| ExtensionField {
+                            key: key.try_into().unwrap(),
+                            value,
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+            store
+                .store_block_section_typed(&sections.extension_id, &w.result(), 108)
+                .unwrap();
+            ids.push(id);
+            prev = Some(header);
+        }
+        ids
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn remote_block_fresh_announces_each_id_to_every_handshaked_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, sections) = prepare_block(&mut state, wall_clock_ms());
+        let mut a = register_connected_peer(&mut state, "10.0.0.1:9001".parse().unwrap());
+        let mut b = register_connected_peer(&mut state, "10.0.0.2:9001".parse().unwrap());
+        state
+            .peer_manager
+            .register_inbound("10.0.0.3:9001".parse().unwrap(), Instant::now())
+            .unwrap();
+        let mut actions = apply(&mut state, id);
+        actions.extend(super::super::block_relay::applied_block_announcements(
+            &mut state, None,
+        ));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, Action::SendToPeer { .. }))
+                .count(),
+            6
+        );
+        let peer_count = state.peer_manager.peer_count();
+        flush_actions(&mut state, actions);
+        assert_eq!(
+            state.peer_manager.peer_count(),
+            peer_count,
+            "inbound-only peer must remain registered"
+        );
+        assert!(
+            state
+                .peer_manager
+                .get(&"10.0.0.3:9001".parse().unwrap())
+                .is_some(),
+            "the inbound-only recipient must still be present after flush"
+        );
+        let expected = vec![
+            (101, vec![id]),
+            (102, vec![sections.transactions_id]),
+            (108, vec![sections.extension_id]),
+        ];
+        assert_eq!(inventories(&mut a), expected);
+        assert_eq!(inventories(&mut b), expected);
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut a).is_empty());
+    }
+
+    #[test]
+    fn remote_block_below_tip_window_sends_no_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let actions = apply(&mut state, id);
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .test_force_set_best_header_unsafe([77; 32], 18, vec![18])
+            .unwrap();
+        flush_actions(&mut state, actions);
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "fresh block 17 below best header must not relay"
+        );
+    }
+
+    #[test]
+    fn relay_flush_pending_persist_failure_next_apply_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let _rx = register_connected_peer(&mut state, test_peer());
+        let actions = apply(&mut state, id);
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .inject_pending_persist_failure_for_test(1);
+        flush_actions(&mut state, actions);
+        let store = state.store.as_utxo_mut().unwrap();
+        let root = store.root_digest();
+        let result = store.apply_block_unchecked_for_test(2, &[88; 32], &root, &[]);
+        assert!(
+            matches!(
+                result,
+                Err(ergo_state::store::StateError::PersistFailed { height: 1, .. })
+            ),
+            "next apply must see pending persist error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn remote_block_sequential_apply_announces_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        state.executor.try_apply_next_blocks(
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, id);
+        flush_actions(&mut state, vec![]);
+        assert_eq!(inventories(&mut rx).len(), 3);
+        let actions = apply(&mut state, id);
+        flush_actions(&mut state, actions);
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn locally_mined_block_applied_announces_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, sections) = prepare_block(&mut state, wall_clock_ms());
+        state
+            .store
+            .store_block_section_typed(&sections.ad_proofs_id, &[1, 2, 3], 104)
+            .unwrap();
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let actions = apply(&mut state, id);
+        assert!(super::super::block_relay::relay_local_apply(
+            &mut state, id, actions
+        ));
+        assert_eq!(
+            inventories(&mut rx),
+            vec![
+                (101, vec![id]),
+                (104, vec![sections.ad_proofs_id]),
+                (102, vec![sections.transactions_id]),
+                (108, vec![sections.extension_id]),
+            ]
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn locally_mined_block_rejected_sends_no_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        assert!(!super::super::block_relay::relay_local_apply(
+            &mut state,
+            id,
+            vec![]
+        ));
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "stored but unapplied local block must not announce"
+        );
+    }
+
+    #[test]
+    fn remote_blocks_real_catch_up_flush_announces_only_near_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let ids = prepare_mainnet_catch_up(state.store.as_utxo_mut().unwrap());
+        state.executor.try_apply_next_blocks(
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        assert_eq!(
+            state.store.chain_state_meta().best_full_block_height,
+            10,
+            "all ten fixture blocks must actually apply: {:?}",
+            state.executor.last_block_apply_error()
+        );
+        let applied = state.executor.take_applied_blocks();
+        assert_eq!(
+            applied, ids,
+            "whole catch-up batch before a single relay flush"
+        );
+        let tip_bytes = state.store.get_header(&ids[9]).unwrap().unwrap();
+        let now_ms = read_header(&mut VlqReader::new(&tip_bytes))
+            .unwrap()
+            .timestamp;
+        // Deterministic historical wall time: all ten fixture blocks are fresh.
+        for id in &ids {
+            let bytes = state.store.get_header(id).unwrap().unwrap();
+            assert!(
+                now_ms - read_header(&mut VlqReader::new(&bytes)).unwrap().timestamp < 7_200_000
+            );
+        }
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .test_force_set_best_header_unsafe([77; 32], 25, vec![25])
+            .unwrap();
+        let (tx, mut rx) =
+            crate::peer_loop::outbound::channel(crate::peer_loop::outbound::MAX_MESSAGES);
+        state.registry.peers.insert(
+            test_peer(),
+            super::super::state::PeerRuntime {
+                sync_version: SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        let actions = super::super::block_relay::remote_announcements(&state, applied, now_ms);
+        flush_actions(&mut state, actions);
+        let announced: Vec<_> = inventories(&mut rx)
+            .into_iter()
+            .filter(|(kind, _)| *kind == 101)
+            .map(|(_, ids)| ids[0])
+            .collect();
+        assert_eq!(
+            announced,
+            ids[8..],
+            "only heights 9 and 10 are within 16 of header tip 25"
+        );
+        assert!(state.executor.take_applied_blocks().is_empty());
+    }
+
+    #[test]
+    fn remote_blocks_catch_up_only_tip_window_fits_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let now = wall_clock_ms();
+        let mut ids = Vec::new();
+        // Simulate the drained feedback of a large catch-up batch. Executor
+        // batch/reorg feedback itself is covered with real blocks in ergo-sync.
+        for height in 1..=600 {
+            let (_, bytes) = synthetic_header_with_state_root(
+                height,
+                ergo_primitives::digest::ADDigest::from_bytes([0; 33]),
+            );
+            let mut header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+            header.timestamp = now;
+            let (bytes, id) = serialize_header(&header).unwrap();
+            let id = *id.as_bytes();
+            state.store.store_header(&id, &bytes).unwrap();
+            let sections = ExpectedSections::from_header(&id, &[0; 32], &[0; 32], &[0; 32]);
+            for (kind, section) in [
+                (104, sections.ad_proofs_id),
+                (102, sections.transactions_id),
+                (108, sections.extension_id),
+            ] {
+                state
+                    .store
+                    .store_block_section_typed(&section, &[kind], kind)
+                    .unwrap();
+            }
+            ids.push(id);
+        }
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .test_force_set_best_header_unsafe(ids[599], 600, vec![1])
+            .unwrap();
+        let (tx, mut rx) =
+            crate::peer_loop::outbound::channel(crate::peer_loop::outbound::MAX_MESSAGES);
+        state.registry.peers.insert(
+            test_peer(),
+            super::super::state::PeerRuntime {
+                sync_version: SyncVersion::V2,
+                outbound_tx: tx,
+            },
+        );
+        let actions = super::super::block_relay::remote_announcements(&state, ids.clone(), now);
+        assert_eq!(actions.len(), 17 * 4, "inclusive tip through tip-16");
+        flush_actions(&mut state, actions);
+        let announced = inventories(&mut rx);
+        let headers: Vec<_> = announced
+            .iter()
+            .filter(|(kind, _)| *kind == 101)
+            .map(|(_, ids)| ids[0])
+            .collect();
+        assert_eq!(headers, ids[583..], "only the last 17 heights may relay");
+        let actions = super::super::block_relay::remote_announcements(
+            &state,
+            ids[584..].iter().copied(),
+            now,
+        );
+        assert_eq!(actions.len(), 16 * 4);
+        assert!(
+            actions.len() < crate::peer_loop::outbound::MAX_MESSAGES / 16,
+            "16-block burst must leave ample queue headroom"
+        );
+    }
+
+    #[test]
+    fn remote_block_freshness_boundary_matches_scala() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let timestamp = 10_000_000;
+        let (id, _) = prepare_block(&mut state, timestamp);
+        let _rx = register_connected_peer(&mut state, test_peer());
+        assert_eq!(
+            super::super::block_relay::block_announcements(&state, id, Announcement::Mined).len(),
+            3
+        );
+        for (now, count) in [
+            (0, 0),
+            (timestamp - 1, 3),
+            (timestamp + 7_199_999, 3),
+            (timestamp + 7_200_000, 0),
+        ] {
+            let actions = super::super::block_relay::block_announcements(
+                &state,
+                id,
+                Announcement::Remote {
+                    now_ms: now,
+                    best_header_height: 1,
+                },
+            );
+            assert_eq!(actions.len(), count, "now={now}");
+        }
+    }
+
+    #[test]
+    fn served_sections_storage_modes_match_request_modifier_handler() {
+        // Includes proof-retaining UTXO, proof-less UTXO, digest, and the
+        // prune/bootstrap sentinel at/below the stored header's height.
+        for digest in [false, true] {
+            for proofs in [false, true] {
+                for sentinel in [1, 10, 11] {
+                    if digest && sentinel != 1 {
+                        continue; // Digest has no configurable pruning window.
+                    }
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut state = if digest {
+                        make_digest_state(&dir.path().join("state.redb"))
+                    } else {
+                        make_state(&dir.path().join("state.redb"))
+                    };
+                    let (id, bytes) = synthetic_header_with_state_root(
+                        10,
+                        ergo_primitives::digest::ADDigest::from_bytes([0; 33]),
+                    );
+                    state.store.store_header(&id, &bytes).unwrap();
+                    let sections = ExpectedSections::from_header(&id, &[0; 32], &[0; 32], &[0; 32]);
+                    let entries = [
+                        (104, sections.ad_proofs_id),
+                        (102, sections.transactions_id),
+                        (108, sections.extension_id),
+                    ];
+                    for (kind, section_id) in entries {
+                        if kind != 104 || proofs {
+                            state
+                                .store
+                                .store_block_section_typed(&section_id, &[kind; 8], kind)
+                                .unwrap();
+                        }
+                    }
+                    let orphan = [99; 32];
+                    state
+                        .store
+                        .store_block_section_typed(&orphan, &[102; 8], 102)
+                        .unwrap();
+                    if let Some(store) = state.store.as_utxo_mut() {
+                        if sentinel > 1 {
+                            store.set_blocks_to_keep(1000);
+                        }
+                        store.write_minimal_full_block_height(sentinel).unwrap();
+                    }
+                    let peer = test_peer();
+                    let mut rx = register_connected_peer(&mut state, peer);
+                    let actions = super::super::block_relay::block_announcements(
+                        &state,
+                        id,
+                        Announcement::Mined,
+                    );
+                    flush_actions(&mut state, actions);
+                    let advertised = inventories(&mut rx);
+                    let expected: Vec<_> = std::iter::once((101, vec![id]))
+                        .chain(
+                            entries
+                                .into_iter()
+                                .filter(|(kind, _)| sentinel <= 10 && (*kind != 104 || proofs))
+                                .map(|(kind, id)| (kind, vec![id])),
+                        )
+                        .collect();
+                    assert_eq!(
+                        advertised, expected,
+                        "digest={digest} proofs={proofs} sentinel={sentinel}"
+                    );
+                    for (kind, section_id) in std::iter::once((101, id)).chain(entries) {
+                        let request = message::serialize_inv(&InvData {
+                            type_id: kind,
+                            ids: vec![section_id],
+                        })
+                        .unwrap();
+                        let actions = handle_message(
+                            &mut state,
+                            peer,
+                            message::CODE_REQUEST_MODIFIER,
+                            &request,
+                            Instant::now(),
+                        );
+                        let advertised_id = advertised.contains(&(kind, vec![section_id]));
+                        assert_eq!(
+                            !actions.is_empty(),
+                            advertised_id,
+                            "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                        );
+                        for action in actions {
+                            let Action::SendToPeer { code, payload, .. } = action else {
+                                panic!("expected served modifier: digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}")
+                            };
+                            assert_eq!(
+                                code,
+                                message::CODE_MODIFIER,
+                                "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                            );
+                            let served = message::deserialize_modifiers(&payload).unwrap();
+                            assert_eq!(
+                                served.type_id, kind,
+                                "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                            );
+                            assert_eq!(
+                                served.modifiers.len(),
+                                1,
+                                "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                            );
+                            assert_eq!(
+                                served.modifiers[0].0, section_id,
+                                "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                            );
+                            let expected_bytes = if kind == 101 {
+                                bytes.clone()
+                            } else {
+                                vec![kind; 8]
+                            };
+                            assert_eq!(
+                                served.modifiers[0].1, expected_bytes,
+                                "digest={digest} proofs={proofs} sentinel={sentinel} kind={kind}"
+                            );
+                        }
+                    }
+                    // A stored section without a header index fails closed when pruned.
+                    let request = message::serialize_inv(&InvData {
+                        type_id: 102,
+                        ids: vec![orphan],
+                    })
+                    .unwrap();
+                    let actions = handle_message(
+                        &mut state,
+                        peer,
+                        message::CODE_REQUEST_MODIFIER,
+                        &request,
+                        Instant::now(),
+                    );
+                    assert_eq!(
+                        actions.is_empty(),
+                        sentinel > 1,
+                        "digest={digest} proofs={proofs} sentinel={sentinel} orphan"
+                    );
+                    assert_eq!(
+                        super::super::section_serving::servable_section(
+                            &state.store,
+                            &orphan,
+                            sentinel
+                        )
+                        .is_none(),
+                        sentinel > 1,
+                        "digest={digest} proofs={proofs} sentinel={sentinel} orphan helper"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn served_sections_mixed_request_returns_only_retained_indexed_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let mut ids = Vec::new();
+        for height in [9, 10] {
+            let (id, bytes) = synthetic_header_with_state_root(
+                height,
+                ergo_primitives::digest::ADDigest::from_bytes([0; 33]),
+            );
+            state.store.store_header(&id, &bytes).unwrap();
+            ids.push(
+                ExpectedSections::from_header(&id, &[0; 32], &[0; 32], &[0; 32]).transactions_id,
+            );
+        }
+        ids.push([99; 32]); // stored, unindexed orphan
+        for id in &ids {
+            state
+                .store
+                .store_block_section_typed(id, &[42], 102)
+                .unwrap();
+        }
+        let store = state.store.as_utxo_mut().unwrap();
+        store.set_blocks_to_keep(1000);
+        store.write_minimal_full_block_height(10).unwrap();
+        let request = message::serialize_inv(&InvData {
+            type_id: 102,
+            ids: ids.clone(),
+        })
+        .unwrap();
+        let actions = handle_message(
+            &mut state,
+            test_peer(),
+            message::CODE_REQUEST_MODIFIER,
+            &request,
+            Instant::now(),
+        );
+        assert_eq!(actions.len(), 1);
+        let Action::SendToPeer { code, payload, .. } = &actions[0] else {
+            panic!("expected modifier response")
+        };
+        assert_eq!(*code, message::CODE_MODIFIER);
+        assert_eq!(
+            message::deserialize_modifiers(payload).unwrap().modifiers,
+            vec![(ids[1], vec![42])]
+        );
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn served_sections_oversized_proof_is_not_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, sections) = prepare_block(&mut state, wall_clock_ms());
+        state
+            .store
+            .store_block_section_typed(&sections.ad_proofs_id, &vec![0; 9 * 1024 * 1024], 104)
+            .unwrap();
+        let peer = test_peer();
+        let mut rx = register_connected_peer(&mut state, peer);
+        let actions =
+            super::super::block_relay::block_announcements(&state, id, Announcement::Mined);
+        flush_actions(&mut state, actions);
+        assert_eq!(
+            inventories(&mut rx),
+            vec![
+                (101, vec![id]),
+                (102, vec![sections.transactions_id]),
+                (108, vec![sections.extension_id]),
+            ]
+        );
+        let request = message::serialize_inv(&InvData {
+            type_id: 104,
+            ids: vec![sections.ad_proofs_id],
+        })
+        .unwrap();
+        let actions = handle_message(
+            &mut state,
+            peer,
+            message::CODE_REQUEST_MODIFIER,
+            &request,
+            Instant::now(),
+        );
+        assert!(
+            actions.is_empty(),
+            "the serving encoder refuses this proof too"
+        );
+    }
+
+    #[test]
+    fn remote_block_unreadable_clock_drains_without_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let _rx = register_connected_peer(&mut state, test_peer());
+        apply(&mut state, id);
+        let broken_clock = std::time::UNIX_EPOCH - Duration::from_secs(1);
+        let actions = super::super::block_relay::applied_block_announcements_at(
+            &mut state,
+            None,
+            broken_clock,
+        );
+        assert!(actions.is_empty(), "unreadable clock must fail closed");
+        assert!(
+            state.executor.take_applied_blocks().is_empty(),
+            "bad clock must not accumulate feedback"
+        );
+    }
+
+    #[test]
+    fn remote_block_old_timestamp_sends_no_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms() - 7_200_001);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let actions = apply(&mut state, id);
+        flush_actions(&mut state, actions);
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn remote_block_unknown_header_sends_no_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let _connected = register_connected_peer(&mut state, "10.0.0.8:9001".parse().unwrap());
+        assert!(super::super::block_relay::block_announcements(
+            &state,
+            [99; 32],
+            Announcement::Remote {
+                now_ms: wall_clock_ms(),
+                best_header_height: 1
+            }
+        )
+        .is_empty());
+        // Advertised id is not an applicable block: no success feedback.
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let actions = state.executor.execute(
+            Action::AssembleBlock {
+                header_id: [99; 32],
+            },
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        assert_ne!(state.store.chain_state_meta().best_full_block_id, id);
+        flush_actions(&mut state, actions);
+        assert!(inventories(&mut rx).is_empty());
+    }
+}
