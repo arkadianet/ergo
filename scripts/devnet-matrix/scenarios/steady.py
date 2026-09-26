@@ -79,7 +79,11 @@ def _observe_window(ctx, blocks, address):
             if applied is None:
                 # Landed in the same reading as the block before it, so
                 # the tree it closed was never sampled. Unread, not zero.
-                observations.append({'height': scanned,
+                # `kind='cadence'`: two Autolykos solutions a fraction of a
+                # second apart (rm-A-steady-armA-4 measured 0.1-0.2 s at
+                # its two occurrences, against 5-45 s elsewhere), not a
+                # read that failed — see the `kind` split in `run()`.
+                observations.append({'height': scanned, 'kind': 'cadence',
                                      'unread': 'no chain snapshot was taken '
                                                'before this block landed'})
                 continue
@@ -95,7 +99,8 @@ def _observe_window(ctx, blocks, address):
                 rust_pool = {t['id'] for t in api('rust', '/transactions/unconfirmed')}
                 scala_pool = {t['id'] for t in api('scala', '/transactions/unconfirmed')}
             except (Unavailable, KeyError, TypeError) as error:
-                observations.append({'height': scanned, 'unread': str(error)})
+                observations.append({'height': scanned, 'kind': 'error',
+                                     'unread': str(error)})
                 continue
             observations.append({
                 'height': scanned, 'ordering_block': header,
@@ -146,11 +151,23 @@ def run(ctx):
     start, reached, observations, sent = _observe_window(ctx, blocks, address)
     readable = [o for o in observations if 'unread' not in o]
     unread = [o['height'] for o in observations if 'unread' in o]
+    # Two different things can leave a block unread. A `cadence` gap is
+    # WindowWalker never getting a pre-image snapshot because the block
+    # landed inside the same ~1 s poll as the one before it (an
+    # occasional pair of Autolykos solutions a fraction of a second
+    # apart, unrelated to either build) — F6 is unmeasured for it, not
+    # wrong. An `error` is a REST call that actually failed while the
+    # host answered everything else — still reportable as a failure, so
+    # it is not folded into the cadence case.
+    cadence_gaps = [o['height'] for o in observations if o.get('kind') == 'cadence']
+    read_errors = [o['height'] for o in observations if o.get('kind') == 'error']
     ctx.note('steady_window', {'start_height': start, 'target': start + blocks,
                                'reached': reached,
                                'short_by': max(0, start + blocks - reached),
                                'blocks_accounted': len(readable),
                                'blocks_unread': unread,
+                               'unread_cadence_gaps': cadence_gaps,
+                               'unread_read_errors': read_errors,
                                'why_unread': {o['height']: o['unread']
                                               for o in observations if 'unread' in o},
                                'payments_submitted': len(sent)})
@@ -159,10 +176,17 @@ def run(ctx):
                  'blocks steady needs (upstream F11 stalls the candidate '
                  'generator); the shortfall is reported, never absorbed',
                  {'start_height': start, 'reached': reached})
-    if unread:
-        ctx.fail(f'{len(unread)} ordering blocks in the window could not be read, '
-                 'so their F6 accounting is missing rather than zero',
-                 {'heights': unread})
+    if read_errors:
+        ctx.fail(f'{len(read_errors)} ordering blocks in the window could not be '
+                 'read due to a REST error, so their F6 accounting is missing '
+                 'rather than zero', {'heights': read_errors})
+    if cadence_gaps:
+        ctx.not_measured(
+            f'{len(cadence_gaps)} ordering blocks landed inside the same ~1 s poll '
+            'as the block before them, so no pre-image chain snapshot exists to '
+            'compute their F6 accounting from — not a failure of either node, and '
+            f'the other {len(readable)} of {len(observations)} blocks in the '
+            'window are unaffected', {'heights': cadence_gaps})
 
     # The verdicts, over EVERY sample the run took.
     smoke.finalize_agreement(ctx.run, ctx.evidence)
