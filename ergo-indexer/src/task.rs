@@ -12,10 +12,12 @@
 //!
 //! Single-step semantics. `step` is the unit of forward progress: it
 //! either applies one block, rolls one block back, sleeps when caught
-//! up, or surfaces a halt/race condition. The async [`IndexerTask::run`]
+//! up, or surfaces a halt/race condition. The blocking [`IndexerTask::run`]
 //! driver loop turns those outcomes into a long-running task — backing
 //! off on section-missing (5 × 1 s), tight-looping while behind, and
 //! idling on `Idle`.
+//! Production uses [`IndexerTask::spawn`] to run this synchronous I/O and
+//! compute work on a dedicated thread, outside the node's async worker pool.
 //!
 //! Rollback is gated on the STATE layer having reorged (its committed
 //! tip lying on the canonical header chain), not on the raw header-chain
@@ -75,7 +77,7 @@ pub trait IndexerChainSource: Send + Sync {
     fn full_block(&self, header_id: &HeaderId) -> Option<IndexerFullBlock>;
 }
 
-/// Outcome of one `step` iteration. The async [`IndexerTask::run`]
+/// Outcome of one `step` iteration. The blocking [`IndexerTask::run`]
 /// driver maps each variant to a sleep / retry / halt decision.
 #[derive(Debug)]
 pub enum IndexerPoll {
@@ -117,6 +119,30 @@ pub struct IndexerTask<C: IndexerChainSource> {
     hold_logged: bool,
 }
 
+/// Owned dedicated indexer thread. Dropping requests cancellation; use
+/// [`Self::join`] to wait for the current atomic step and release worker-owned
+/// database references. Drop alone cannot synchronously drain a blocking step.
+pub struct IndexerWorker {
+    cancel: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IndexerWorker {
+    /// Request cancellation and wait for the worker. This blocks, so async
+    /// callers must join through `spawn_blocking`, not on a runtime worker.
+    pub fn join(mut self) -> std::thread::Result<()> {
+        self.cancel.store(true, Ordering::Release);
+        self.thread.take().expect("owned indexer thread").join()
+    }
+}
+
+impl Drop for IndexerWorker {
+    fn drop(&mut self) {
+        // Also covers partial node boot failure before RunHandle is created.
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
 impl<C: IndexerChainSource> IndexerTask<C> {
     pub fn new(handle: IndexerHandle, chain: Arc<C>) -> Self {
         Self {
@@ -126,6 +152,28 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             cancel: Arc::new(AtomicBool::new(false)),
             hold_logged: false,
         }
+    }
+
+    /// Start a dedicated worker for the node's lifetime. All step/rebuild work
+    /// and idle waits stay on this OS thread; no nested runtime is needed.
+    /// Neither the node's async nor blocking pools are occupied
+    /// by the persistent catch-up loop. Spawn failure propagates to node boot.
+    pub fn spawn(
+        self,
+        cancel: Arc<AtomicBool>,
+        poll_idle: Duration,
+    ) -> std::io::Result<IndexerWorker>
+    where
+        C: 'static,
+    {
+        let worker_cancel = Arc::clone(&cancel);
+        let thread = std::thread::Builder::new()
+            .name("extra-indexer".into())
+            .spawn(move || self.run(worker_cancel, poll_idle))?;
+        Ok(IndexerWorker {
+            cancel,
+            thread: Some(thread),
+        })
     }
 
     /// One poll iteration. Synchronous — does no sleeping itself.
@@ -317,6 +365,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// `true`, halts on terminal errors (sets `IndexerStatus::Halted`
     /// and returns).
     ///
+    /// This method blocks the calling thread. Use [`Self::spawn`] in production;
+    /// never call it directly on a shared async runtime worker.
+    ///
     /// Sleeping policy:
     /// - `Idle`: sleep `poll_idle`.
     /// - `Applied` / `RolledBack`: tight loop (no sleep — backfill
@@ -325,7 +376,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// - `SectionRetry`: 1 s backoff per attempt; halt
     ///   `SectionMissing` after [`MAX_SECTION_RETRIES`].
     /// - `Halted`: set status, exit.
-    pub async fn run(mut self, cancel: Arc<AtomicBool>, poll_idle: Duration) {
+    pub fn run(mut self, cancel: Arc<AtomicBool>, poll_idle: Duration) {
         // Share the driver's cancel flag with `step` so an in-progress
         // secondary-index rebuild can drain promptly on shutdown.
         self.cancel = cancel.clone();
@@ -337,7 +388,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             match self.step() {
                 IndexerPoll::Idle => {
                     section_retry_count = 0;
-                    if !sleep_or_cancel(poll_idle, &cancel).await {
+                    if !sleep_or_cancel(poll_idle, &cancel) {
                         return;
                     }
                 }
@@ -357,7 +408,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                             .set_status(IndexerStatus::Halted(IndexerHaltReason::SectionMissing));
                         return;
                     }
-                    if !sleep_or_cancel(SECTION_RETRY_DELAY, &cancel).await {
+                    if !sleep_or_cancel(SECTION_RETRY_DELAY, &cancel) {
                         return;
                     }
                 }
@@ -388,7 +439,17 @@ const SECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Returns `true` if the sleep elapsed; `false` if the cancel flag
 /// flipped during sleep. Used by the driver loop to exit promptly on
 /// shutdown.
-async fn sleep_or_cancel(d: Duration, cancel: &AtomicBool) -> bool {
-    tokio::time::sleep(d).await;
-    !cancel.load(Ordering::Acquire)
+fn sleep_or_cancel(d: Duration, cancel: &AtomicBool) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        let remaining = d.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return true;
+        }
+        // Honor cancellation even with a long configured idle interval.
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
 }

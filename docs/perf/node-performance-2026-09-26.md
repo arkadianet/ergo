@@ -64,7 +64,7 @@ they count writes requested, not physical disk writes.
 | Ordered lookup + selective writes | 4096 | Middle | 0.144 | 8.326 | 1 |
 | Ordered lookup + selective writes | 4096 | Head | <0.001 | 8.192 | 0 |
 
-Validation: 180 unit tests and 142 integration tests pass, plus the manual
+Lookup-change validation: 180 unit tests and 142 integration tests pass, plus the manual
 benchmark above. Added regression tests compare against the previous linear
 semantics across duplicates, boundaries, gaps and rollback; enforce at most 14
 spill reads for an oldest entry among 4096 spills; check unchanged persisted
@@ -75,7 +75,7 @@ shows this lookup is still material. It would add storage, write amplification,
 migration and rollback maintenance; the current measured improvement does not
 justify that complexity yet.
 
-## Follow-up gates
+## Resident-memory measurement
 
 The live RSS sampler now uses the existing `sysinfo` dependency off Linux,
 refreshing only this process. Windows reports working-set bytes converted to
@@ -83,6 +83,48 @@ KiB, consistent with the host endpoint; Linux retains `smaps_rollup`. This fixes
 the misleading zero in `/metrics` on Windows. It measures total resident memory,
 not ownership by the AVL cache, mining graph or redb caches, and does not itself
 reduce memory consumption.
+
+## Dedicated extra-index worker
+
+The persistent catch-up loop now runs on one named OS thread. The driver uses
+ordinary blocking waits; database reads, writes and rebuilding stay off the
+shared node runtime, without creating a second runtime. Tokio is now a test-only
+dependency of the indexer crate. Within this workspace, `IndexerTask::run` becomes
+blocking and node boot uses `IndexerTask::spawn` instead of `tokio::spawn(run(...))`.
+This follows [Tokio's guidance for long-lived blocking workloads](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html#when-to-use-spawn_blocking-vs-dedicated-threads).
+It retains the single writer, per-block transaction boundaries, retry and reorg
+semantics. It does not parallelize block application or promise higher indexing
+throughput.
+
+Idle/retry waits check cancellation at most every 50 ms, including when a long
+idle interval is configured. Explicit node shutdown joins the worker after its
+current atomic step or cancellable rebuild chunk. A slow step produces a warning
+after five seconds and remains awaited: aborting a blocking write cannot safely
+release its database ownership. Dropping the worker requests cancellation, also
+covering failure during node boot; callers requiring a completed drain must join.
+
+Tests hold a chain read blocked while a single-threaded host runtime runs a timer,
+verify join waits for that read, exercise reorg/cancellation, and reopen the index
+database after shutdown. A node integration test boots and shuts down twice with
+a 60-second idle interval, checking the public status API and immediate DB reopen.
+
+## Validation of the combined branch
+
+- `cargo fmt --all --check` and Clippy for all targets of `ergo-indexer`,
+  `ergo-node`, and `ergo-api` with warnings denied: pass.
+- Indexer: 180 unit + 145 integration tests pass; the ignored manual benchmark
+  was also run separately as documented above.
+- API: 407 unit + 857 integration tests pass (4 integration tests ignored).
+- Node: 84 integration tests pass, including the added worker lifecycle test.
+  The combined parallel unit run had 742 passing tests, 2 ignored, and one
+  failure in the existing
+  `match_boxes_registry_load_failure_invalidates_for_rescan` test. Its isolated
+  rerun passes. That unchanged test calls a hook gated by the process-wide
+  `SCAN_REBUILD_IN_PROGRESS` flag while other tests mutate that flag; it has
+  also failed in earlier work outside this branch. This parallel run is not
+  reported as fully green, and the wallet test is not changed here.
+
+## Follow-up gates
 
 - Validate each change against indexer apply, rollback, duplicate-token and
   repair tests. Preserve on-disk encoding and schema version.
