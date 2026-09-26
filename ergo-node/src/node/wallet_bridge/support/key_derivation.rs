@@ -76,7 +76,7 @@ pub(crate) fn persist_tracked_pubkey(
 pub(crate) async fn derive_key_impl(
     request: &ergo_api::wallet::admin_advanced::DeriveKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -166,7 +166,7 @@ pub(crate) async fn derive_key_impl(
 /// future call, since the head is the sole source for the next path).
 pub(crate) async fn derive_next_key_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,

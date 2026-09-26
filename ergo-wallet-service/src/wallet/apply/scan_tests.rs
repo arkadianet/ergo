@@ -5,7 +5,7 @@
 #![cfg(test)]
 
 use super::*;
-use crate::store::ScanMatchRecord;
+use crate::wallet::types::ScanMatchRecord;
 use crate::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
 
 fn temp_db() -> (tempfile::TempDir, redb::Database) {

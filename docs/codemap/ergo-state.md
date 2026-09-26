@@ -4,160 +4,132 @@
 redb-backed `StateStore` that validated blocks apply to: an in-memory AVL+
 tree with arena-backed node storage and incremental root-label maintenance,
 an atomic `apply_block` / `rollback_to` (delta-based reorg) commit path, the
-header/section chain index (best-header vs best-full-block), per-epoch voted
-protocol parameters, Mode 2 UTXO-snapshot install, Mode 3 suffix pruning, and
-a sibling Mode 5 digest-verifier backend (`DigestStateStore`) that derives the
-same state root from a block's ADProofs instead of a box arena.
+header/section chain index, voted protocol parameters, Mode 2 UTXO-snapshot
+install, Mode 3 suffix pruning, and a sibling Mode 5 digest-verifier backend
+(`DigestStateStore`).
 
-**Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec, ergo-crypto, ergo-validation, ergo-sigma
+Wallet tables and wallet apply/rescan code are now owned by
+`ergo-wallet-service`. `ergo-state` keeps a compatibility wallet facade and
+coordinates service-backed wallet writes inside the same `state.redb` write
+transaction, because moving that transaction boundary is transitional phase-2
+work.
+
+**Depends on (workspace):** `ergo-primitives`, `ergo-ser`, `ergo-chain-spec`,
+`ergo-crypto`, `ergo-validation`, `ergo-sigma`, `ergo-wallet`,
+`ergo-wallet-service`
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~33,000 (src incl. substantial inline tests; ~26 of 43 files carry `#[cfg(test)]` blocks)
+**Approx LOC:** ~35K (source and substantial inline tests)
 
 ## Start here
-- `lib.rs` (`src/lib.rs:1`) — module map + re-export surface. Names the
-  three-trait backend dispatch (`StateBackend` = `ChainStateRead` +
-  `HeaderSectionStore` + `BlockApply`) and the two concrete backends.
-- `StateStore` (`src/store/mod.rs:641`) — the Mode 1/2/3/6 store. Its
-  inherent methods (`open`, `initialize_genesis`/`apply_genesis`,
-  `apply_block`, `rollback_to`, `install_snapshot_state`, `reader_handle`)
-  are the whole forward contract. The largest module in the crate.
-- `apply_block` → `apply_checked_transactions` → `apply_utxo_changes` →
-  `persist_apply` (`src/store/apply.rs:139`, `:208`, `:451`; `src/store/mod.rs:4271`)
-  — the apply pipeline. `persist_apply` is the atomic-commit unit (one redb
-  write txn for undo + AVL + chain_index + state_meta + voted_params + wallet).
-- `AvlTree` (`src/avl/tree.rs:61`) — the authenticated AVL+ tree; maintains the
-  root label incrementally so `root_digest()` is O(1). Read alongside
-  `avl/digest.rs` for the consensus-critical label hash inputs.
-- `backend.rs` (`src/backend.rs:40`) — the `StateBackend` trait family and the
-  `StateBackendKind` enum (`Utxo(StateStore)` / `Digest(DigestStateStore)`) the
-  node binds against generically.
+- `src/lib.rs` — module map and the public state/apply surface.
+- `src/store/mod.rs` — `StateStore` plus the chain-state data model and the
+  service-backed wallet re-exports used by the state integration.
+- `src/store/apply.rs` — the apply pipeline: builds the service-owned
+  `WalletApplyPayload`, applies UTXO changes, and commits chain plus wallet
+  state atomically.
+- `src/avl/tree.rs` — the authenticated AVL+ tree and its O(1) root digest.
+- `src/backend.rs` — `StateBackend`, `ChainStateRead`, `HeaderSectionStore`,
+  and `BlockApply` dispatch for UTXO and digest backends.
+- `src/reader.rs` — lock-free `ChainStoreReader` and committed block/wallet
+  read helpers.
+- `src/wallet/mod.rs` — the transitional facade: most `wallet` submodules are
+  re-exports from `ergo-wallet-service`, not a second implementation.
+- `src/store/wallet_tx_bridge.rs` — the chain-side adapter that builds owned
+  wallet block data and maps state errors into the service rescan error model.
 
 ## Modules
 - `src/store/` — `StateStore`: open / genesis / apply / rollback / reorg /
-  snapshot install / pruning, plus all redb table definitions. Submodules:
-  `apply.rs` (block-apply core + `compute_minimal_full_block_height`),
-  `reorg.rs` (`rollback_to` three-phase delta replay), `undo.rs` (`UndoEntry`
-  reverse-delta codec), `snapshot.rs` (`CommittedSnapshot` single-txn off-loop
-  view + mining-candidate dry-run), `dry_run.rs` (`apply_change_set_via_prover`),
-  `lazy_prover.rs` (scoped-worker AVL proof generation with on-demand node
-  expansion, backing `StateStore::regenerate_ad_proofs`),
-  `votes.rs`, `popow_cache.rs` (NiPoPoW prover/interlinks), `meta.rs`
-  (`StateMeta` row), `open.rs`, `rebuild.rs` (rebuild-from-committed recovery),
-  `backfill.rs` (legacy index back-fill), `error.rs` (`StateError`).
-- `src/avl/` — AVL+ primitives: `node.rs` (`AvlNode` enum, `NodeId`),
-  `tree.rs` (`AvlTree`), `arena.rs` (`NodeArena` trait + memory/cached-disk
-  arenas), `digest.rs` (leaf/internal label + root-digest math),
-  `changelog.rs` (`ChangeLog` before-image undo), `serialization.rs` (node
-  byte codec), `hydrate.rs` (rebuild tree from `AVL_NODES`), `snapshot_codec.rs`
-  (Scala-byte-exact `ProverNodeSerializer` codec for Mode 2 snapshot chunks).
-- `src/backend.rs` — `StateBackend`/`ChainStateRead`/`HeaderSectionStore`/
-  `BlockApply` traits + `StateBackendKind` enum dispatch.
-- `src/chain.rs` — `HeaderMeta`, `ChainStateMeta`, `ChainState`,
-  `HeaderAvailability`, `HeightLookup`: serialization-focused chain-index types.
-- `src/reader.rs` — `ChainStoreReader`: lock-free `Clone` read handle (own redb
-  read txn per call) used by the API layer and indexer.
-- `src/persist.rs` — background persist pipeline (`PersistPipeline`,
-  `PersistResult`) batching AVL writes into one redb commit off the action loop.
-- `src/diff.rs` — block-apply tx diff (`TipPointer`, `AppliedTx`, `TxDiff`)
-  consumed by the indexer/mempool.
-- `src/active_params.rs` — `voted_params` redb table read/write helpers
-  (`VOTED_PARAMS`); the `ActiveProtocolParameters` type itself lives in
-  `ergo-validation`.
-- `src/header_store.rs` — `HeaderSectionTables`: the header/section tables +
-  buffered-write overlay shared by both backends.
-- `src/digest_store.rs` — `DigestStateStore`: Mode 5 persistence sibling to
-  `StateStore` (digest + chain-state history ledgers, no arena).
-- `src/digest_apply.rs` — `DigestProofVerifier`, `DigestApplyError`,
-  `ResolvedBoxes`: verifies a block's ADProofs and derives the post-apply digest.
-- `src/digest_utxo_view.rs` — `DigestUtxoView`: resolves a block's input boxes
-  from its ADProofs so the digest backend can run full tx validation.
-- `src/wallet/` — wallet persistence in the same `state.redb`: `WalletApplyHook`
-  / `RescanGuard` hooks, `WalletReader`, value types, apply/maturity/scan logic.
-- `src/redb_util.rs` — `begin_write_qr` (quick-repair write txn) +
-  `open_with_repair_logging`; every production write txn must route through here.
+  snapshot install / pruning, plus redb table definitions. Important children
+  are `apply.rs` (block-apply and service wallet payload), `reorg.rs`,
+  `undo.rs`, `snapshot.rs`, `dry_run.rs`, `lazy_prover.rs`, `votes.rs`,
+  `popow_cache.rs`, `meta.rs`, `open.rs`, `rebuild.rs`, `backfill.rs`, and
+  `error.rs`.
+- `src/avl/` — AVL+ nodes, arena, digest, changelog, serialization, hydration,
+  and Scala-compatible snapshot codecs.
+- `src/backend.rs` — backend traits and `StateBackendKind` dispatch.
+- `src/chain.rs` — `HeaderMeta`, `ChainStateMeta`, `ChainState`, and
+  header-availability types.
+- `src/reader.rs` — `ChainStoreReader`, committed snapshots, chain-index reads,
+  and block data for wallet rescans.
+- `src/persist.rs` — background persistence pipeline. A queued job carries
+  the service-owned wallet payload and applies it in the batch write
+  transaction.
+- `src/diff.rs` — block-apply transaction diffs consumed by the mempool and
+  indexer.
+- `src/active_params.rs` — voted-parameter redb table helpers.
+- `src/header_store.rs` — header/section tables and buffered-write overlay.
+- `src/digest_store.rs`, `src/digest_apply.rs`, `src/digest_utxo_view.rs` —
+  Mode 5 digest persistence and ADProof-driven verification.
+- `src/wallet/` — compatibility facade over `ergo-wallet-service`: apply and
+  scan hooks, reader/store/table/value types, maturity, schema migration, and
+  rescan exports. The service owns the implementation; state still calls it
+  through the facade.
+- `src/redb_util.rs` — `begin_write_qr` and repair-logging write helper.
 
 ## Key types, traits & functions
-- `StateStore` (struct) — Mode 1/2/3/6 UTXO state store — `src/store/mod.rs:641`
-- `StateStore::apply_block` (fn) — apply a `CheckedBlock`, advancing the tip — `src/store/apply.rs:139`
-- `StateStore::rollback_to` (fn) — delta-based reorg rollback to a target height — `src/store/reorg.rs:41`
-- `StateStore::persist_apply` (fn) — the atomic one-txn commit unit — `src/store/mod.rs:4271`
-- `StateStore::install_snapshot_state` (fn) — Mode 2 UTXO-snapshot install — `src/store/mod.rs:1091`
-- `StateStore::regenerate_ad_proofs` (fn) — regenerate a block's ADProofs from
-  the parent tree via on-demand AVL reads (Scala `UtxoState` proof generation);
-  self-checks the proof and never mutates the tree — `src/store/mod.rs:2822`
-- `AdProofsApplyPolicy` (enum) — `Regenerate` (default for UTXO stores) vs
-  `VerifyShipped` (digest/opt-in tests) — `src/store/mod.rs:752`
-- `compute_minimal_full_block_height` (fn) — Mode 3 prune low-water mark (Scala parity) — `src/store/apply.rs:53`
-- `AvlTree` (struct) — incremental authenticated AVL+ tree — `src/avl/tree.rs:61`
-- `AvlNode` (enum) — Leaf / Internal node, with cached labels — `src/avl/node.rs:18`
-- `leaf_label` / `internal_label` (fn) — consensus-critical label hashes — `src/avl/digest.rs:32`, `:52`
-- `NodeArena` (trait) — pluggable node storage (memory / cached-disk) — `src/avl/arena.rs:25`
-- `UndoEntry` (struct) — per-block reverse delta (changelog + box-level) — `src/store/undo.rs:18`
-- `ChainState` / `ChainStateMeta` (struct) — in-memory vs persisted chain pointers — `src/chain.rs:358`, `:209`
-- `HeaderMeta` (struct) — persisted header row; `pow_validity` is the only persisted validity flag — `src/chain.rs:22`
-- `HeaderAvailability` (enum) — Dense vs PoPowSparse history mode — `src/chain.rs:135`
-- `ChainStoreReader` (struct) — lock-free read handle — `src/reader.rs:31`
-- `CommittedSnapshot` (struct) — single-txn committed view for off-loop builds — `src/store/snapshot.rs`
-- `StateBackend` / `ChainStateRead` / `HeaderSectionStore` / `BlockApply` (traits) — backend dispatch surface — `src/backend.rs:40`–`:120`
-- `StateBackendKind` (enum) — `Utxo` / `Digest` runtime dispatch — `src/backend.rs:246`
-- `DigestStateStore` (struct) — Mode 5 digest-verifier backend — `src/digest_store.rs:140`
-- `DigestProofVerifier` (struct) — ADProof-driven digest derivation — `src/digest_apply.rs:156`
-- `PersistPipeline` / `PersistResult` (struct/enum) — background commit batching — `src/persist.rs:284`, `:261`
-- `StateError` (enum) — crate-wide error; re-exported as `ergo_state::store::StateError` — `src/store/error.rs`
-- `begin_write_qr` (fn) — quick-repair write-txn helper (mandatory for all writes) — `src/redb_util.rs:33`
+- `StateStore` — Mode 1/2/3/6 UTXO state store.
+- `StateStore::apply_block` — apply a `CheckedBlock` and advance the tip.
+- `StateStore::rollback_to` — delta-based reorg rollback.
+- `StateStore::persist_apply` — atomic chain-plus-wallet commit unit.
+- `StateStore::install_snapshot_state` — Mode 2 UTXO snapshot install.
+- `AvlTree`, `AvlNode`, `NodeArena` — authenticated tree and node storage.
+- `ChainStoreReader` — lock-free committed-state read handle.
+- `StateBackend`, `ChainStateRead`, `HeaderSectionStore`, `BlockApply` —
+  generic backend dispatch traits.
+- `DigestStateStore`, `DigestProofVerifier` — Mode 5 digest backend.
+- `PersistPipeline`, `PersistResult` — background commit batching.
+- `WalletApplyHook`, `WalletApplyPayload`, `WalletWiring`, `RescanGuard` —
+  service-owned integration contracts re-exported through the state facade.
+- `WalletStore`, `WalletRead`, `WalletWrite`, `RedbWalletStore` — service
+  persistence ports used by the state transaction.
+- `WalletScanService`, `WalletScanCursor`, `RescanState` — service rescan
+  surface exposed to the state/node integration.
+- `StateError` — state/store error taxonomy, including conversion from
+  service wallet-store errors.
+- `begin_write_qr` — mandatory quick-repair write-transaction helper.
 
 ## Invariants & contracts
-- **Atomic commit per applied block.** `persist_apply` writes undo_log +
-  AVL+ node mutations + chain_index + state_meta + (epoch-boundary) voted_params
-  + (when hooked) wallet rows in a single redb write transaction. Either all
-  land or none do.
-- **Delta-based reorg.** There is no single "reorg" method; reorg is
-  `rollback_to(common_ancestor)` then re-apply. Rollback replays each block's
-  `ChangeLog` before-image in reverse via `apply_rollback_mutations`. Any
-  failure after AVL mutation routes through `rebuild_from_committed` to restore
-  in-memory state from committed disk state.
-- **undo_log keys are (height, header_id).** Composite 36-byte key so
-  competing fork branches at the same height coexist (`store/undo.rs`,
-  `UNDO_LOG` def in `store/mod.rs:74`).
-- **best_header and best_full_block are separate.** Tracked independently in
-  `ChainState` / `ChainStateMeta`; the gap drives IBD block download.
-- **Invalidity policy.** `pow_validity` is the ONLY persisted validity flag,
-  reserved for cryptographically definitive PoW failure. All other failures use
-  session-scoped `ChainState::session_invalids`, cleared on restart
-  (`chain.rs:17`, `:375`).
-- **AVL+ label hashing matches scorex-util / `ergo_avltree_rust`.** Leaf =
-  `blake2b256(0x00 ‖ key ‖ value ‖ next_key)`, Internal =
-  `blake2b256(0x01 ‖ balance ‖ left_label ‖ right_label)`, ADDigest =
-  `root_label[32] ‖ tree_height[1]`. Note the label prefixes (leaf=0,
-  internal=1) are the OPPOSITE of the node serialization prefixes (leaf=1,
-  internal=0) — `avl/digest.rs:15`, `avl/snapshot_codec.rs:8`.
-- **Snapshot node codec is Scala-byte-exact.** `value_length` is fixed-width
-  4-byte big-endian (`Ints.toByteArray`), NOT VLQ (`avl/snapshot_codec.rs:20`).
-- **Single-writer state; generic (not `dyn`) backend dispatch.** The action
-  loop is the sole writer, so the executor binds `B: StateBackend` and
-  monomorphizes; the differing `apply_full_block` internals (box arena vs
-  ADProof verifier) are not object-safe behind `dyn` (`backend.rs:13`).
-- **Backend schema separation enforced by `data_dir_state_type`.** `"utxo"`,
-  `"digest"` (headers-only Mode 6, same schema), and `"digest-verifier"` (Mode 5,
-  incompatible schema). A dir carrying both AVL arena rows and digest-verifier
-  markers with no sentinel is a hard `DbCorruption` — never inferred
-  (`store/mod.rs:425`).
-- **Mode 3 prune monotonicity / rollback-window safety.** The prune
-  low-water mark never walks backward (`compute_minimal_full_block_height`),
-  and `blocks_to_keep >= ROLLBACK_WINDOW + SAFETY_MARGIN` is enforced at config
-  load so the active rollback window can never fall into pruned territory
-  (`store/mod.rs:173`, `:608`).
-- **Crash-repair contract.** Every write txn goes through `begin_write_qr`
-  (quick_repair on); a single non-quick-repair commit defeats it for all prior
-  commits, so the rule is mechanical: zero `db.begin_write()` outside this
-  helper (`redb_util.rs:10`).
-- **`ergo-state` depends on `ergo-validation`, not vice versa.** State asks
-  validation "is this block legal?" before applying; it never defines
-  acceptance rules.
+- **Atomic commit per applied block.** `persist_apply` writes undo-log, AVL+
+  mutations, chain index, state metadata, epoch-boundary voted parameters,
+  and service-owned wallet rows in one redb write transaction. Wallet writes
+  use the service-backed `WalletWrite` implementation on that same transaction;
+  the service does not open a second state database.
+- **Delta-based reorg.** Reorg is `rollback_to(common_ancestor)` followed by
+  re-application. Rollback replays each block's before-image through the
+  service wallet rollback path and restores the in-memory chain from committed
+  disk state after an AVL mutation failure.
+- **Cursor continuity and recovery.** Wallet cursor height, header identity,
+  chain-index identity, scan invalidation, and rescan state are checked across
+  apply, rollback, restart, and migration paths. A partial or stale rescan
+  cannot silently advance the wallet cursor.
+- **Undo-log keys are `(height, header_id)`.** The composite key lets fork
+  branches at the same height coexist.
+- **best_header and best_full_block are separate.** They are tracked
+  independently so header-first sync and headers-only digest mode remain
+  possible.
+- **Invalidity policy.** `pow_validity` is the only persisted validity flag;
+  other failures are session-scoped and cleared on restart.
+- **AVL+ label hashing matches the reference.** Leaf and internal label
+  prefixes, the `ADDigest` layout, and snapshot codecs are consensus-facing
+  byte contracts.
+- **Single-writer state; generic backend dispatch.** The node action loop is
+  the sole chain-state writer. The backend is monomorphized through
+  `B: StateBackend`; it is not a `dyn` dispatch boundary.
+- **Crash-repair contract.** Every production write transaction routes through
+  `begin_write_qr` with quick repair enabled.
+- **Dependency boundary.** `ergo-state` may depend on
+  `ergo-wallet-service` for the transitional facade, but the service must
+  not depend on `ergo-state`. This direction preserves the shared-database
+  transaction seam without creating a cycle.
+- **Validation direction.** `ergo-state` depends on `ergo-validation`, not the
+  reverse: state asks validation whether a block is legal before applying it.
 
-## Doc accuracy notes
-- The crate's read-only handle is `reader::ChainStoreReader`
-  (`src/reader.rs:31`), reached via `StateStore::reader_handle()`. There is no
-  type named `StateReader`; the stale `src/lib.rs` crate-doc reference is
-  corrected to `ChainStoreReader`, and `docs/architecture.md` is now only a
-  redirect to `ARCHITECTURE.md`.
+## Transitional wallet facade
+
+`ergo-state/src/wallet/` and selected `ergo-state/src/store` exports preserve
+the historical `ergo_state::wallet` paths while delegating implementation to
+`ergo-wallet-service`. The state crate remains the owner of the chain apply
+and rollback orchestration; the service owns wallet tables, reader/writer
+semantics, apply classification, maturity, scan tracking, and rescan logic.
+The edge is deliberately one-way and transitional: full runtime relocation
+from the node/state integration is not complete in this phase.

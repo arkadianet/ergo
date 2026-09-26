@@ -26,7 +26,7 @@ pub(crate) async fn payment_send_impl(
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
@@ -107,7 +107,7 @@ pub(crate) async fn transaction_generate_impl(
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -160,7 +160,7 @@ pub(crate) async fn transaction_generate_unsigned_impl(
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -191,7 +191,7 @@ pub(crate) async fn transaction_sign_impl(
     external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
     hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -212,7 +212,7 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
     external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
     hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    _state: &RwLock<ergo_wallet::state::WalletState>,
+    _state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     snapshot: &ChainSnapshot,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -254,7 +254,7 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
 pub(crate) fn boxes_collect_impl(
     request: &BoxesCollectRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    _state: &RwLock<ergo_wallet::state::WalletState>,
+    _state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<BoxesCollectResponse, WalletAdminError> {
@@ -266,9 +266,9 @@ pub(crate) fn boxes_collect_impl(
         .unspent_boxes()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-    let summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
+    let summaries: Vec<ergo_wallet_service::box_selector::BoxSummary> = unspent
         .iter()
-        .map(|wb| ergo_wallet::box_selector::BoxSummary {
+        .map(|wb| ergo_wallet_service::box_selector::BoxSummary {
             box_id: wb.box_id,
             value: wb.value,
             tokens: wb.assets.iter().copied().collect(),
@@ -289,15 +289,16 @@ pub(crate) fn boxes_collect_impl(
         })
         .collect::<Result<_, WalletAdminError>>()?;
 
-    let target = ergo_wallet::box_selector::SelectionTarget {
+    let target = ergo_wallet_service::box_selector::SelectionTarget {
         erg_amount: request.target_balance,
         tokens: target_tokens,
         min_change_value: MIN_BOX_VALUE,
     };
 
-    let selector = ergo_wallet::box_selector::default::DefaultBoxSelector;
-    let selection = ergo_wallet::box_selector::BoxSelector::select(&selector, &summaries, &target)
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let selector = ergo_wallet_service::box_selector::default::DefaultBoxSelector;
+    let selection =
+        ergo_wallet_service::box_selector::BoxSelector::select(&selector, &summaries, &target)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     let boxes = selection.selected_ids.iter().map(hex::encode).collect();
     let change_boxes = if selection.change_erg > 0 || !selection.change_tokens.is_empty() {

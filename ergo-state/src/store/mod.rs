@@ -503,6 +503,10 @@ mod votes;
 mod wallet_tx_bridge;
 
 pub use backfill::ModifierIndexBackfillEvent;
+pub use ergo_wallet_service::wallet::{
+    owned_to_block_txs, BoundBlockTxs, OwnedBlockOutput, OwnedBlockTxData, ScanMatchRecord,
+    WalletApplyPayload,
+};
 pub use error::{PopowByIdLookup, PopowMissingAt, StateError, VotedParamsWriteError};
 pub(crate) use height_index::{
     append_orphan_to_height_index, promote_to_height_index_slot_0, read_height_index_ids,
@@ -513,10 +517,7 @@ pub use snapshot::{BaseDisposition, CommittedSnapshot, DryRunBase};
 use undo::undo_log_key;
 pub use undo::UndoEntry;
 use votes::compute_epoch_votes_via_txn;
-pub use wallet_tx_bridge::{
-    block_txs_for_wallet_at_height, owned_to_block_txs, BoundBlockTxs, OwnedBlockOutput,
-    OwnedBlockTxData,
-};
+pub use wallet_tx_bridge::block_txs_for_wallet_at_height;
 pub(crate) use wallet_tx_bridge::{
     block_txs_for_wallet_at_height_in_read_txn, build_scan_match_records,
     build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
@@ -545,76 +546,6 @@ struct UtxoMutation<'a> {
     /// together.
     wallet_payload: Option<&'a WalletApplyPayload>,
     wallet_apply_generation: u64,
-}
-
-/// Owned wallet-apply payload built at block-apply time on the main
-/// thread. Carries everything needed to run `apply_block_to_wallet` +
-/// `promote_matured_boxes` inside the chain's redb write_txn, so the
-/// chain and wallet commit atomically in the same transaction.
-///
-/// Bundled as owned data (not references to live wallet state) so
-/// the payload crosses the persist-pipeline thread boundary into
-/// `PersistJob` without lifetime or Send/Sync friction.
-#[derive(Clone)]
-pub struct WalletApplyPayload {
-    pub apply_generation: u64,
-    pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
-    pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
-    pub block_txs_owned: Vec<OwnedBlockTxData>,
-    /// One record per block output box that matched ≥1 registered scan.
-    /// Computed on the main thread (where the `ergo-wallet` matcher is reachable
-    /// via the hook) and carried as owned data so it crosses the persist-worker
-    /// boundary; `ergo-state` persists it atomically in the chain write-txn.
-    /// Empty when no scans are registered — and ALSO empty for a block that only
-    /// spends (no new matches), which is why the scan-apply gate uses
-    /// `has_registered_scans` below, not `scan_matches.is_empty()`.
-    pub scan_matches: Vec<ScanMatchRecord>,
-    /// True iff ≥1 scan was registered at payload-build time
-    /// (`registered_scan_count() > 0`). Gates `apply_block_to_scans`: when no
-    /// scans exist the scan tables are never opened/created and the per-input
-    /// spend-index probe is skipped — the `scan_count == 0` fast path, made
-    /// complete at the apply site (not just at payload build). Must NOT be
-    /// derived from `scan_matches.is_empty()`: a registered scan still needs
-    /// phase-2 spend transitions on a block that produced no new matches.
-    pub has_registered_scans: bool,
-    pub allow_non_contiguous_wallet: bool,
-}
-
-impl WalletApplyPayload {
-    /// True when this payload carries wallet-key tracking (tracked P2PK
-    /// trees or cached pubkeys), as opposed to existing solely to carry
-    /// scan matches.
-    ///
-    /// The commit sites gate `apply_block_to_wallet` + `promote_matured_boxes`
-    /// on this: a scan-only payload (built because scans are registered but the
-    /// wallet currently has no keys/trees — e.g. keys not yet loaded, hydration
-    /// failed, or a genuinely keyless node) must NOT run wallet apply, which
-    /// would advance `WALLET_SCAN_HEIGHT` for blocks the wallet never
-    /// classified. Nothing resumes scanning from that height today, so the
-    /// concrete harm is `/wallet/status` + `/wallet/balances` reporting a
-    /// `walletHeight` (and wallet-confirmations base) for work never done.
-    /// Scan tracking (`apply_block_to_scans`) runs regardless.
-    ///
-    /// This reproduces the pre-scan-tracking payload-build gate exactly:
-    /// before scans existed, a payload was built (and wallet apply run) only
-    /// when `!trees.is_empty() || !pubkeys.is_empty()`.
-    pub fn has_wallet_tracking(&self) -> bool {
-        !self.tracked_p2pk_trees.is_empty() || !self.cached_pubkeys.is_empty()
-    }
-}
-
-/// One scan-matched output box, produced at payload-build time. Carries the
-/// serialized box so the matched box can be persisted (and rendered for
-/// `/scan/spentBoxes` after it leaves the UTXO set).
-#[derive(Clone)]
-pub struct ScanMatchRecord {
-    pub box_id: [u8; 32],
-    /// Ids of every registered scan whose rule matched this box.
-    pub scan_ids: Vec<u16>,
-    /// Full serialized `ErgoBox` bytes.
-    pub box_bytes: Vec<u8>,
-    pub inclusion_height: u32,
-    pub creation_out_index: u16,
 }
 
 // ---- Persistent state store ----

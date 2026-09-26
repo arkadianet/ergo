@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 
-use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError};
+use crate::node::wallet_bridge::{map_chain_error, ChainStateAccessor, WalletAdminError};
 use ergo_api::wallet::sending::PaymentRequestDto;
 
 /// Minimum fee in nanoERG. Mirrors Scala's `Parameters.MinFee`.
@@ -58,7 +58,7 @@ pub(crate) async fn build_unsigned_tx(
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     change_address_override: Option<&str>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -69,7 +69,7 @@ pub(crate) async fn build_unsigned_tx(
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     // Decode payment requests: address → pubkey → ErgoTree bytes.
-    let payment_reqs: Vec<ergo_wallet::tx_builder::PaymentRequest> = requests
+    let payment_reqs: Vec<ergo_wallet_service::tx_builder::PaymentRequest> = requests
         .iter()
         .map(|r| {
             let pubkey =
@@ -96,7 +96,7 @@ pub(crate) async fn build_unsigned_tx(
                     Ok((id, a.amount))
                 })
                 .collect::<Result<_, WalletAdminError>>()?;
-            Ok(ergo_wallet::tx_builder::PaymentRequest {
+            Ok(ergo_wallet_service::tx_builder::PaymentRequest {
                 to_ergo_tree,
                 value: r.value,
                 assets,
@@ -181,6 +181,7 @@ pub(crate) async fn build_unsigned_tx(
             // server fault (it may be already spent or never existed).
             let ergo_box = chain
                 .lookup_utxo(&id)
+                .map_err(map_chain_error)?
                 .ok_or(WalletAdminError::BoxNotFound)?;
 
             input_erg_total = input_erg_total
@@ -456,9 +457,9 @@ pub(crate) async fn build_unsigned_tx(
             .unspent_boxes()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-        let summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
+        let summaries: Vec<ergo_wallet_service::box_selector::BoxSummary> = unspent
             .iter()
-            .map(|wb| ergo_wallet::box_selector::BoxSummary {
+            .map(|wb| ergo_wallet_service::box_selector::BoxSummary {
                 box_id: wb.box_id,
                 value: wb.value,
                 tokens: wb.assets.iter().copied().collect(),
@@ -482,8 +483,8 @@ pub(crate) async fn build_unsigned_tx(
             .collect::<Result<_, WalletAdminError>>()?;
 
         let reemission_rules = chain.reemission_rules();
-        let selector = ergo_wallet::box_selector::default::DefaultBoxSelector;
-        let builder = ergo_wallet::tx_builder::UnsignedTxBuilder {
+        let selector = ergo_wallet_service::box_selector::default::DefaultBoxSelector;
+        let builder = ergo_wallet_service::tx_builder::UnsignedTxBuilder {
             available_summaries: &summaries,
             selector: &selector,
             fee,
@@ -511,7 +512,7 @@ pub(crate) async fn build_unsigned_tx(
         // Reconstruct the response plan from the builder's `SelectionPlan` + the
         // SHARED change-fold rule, so the reported fee/change match the bytes.
         let change_has_tokens = !plan.change_tokens.is_empty();
-        let folded = ergo_wallet::tx_builder::change_goes_to_fee(
+        let folded = ergo_wallet_service::tx_builder::change_goes_to_fee(
             plan.change_erg,
             change_has_tokens,
             MIN_BOX_VALUE,
@@ -524,7 +525,7 @@ pub(crate) async fn build_unsigned_tx(
         };
         let summary_by_id: std::collections::HashMap<
             [u8; 32],
-            &ergo_wallet::box_selector::BoxSummary,
+            &ergo_wallet_service::box_selector::BoxSummary,
         > = summaries.iter().map(|s| (s.box_id, s)).collect();
         let selected: Vec<SelectedInputInfo> = plan
             .selected_ids
@@ -636,7 +637,7 @@ pub(crate) fn reemission_burn_dto(
 /// be a tracked wallet tree, else `change_address_untracked(422)`.
 pub(crate) fn validate_tracked_change_address(
     addr: &str,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<(), WalletAdminError> {
     let pubkey = ergo_ser::address::decode_p2pk_address(addr, network)
@@ -656,12 +657,12 @@ pub(crate) fn validate_tracked_change_address(
 /// the burn from change only (fee preserved); an exact set whose change cannot
 /// cover it is `insufficient_funds`. The re-emission token is stripped from change.
 pub(crate) fn exact_set_plan(
-    boxes: &[ergo_wallet::box_selector::BoxSummary],
+    boxes: &[ergo_wallet_service::box_selector::BoxSummary],
     target_erg: u64,
     target_tokens: &BTreeMap<[u8; 32], u64>,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
     reemission_height: u32,
-) -> Result<ergo_wallet::tx_builder::SelectionPlan, WalletAdminError> {
+) -> Result<ergo_wallet_service::tx_builder::SelectionPlan, WalletAdminError> {
     let mut input_erg: u64 = 0;
     let mut input_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
     for b in boxes {
@@ -724,7 +725,7 @@ pub(crate) fn exact_set_plan(
             change_tokens.remove(&rules.reemission_token_id);
         }
     }
-    Ok(ergo_wallet::tx_builder::SelectionPlan {
+    Ok(ergo_wallet_service::tx_builder::SelectionPlan {
         selected_ids: boxes.iter().map(|b| b.box_id).collect(),
         change_erg,
         change_tokens,
@@ -738,7 +739,7 @@ pub(crate) fn exact_set_plan(
 /// `boxIds` uses the exact set (so it agrees with `transactions/build`).
 pub(crate) fn select_boxes_impl(
     req: &ergo_api::wallet::native::dto::BoxSelectRequest,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -755,9 +756,9 @@ pub(crate) fn select_boxes_impl(
     let unspent = read
         .unspent_boxes()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let mut summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
+    let mut summaries: Vec<ergo_wallet_service::box_selector::BoxSummary> = unspent
         .iter()
-        .map(|wb| ergo_wallet::box_selector::BoxSummary {
+        .map(|wb| ergo_wallet_service::box_selector::BoxSummary {
             box_id: wb.box_id,
             value: wb.value,
             tokens: wb.assets.iter().copied().collect(),
@@ -788,8 +789,8 @@ pub(crate) fn select_boxes_impl(
                 excluded.insert(parse_box_id_hex(id)?);
             }
             summaries.retain(|s| !excluded.contains(&s.box_id));
-            ergo_wallet::tx_builder::select_with_reemission(
-                &ergo_wallet::box_selector::default::DefaultBoxSelector,
+            ergo_wallet_service::tx_builder::select_with_reemission(
+                &ergo_wallet_service::box_selector::default::DefaultBoxSelector,
                 &summaries,
                 target_erg,
                 &target_tokens,
@@ -858,8 +859,10 @@ pub(crate) fn select_boxes_impl(
         }
     }
 
-    let summary_by_id: std::collections::HashMap<[u8; 32], &ergo_wallet::box_selector::BoxSummary> =
-        summaries.iter().map(|s| (s.box_id, s)).collect();
+    let summary_by_id: std::collections::HashMap<
+        [u8; 32],
+        &ergo_wallet_service::box_selector::BoxSummary,
+    > = summaries.iter().map(|s| (s.box_id, s)).collect();
     let inputs_selected = plan
         .selected_ids
         .iter()
@@ -895,7 +898,7 @@ pub(crate) fn select_boxes_impl(
 /// same well-formed request).
 pub(crate) async fn build_transaction_impl(
     intent: &ergo_api::wallet::native::dto::TxIntent,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
@@ -1069,8 +1072,12 @@ mod tests {
         fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
             Some(&self.rules)
         }
-        fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-            (box_id == &self.reward_id).then(|| self.reward_box.clone())
+        fn lookup_utxo(
+            &self,
+            box_id: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
+        {
+            Ok((box_id == &self.reward_id).then(|| self.reward_box.clone()))
         }
     }
 
@@ -1118,7 +1125,7 @@ mod tests {
             tip: 200, // candidate height 201 > activation 100 → burn triggers
         };
 
-        let mut ws = ergo_wallet::state::WalletState::empty(false);
+        let mut ws = ergo_wallet_service::state::WalletState::empty(false);
         ws.set_change_address(addr.clone());
         let state = RwLock::new(ws);
 
@@ -1217,6 +1224,111 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum LookupOutcome {
+        Absent,
+        ReadFailure,
+    }
+
+    struct LookupOutcomeChain {
+        tip: u32,
+        outcome: LookupOutcome,
+    }
+
+    impl ChainStateAccessor for LookupOutcomeChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
+        }
+
+        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(
+            &self,
+            _h: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
+        }
+
+        fn lookup_utxo(
+            &self,
+            _box_id: &[u8; 32],
+        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
+        {
+            match self.outcome {
+                LookupOutcome::Absent => Ok(None),
+                LookupOutcome::ReadFailure => {
+                    Err(crate::node::wallet_bridge::ChainStateError::State(
+                        ergo_state::store::StateError::Serialization(
+                            "injected UTXO read failure".to_string(),
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_input_distinguishes_absent_box_from_lookup_failure() {
+        let addr = test_addr();
+        let mut wallet_state = ergo_wallet_service::state::WalletState::empty(false);
+        wallet_state.set_change_address(addr.clone());
+        let state = RwLock::new(wallet_state);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("w.redb")).unwrap();
+        let requests = vec![PaymentRequestDto {
+            address: addr,
+            value: 1_000_000,
+            assets: Vec::new(),
+        }];
+        let inputs = vec![hex::encode([0x42; 32])];
+
+        let absent = build_unsigned_tx(
+            &requests,
+            Some(&inputs),
+            None,
+            None,
+            None,
+            &state,
+            &db,
+            &LookupOutcomeChain {
+                tip: 10,
+                outcome: LookupOutcome::Absent,
+            },
+            NetworkPrefix::Mainnet,
+        )
+        .await;
+        assert!(matches!(absent, Err(WalletAdminError::BoxNotFound)));
+
+        let failed = build_unsigned_tx(
+            &requests,
+            Some(&inputs),
+            None,
+            None,
+            None,
+            &state,
+            &db,
+            &LookupOutcomeChain {
+                tip: 10,
+                outcome: LookupOutcome::ReadFailure,
+            },
+            NetworkPrefix::Mainnet,
+        )
+        .await;
+        assert!(matches!(
+            failed,
+            Err(WalletAdminError::Internal(detail)) if detail.contains("injected UTXO read failure")
+        ));
+    }
+
     /// A `boxIds` input source listing the same id twice must be rejected as
     /// a client error, not silently collapsed into "spend it once" by the
     /// dedup `HashSet` — matches `build_unsigned_tx`'s explicit-input path,
@@ -1225,7 +1337,7 @@ mod tests {
     fn select_boxes_rejects_duplicate_box_id_in_boxids_source() {
         use ergo_api::wallet::native::dto as ndto;
 
-        let ws = ergo_wallet::state::WalletState::empty(false);
+        let ws = ergo_wallet_service::state::WalletState::empty(false);
         let state = RwLock::new(ws);
         let dir = tempfile::tempdir().unwrap();
         let db = redb::Database::create(dir.path().join("w.redb")).unwrap();

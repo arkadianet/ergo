@@ -701,6 +701,7 @@ dependencies = [
  "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
+ "ergo-wallet-protocol",
  "futures-util",
  "hex",
  "hmac",
@@ -882,6 +883,7 @@ dependencies = [
  "ergo-sync",
  "ergo-validation",
  "ergo-wallet",
+ "ergo-wallet-service",
  "hex",
  "indexmap",
  "k256",
@@ -999,9 +1001,9 @@ dependencies = [
  "ergo-state",
  "ergo-validation",
  "ergo-wallet",
+ "ergo-wallet-service",
  "ergo_avltree_rust",
  "hex",
- "k256",
  "lru",
  "num-bigint",
  "proptest",
@@ -1077,7 +1079,6 @@ dependencies = [
  "ergo-primitives",
  "ergo-ser",
  "ergo-sigma",
- "ergo-state",
  "ergo-validation",
  "gf2_192",
  "hex",
@@ -1097,6 +1098,34 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "ergo-wallet-protocol"
+version = "0.8.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ergo-wallet-service"
+version = "0.8.0"
+dependencies = [
+ "bincode",
+ "ergo-primitives",
+ "ergo-ser",
+ "ergo-validation",
+ "ergo-wallet",
+ "ergo-wallet-protocol",
+ "hex",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

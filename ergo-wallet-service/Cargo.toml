@@ -1,0 +1,29 @@
+[package]
+name        = "ergo-wallet-service"
+description = "Transport-neutral wallet orchestration and persistence core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish    = false
+
+[dependencies]
+ergo-wallet          = { workspace = true }
+ergo-wallet-protocol = { workspace = true }
+ergo-primitives      = { workspace = true }
+ergo-ser             = { workspace = true }
+ergo-validation      = { workspace = true }
+serde                = { workspace = true, features = ["derive"] }
+serde_json           = { workspace = true }
+hex                  = { workspace = true }
+thiserror            = { workspace = true }
+redb                 = { workspace = true }
+bincode              = { workspace = true }
+tracing              = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

@@ -20,7 +20,7 @@ use ergo_state::wallet::apply::{
 };
 use ergo_state::wallet::tables::WALLET_BOXES;
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
-use ergo_wallet::state::WalletState;
+use ergo_wallet_service::state::WalletState;
 use redb::Database;
 
 // ----- helpers -----

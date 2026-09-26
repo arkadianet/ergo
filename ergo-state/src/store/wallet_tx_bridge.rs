@@ -6,8 +6,12 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
-use super::{ScanMatchRecord, StateError, BLOCK_SECTIONS, CHAIN_INDEX, HEADERS};
+use super::{
+    OwnedBlockOutput, OwnedBlockTxData, ScanMatchRecord, StateError, BLOCK_SECTIONS, CHAIN_INDEX,
+    HEADERS,
+};
 use crate::wallet::scan::RescanReadError;
+use crate::wallet::WalletStoreError;
 
 pub(crate) enum WalletBlockSections {
     MissingHeader,
@@ -16,39 +20,6 @@ pub(crate) enum WalletBlockSections {
 }
 
 // ---- wallet integration helpers ----
-
-/// Owned per-output data for the wallet hook (avoids lifetime complexity).
-#[derive(Clone)]
-pub struct OwnedBlockOutput {
-    pub box_id: [u8; 32],
-    pub output_index: u16,
-    pub ergo_tree_bytes: Vec<u8>,
-    pub value: u64,
-    pub assets: Vec<([u8; 32], u64)>,
-    pub miner_reward_pubkey: Option<[u8; 33]>,
-    /// Full serialized `ErgoBox` bytes. Populated by BOTH builders:
-    /// - the section/replay builder ([`build_wallet_block_txs_from_sections`])
-    ///   feeds the rescan read path's registered-scan matching +
-    ///   `ScanTrackedBox.box_bytes`;
-    /// - the live-apply builder ([`build_owned_tx_data_checked`]) captures it
-    ///   for free by reusing the box-id serialization (the id IS
-    ///   `blake2b256` of these bytes), so the apply hook can store it in
-    ///   `WALLET_BOX_BYTES` for the reserved-scan reads
-    ///   (`/scan/{unspent,spent}Boxes/9|10`).
-    ///
-    /// May still be empty for callers that have no bytes to carry; the apply
-    /// hook then skips the `WALLET_BOX_BYTES` row and the read degrades to
-    /// empty `bytes` until a `/wallet/rescan` backfills it.
-    pub box_bytes: Vec<u8>,
-}
-
-/// Owned per-tx data for the wallet hook.
-#[derive(Clone)]
-pub struct OwnedBlockTxData {
-    pub tx_id: [u8; 32],
-    pub inputs: Vec<[u8; 32]>,
-    pub outputs: Vec<OwnedBlockOutput>,
-}
 
 /// Build the wallet-apply input from a slice of `CheckedTransaction`.
 /// Computes box_ids from the `ErgoBox` serialization formula.
@@ -164,7 +135,7 @@ fn build_owned_tx_data_checked(
                 .map(|t| (*t.token_id.as_bytes(), t.amount))
                 .collect();
             let miner_reward_pubkey =
-                crate::wallet::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
+                ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
             Ok(OwnedBlockOutput {
                 box_id: *box_id.as_bytes(),
                 output_index: idx as u16,
@@ -304,7 +275,9 @@ pub(crate) fn build_wallet_block_txs_from_read_txn_classified(
                         .map(|t| (*t.token_id.as_bytes(), t.amount))
                         .collect();
                     let miner_reward_pubkey =
-                        crate::wallet::miner_reward::extract_miner_reward_pubkey(&ergo_tree_bytes);
+                        ergo_wallet::proving::miner_reward::extract_miner_reward_pubkey(
+                            &ergo_tree_bytes,
+                        );
                     // Replay/rescan path: carry the full box so the rescan
                     // scan-matcher can re-derive scan membership and so
                     // `ScanTrackedBox.box_bytes` can be reconstructed. The
@@ -337,64 +310,21 @@ pub(crate) fn build_wallet_block_txs_from_read_txn_classified(
     Ok(WalletBlockSections::Found(owned))
 }
 
-/// Intermediate binding that keeps per-tx `BlockOutput` vecs alive long
-/// enough for `BlockTx<'_>` slices to borrow from them.
-///
-/// `BlockTx.outputs` is `&'a [BlockOutput<'a>]` — a reference into stable
-/// memory — so the intermediate `Vec<BlockOutput>` must outlive the
-/// `BlockTx` slice. `BoundBlockTxs` owns both allocations and exposes an
-/// `as_block_txs()` method that creates the borrows.
-pub struct BoundBlockTxs<'a> {
-    // One Vec<BlockOutput<'a>> per tx, in block order.
-    outputs: Vec<Vec<crate::wallet::apply::BlockOutput<'a>>>,
-    // Parallel tx metadata (tx_id, inputs slice).
-    meta: Vec<([u8; 32], &'a [[u8; 32]])>,
-}
-
-impl<'a> BoundBlockTxs<'a> {
-    pub fn as_block_txs(&self) -> Vec<crate::wallet::apply::BlockTx<'_>> {
-        self.meta
-            .iter()
-            .zip(self.outputs.iter())
-            .map(|((tx_id, inputs), outs)| crate::wallet::apply::BlockTx {
-                tx_id: *tx_id,
-                inputs,
-                outputs: outs.as_slice(),
-            })
-            .collect()
+fn rescan_error(height: u32, source: StateError) -> RescanReadError {
+    if matches!(
+        &source,
+        StateError::Serialization(_) | StateError::DbCorruption { .. }
+    ) {
+        RescanReadError::Corrupt {
+            height,
+            reason: source.to_string(),
+        }
+    } else {
+        RescanReadError::Storage {
+            height,
+            source: WalletStoreError::decode(source.to_string()),
+        }
     }
-}
-
-/// Convert owned block-tx data into `BoundBlockTxs<'_>` which borrows from
-/// `owned`. Call `.as_block_txs()` to get the `&[BlockTx<'_>]` view needed
-/// by the wallet-hook functions.
-///
-/// Two-step construction avoids the lifetime pitfall of creating a
-/// `Vec<BlockOutput>` inside a closure that also produces a `BlockTx`
-/// holding a reference into that same Vec.
-pub fn owned_to_block_txs(owned: &[OwnedBlockTxData]) -> BoundBlockTxs<'_> {
-    let outputs: Vec<Vec<crate::wallet::apply::BlockOutput<'_>>> = owned
-        .iter()
-        .map(|d| {
-            d.outputs
-                .iter()
-                .map(|o| crate::wallet::apply::BlockOutput {
-                    box_id: o.box_id,
-                    output_index: o.output_index,
-                    ergo_tree_bytes: &o.ergo_tree_bytes,
-                    value: o.value,
-                    assets: o.assets.clone(),
-                    miner_reward_pubkey: o.miner_reward_pubkey,
-                    box_bytes: &o.box_bytes,
-                })
-                .collect()
-        })
-        .collect();
-    let meta: Vec<([u8; 32], &[[u8; 32]])> = owned
-        .iter()
-        .map(|d| (d.tx_id, d.inputs.as_slice()))
-        .collect();
-    BoundBlockTxs { outputs, meta }
 }
 
 /// Read block transactions for the wallet rescan path. Returns `None` when
@@ -411,7 +341,7 @@ pub fn block_txs_for_wallet_at_height(
 ) -> Result<Option<([u8; 32], Vec<OwnedBlockTxData>)>, RescanReadError> {
     let read_txn = db
         .begin_read()
-        .map_err(|e| RescanReadError::from_state(height, e.into()))?;
+        .map_err(|e| rescan_error(height, e.into()))?;
     block_txs_for_wallet_at_height_in_read_txn(&read_txn, height)
 }
 
@@ -424,7 +354,7 @@ pub(crate) fn block_txs_for_wallet_at_height_in_read_txn(
     let chain_table = match read_txn.open_table(CHAIN_INDEX) {
         Ok(t) => t,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(e) => return Err(RescanReadError::from_state(height, e.into())),
+        Err(e) => return Err(rescan_error(height, e.into())),
     };
     let header_id: [u8; 32] = match chain_table.get(height as u64) {
         Ok(Some(g)) => {
@@ -432,11 +362,7 @@ pub(crate) fn block_txs_for_wallet_at_height_in_read_txn(
             if bytes.len() != 32 {
                 return Err(RescanReadError::Corrupt {
                     height,
-                    source: StateError::DbCorruption {
-                        table: "chain_index",
-                        key: hex::encode((height as u64).to_be_bytes()),
-                        reason: format!("row has len {} (expected 32)", bytes.len()),
-                    },
+                    reason: format!("chain_index row has len {} (expected 32)", bytes.len()),
                 });
             }
             let mut id = [0u8; 32];
@@ -444,7 +370,7 @@ pub(crate) fn block_txs_for_wallet_at_height_in_read_txn(
             id
         }
         Ok(None) => return Ok(None),
-        Err(e) => return Err(RescanReadError::from_state(height, e.into())),
+        Err(e) => return Err(rescan_error(height, e.into())),
     };
 
     // Reuse the SAME read transaction for the section reads so the height's
@@ -456,13 +382,9 @@ pub(crate) fn block_txs_for_wallet_at_height_in_read_txn(
         Ok(WalletBlockSections::MissingBlockTransactions) => Ok(None),
         Ok(WalletBlockSections::MissingHeader) => Err(RescanReadError::Corrupt {
             height,
-            source: StateError::DbCorruption {
-                table: "headers",
-                key: hex::encode(header_id),
-                reason: "applied-chain header missing during rescan".to_string(),
-            },
+            reason: "applied-chain header missing during rescan".to_string(),
         }),
-        Err(e) => Err(RescanReadError::from_state(height, e)),
+        Err(e) => Err(rescan_error(height, e)),
     }
 }
 

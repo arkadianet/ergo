@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
 use ergo_avltree_rust::batch_node::AVLTree as OracleTree;
-use ergo_primitives::digest::{ADDigest, Digest32};
+use ergo_primitives::digest::{blake2b256, ADDigest, Digest32};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::ergo_box::{read_ergo_box, ErgoBox};
@@ -320,8 +320,9 @@ impl CommittedSnapshot {
             })
     }
 
-    /// The last up-to-10 applied-chain headers walked by parent id, tip-first.
-    pub fn last_ancestor_headers_window(&self) -> Result<Vec<Header>, StateError> {
+    pub fn last_ancestor_header_window_with_ids(
+        &self,
+    ) -> Result<Vec<(Header, [u8; 32])>, StateError> {
         let tip_height = self.chain_state.best_full_block_height;
         let count = tip_height.min(10) as usize;
         if count == 0 {
@@ -339,7 +340,16 @@ impl CommittedSnapshot {
                     reason: format!("missing ancestor header at h={expected_height}"),
                 }
             })?;
-            let mut reader = VlqReader::new(bytes.value());
+            let raw = bytes.value().to_vec();
+            let actual_id = *blake2b256(&raw).as_bytes();
+            if actual_id != current_id {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("header id does not match bytes at h={expected_height}"),
+                });
+            }
+            let mut reader = VlqReader::new(&raw);
             let header = ergo_ser::header::read_header(&mut reader).map_err(|error| {
                 StateError::DbCorruption {
                     table: "headers",
@@ -347,6 +357,13 @@ impl CommittedSnapshot {
                     reason: format!("header decode at h={expected_height}: {error}"),
                 }
             })?;
+            if !reader.is_empty() {
+                return Err(StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(current_id),
+                    reason: format!("header has trailing bytes at h={expected_height}"),
+                });
+            }
             if header.height != expected_height {
                 return Err(StateError::DbCorruption {
                     table: "headers",
@@ -358,9 +375,18 @@ impl CommittedSnapshot {
                 });
             }
             current_id = *header.parent_id.as_bytes();
-            headers.push(header);
+            headers.push((header, actual_id));
         }
         Ok(headers)
+    }
+
+    /// The last up-to-10 applied-chain headers walked by parent id, tip-first.
+    pub fn last_ancestor_headers_window(&self) -> Result<Vec<Header>, StateError> {
+        Ok(self
+            .last_ancestor_header_window_with_ids()?
+            .into_iter()
+            .map(|(header, _)| header)
+            .collect())
     }
 
     /// Active protocol parameters at the committed tip — the block version

@@ -261,7 +261,7 @@ pub(crate) struct PersistJob {
     /// crosses the worker-thread boundary without lifetime or
     /// Send/Sync friction. `None` when no wallet hook is wired (no-
     /// wallet deployments, tests).
-    pub wallet_payload: Option<crate::store::WalletApplyPayload>,
+    pub wallet_payload: Option<crate::wallet::WalletApplyPayload>,
     pub wallet_apply_generation: u64,
 }
 
@@ -1290,10 +1290,10 @@ mod tests {
         let mut j = minimal_job(height);
         let mut trees = std::collections::BTreeSet::new();
         trees.insert(tracked_tree_bytes.clone());
-        let tx = crate::store::OwnedBlockTxData {
+        let tx = crate::wallet::OwnedBlockTxData {
             tx_id: [height as u8; 32],
             inputs: Vec::new(),
-            outputs: vec![crate::store::OwnedBlockOutput {
+            outputs: vec![crate::wallet::OwnedBlockOutput {
                 box_id: output_box_id,
                 output_index: 0,
                 ergo_tree_bytes: tracked_tree_bytes,
@@ -1303,7 +1303,7 @@ mod tests {
                 box_bytes: Vec::new(),
             }],
         };
-        j.wallet_payload = Some(crate::store::WalletApplyPayload {
+        j.wallet_payload = Some(crate::wallet::WalletApplyPayload {
             apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: trees,
             cached_pubkeys: std::collections::BTreeMap::new(),

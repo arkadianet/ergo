@@ -14,15 +14,20 @@
 //! file. After rehydration, the wallet is in Locked state regardless
 //! of how it shut down — operator must Unlock to populate the prover.
 
-pub use ergo_state::wallet::hydration::HydrationSource;
+/// Storage-backed callers first load a fallible `wallet::hydration::HydrationSnapshot`.
+pub trait HydrationSource {
+    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_>;
 
-use crate::storage::UnlockedSecret;
+    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_>;
+
+    fn change_address_pubkey(&self) -> Option<[u8; 33]>;
+}
+
+use ergo_wallet::storage::UnlockedSecret;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `WalletState`. Fields are public-within-crate so the apply hook (in
-/// `ergo-state`) can read them through a reader trait; public API for
-/// outside-crate access goes through the `WalletReader` abstraction in
-/// `ergo-state/src/wallet/reader.rs`.
+/// `WalletState`. Fields are public within the service so apply and
+/// persistence integrations can read them through their reader traits.
 pub struct WalletState {
     /// Tracked HD pubkeys, ordered by their derivation-path index
     /// (mirrors the persisted `WALLET_TRACKED_PUBKEYS` table).
@@ -165,14 +170,16 @@ impl WalletState {
         derivation_path_index: u64,
         pubkey: [u8; 33],
         network: ergo_ser::address::NetworkPrefix,
-    ) -> Result<(), crate::error::WalletError> {
+    ) -> Result<(), ergo_wallet::error::WalletError> {
         // Insert into the ordered cache.
         self.cached_pubkeys.insert(derivation_path_index, pubkey);
 
         // Compute the canonical P2PK ErgoTree bytes that the apply
         // hook will compare against.
         let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-            crate::error::WalletError::InvalidPublicKey(format!("p2pk tree build failed: {e:?}"))
+            ergo_wallet::error::WalletError::InvalidPublicKey(format!(
+                "p2pk tree build failed: {e:?}"
+            ))
         })?;
         self.tracked_p2pk_trees.insert(tree_bytes);
 
@@ -188,10 +195,10 @@ impl WalletState {
         &mut self,
         derivation_path_index: u64,
         network: ergo_ser::address::NetworkPrefix,
-    ) -> Result<(), crate::error::WalletError> {
+    ) -> Result<(), ergo_wallet::error::WalletError> {
         if let Some(pubkey) = self.cached_pubkeys.remove(&derivation_path_index) {
             let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-                crate::error::WalletError::InvalidPublicKey(format!(
+                ergo_wallet::error::WalletError::InvalidPublicKey(format!(
                     "p2pk tree build failed: {e:?}"
                 ))
             })?;
@@ -208,7 +215,7 @@ impl WalletState {
     fn rebuild_visible_addresses(
         &mut self,
         network: ergo_ser::address::NetworkPrefix,
-    ) -> Result<(), crate::error::WalletError> {
+    ) -> Result<(), ergo_wallet::error::WalletError> {
         let total = self.cached_pubkeys.len();
         let skip_first = total == 2;
         self.visible_addresses.clear();
@@ -216,7 +223,7 @@ impl WalletState {
             if skip_first && idx == 0 {
                 continue;
             }
-            let addr = crate::address::pubkey_to_p2pk_address(pubkey, network)?;
+            let addr = ergo_wallet::address::pubkey_to_p2pk_address(pubkey, network)?;
             self.visible_addresses.push(addr);
         }
         Ok(())
@@ -233,7 +240,7 @@ impl WalletState {
         &mut self,
         reader: &R,
         network: ergo_ser::address::NetworkPrefix,
-    ) -> Result<(), crate::error::WalletError> {
+    ) -> Result<(), ergo_wallet::error::WalletError> {
         self.cached_pubkeys.clear();
         self.tracked_p2pk_trees.clear();
         self.visible_addresses.clear();
@@ -241,7 +248,7 @@ impl WalletState {
         for (path_idx, pubkey) in reader.tracked_pubkeys() {
             self.cached_pubkeys.insert(path_idx, pubkey);
             let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).map_err(|e| {
-                crate::error::WalletError::InvalidPublicKey(format!(
+                ergo_wallet::error::WalletError::InvalidPublicKey(format!(
                     "p2pk tree build during hydration: {e:?}"
                 ))
             })?;
@@ -254,13 +261,13 @@ impl WalletState {
         // network-neutral pubkey bytes; the address rendering
         // happens with the current network prefix.
         for (_idx, pubkey) in reader.visible_pubkeys() {
-            let addr = crate::address::pubkey_to_p2pk_address(&pubkey, network)?;
+            let addr = ergo_wallet::address::pubkey_to_p2pk_address(&pubkey, network)?;
             self.visible_addresses.push(addr);
         }
 
         // Same for change address: persisted as pubkey, rendered at read.
         self.persisted_change_address = match reader.change_address_pubkey() {
-            Some(pk) => Some(crate::address::pubkey_to_p2pk_address(&pk, network)?),
+            Some(pk) => Some(ergo_wallet::address::pubkey_to_p2pk_address(&pk, network)?),
             None => None,
         };
         Ok(())

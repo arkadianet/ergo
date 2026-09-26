@@ -29,6 +29,7 @@ use ergo_ser::transaction::{bytes_to_sign, Transaction, UnsignedTransaction};
 
 use crate::error::WalletError;
 use crate::proving::hints::TransactionHintsBag;
+use crate::proving::miner_reward::extract_miner_reward_pubkey;
 use crate::proving::randomness::OsRngBackend;
 use crate::proving::secrets::SecretRegistry;
 use crate::proving::sigma::prove_sigma;
@@ -57,7 +58,7 @@ impl Prover {
     /// currently-supported set:
     /// - Bare `ProveDlog` / `ProveDHTuple` (trivial_reduce returns Ok).
     /// - Canonical miner-reward wrapper `{ HEIGHT >= R_4 && proveDlog(R_5) }`
-    ///   (detected by `ergo_state::wallet::miner_reward::extract_miner_reward_pubkey`).
+    ///   (detected by `proving::miner_reward::extract_miner_reward_pubkey`).
     ///
     /// Context-sensitive scripts could self-verify against the synthetic
     /// pre-header but fail on the chain's real context. This gate can be
@@ -92,10 +93,8 @@ impl Prover {
         for (idx, input_box) in boxes_to_spend.iter().enumerate() {
             let ergo_tree = input_box.candidate.ergo_tree();
             let is_trivially_reducible = ergo_sigma::reduce::trivial_reduce(ergo_tree).is_ok();
-            let is_miner_reward = ergo_state::wallet::miner_reward::extract_miner_reward_pubkey(
-                input_box.candidate.ergo_tree_bytes(),
-            )
-            .is_some();
+            let is_miner_reward =
+                extract_miner_reward_pubkey(input_box.candidate.ergo_tree_bytes()).is_some();
             if !is_trivially_reducible && !is_miner_reward {
                 return Err(WalletError::TxBuild(format!(
                     "input {idx} has an unsupported script family; \

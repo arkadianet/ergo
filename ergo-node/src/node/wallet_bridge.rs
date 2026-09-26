@@ -24,10 +24,14 @@ use ergo_api::wallet::types::{
     WalletTransactionsPage,
 };
 use ergo_api::wallet::{WalletAdmin, WalletAdminError};
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::state::WalletState;
 
+pub mod chain_client;
 pub mod chain_snapshot;
+pub use chain_client::{
+    ChainClientAdapter, InProcessChainClient, IntoChainSubmitter, NodeChainClient,
+};
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
 /// Abstracts the chain submit path so the wallet writer can submit a
@@ -911,7 +915,7 @@ pub trait ChainStateAccessor: Send + Sync {
             Ok(_) => Ok(self.read_block_at(1)?.is_some()),
             Err(error) => Err(ergo_state::wallet::scan::RescanReadError::Storage {
                 height: 0,
-                source: error,
+                source: ergo_state::wallet::WalletStoreError::decode(error.to_string()),
             }),
         }
     }
@@ -967,9 +971,11 @@ pub trait ChainStateAccessor: Send + Sync {
 
     /// Look up a full `ErgoBox` from the UTXO set by its 32-byte box ID.
     /// Returns `None` if the box is not present (spent or unknown).
-    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-        let _ = box_id;
-        None
+    fn lookup_utxo(
+        &self,
+        _box_id: &[u8; 32],
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainStateError> {
+        Err(ChainStateError::Unsupported)
     }
 }
 
@@ -1127,11 +1133,20 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
             .map(|snapshot| snapshot.protocol_params().clone())
     }
 
-    fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
-        use ergo_primitives::reader::VlqReader;
-        let bytes = self.reader.lookup_box(box_id).ok()??;
-        let mut r = VlqReader::new(&bytes);
-        ergo_ser::ergo_box::read_ergo_box(&mut r).ok()
+    fn lookup_utxo(
+        &self,
+        box_id: &[u8; 32],
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainStateError> {
+        let Some(bytes) = self
+            .reader
+            .lookup_box(box_id)
+            .map_err(ChainStateError::from)?
+        else {
+            return Ok(None);
+        };
+        chain_snapshot::decode_utxo_box(box_id, &bytes)
+            .map(Some)
+            .map_err(Into::into)
     }
 }
 
@@ -1149,7 +1164,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// much slower than even a slow PBKDF2 (sub-second), so the worst case is a
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
-    pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
+    pub wallet: Arc<RwLock<ergo_wallet_service::state::WalletState>>,
     /// Shared wallet store used for block-apply matching and invalidation.
     pub store: Arc<dyn ergo_state::wallet::WalletStore>,
 }
@@ -1343,7 +1358,7 @@ pub async fn run_wallet_writer(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_wallet_writer_with_session(
-    mut rx: mpsc::Receiver<WalletCommand>,
+    rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
     store: Arc<dyn ergo_state::wallet::WalletStore>,
@@ -1353,6 +1368,62 @@ pub(super) async fn run_wallet_writer_with_session(
     mempool: Arc<dyn ergo_api::MempoolView>,
     wallet_session_id: u64,
 ) {
+    run_wallet_writer_inner(
+        rx,
+        storage,
+        state,
+        store,
+        chain,
+        cfg,
+        submit_handle,
+        mempool,
+        wallet_session_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_wallet_writer_with_service(
+    rx: mpsc::Receiver<WalletCommand>,
+    storage: Arc<RwLock<SecretStorage>>,
+    state: Arc<RwLock<WalletState>>,
+    store: Arc<dyn ergo_state::wallet::WalletStore>,
+    chain: Arc<dyn ChainStateAccessor>,
+    cfg: WriterConfig,
+    submit_handle: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+    wallet_session_id: u64,
+    service: Arc<ergo_wallet_service::runtime::WalletService>,
+) {
+    run_wallet_writer_inner(
+        rx,
+        storage,
+        state,
+        store,
+        chain,
+        cfg,
+        submit_handle,
+        mempool,
+        wallet_session_id,
+        Some(service),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wallet_writer_inner(
+    mut rx: mpsc::Receiver<WalletCommand>,
+    storage: Arc<RwLock<SecretStorage>>,
+    state: Arc<RwLock<WalletState>>,
+    store: Arc<dyn ergo_state::wallet::WalletStore>,
+    chain: Arc<dyn ChainStateAccessor>,
+    cfg: WriterConfig,
+    submit_handle: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+    wallet_session_id: u64,
+    service: Option<Arc<ergo_wallet_service::runtime::WalletService>>,
+) {
     let ctx = commands::WriterContext {
         storage: &storage,
         state: &state,
@@ -1361,6 +1432,7 @@ pub(super) async fn run_wallet_writer_with_session(
         cfg: &cfg,
         submit_handle: &submit_handle,
         mempool: &mempool,
+        service: service.as_deref(),
         wallet_session_id,
     };
     // Sensitive-op failed-attempt budgets, owned by this loop (the single
@@ -1725,7 +1797,9 @@ mod scan_invalidation_tests {
     fn wallet_state_hook_snapshots_trees_and_pubkeys_together() {
         let _guard = INVALIDATION_GUARD.blocking_lock();
         crate::wallet_boot::clear_rescan_guards();
-        let state = Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false)));
+        let state = Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
+            false,
+        )));
         state
             .write()
             .insert_tracked_pubkey(0, [2; 33], ergo_ser::address::NetworkPrefix::Mainnet)
@@ -1758,7 +1832,9 @@ mod scan_invalidation_tests {
         let store: Arc<dyn ergo_state::wallet::WalletStore> =
             Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
         let hook = WalletStateHook {
-            wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
+            wallet: Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
+                false,
+            ))),
             store,
         };
         // match_boxes loads the registry first (regardless of the box slice), so

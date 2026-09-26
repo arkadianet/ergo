@@ -15,7 +15,7 @@ use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::block_transactions::{write_block_transactions, BlockTransactions};
 use ergo_ser::header::{serialize_header, Header};
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
-use ergo_state::store::{block_txs_for_wallet_at_height, StateError, StateStore};
+use ergo_state::store::{block_txs_for_wallet_at_height, StateStore};
 use ergo_state::wallet::reader::WalletReader;
 use ergo_state::wallet::scan::{
     OwnedBlockOutput, RescanBlock, RescanError, RescanReadError, RescanTx, ScanRescanMatcher,
@@ -25,6 +25,7 @@ use ergo_state::wallet::tables::{
     scan_box_key, WALLET_SCAN_BOXES, WALLET_SCAN_HEIGHT, WALLET_SCAN_INVALIDATED, WALLET_SCAN_TXS,
 };
 use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
+use ergo_state::wallet::WalletStoreError;
 use redb::{Database, ReadableTable};
 
 /// Fake matcher: maps a box's full serialized bytes to the scan ids that
@@ -453,7 +454,7 @@ fn rescan_storage_error_is_distinct_and_keeps_cursor_before_hole() {
             } else {
                 Err(RescanReadError::Storage {
                     height,
-                    source: StateError::Serialization("synthetic read failure".to_string()),
+                    source: WalletStoreError::Decode("synthetic read failure".to_string()),
                 })
             }
         },

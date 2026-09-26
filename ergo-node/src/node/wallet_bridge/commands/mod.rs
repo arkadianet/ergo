@@ -25,8 +25,9 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::runtime::WalletService;
+use ergo_wallet_service::state::WalletState;
 
 use super::{ChainStateAccessor, TxSubmitter, WriterConfig};
 
@@ -68,5 +69,6 @@ pub(super) struct WriterContext<'a> {
     /// Snapshot-backed mempool view for the unconfirmed-balance overlay
     /// (`balances/withUnconfirmed`). Read-only; cheap per-call snapshot reads.
     pub mempool: &'a Arc<dyn ergo_api::MempoolView>,
+    pub service: Option<&'a WalletService>,
     pub wallet_session_id: u64,
 }

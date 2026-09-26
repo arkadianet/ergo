@@ -19,7 +19,6 @@ ergo-sigma       = { workspace = true }
 gf2_192          = { workspace = true }
 ergo-ser         = { workspace = true }
 ergo-validation  = { workspace = true }
-ergo-state       = { workspace = true }
 k256        = { workspace = true, features = ["arithmetic"] }
 md5         = { workspace = true }
 pbkdf2      = { workspace = true }
