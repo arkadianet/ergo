@@ -402,6 +402,14 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
     assert!(ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
     assert!(ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
     assert!(ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("rescan task must finish before resetting global state");
+    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
@@ -450,6 +458,14 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use std::time::Duration;
 
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("rescan task must finish before resetting global state");
+    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
@@ -488,6 +504,14 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     })
     .await
     .expect("corrupt-registry recovery rescan must finish");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("rescan task must finish before resetting global state");
+    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
