@@ -14,7 +14,7 @@ use ergo_state::wallet::maturity::promote_matured_boxes;
 use ergo_state::wallet::scan::{
     OwnedBlockOutput, RescanBlock, RescanReadError, RescanTx, WalletScanService,
 };
-use ergo_state::wallet::tables::WALLET_BOXES;
+use ergo_state::wallet::tables::{WALLET_BOXES, WALLET_SCAN_HEADER_ID, WALLET_SCAN_HEIGHT};
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
 use ergo_wallet::state::WalletState;
 use redb::{Database, TableDefinition};
@@ -53,6 +53,25 @@ fn seed_chain_index(db: &Database, height: u32, header_id: [u8; 32]) {
         .unwrap()
         .insert(height as u64, header_id.as_slice())
         .unwrap();
+    txn.commit().unwrap();
+}
+
+fn set_wallet_cursor(db: &Database, height: u32, header_id: Option<[u8; 32]>) {
+    let txn = db.begin_write().unwrap();
+    txn.open_table(WALLET_SCAN_HEIGHT)
+        .unwrap()
+        .insert((), height)
+        .unwrap();
+    let mut headers = txn.open_table(WALLET_SCAN_HEADER_ID).unwrap();
+    match header_id {
+        Some(header_id) => {
+            headers.insert((), header_id).unwrap();
+        }
+        None => {
+            headers.remove(()).unwrap();
+        }
+    }
+    drop(headers);
     txn.commit().unwrap();
 }
 
@@ -122,6 +141,7 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
 
     // Partial rescan from N=100. Empty blocks — spend tx is gone (reorg).
     seed_chain_index(&db, 99, [0xBB; 32]);
+    set_wallet_cursor(&db, 99, Some([0xBB; 32]));
     let (trees, pks) = wallet_data(&wallet);
     let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
         Ok(Some(RescanBlock {
@@ -143,6 +163,7 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
         None,
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     // Expected: box is back to Confirmed (rewind un-spent it; replay didn't re-spend).
     let wb = read_box(&db, box_id).expect("box must survive");
@@ -201,6 +222,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
     // STEP A: partial rescan from N=500 through h=819 (one below maturity).
     // Rewind should downgrade box to Immature{820}; replay through 819 doesn't re-promote.
     seed_chain_index(&db, 499, [0xEE; 32]);
+    set_wallet_cursor(&db, 499, Some([0xEE; 32]));
     {
         let (trees, pks) = wallet_data(&wallet);
         let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
@@ -223,6 +245,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             None,
         )
         .unwrap();
+        ergo_state::wallet::set_wallet_finalization_in_progress(false);
     }
     let wb = read_box(&db, box_id).expect("box must exist after STEP A");
     match wb.status {
@@ -242,6 +265,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
     // STEP B: advance replay one more block to h=820 (maturity).
     // promote_matured_boxes_rescan inside the replay loop must re-promote.
     seed_chain_index(&db, 819, [0xEE; 32]);
+    set_wallet_cursor(&db, 819, Some([0xEE; 32]));
     {
         let (trees, pks) = wallet_data(&wallet);
         let read_block = |_h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
@@ -264,6 +288,7 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             None,
         )
         .unwrap();
+        ergo_state::wallet::set_wallet_finalization_in_progress(false);
     }
     let wb = read_box(&db, box_id).expect("box must exist after STEP B");
     assert!(
@@ -323,6 +348,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
 
     // Partial rescan from N=100 with read_block returning the spend tx at h=105.
     seed_chain_index(&db, 99, [0xBB; 32]);
+    set_wallet_cursor(&db, 99, Some([0xBB; 32]));
     let (trees, pks) = wallet_data(&wallet);
     let spend_inputs_vec: Vec<[u8; 32]> = vec![box_id];
     let read_block = move |h: u32| -> Result<Option<RescanBlock>, RescanReadError> {
@@ -353,6 +379,7 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
         None,
     )
     .unwrap();
+    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     // Expected: box is Spent again (rewind un-spent; replay re-spent).
     let wb = read_box(&db, box_id).expect("box must exist");

@@ -1,5 +1,5 @@
-//! Read-only wallet view over the redb tables. Implements the
-//! `HydrationSource` trait for boot rehydration. Read paths used
+//! Read-only wallet view over the redb tables, with fallible reads
+//! for boot rehydration. Read paths used
 //! by both internal scan/maturity logic AND the REST `/wallet/*`
 //! handlers in `ergo-api`.
 
@@ -42,7 +42,7 @@ const EIP3_FIRST_ADDRESS_PATH: [u32; 5] = [44 | 0x8000_0000, 429 | 0x8000_0000, 
 
 /// Outcome of resolving the wallet's EIP-3 first-address pubkey for use as
 /// the miner reward key. Three states, kept distinct end-to-end
-/// (ergo-state → ergo-mining → ergo-api) so the API can map them to the
+/// (wallet store → mining source → ergo-api) so the API can map them to the
 /// right transport:
 /// - `Ready` → 200 with the key,
 /// - `Pending` → 503 (wallet tracking not initialized yet; retry),
@@ -133,6 +133,27 @@ impl<'tx> WalletReader<'tx> {
             height,
             header_id: Some(header_id),
         }))
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, redb::Error> {
+        let table = match self.txn.open_table(crate::store::CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(bytes) = table.get(height as u64)? else {
+            return Ok(None);
+        };
+        if bytes.value().len() != 32 {
+            return Err(redb::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chain index header row is not 32 bytes",
+            )));
+        }
+        let mut header_id = [0u8; 32];
+        header_id.copy_from_slice(bytes.value());
+        Ok(Some(header_id))
     }
 
     /// All wallet boxes (any status). Returns an owned `Vec<WalletBox>`
@@ -435,50 +456,6 @@ impl<'tx> WalletReader<'tx> {
             // Non-empty table but no EIP-3 row — inconsistent tracking.
             None => RewardKeyResolution::Corrupt,
         }
-    }
-}
-
-// Implement HydrationSource so WalletState can hydrate. The trait
-// lives in this crate (ergo-state) so the dep direction is
-// ergo-wallet → ergo-state (clean, non-cyclic).
-impl<'tx> crate::wallet::hydration::HydrationSource for WalletReader<'tx> {
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
-        let tbl = match self.txn.open_table(WALLET_TRACKED_PUBKEYS) {
-            Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
-        };
-        // Collect inside the txn (can't return a borrow across the
-        // txn boundary). For typical wallet sizes (≤ tens of pubkeys)
-        // this is fine; revisit if multi-scan makes it a hot path.
-        let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, _) in iter.flatten() {
-                let k_bytes: [u8; 41] = k.value();
-                pairs.push(parse_tracked_pubkey_key(&k_bytes));
-            }
-        }
-        Box::new(pairs.into_iter())
-    }
-
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
-        let tbl = match self.txn.open_table(WALLET_VISIBLE_ADDRESSES) {
-            Ok(t) => t,
-            Err(_) => return Box::new(std::iter::empty()),
-        };
-        // Collect — redb iteration gives keys in ASC byte order,
-        // which for u32 keys = numeric ASC order natively.
-        let mut pairs = Vec::new();
-        if let Ok(iter) = tbl.iter() {
-            for (k, v) in iter.flatten() {
-                pairs.push((k.value(), v.value()));
-            }
-        }
-        Box::new(pairs.into_iter())
-    }
-
-    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
-        let tbl = self.txn.open_table(WALLET_CHANGE_ADDRESS).ok()?;
-        tbl.get(()).ok().flatten().map(|g| g.value())
     }
 }
 

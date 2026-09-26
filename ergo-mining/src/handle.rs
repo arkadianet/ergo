@@ -25,7 +25,6 @@ use ergo_primitives::digest::Digest32;
 
 use ergo_crypto::difficulty::DifficultyParams;
 use ergo_state::store::StateStore;
-use ergo_state::wallet::RewardKeyResolution;
 use ergo_validation::{ReemissionRuleInputs, VotingSettings};
 
 use crate::candidate::Candidate;
@@ -120,16 +119,67 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// horizon.
 const MAX_RETAINED_TEMPLATES: usize = 16;
 
-/// Where the miner reward key comes from. Mirrors Scala's two-tier
-/// resolution (`ErgoMiner`): an operator-configured key, or the wallet's
-/// EIP-3 first-address key resolved lazily from persisted tracking state.
+/// Resolution state for the reward key used by a mining candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RewardKeySource {
-    /// `[mining].miner_public_key_hex` was configured; decoded once at boot.
-    Pinned([u8; 33]),
-    /// No key configured — resolve the wallet's EIP-3 first-address key from
-    /// `StateStore` at candidate-build time (and for the reward endpoints).
-    Wallet,
+pub enum RewardKeyResolution {
+    Ready([u8; 33]),
+    Pending,
+    Corrupt,
+}
+
+/// Resolves the key used for the miner reward output.
+///
+/// Implementations are deliberately independent of chain state. The pinned
+/// source is always ready; a wallet-backed source preserves pending/corrupt
+/// semantics without exposing wallet persistence to mining.
+pub trait RewardKeySource: Send + Sync {
+    /// Resolve the current key without exposing wallet tables to mining.
+    fn resolve(&self) -> RewardKeyResolution;
+}
+
+/// A reward key supplied by node configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct PinnedRewardKeySource {
+    key: [u8; 33],
+}
+
+impl PinnedRewardKeySource {
+    pub const fn new(key: [u8; 33]) -> Self {
+        Self { key }
+    }
+
+    pub const fn key(&self) -> [u8; 33] {
+        self.key
+    }
+}
+
+impl RewardKeySource for PinnedRewardKeySource {
+    fn resolve(&self) -> RewardKeyResolution {
+        RewardKeyResolution::Ready(self.key)
+    }
+}
+
+/// A reward key supplied by a wallet-facing resolver.
+#[derive(Clone)]
+pub struct WalletRewardKeySource {
+    resolver: Arc<dyn Fn() -> RewardKeyResolution + Send + Sync>,
+}
+
+impl WalletRewardKeySource {
+    pub fn new<F>(resolver: F) -> Self
+    where
+        F: Fn() -> RewardKeyResolution + Send + Sync + 'static,
+    {
+        Self {
+            resolver: Arc::new(resolver),
+        }
+    }
+}
+
+impl RewardKeySource for WalletRewardKeySource {
+    fn resolve(&self) -> RewardKeyResolution {
+        (self.resolver)()
+    }
 }
 
 /// Mutable cache state — wrapped in an `RwLock` inside `MiningHandle`.
@@ -172,7 +222,7 @@ pub struct MiningHandle {
     /// the engine task, the action loop, the boot-time subscriber — shares the
     /// one channel.
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
-    reward_key: RewardKeySource,
+    reward_key: Arc<dyn RewardKeySource>,
     monetary: Arc<MonetarySettings>,
     /// `None` on networks that don't enable EIP-27 reemission
     /// (new public testnet). When `None`, candidate assembly skips
@@ -235,7 +285,7 @@ impl MiningHandle {
         voting_settings: VotingSettings,
     ) -> Self {
         Self::with_reward_key(
-            RewardKeySource::Pinned(miner_pk),
+            Arc::new(PinnedRewardKeySource::new(miner_pk)),
             monetary,
             reemission,
             chain_config,
@@ -243,11 +293,11 @@ impl MiningHandle {
         )
     }
 
-    /// Construct a handle with an explicit reward-key source — `Pinned` for a
-    /// configured pubkey, or `Wallet` to resolve the wallet's EIP-3 first-address
-    /// key lazily at candidate-build time (Scala parity for an unset config key).
+    /// Construct a handle with an explicit reward-key source. Production
+    /// callers normally use [`PinnedRewardKeySource`] or
+    /// [`WalletRewardKeySource`].
     pub fn with_reward_key(
-        reward_key: RewardKeySource,
+        reward_key: Arc<dyn RewardKeySource>,
         monetary: MonetarySettings,
         reemission: Option<ReemissionSettings>,
         chain_config: DifficultyParams,
@@ -580,15 +630,11 @@ impl MiningHandle {
         )
     }
 
-    /// Resolve the reward key against current persisted state. `Pinned` is
-    /// always `Ready`; `Wallet` delegates to the wallet's EIP-3 resolver
-    /// (`Pending` until the wallet is initialized, `Corrupt` if tracking is
-    /// inconsistent). Used by candidate refresh and the reward endpoints.
-    pub fn resolve_reward_key(&self, state: &StateStore) -> RewardKeyResolution {
-        match self.reward_key {
-            RewardKeySource::Pinned(pk) => RewardKeyResolution::Ready(pk),
-            RewardKeySource::Wallet => state.resolve_eip3_reward_key(),
-        }
+    /// Resolve the reward key against its configured source. Pinned sources
+    /// are always ready; wallet-backed sources preserve the existing pending
+    /// and corrupt states.
+    pub fn resolve_reward_key(&self) -> RewardKeyResolution {
+        self.reward_key.resolve()
     }
 
     /// Run the API-side solution pre-check against every cached template,
@@ -727,10 +773,8 @@ impl MiningHandle {
     /// until the wallet is initialized and `Corrupt` if tracking is
     /// inconsistent, so the reward endpoints can return 503 / 500 instead of a
     /// stale or fabricated string.
-    pub fn reward_pubkey_hex(&self, state: &StateStore) -> RewardKeyResolution {
-        // RewardKeyResolution carries the raw pubkey; callers hex-encode the
-        // Ready case. Returned as-is so Pending/Corrupt stay distinguishable.
-        self.resolve_reward_key(state)
+    pub fn reward_pubkey_hex(&self) -> RewardKeyResolution {
+        self.resolve_reward_key()
     }
 }
 
@@ -984,25 +1028,21 @@ mod tests {
 
     #[test]
     fn pinned_source_carries_the_configured_key() {
-        // A pinned handle stores exactly the configured pubkey; the
-        // wallet-resolution path is bypassed. (Full resolve_reward_key
-        // coverage incl. Wallet/Pending/Corrupt lives in the StateStore-backed
-        // resolver tests in ergo-state and the integration tests.)
         let pk = [0x02u8; 33];
         let h = MiningHandle::mainnet(pk);
-        assert_eq!(h.reward_key, RewardKeySource::Pinned(pk));
+        assert_eq!(h.resolve_reward_key(), RewardKeyResolution::Ready(pk));
     }
 
     #[test]
-    fn wallet_source_is_distinct_from_pinned() {
+    fn wallet_source_preserves_pending_semantics() {
         let h = MiningHandle::with_reward_key(
-            RewardKeySource::Wallet,
+            Arc::new(WalletRewardKeySource::new(|| RewardKeyResolution::Pending)),
             MonetarySettings::mainnet(),
             Some(ReemissionSettings::mainnet()),
             DifficultyParams::mainnet(),
             VotingSettings::mainnet(),
         );
-        assert_eq!(h.reward_key, RewardKeySource::Wallet);
+        assert_eq!(h.resolve_reward_key(), RewardKeyResolution::Pending);
     }
 
     #[test]
@@ -1585,10 +1625,12 @@ mod tests {
             p
         };
         // Pinned resolves to Ready(pk) regardless of state (no DB needed).
-        let pinned = RewardKeySource::Pinned(pk);
-        let resolved_pk = match pinned {
-            RewardKeySource::Pinned(p) => p,
-            RewardKeySource::Wallet => unreachable!(),
+        let pinned = PinnedRewardKeySource::new(pk);
+        let resolved_pk = match pinned.resolve() {
+            RewardKeyResolution::Ready(p) => p,
+            RewardKeyResolution::Pending | RewardKeyResolution::Corrupt => {
+                unreachable!("pinned source is always ready")
+            }
         };
         // A wallet path that resolved Ready(pk) carries the same pk by
         // construction; assert the downstream script bytes match.

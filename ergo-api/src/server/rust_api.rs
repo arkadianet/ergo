@@ -180,12 +180,13 @@ pub(super) fn indexer_router(state: BlockchainState) -> FamilyRouter {
 pub(super) fn wallet_router(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> FamilyRouter {
     let operations = super::openapi_operations(&super::legacy_rust_openapi())
         .into_iter()
         .filter(|operation| operation.path.starts_with("/api/v1/wallet/"));
     FamilyRouter::new(ApiFamily::Rust).merge_documented(
-        crate::wallet::native::router_with_security(wallet_admin, security),
+        crate::wallet::native::router_with_security_and_moved(wallet_admin, security, wallet_moved),
         operations,
     )
 }
@@ -198,6 +199,7 @@ pub(super) struct ProductRouterState {
     pub webhooks: crate::v1::WebhooksState,
     pub governor: Arc<crate::v1::governor::Governor>,
     pub auth: Arc<crate::v1::auth::V1AuthConfig>,
+    pub wallet_moved: Option<String>,
 }
 
 pub(super) fn product_router(state: ProductRouterState) -> FamilyRouter {
@@ -220,6 +222,7 @@ pub(super) fn product_router(state: ProductRouterState) -> FamilyRouter {
             state.accounts,
             state.governor.clone(),
             state.auth.clone(),
+            state.wallet_moved.as_deref(),
         ))
         .merge(crate::v1::batch_router(state.api, state.governor))
         .merge(crate::v1::webhooks_router(state.webhooks, state.auth));

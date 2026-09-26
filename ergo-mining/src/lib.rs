@@ -34,6 +34,9 @@ pub use emission_rules::{
     emission_at_height, miners_reward_at_height, MonetarySettings, COINS_IN_ONE_ERGO,
 };
 pub use error::MiningError;
+pub use handle::{
+    PinnedRewardKeySource, RewardKeyResolution, RewardKeySource, WalletRewardKeySource,
+};
 pub use reward_script::{reward_output_script, reward_output_script_from_hex, REWARD_SCRIPT_LEN};
 
 mod genesis;

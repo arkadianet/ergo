@@ -248,11 +248,33 @@ pub(crate) fn rollback_scans_from_block(
 /// already force-invalidate the wallet for a full rescan; rebuilding scan
 /// history is a follow-up — there is no scan rescan yet.)
 pub(crate) fn clear_scan_tracking(txn: &WriteTransaction) -> Result<(), redb::Error> {
-    txn.delete_table(WALLET_SCAN_BOXES)
-        .map_err(redb::Error::from)?;
-    txn.delete_table(WALLET_SCAN_BOX_INDEX)
-        .map_err(redb::Error::from)?;
-    txn.delete_table(WALLET_SCAN_TXS)
-        .map_err(redb::Error::from)?;
+    macro_rules! clear_table {
+        ($table:expr) => {
+            match txn.open_table($table) {
+                Ok(table) => {
+                    drop(table);
+                    txn.delete_table($table)?;
+                }
+                Err(redb::TableError::TableDoesNotExist(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        };
+    }
+    clear_table!(WALLET_SCAN_BOXES);
+    clear_table!(WALLET_SCAN_BOX_INDEX);
+    clear_table!(WALLET_SCAN_TXS);
+    Ok(())
+}
+
+pub(crate) fn clear_scan_registry(txn: &WriteTransaction) -> Result<(), redb::Error> {
+    clear_scan_tracking(txn)?;
+    match txn.open_table(WALLET_SCANS) {
+        Ok(table) => {
+            drop(table);
+            txn.delete_table(WALLET_SCANS)?;
+        }
+        Err(redb::TableError::TableDoesNotExist(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }

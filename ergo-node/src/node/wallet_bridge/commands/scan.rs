@@ -14,20 +14,24 @@
 //! opaquely as JSON ([`ScanRequestDto`] / [`ScanDto`]); the DTO <-> domain
 //! conversion (which also validates the `trackingRule` predicate) happens here.
 
-use redb::ReadableTable;
 use tokio::sync::oneshot;
 
 use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_api::wallet::WalletAdminError;
-use ergo_state::wallet::tables::{
-    scan_box_key, WALLET_LAST_USED_SCAN_ID, WALLET_SCANS, WALLET_SCAN_BOXES, WALLET_SCAN_BOX_INDEX,
-    WALLET_SCAN_TXS,
-};
-use ergo_state::wallet::types::{ScanBoxStatus, ScanTrackedBox, ScanTxRecord};
+use ergo_state::wallet::store::WalletStoreError;
+use ergo_state::wallet::types::ScanBoxStatus;
+use thiserror::Error;
+
+#[cfg(test)]
+use ergo_state::wallet::tables::*;
+#[cfg(test)]
+use ergo_state::wallet::types::{ScanTrackedBox, ScanTxRecord};
 use ergo_wallet::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
     MAX_SCAN_NAME_LENGTH, MINING_SCAN_ID, PAYMENTS_SCAN_ID,
 };
+#[cfg(test)]
+use redb::ReadableTable;
 
 use super::WriterContext;
 
@@ -58,45 +62,54 @@ fn reject_during_scan_rebuild() -> Result<(), WalletAdminError> {
 /// `WalletStateHook::match_boxes`, reusing the same
 /// `ScanRegistry::matching_scan_ids`, so a rescan reproduces live scan
 /// tracking exactly.
+#[derive(Debug, Error)]
+pub(crate) enum ScanRegistryLoadError {
+    #[error("corrupt scan registry: {0}")]
+    Corrupt(String),
+    #[error("wallet store read failed while loading scan registry: {0}")]
+    Read(String),
+}
+
 pub(crate) struct RescanScanMatcher {
-    registry: ScanRegistry,
+    registry: Option<ScanRegistry>,
+}
+
+pub(crate) fn empty_rescan_matcher() -> RescanScanMatcher {
+    RescanScanMatcher { registry: None }
 }
 
 impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
     fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
+        let Some(registry) = &self.registry else {
+            return Ok(vec![Vec::new(); boxes.len()]);
+        };
         boxes
             .iter()
             .map(|bytes| {
                 let mut r = ergo_primitives::reader::VlqReader::new(bytes);
                 let b = ergo_ser::ergo_box::read_ergo_box(&mut r)
                     .map_err(|e| format!("output box parse failed: {e}"))?;
-                Ok(self.registry.matching_scan_ids(&b))
+                Ok(registry.matching_scan_ids(&b))
             })
             .collect()
     }
 }
 
-/// Build a rescan scan-matcher snapshot: `Ok(Some)` iff ≥1 user scan is
-/// registered, `Ok(None)` for a node with no scans (no scan rescan needed).
-///
-/// A registry-load error is propagated as `Err`, NOT collapsed to `None`: the
-/// caller must refuse the rescan in that case. A full rescan ends by clearing
-/// `WALLET_SCAN_INVALIDATED`, but a rescan can't rebuild scans from a registry
-/// it can't read — treating the error as "no scans" would clear the flag and
-/// falsely report a healthy wallet while the registry is still corrupt and the
-/// dropped block's scan matches were never rebuilt.
+/// Build a rescan scan-matcher snapshot. Registry decode failures are
+/// classified separately from transient wallet-store read failures so callers
+/// can clear only a genuinely corrupt registry.
 #[cfg(test)]
 pub(crate) fn build_rescan_matcher(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
 ) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
-    let registry = load_registry(db)?;
+    let registry = load_registry(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
 }
 
 pub(crate) fn build_rescan_matcher_from_store(
     store: &dyn ergo_state::wallet::WalletStore,
-) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
-    let registry = load_registry_from_store(store)?;
+) -> Result<Option<RescanScanMatcher>, ScanRegistryLoadError> {
+    let registry = load_registry_from_store_classified(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
 }
 
@@ -104,7 +117,9 @@ fn build_rescan_matcher_from_registry(registry: ScanRegistry) -> Option<RescanSc
     if registry.list().is_empty() {
         None
     } else {
-        Some(RescanScanMatcher { registry })
+        Some(RescanScanMatcher {
+            registry: Some(registry),
+        })
     }
 }
 
@@ -130,46 +145,63 @@ fn dto_from_scan(scan: &Scan) -> Result<ScanDto, WalletAdminError> {
 ///
 /// `pub(crate)` so the block-apply hook (`WalletStateHook`) can load the
 /// registry to match each block's boxes.
-pub(crate) fn load_registry(db: &redb::Database) -> Result<ScanRegistry, WalletAdminError> {
-    let read = db.begin_read().map_err(internal)?;
-
-    let last_used = match read.open_table(WALLET_LAST_USED_SCAN_ID) {
-        Ok(t) => t
-            .get(())
-            .map_err(internal)?
-            .map(|g| g.value())
-            .unwrap_or(PAYMENTS_SCAN_ID),
-        Err(redb::TableError::TableDoesNotExist(_)) => PAYMENTS_SCAN_ID,
-        Err(e) => return Err(internal(e)),
-    };
-
-    let scans = match read.open_table(WALLET_SCANS) {
-        Ok(t) => {
-            let mut scans = Vec::new();
-            for entry in t.iter().map_err(internal)? {
-                let (_, value) = entry.map_err(internal)?;
-                let scan: Scan = serde_json::from_slice(&value.value()).map_err(internal)?;
-                scans.push(scan);
-            }
-            scans
-        }
-        Err(redb::TableError::TableDoesNotExist(_)) => Vec::new(),
-        Err(e) => return Err(internal(e)),
-    };
-
-    Ok(ScanRegistry::from_persisted(scans, last_used))
+pub(crate) fn load_registry(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<ScanRegistry, WalletAdminError> {
+    load_registry_from_store(store)
 }
 
 pub(crate) fn load_registry_from_store(
     store: &dyn ergo_state::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
-    let read = store.begin_read().map_err(internal)?;
-    let snapshot = read.scan_registry().map_err(internal)?;
-    let scans = snapshot
-        .scans
-        .into_iter()
-        .map(|scan| serde_json::from_slice::<Scan>(&scan.json).map_err(internal))
-        .collect::<Result<Vec<_>, _>>()?;
+    load_registry_from_store_classified(store)
+        .map_err(|error| WalletAdminError::Internal(error.to_string()))
+}
+
+fn classify_registry_store_error(error: WalletStoreError) -> ScanRegistryLoadError {
+    match error {
+        WalletStoreError::Decode(message) => ScanRegistryLoadError::Corrupt(message),
+        other => ScanRegistryLoadError::Read(other.to_string()),
+    }
+}
+
+fn load_registry_from_store_classified(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<ScanRegistry, ScanRegistryLoadError> {
+    let read = store
+        .read()
+        .map_err(|error| ScanRegistryLoadError::Read(error.to_string()))?;
+    let snapshot = read
+        .scan_registry()
+        .map_err(classify_registry_store_error)?;
+    let mut scans = Vec::new();
+    let mut embedded_ids = std::collections::BTreeSet::new();
+    for stored in snapshot.scans {
+        let scan: Scan = serde_json::from_slice::<Scan>(&stored.json)
+            .map_err(|error| ScanRegistryLoadError::Corrupt(error.to_string()))?;
+        scan.tracking_rule.validate().map_err(|error| {
+            ScanRegistryLoadError::Corrupt(format!("invalid tracking rule: {error}"))
+        })?;
+        if !embedded_ids.insert(scan.scan_id) {
+            return Err(ScanRegistryLoadError::Corrupt(format!(
+                "duplicate embedded scan id {}",
+                scan.scan_id
+            )));
+        }
+        if scan.scan_id <= PAYMENTS_SCAN_ID {
+            return Err(ScanRegistryLoadError::Corrupt(format!(
+                "reserved or invalid scan id {}",
+                scan.scan_id
+            )));
+        }
+        if scan.scan_id != stored.id {
+            return Err(ScanRegistryLoadError::Corrupt(format!(
+                "scan key {} does not match embedded scanId {}",
+                stored.id, scan.scan_id
+            )));
+        }
+        scans.push(scan);
+    }
     Ok(ScanRegistry::from_persisted(
         scans,
         snapshot.last_used_id.unwrap_or(PAYMENTS_SCAN_ID),
@@ -185,18 +217,29 @@ pub(crate) async fn register(
         let _ = reply.send(Err(e));
         return;
     }
-    let _ = reply.send(register_impl(ctx.db, request));
+    let _ = reply.send(register_impl_with_store(ctx.store.as_ref(), request));
 }
 
-fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
+fn register_impl_with_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+    request: ScanRequestDto,
+) -> Result<u16, WalletAdminError> {
     let request = request_from_dto(request)?;
-    register_request(db, request)
+    register_request(store, request)
+}
+
+#[cfg(test)]
+fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
+    register_impl_with_store(db, request)
 }
 
 /// Validate + allocate + persist a domain `ScanRequest`. Shared by
 /// `/scan/register` (after DTO conversion) and `/scan/p2sRule` (which builds
 /// the request directly from an address).
-fn register_request(db: &redb::Database, request: ScanRequest) -> Result<u16, WalletAdminError> {
+fn register_request(
+    store: &dyn ergo_state::wallet::WalletStore,
+    request: ScanRequest,
+) -> Result<u16, WalletAdminError> {
     // Scala `ScanRequest.toScan` rejects an over-long scan name (> 255 UTF-8
     // bytes) as a bad request before storing.
     if request.scan_name.len() > MAX_SCAN_NAME_LENGTH {
@@ -213,23 +256,16 @@ fn register_request(db: &redb::Database, request: ScanRequest) -> Result<u16, Wa
         .validate()
         .map_err(|e| WalletAdminError::BadRequest(format!("invalid tracking rule: {e}")))?;
 
-    let mut registry = load_registry(db)?;
+    let mut registry = load_registry(store)?;
     let scan = registry.register(request).map_err(internal)?;
 
     // Persist the new scan and the advanced counter atomically (Scala
     // `addScan` writes both the scan key and `lastUsedScanId` in one batch).
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let value = serde_json::to_vec(&scan).map_err(internal)?;
-        let mut scans = write.open_table(WALLET_SCANS).map_err(internal)?;
-        scans.insert(scan.scan_id, value).map_err(internal)?;
-        let mut counter = write
-            .open_table(WALLET_LAST_USED_SCAN_ID)
-            .map_err(internal)?;
-        counter
-            .insert((), registry.last_used_scan_id())
-            .map_err(internal)?;
-    }
+    let value = serde_json::to_vec(&scan).map_err(internal)?;
+    let mut write = store.begin_write().map_err(internal)?;
+    write
+        .put_scan(scan.scan_id, value, registry.last_used_scan_id())
+        .map_err(internal)?;
     write.commit().map_err(internal)?;
     Ok(scan.scan_id)
 }
@@ -241,8 +277,8 @@ fn register_request(db: &redb::Database, request: ScanRequest) -> Result<u16, Wa
 /// Address classes: P2PK and P2S decode to their canonical tree bytes; P2SH
 /// is rejected (Scala registers the synthetic P2SH wrapper script — this
 /// build's address path refuses P2SH outright, same posture as the indexer).
-fn p2s_rule_impl(
-    db: &redb::Database,
+fn p2s_rule_impl_with_store(
+    store: &dyn ergo_state::wallet::WalletStore,
     network: ergo_ser::address::NetworkPrefix,
     p2s: &str,
 ) -> Result<u16, WalletAdminError> {
@@ -281,7 +317,7 @@ fn p2s_rule_impl(
         wallet_interaction: Some(WalletInteraction::Off),
         remove_offchain: Some(true),
     };
-    register_request(db, request)
+    register_request(store, request)
 }
 
 pub(crate) async fn deregister(
@@ -293,11 +329,14 @@ pub(crate) async fn deregister(
         let _ = reply.send(Err(e));
         return;
     }
-    let _ = reply.send(deregister_impl(ctx.db, scan_id));
+    let _ = reply.send(deregister_impl_with_store(ctx.store.as_ref(), scan_id));
 }
 
-fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminError> {
-    let mut registry = load_registry(db)?;
+fn deregister_impl_with_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+    scan_id: u16,
+) -> Result<(), WalletAdminError> {
+    let mut registry = load_registry(store)?;
     // Scala `removeScan` is not idempotent: a missing id is a failure. The
     // `/scan/deregister` route maps that to HTTP 400 (BadRequest).
     registry
@@ -310,96 +349,30 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
     // lost/under-set, `load_registry` lifts it to the highest scan id; writing
     // it here makes that recovery durable, so deregistering the highest scan
     // can't drop the counter and let the next register reuse the removed id.
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let mut scans = write.open_table(WALLET_SCANS).map_err(internal)?;
-        scans.remove(scan_id).map_err(internal)?;
-        let mut counter = write
-            .open_table(WALLET_LAST_USED_SCAN_ID)
-            .map_err(internal)?;
-        counter
-            .insert((), registry.last_used_scan_id())
-            .map_err(internal)?;
-
-        // Purge the scan's tracked-box rows and prune the reverse index, in the
-        // same txn. Without this the rows are only hidden-on-read; since scan ids
-        // are never reused they would accumulate forever. A box still tracked by
-        // a surviving scan keeps its row and a pruned index entry.
-        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
-        let box_ids: Vec<[u8; 32]> = boxes
-            .range(scan_box_key(scan_id, &[0u8; 32])..=scan_box_key(scan_id, &[0xffu8; 32]))
-            .map_err(internal)?
-            .map(|item| {
-                let (k, _) = item.map_err(internal)?;
-                let mut id = [0u8; 32];
-                id.copy_from_slice(&k.value()[2..]);
-                Ok::<[u8; 32], WalletAdminError>(id)
-            })
-            .collect::<Result<_, _>>()?;
-        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
-        for box_id in &box_ids {
-            boxes
-                .remove(scan_box_key(scan_id, box_id))
-                .map_err(internal)?;
-            let remaining: Vec<u16> = match idx.get(box_id).map_err(internal)? {
-                Some(g) => bincode::deserialize::<Vec<u16>>(&g.value())
-                    .map_err(internal)?
-                    .into_iter()
-                    .filter(|&s| s != scan_id)
-                    .collect(),
-                None => Vec::new(),
-            };
-            if remaining.is_empty() {
-                idx.remove(box_id).map_err(internal)?;
-            } else {
-                idx.insert(*box_id, bincode::serialize(&remaining).map_err(internal)?)
-                    .map_err(internal)?;
-            }
-        }
-
-        // Purge the deregistered id from per-tx scan tags. WALLET_SCAN_TXS is
-        // keyed by (height, tx_id), not scan id, so this is a full-table scan:
-        // strip the id from each record's `scan_ids`, deleting records that
-        // empty out. The `created`/`spent` box-id lists are a cross-scan union
-        // the schema doesn't attribute per scan, so they're left as-is — they
-        // were already the union shown to every member scan, and a deregistered
-        // id's txs are hidden-on-read regardless.
-        let mut txs = write.open_table(WALLET_SCAN_TXS).map_err(internal)?;
-        let mut tx_updates: Vec<([u8; 36], Vec<u8>)> = Vec::new();
-        let mut tx_deletes: Vec<[u8; 36]> = Vec::new();
-        for item in txs.iter().map_err(internal)? {
-            let (k, v) = item.map_err(internal)?;
-            let mut rec: ScanTxRecord = bincode::deserialize(&v.value()).map_err(internal)?;
-            if !rec.scan_ids.contains(&scan_id) {
-                continue;
-            }
-            rec.scan_ids.retain(|&s| s != scan_id);
-            if rec.scan_ids.is_empty() {
-                tx_deletes.push(k.value());
-            } else {
-                tx_updates.push((k.value(), bincode::serialize(&rec).map_err(internal)?));
-            }
-        }
-        for (k, v) in tx_updates {
-            txs.insert(k, v).map_err(internal)?;
-        }
-        for k in tx_deletes {
-            txs.remove(k).map_err(internal)?;
-        }
-    }
+    let mut write = store.begin_write().map_err(internal)?;
+    write
+        .remove_scan(scan_id, registry.last_used_scan_id())
+        .map_err(internal)?;
     write.commit().map_err(internal)?;
     Ok(())
+}
+
+#[cfg(test)]
+fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminError> {
+    deregister_impl_with_store(db, scan_id)
 }
 
 pub(crate) async fn list(
     ctx: &WriterContext<'_>,
     reply: oneshot::Sender<Result<Vec<ScanDto>, WalletAdminError>>,
 ) {
-    let _ = reply.send(list_impl(ctx.db));
+    let _ = reply.send(list_impl(ctx.store.as_ref()));
 }
 
-fn list_impl(db: &redb::Database) -> Result<Vec<ScanDto>, WalletAdminError> {
-    load_registry(db)?
+fn list_impl(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<Vec<ScanDto>, WalletAdminError> {
+    load_registry(store)?
         .list()
         .iter()
         .map(dto_from_scan)
@@ -439,38 +412,20 @@ fn require_user_scan_id(scan_id: u16) -> Result<(), WalletAdminError> {
 /// "un-spends" for the scans that still track it, an upstream accident we
 /// don't replicate. Documented in the openapi header's scan note.
 fn stop_tracking_impl(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     scan_id: u16,
     box_id_hex: &str,
 ) -> Result<(), WalletAdminError> {
     require_user_scan_id(scan_id)?;
     let box_id = parse_box_id(box_id_hex)?;
-
-    // The single-writer wallet task serializes this read-then-write; the
-    // read happens inside the write txn, so block-apply writes (same redb,
-    // global write lock) can't interleave.
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
-        let ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {
-            Some(g) => bincode::deserialize(&g.value()).map_err(internal)?,
-            None => {
-                return Err(WalletAdminError::BadRequest(format!(
-                    "no box with id {box_id_hex} found in the scan database"
-                )))
-            }
-        };
-        let new_ids: Vec<u16> = ids.iter().copied().filter(|&s| s != scan_id).collect();
-        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
-        boxes
-            .remove(scan_box_key(scan_id, &box_id))
-            .map_err(internal)?;
-        if new_ids.is_empty() {
-            idx.remove(box_id).map_err(internal)?;
-        } else {
-            idx.insert(box_id, bincode::serialize(&new_ids).map_err(internal)?)
-                .map_err(internal)?;
-        }
+    let mut write = store.begin_write().map_err(internal)?;
+    let found = write
+        .stop_tracking_scan_box(scan_id, &box_id)
+        .map_err(internal)?;
+    if !found {
+        return Err(WalletAdminError::BadRequest(format!(
+            "no box with id {box_id_hex} found in the scan database"
+        )));
     }
     write.commit().map_err(internal)?;
     Ok(())
@@ -505,8 +460,8 @@ fn bad_request(e: impl std::fmt::Display) -> WalletAdminError {
 /// to an unregistered id would persist rows invisible to reads (hide-on-read)
 /// forever (ids never reused), and reserved ids (<= 10) address the wallet's
 /// own tables in this build, not the scan tables.
-fn add_box_impl(
-    db: &redb::Database,
+fn add_box_impl_with_store(
+    store: &dyn ergo_state::wallet::WalletStore,
     scan_ids: &[u16],
     box_json: &serde_json::Value,
 ) -> Result<String, WalletAdminError> {
@@ -515,7 +470,7 @@ fn add_box_impl(
     new_ids.sort_unstable();
     new_ids.dedup();
 
-    let registry = load_registry(db)?;
+    let registry = load_registry(store)?;
     for &sid in &new_ids {
         require_user_scan_id(sid)?;
         if registry.get(sid).is_none() {
@@ -556,49 +511,26 @@ fn add_box_impl(
     let box_bytes = ergo_ser::ergo_box::serialize_ergo_box(&ergo_box)
         .map_err(|e| bad_request(format!("box serialize: {e}")))?;
 
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let mut idx = write.open_table(WALLET_SCAN_BOX_INDEX).map_err(internal)?;
-        let old_ids: Vec<u16> = match idx.get(box_id).map_err(internal)? {
-            Some(g) => bincode::deserialize(&g.value()).map_err(internal)?,
-            None => Vec::new(),
-        };
-        if new_ids.is_empty() && old_ids.is_empty() {
-            return Err(WalletAdminError::BadRequest(
-                "can't remove a box which does not exist".to_string(),
-            ));
-        }
-
-        let mut boxes = write.open_table(WALLET_SCAN_BOXES).map_err(internal)?;
-        // Replace: drop every old row, then write fresh Unspent rows.
-        for sid in old_ids {
-            boxes.remove(scan_box_key(sid, &box_id)).map_err(internal)?;
-        }
-        for &sid in &new_ids {
-            let tb = ScanTrackedBox {
-                scan_id: sid,
-                box_id,
-                inclusion_height: creation_height,
-                creation_out_index: parsed.index,
-                box_bytes: box_bytes.clone(),
-                status: ScanBoxStatus::Unspent,
-            };
-            boxes
-                .insert(
-                    scan_box_key(sid, &box_id),
-                    bincode::serialize(&tb).map_err(internal)?,
-                )
-                .map_err(internal)?;
-        }
-        if new_ids.is_empty() {
-            idx.remove(box_id).map_err(internal)?;
-        } else {
-            idx.insert(box_id, bincode::serialize(&new_ids).map_err(internal)?)
-                .map_err(internal)?;
-        }
+    let mut write = store.begin_write().map_err(internal)?;
+    let replaced = write
+        .replace_scan_box(&new_ids, box_id, creation_height, parsed.index, box_bytes)
+        .map_err(internal)?;
+    if !replaced {
+        return Err(WalletAdminError::BadRequest(
+            "can't remove a box which does not exist".to_string(),
+        ));
     }
     write.commit().map_err(internal)?;
     Ok(hex::encode(box_id))
+}
+
+#[cfg(test)]
+fn add_box_impl(
+    db: &redb::Database,
+    scan_ids: &[u16],
+    box_json: &serde_json::Value,
+) -> Result<String, WalletAdminError> {
+    add_box_impl_with_store(db, scan_ids, box_json)
 }
 
 pub(crate) async fn stop_tracking(
@@ -611,7 +543,7 @@ pub(crate) async fn stop_tracking(
         let _ = reply.send(Err(e));
         return;
     }
-    let _ = reply.send(stop_tracking_impl(ctx.db, scan_id, &box_id));
+    let _ = reply.send(stop_tracking_impl(ctx.store.as_ref(), scan_id, &box_id));
 }
 
 pub(crate) async fn add_box(
@@ -624,7 +556,11 @@ pub(crate) async fn add_box(
         let _ = reply.send(Err(e));
         return;
     }
-    let _ = reply.send(add_box_impl(ctx.db, &scan_ids, &box_json));
+    let _ = reply.send(add_box_impl_with_store(
+        ctx.store.as_ref(),
+        &scan_ids,
+        &box_json,
+    ));
 }
 
 pub(crate) async fn p2s_rule(
@@ -636,7 +572,20 @@ pub(crate) async fn p2s_rule(
         let _ = reply.send(Err(e));
         return;
     }
-    let _ = reply.send(p2s_rule_impl(ctx.db, ctx.cfg.network, &p2s));
+    let _ = reply.send(p2s_rule_impl_with_store(
+        ctx.store.as_ref(),
+        ctx.cfg.network,
+        &p2s,
+    ));
+}
+
+#[cfg(test)]
+fn p2s_rule_impl(
+    db: &redb::Database,
+    network: ergo_ser::address::NetworkPrefix,
+    p2s: &str,
+) -> Result<u16, WalletAdminError> {
+    p2s_rule_impl_with_store(db, network, p2s)
 }
 
 /// Transactions associated with a user scan, from `WALLET_SCAN_TXS` —
@@ -644,26 +593,21 @@ pub(crate) async fn p2s_rule(
 /// here the rows are pre-tagged at block apply and filtered the same way.
 /// Unregistered / deregistered user scans read as empty (hide-on-read, parity
 /// with the box endpoints).
-///
-/// Deliberate divergence: reserved ids read as empty here — the matcher tags
-/// only registered user scans (≥ 11), while Scala serves mining-scan txs at
-/// id 9 from its unified store. (Id 10 is the wallet's own listing at the
-/// dispatch layer and never reaches here.)
 pub(crate) fn scan_transactions_impl(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     scan_id: u16,
     page: ergo_api::wallet::types::Page,
 ) -> Result<ergo_api::wallet::types::WalletTransactionsPage, WalletAdminError> {
-    if scan_id > PAYMENTS_SCAN_ID && load_registry(db)?.get(scan_id).is_none() {
+    if scan_id == MINING_SCAN_ID || scan_id == PAYMENTS_SCAN_ID {
+        return Ok(Default::default());
+    }
+    require_user_scan_id(scan_id)?;
+    if scan_id > PAYMENTS_SCAN_ID && load_registry(store)?.get(scan_id).is_none() {
         return Ok(Default::default());
     }
 
-    let read = db.begin_read().map_err(internal)?;
-    let table = match read.open_table(WALLET_SCAN_TXS) {
-        Ok(t) => t,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Default::default()),
-        Err(e) => return Err(internal(e)),
-    };
+    let read = store.read().map_err(internal)?;
+    let records = read.scan_transactions(scan_id).map_err(internal)?;
 
     // Table order is (height, tx_id) ascending. Single pass: count every
     // membership match for `total`, but materialize entries only inside the
@@ -674,12 +618,7 @@ pub(crate) fn scan_transactions_impl(
     let limit = page.limit as usize;
     let mut match_count: usize = 0;
     let mut items = Vec::new();
-    for item in table.iter().map_err(internal)? {
-        let (_, value) = item.map_err(internal)?;
-        let rec: ScanTxRecord = bincode::deserialize(&value.value()).map_err(internal)?;
-        if !rec.scan_ids.contains(&scan_id) {
-            continue;
-        }
+    for rec in records {
         let in_window = match_count >= offset && items.len() < limit;
         match_count += 1;
         if in_window {
@@ -705,11 +644,11 @@ pub(crate) async fn unspent_boxes(
     filter: ScanBoxFilter,
     reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
 ) {
-    // `None` tip: read_scan_boxes derives the committed tip from the SAME redb
-    // snapshot it reads the boxes from (consistent confirmations). The live
-    // mempool view feeds the off-chain overlay (minConfirmations=-1).
+    // The chain accessor supplies the committed tip used for confirmations;
+    // the wallet store supplies the box snapshot. The live mempool view feeds
+    // the off-chain overlay (minConfirmations=-1).
     let _ = reply.send(read_scan_boxes(
-        ctx.db,
+        ctx.store.as_ref(),
         None,
         scan_id,
         false,
@@ -727,7 +666,7 @@ pub(crate) async fn spent_boxes(
     // spentBoxes has no off-chain component (Scala `getScanSpentBoxes`), but the
     // view is threaded through uniformly; the overlay self-gates on want_spent.
     let _ = reply.send(read_scan_boxes(
-        ctx.db,
+        ctx.store.as_ref(),
         None,
         scan_id,
         true,
@@ -748,7 +687,7 @@ pub(crate) async fn spent_boxes(
 /// `minConfirmations=0` would then hide). Tests pass `Some(height)` to drive
 /// confirmations deterministically without seeding chain-state meta.
 fn read_scan_boxes(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     tip_override: Option<u32>,
     scan_id: u16,
     want_spent: bool,
@@ -757,12 +696,9 @@ fn read_scan_boxes(
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
     // Reserved scan ids 9 (Mining) / 10 (Payments) surface the wallet's OWN
     // boxes, which live in WALLET_BOXES — the scan tables only hold user scans.
-    // Bridge them: 9 = `MinerReward` provenance, 10 = `Owned`. Documented
-    // divergence — Scala migrates a matured mining box 9→10, whereas our
-    // provenance is fixed at creation, so matured mining stays under 9.
     if scan_id == MINING_SCAN_ID || scan_id == PAYMENTS_SCAN_ID {
         return read_reserved_scan_boxes(
-            db,
+            store,
             tip_override,
             scan_id == MINING_SCAN_ID,
             want_spent,
@@ -770,46 +706,24 @@ fn read_scan_boxes(
             mempool,
         );
     }
+    require_user_scan_id(scan_id)?;
 
     // Hide boxes belonging to a user scan that isn't currently registered.
-    // `/scan/deregister` removes the scan from the registry but leaves its
-    // tracked rows in WALLET_SCAN_BOXES (we don't purge on deregister), so a
-    // read by the old id would otherwise still surface them. Reserved ids
-    // (<= PAYMENTS_SCAN_ID) are not user-managed and never have rows here, so
-    // they bypass this guard and fall through to the (empty) table read.
+    // Deregistration purges the scan's rows and reverse-index entries in the
+    // same transaction; this guard also handles legacy orphaned rows.
     //
     // Deliberate divergence from Scala: `ErgoWalletService.removeScan` neither
     // purges nor hides, so Scala keeps serving boxes tagged with a removed id.
-    // Hiding is strictly safer; the orphaned rows are bounded (ids never reuse)
-    // and reclaiming them via purge-on-deregister is a tracked follow-up.
-    if scan_id > PAYMENTS_SCAN_ID && load_registry(db)?.get(scan_id).is_none() {
+    // This build removes them and fails closed for an unknown user scan.
+    if scan_id > PAYMENTS_SCAN_ID && load_registry(store)?.get(scan_id).is_none() {
         return Ok(Vec::new());
     }
 
-    let read = db.begin_read().map_err(internal)?;
-    // Derive the tip from the same snapshot as the boxes (unless overridden).
-    // `None` committed tip means no chain is applied yet → no tracked boxes
-    // exist, so 0 is a safe base.
-    let current_height = match tip_override {
-        Some(h) => h,
-        None => ergo_state::reader::committed_tip_in(&read)
-            .map_err(internal)?
-            .map(|(h, _)| h)
-            .unwrap_or(0),
+    let read = store.read().map_err(internal)?;
+    let (current_height, tracked_boxes) = match tip_override {
+        Some(height) => (height, read.scan_boxes(scan_id).map_err(internal)?),
+        None => read.scan_boxes_with_tip(scan_id).map_err(internal)?,
     };
-    // The scan-boxes table is created lazily on the first tracked-box write, so
-    // a scan whose boxes have only ever been seen off-chain (in the mempool) has
-    // no table yet. Treat a missing table as "no confirmed boxes" and still fall
-    // through to the off-chain overlay below, rather than returning early.
-    let table_opt = match read.open_table(WALLET_SCAN_BOXES) {
-        Ok(t) => Some(t),
-        Err(redb::TableError::TableDoesNotExist(_)) => None,
-        Err(e) => return Err(internal(e)),
-    };
-
-    // Range over exactly this scan's keys: [(scan_id, 0..0) ..= (scan_id, ff..ff)].
-    let lo = scan_box_key(scan_id, &[0u8; 32]);
-    let hi = scan_box_key(scan_id, &[0xffu8; 32]);
 
     let mut entries: Vec<ScanBoxEntry> = Vec::new();
     // Every box id this scan knows on-chain, in ANY status and regardless of the
@@ -817,50 +731,46 @@ fn read_scan_boxes(
     // a box that is already on-chain (even one filtered out of `entries`, e.g.
     // now spent or outside the window) is never re-surfaced as off-chain.
     let mut on_chain_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(table) = &table_opt {
-        for item in table.range(lo..=hi).map_err(internal)? {
-            let (_, value) = item.map_err(internal)?;
-            let tb: ScanTrackedBox = bincode::deserialize(&value.value()).map_err(internal)?;
-            on_chain_ids.insert(hex::encode(tb.box_id));
+    for tb in tracked_boxes {
+        on_chain_ids.insert(hex::encode(tb.box_id));
 
-            let spent = matches!(tb.status, ScanBoxStatus::Spent { .. });
-            if spent != want_spent {
-                continue;
-            }
-
-            // Inclusion-height window. A `-1` max means unbounded.
-            let h = tb.inclusion_height as i64;
-            if h < filter.min_inclusion_height as i64 {
-                continue;
-            }
-            if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
-                continue;
-            }
-
-            // Confirmations window. `-1` bounds are unbounded.
-            let confirmations = current_height as i64 - tb.inclusion_height as i64;
-            if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
-                continue;
-            }
-            if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
-                continue;
-            }
-
-            // `value` is the leading u64 of the serialized box; read just that
-            // rather than parsing the whole box (clients get the full box via `bytes`).
-            let value = ergo_primitives::reader::VlqReader::new(&tb.box_bytes)
-                .get_u64()
-                .map_err(internal)?;
-
-            entries.push(ScanBoxEntry {
-                box_id: hex::encode(tb.box_id),
-                value,
-                inclusion_height: Some(tb.inclusion_height),
-                confirmations_num: Some(confirmations),
-                spent,
-                bytes: hex::encode(&tb.box_bytes),
-            });
+        let spent = matches!(tb.status, ScanBoxStatus::Spent { .. });
+        if spent != want_spent {
+            continue;
         }
+
+        // Inclusion-height window. A `-1` max means unbounded.
+        let h = tb.inclusion_height as i64;
+        if h < filter.min_inclusion_height as i64 {
+            continue;
+        }
+        if filter.max_inclusion_height >= 0 && h > filter.max_inclusion_height as i64 {
+            continue;
+        }
+
+        // Confirmations window. `-1` bounds are unbounded.
+        let confirmations = current_height as i64 - tb.inclusion_height as i64;
+        if filter.min_confirmations >= 0 && confirmations < filter.min_confirmations as i64 {
+            continue;
+        }
+        if filter.max_confirmations >= 0 && confirmations > filter.max_confirmations as i64 {
+            continue;
+        }
+
+        // `value` is the leading u64 of the serialized box; read just that
+        // rather than parsing the whole box (clients get the full box via `bytes`).
+        let value = ergo_primitives::reader::VlqReader::new(&tb.box_bytes)
+            .get_u64()
+            .map_err(internal)?;
+
+        entries.push(ScanBoxEntry {
+            box_id: hex::encode(tb.box_id),
+            value,
+            inclusion_height: Some(tb.inclusion_height),
+            confirmations_num: Some(confirmations),
+            spent,
+            bytes: hex::encode(&tb.box_bytes),
+        });
     }
 
     // Off-chain (mempool) overlay. Scala `getScanUnspentBoxes` merges the
@@ -871,7 +781,7 @@ fn read_scan_boxes(
     // unconfirmed).sortBy(inclusionHeightOpt)`.
     if !want_spent && filter.min_confirmations == -1 {
         if let Some(mp) = mempool {
-            let registry = load_registry(db)?;
+            let registry = load_registry(store)?;
             for (box_id, b) in mp.pool_outputs().iter() {
                 let scan_ids = registry.matching_scan_ids(b);
                 if !scan_ids.contains(&scan_id) {
@@ -936,24 +846,24 @@ fn read_scan_boxes(
 /// `WalletBox.value` and `bytes` from the companion table (empty for boxes that
 /// predate it, until a `/wallet/rescan` backfills them).
 fn read_reserved_scan_boxes(
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     tip_override: Option<u32>,
     mining: bool,
     want_spent: bool,
     filter: &ScanBoxFilter,
     mempool: Option<&dyn ergo_api::MempoolView>,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
-    let read = db.begin_read().map_err(internal)?;
-    let current_height = match tip_override {
-        Some(h) => h,
-        None => ergo_state::reader::committed_tip_in(&read)
-            .map_err(internal)?
-            .map(|(h, _)| h)
-            .unwrap_or(0),
+    let read = store.read().map_err(internal)?;
+    let (current_height, boxes) = match tip_override {
+        Some(height) => (
+            height,
+            read.reserved_scan_boxes(mining, want_spent)
+                .map_err(internal)?,
+        ),
+        None => read
+            .reserved_scan_boxes_with_tip(mining, want_spent)
+            .map_err(internal)?,
     };
-    let boxes = ergo_state::wallet::reader::WalletReader::new(&read)
-        .reserved_scan_boxes(mining, want_spent)
-        .map_err(internal)?;
 
     let mut entries: Vec<ScanBoxEntry> = Vec::new();
     for rb in boxes {
@@ -992,13 +902,12 @@ fn read_reserved_scan_boxes(
     // retains only multi-scan / user-scan boxes).
     if !want_spent && filter.min_confirmations == -1 {
         if let Some(mp) = mempool {
-            let tracked_pubkeys: Vec<[u8; 33]> =
-                ergo_state::wallet::reader::WalletReader::new(&read)
-                    .tracked_pubkeys_with_paths()
-                    .map_err(internal)?
-                    .into_iter()
-                    .map(|(_, pk, _)| pk)
-                    .collect();
+            let tracked_pubkeys: Vec<[u8; 33]> = read
+                .tracked_pubkeys_with_paths()
+                .map_err(internal)?
+                .into_iter()
+                .map(|(_, pk, _)| pk)
+                .collect();
             let tracked_trees: std::collections::HashSet<Vec<u8>> = tracked_pubkeys
                 .iter()
                 .filter_map(|pk| ergo_ser::address::build_p2pk_tree_bytes(pk).ok())
@@ -1007,13 +916,12 @@ fn read_reserved_scan_boxes(
             // the want_spent-filtered `entries`: a box already in WALLET_BOXES
             // is on-chain and must never be re-surfaced from a stale pool
             // snapshot as off-chain.
-            let on_chain_ids: std::collections::HashSet<String> =
-                ergo_state::wallet::reader::WalletReader::new(&read)
-                    .all_boxes()
-                    .map_err(internal)?
-                    .into_iter()
-                    .map(|wb| hex::encode(wb.box_id))
-                    .collect();
+            let on_chain_ids: std::collections::HashSet<String> = read
+                .all_boxes()
+                .map_err(internal)?
+                .into_iter()
+                .map(|wb| hex::encode(wb.box_id))
+                .collect();
             for (box_id, b) in mp.pool_outputs().iter() {
                 let tree_bytes = b.candidate.ergo_tree_bytes();
                 let matches = if mining {
@@ -1058,6 +966,8 @@ mod tests {
     use super::*;
     use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
     use ergo_state::wallet::tables::wallet_tx_key;
+    use ergo_state::wallet::RedbWalletStore;
+    use std::sync::Arc;
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
         let dir = tempfile::tempdir().unwrap();
@@ -2177,6 +2087,23 @@ mod tests {
         assert!(out.is_err());
     }
 
+    fn set_embedded_scan_id(db: &redb::Database, key: u16, embedded_id: u16) {
+        let txn = db.begin_write().unwrap();
+        let raw = {
+            let table = txn.open_table(WALLET_SCANS).unwrap();
+            let value = table.get(key).unwrap().unwrap();
+            let raw = value.value().to_vec();
+            raw
+        };
+        let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        value["scanId"] = serde_json::json!(embedded_id);
+        txn.open_table(WALLET_SCANS)
+            .unwrap()
+            .insert(key, serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
     #[test]
     fn build_rescan_matcher_errors_on_unreadable_registry() {
         // A corrupt WALLET_SCANS row makes load_registry fail. build_rescan_matcher
@@ -2195,6 +2122,68 @@ mod tests {
     }
 
     #[test]
+    fn build_rescan_matcher_rejects_key_payload_id_mismatch() {
+        let (_dir, db) = temp_db();
+        assert_eq!(register_impl(&db, req("a", 0x11)).unwrap(), 11);
+        set_embedded_scan_id(&db, 11, 12);
+        let error = build_rescan_matcher(&db).err().unwrap();
+        assert!(error.to_string().contains("does not match embedded scanId"));
+    }
+
+    #[test]
+    fn build_rescan_matcher_rejects_duplicate_embedded_scan_ids() {
+        let (_dir, db) = temp_db();
+        assert_eq!(register_impl(&db, req("a", 0x11)).unwrap(), 11);
+        assert_eq!(register_impl(&db, req("b", 0x22)).unwrap(), 12);
+        set_embedded_scan_id(&db, 11, 11);
+        set_embedded_scan_id(&db, 12, 11);
+        let error = build_rescan_matcher(&db).err().unwrap();
+        assert!(error.to_string().contains("duplicate embedded scan id"));
+    }
+
+    #[test]
+    fn build_rescan_matcher_rejects_reserved_embedded_ids() {
+        for reserved_id in [9u16, 10u16] {
+            let (_dir, db) = temp_db();
+            assert_eq!(register_impl(&db, req("reserved", 0x11)).unwrap(), 11);
+            set_embedded_scan_id(&db, 11, reserved_id);
+            let error = build_rescan_matcher(&db).err().unwrap();
+            assert!(error.to_string().contains("reserved or invalid scan id"));
+        }
+    }
+
+    #[test]
+    fn build_rescan_matcher_rejects_invalid_tracking_rule() {
+        let (_dir, db) = temp_db();
+        assert_eq!(register_impl(&db, req("invalid", 0x11)).unwrap(), 11);
+        let txn = db.begin_write().unwrap();
+        let mut value: serde_json::Value = {
+            let raw = txn
+                .open_table(WALLET_SCANS)
+                .unwrap()
+                .get(11)
+                .unwrap()
+                .unwrap()
+                .value()
+                .to_vec();
+            serde_json::from_slice(&raw).unwrap()
+        };
+        value["trackingRule"] = serde_json::json!({
+            "predicate": "equals",
+            "value": "00"
+        });
+        txn.open_table(WALLET_SCANS)
+            .unwrap()
+            .insert(11, serde_json::to_vec(&value).unwrap())
+            .unwrap();
+        txn.commit().unwrap();
+
+        let store = RedbWalletStore::new(Arc::new(db));
+        let error = build_rescan_matcher_from_store(&store).err().unwrap();
+        assert!(error.to_string().contains("invalid tracking rule"));
+    }
+
+    #[test]
     fn build_rescan_matcher_is_none_without_scans() {
         let (_d, db) = temp_db();
         assert!(
@@ -2205,6 +2194,7 @@ mod tests {
 
     #[test]
     fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
+        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
         // While a full rescan rebuilds the scan tables, the live block-apply
         // scan path must no-op so it doesn't race the rebuild's block-by-block
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
@@ -2228,12 +2218,12 @@ mod tests {
         };
 
         let db = std::sync::Arc::new(db);
+        let store = std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db));
         let hook = crate::node::wallet_bridge::WalletStateHook {
             wallet: std::sync::Arc::new(parking_lot::RwLock::new(
                 ergo_wallet::state::WalletState::empty(false),
             )),
-            db: db.clone(),
-            store: std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db)),
+            store,
         };
 
         // Baseline (flag clear): the scan is live and the box matches.
@@ -2263,6 +2253,7 @@ mod tests {
 
     #[test]
     fn scan_mutation_guard_rejects_during_rebuild() {
+        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
         use std::sync::atomic::Ordering;
         // Guard passes when no rebuild is in flight...
         crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -2370,13 +2361,18 @@ mod tests {
         assert_eq!(p.total, 0);
         assert!(p.items.is_empty());
 
-        // Never-registered user id and reserved id (9): empty, not an error.
+        // Never-registered user id is empty.
         assert_eq!(
             scan_transactions_impl(&db, 99, page(0, 50)).unwrap().total,
             0
         );
+        // Reserved ids read through their empty reserved projection.
         assert_eq!(
             scan_transactions_impl(&db, 9, page(0, 50)).unwrap().total,
+            0
+        );
+        assert_eq!(
+            scan_transactions_impl(&db, 10, page(0, 50)).unwrap().total,
             0
         );
     }
@@ -2505,17 +2501,13 @@ mod reserved_scan_read_tests {
         w.commit().unwrap();
     }
 
-    /// Reserved ids 9 (mining = MinerReward) and 10 (payments = Owned) bridge to
-    /// the wallet's own boxes (WALLET_BOXES + WALLET_BOX_BYTES), not the (empty)
-    /// scan tables — splitting by provenance and status.
     #[test]
-    fn reserved_id_reads_bridge_wallet_boxes() {
+    fn reserved_id_reads_return_reserved_projections() {
         let (_d, db) = temp_db();
-        // Mining: one Immature (unspent), one Spent.
         put_wallet_box(
             &db,
             [0x91; 32],
-            1000,
+            1_000,
             100,
             BoxStatus::Immature { matures_at: 820 },
             BoxProvenance::MinerReward,
@@ -2523,19 +2515,18 @@ mod reserved_scan_read_tests {
         put_wallet_box(
             &db,
             [0x92; 32],
-            2000,
+            2_000,
             101,
             BoxStatus::Spent {
-                spent_in_tx: [9u8; 32],
+                spent_in_tx: [9; 32],
                 spent_at: 150,
             },
             BoxProvenance::MinerReward,
         );
-        // Payments: one Confirmed (unspent).
         put_wallet_box(
             &db,
             [0xA1; 32],
-            3000,
+            3_000,
             102,
             BoxStatus::Confirmed,
             BoxProvenance::Owned,
@@ -2544,28 +2535,45 @@ mod reserved_scan_read_tests {
         let mining_unspent =
             read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &filter(), None).unwrap();
         assert_eq!(mining_unspent.len(), 1);
-        assert_eq!(mining_unspent[0].box_id, hex::encode([0x91u8; 32]));
-        assert_eq!(mining_unspent[0].value, 1000);
+        assert_eq!(mining_unspent[0].box_id, hex::encode([0x91; 32]));
+        assert_eq!(mining_unspent[0].value, 1_000);
         assert_eq!(mining_unspent[0].inclusion_height, Some(100));
         assert_eq!(mining_unspent[0].confirmations_num, Some(100));
         assert!(!mining_unspent[0].spent);
-        assert_eq!(mining_unspent[0].bytes, hex::encode([0x91u8, 0xAA]));
 
         let mining_spent =
             read_scan_boxes(&db, Some(200), MINING_SCAN_ID, true, &filter(), None).unwrap();
         assert_eq!(mining_spent.len(), 1);
-        assert_eq!(mining_spent[0].box_id, hex::encode([0x92u8; 32]));
+        assert_eq!(mining_spent[0].box_id, hex::encode([0x92; 32]));
         assert!(mining_spent[0].spent);
 
-        let pay_unspent =
+        let payments_unspent =
             read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &filter(), None).unwrap();
-        assert_eq!(pay_unspent.len(), 1);
-        assert_eq!(pay_unspent[0].box_id, hex::encode([0xA1u8; 32]));
-        assert_eq!(pay_unspent[0].value, 3000);
-        // Mining boxes must NOT leak into payments (10).
-        let pay_spent =
-            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, true, &filter(), None).unwrap();
-        assert!(pay_spent.is_empty());
+        assert_eq!(payments_unspent.len(), 1);
+        assert_eq!(payments_unspent[0].box_id, hex::encode([0xA1; 32]));
+        assert_eq!(payments_unspent[0].value, 3_000);
+        assert!(
+            read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, true, &filter(), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        let page = ergo_api::wallet::types::Page {
+            offset: 0,
+            limit: 50,
+        };
+        assert_eq!(
+            scan_transactions_impl(&db, MINING_SCAN_ID, page)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            scan_transactions_impl(&db, PAYMENTS_SCAN_ID, page)
+                .unwrap()
+                .total,
+            0
+        );
     }
 
     // ----- reserved-id off-chain (mempool) overlay -----
@@ -2655,7 +2663,6 @@ mod reserved_scan_read_tests {
         let pbox = pool_box_from_tree(&tree, 4_000_000);
         let pid = pbox.box_id().unwrap();
         let pool = pool_of(pbox);
-
         let mut f = filter();
         f.min_confirmations = -1;
         let r = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &f, Some(&pool)).unwrap();
@@ -2687,8 +2694,8 @@ mod reserved_scan_read_tests {
         let pbox = pool_box_from_tree(&reward_tree, 67_500_000_000);
         let pid = pbox.box_id().unwrap();
         let pool = pool_of(pbox);
-
         let mut f = filter();
+
         f.min_confirmations = -1;
         let r = read_scan_boxes(&db, Some(200), MINING_SCAN_ID, false, &f, Some(&pool)).unwrap();
         assert_eq!(r.len(), 1, "reward pool box surfaces under mining (9)");
@@ -2728,7 +2735,6 @@ mod reserved_scan_read_tests {
             BoxProvenance::Owned,
         );
         let pool = pool_of(pbox);
-
         let mut f = filter();
         f.min_confirmations = -1;
         let r = read_scan_boxes(&db, Some(200), PAYMENTS_SCAN_ID, false, &f, Some(&pool)).unwrap();
@@ -2745,8 +2751,6 @@ mod reserved_scan_read_tests {
         track_pubkey(&db, 0, pk);
         let tree = ergo_ser::address::build_p2pk_tree_bytes(&pk).unwrap();
         let pool = pool_of(pool_box_from_tree(&tree, 4_000_000));
-
-        // minConfirmations = 0 (default) must NOT pull off-chain boxes for 9/10.
         let r = read_scan_boxes(
             &db,
             Some(200),

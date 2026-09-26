@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use ergo_mempool::ErgoValidator;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::api_bridge::SubmitRequest;
 use crate::notifier::PollOutcome;
@@ -32,6 +32,16 @@ use super::{NodeError, NodeState};
 
 use ergo_mining::engine::BuildReason;
 use ergo_mining::handle::MiningHandle;
+
+struct WalletShutdownOnDrop {
+    session_id: u64,
+}
+
+impl Drop for WalletShutdownOnDrop {
+    fn drop(&mut self) {
+        crate::wallet_boot::request_rescan_shutdown_for(self.session_id);
+    }
+}
 
 /// Mirrors the pre-refactor inline loop one-for-one: signal arms are
 /// replaced by a single `shutdown_rx` arm, and the cleanup runs inside
@@ -56,7 +66,11 @@ pub(super) async fn action_loop(
     mining: Option<MiningWiring>,
     mut shutdown_rx: oneshot::Receiver<()>,
     mempool_tick_ms: u64,
+    wallet_session_id: u64,
 ) -> Result<(), NodeError> {
+    let _wallet_shutdown_guard = WalletShutdownOnDrop {
+        session_id: wallet_session_id,
+    };
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see
@@ -296,6 +310,7 @@ pub(super) async fn action_loop(
     }
 
     let t_shutdown = Instant::now();
+    crate::wallet_boot::request_rescan_shutdown_for(wallet_session_id);
     // Drop the submission receiver immediately so any axum handlers
     // still alive (e.g. when the embedder dropped `RunHandle`
     // without calling `shutdown()`, so we can't pre-abort the API
@@ -307,6 +322,7 @@ pub(super) async fn action_loop(
     // the abort-API-first ordering in `RunHandle::shutdown()`.
     drop(submit_rx);
     drop(mining_submit_rx);
+    let wallet_tasks_result = crate::wallet_boot::await_wallet_tasks(wallet_session_id).await;
     let cs_shutdown = state.store.chain_state_meta();
     shutdown_log!(
         "[node] tip at shutdown: h={} bh={}, peers={}",
@@ -330,7 +346,18 @@ pub(super) async fn action_loop(
         "[node] shutdown complete in {:.1}s",
         t_shutdown.elapsed().as_secs_f64(),
     );
-    shutdown_result.map_err(|e| Box::new(e) as NodeError)
+    match (wallet_tasks_result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(join_err), Ok(())) => {
+            error!(%join_err, "wallet task join failed during node shutdown");
+            Err(Box::new(join_err) as NodeError)
+        }
+        (Ok(()), Err(error)) => Err(Box::new(error) as NodeError),
+        (Err(join_err), Err(error)) => {
+            error!(%join_err, "wallet task join failed during node shutdown");
+            Err(Box::new(error) as NodeError)
+        }
+    }
 }
 
 fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandle>) {

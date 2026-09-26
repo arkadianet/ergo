@@ -368,6 +368,50 @@ fn wallet_section_unknown_field_rejected() {
 }
 
 #[test]
+fn wallet_mode_defaults_to_embedded() {
+    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n");
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("default wallet mode loads");
+    assert_eq!(cfg.wallet_mode, WalletMode::Embedded);
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:9090");
+}
+
+#[test]
+fn wallet_mode_external_accepts_daemon_address() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [wallet]\nmode = \"external\"\ndaemon_address = \"http://127.0.0.1:19090\"\n",
+    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("external wallet mode loads");
+    assert_eq!(cfg.wallet_mode, WalletMode::External);
+    assert_eq!(cfg.wallet_daemon_address, "http://127.0.0.1:19090");
+}
+
+#[test]
+fn wallet_mode_rejects_unknown_value() {
+    let path = write_toml("[peers]\nknown = [\"127.0.0.1:9030\"]\n[wallet]\nmode = \"remote\"\n");
+    let err = NodeConfig::load(minimal_cli(Some(&path))).expect_err("unknown wallet mode rejects");
+    assert!(
+        err.contains("wallet mode"),
+        "error must identify wallet mode: {err}"
+    );
+}
+
+#[test]
+fn external_wallet_mining_requires_pinned_key() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [wallet]\nmode = \"external\"\n\
+         [mining]\nenabled = true\n",
+    );
+    let err = NodeConfig::load(minimal_cli(Some(&path)))
+        .expect_err("external mining without a pinned key rejects");
+    assert!(
+        err.contains("miner_public_key_hex"),
+        "error must name the missing key: {err}"
+    );
+}
+
+#[test]
 fn api_enabled_requires_api_key_hash() {
     // Scala-parity boot rule (ErgoApp.scala:40-43). Without the
     // hash, `load()` must refuse to return Ok rather than silently

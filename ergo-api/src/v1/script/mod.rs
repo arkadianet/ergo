@@ -172,9 +172,6 @@ pub fn script_router(
         .route("/api/v1/script/simulate", post(handlers::simulate))
         .route("/api/v1/script/explain", post(handlers::explain))
         .route("/api/v1/script/diff", post(handlers::diff))
-        // Tier gate FIRST (outermost) so an unauthenticated T1 caller is
-        // rejected before consuming a governor token; the governor then bounds
-        // every admitted request at the Compute weight.
         .route_layer(axum::middleware::from_fn_with_state(
             governor.state(RouteClass::Compute),
             governor_mw,

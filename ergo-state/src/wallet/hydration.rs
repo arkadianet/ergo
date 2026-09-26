@@ -10,7 +10,7 @@
 //! interface stable across schema changes inside ergo-state.
 
 /// Minimal interface a wallet hydration source must provide.
-/// Implemented in `ergo-state/src/wallet/reader.rs::WalletReader`.
+/// Storage-backed callers must first load a fallible [`HydrationSnapshot`].
 pub trait HydrationSource {
     /// Iterate tracked pubkeys in `(derivation_path_index, pubkey)`
     /// ASC order — the BTreeMap order from `WALLET_TRACKED_PUBKEYS`.
@@ -29,6 +29,48 @@ pub trait HydrationSource {
     /// Returns `None` if never set or table is empty.
     /// Rendered to a base58 address at REST read time.
     fn change_address_pubkey(&self) -> Option<[u8; 33]>;
+}
+
+/// Owned, fully read wallet data. A failed read never becomes an empty cache.
+pub struct HydrationSnapshot {
+    tracked: Vec<(u64, [u8; 33])>,
+    visible: Vec<(u32, [u8; 33])>,
+    change: Option<[u8; 33]>,
+}
+
+impl HydrationSnapshot {
+    /// Read all hydration data from one store snapshot before mutating state.
+    pub fn load(
+        read: &dyn crate::wallet::WalletRead,
+    ) -> Result<Self, crate::wallet::WalletStoreError> {
+        Ok(Self {
+            tracked: read
+                .tracked_pubkeys_with_paths()?
+                .into_iter()
+                .map(|(index, pubkey, _)| (index, pubkey))
+                .collect(),
+            visible: read.visible_pubkeys()?,
+            change: read.change_address_pubkey()?,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tracked.is_empty()
+    }
+}
+
+impl HydrationSource for HydrationSnapshot {
+    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_> {
+        Box::new(self.tracked.iter().copied())
+    }
+
+    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_> {
+        Box::new(self.visible.iter().copied())
+    }
+
+    fn change_address_pubkey(&self) -> Option<[u8; 33]> {
+        self.change
+    }
 }
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +95,14 @@ pub trait WalletApplyHook: Send + Sync {
     /// checks if it's in this map's values).
     fn cached_pubkeys(&self) -> BTreeMap<u64, [u8; 33]>;
 
+    fn wallet_state_snapshot(&self) -> (BTreeSet<Vec<u8>>, BTreeMap<u64, [u8; 33]>) {
+        (self.tracked_p2pk_trees(), self.cached_pubkeys())
+    }
+
+    fn allow_non_contiguous_wallet_apply(&self) -> bool {
+        false
+    }
+
     /// Number of registered `/scan/*` scans. The apply path skips ALL scan
     /// matching when this is 0 (the common case, especially during IBD before
     /// any scan exists), so it must be cheap. Defaults to 0 so non-scan hook
@@ -69,5 +119,57 @@ pub trait WalletApplyHook: Send + Sync {
     /// rather than in `ergo-state`. Defaults to "nothing matches".
     fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
         vec![Vec::new(); boxes.len()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::{tables::*, WalletStore};
+
+    #[test]
+    fn hydration_snapshot_propagates_each_table_read_failure() {
+        for name in [
+            "wallet_tracked_pubkeys",
+            "wallet_visible_addresses",
+            "wallet_change_address",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+            let write = db.begin_write().unwrap();
+            // A real redb schema mismatch must not look like an absent table.
+            write
+                .open_table(redb::TableDefinition::<(), u8>::new(name))
+                .unwrap();
+            write.commit().unwrap();
+            let read = WalletStore::read(&db).unwrap();
+            assert!(HydrationSnapshot::load(read.as_ref()).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn hydration_snapshot_rejects_corrupt_tracked_key_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(WALLET_TRACKED_PUBKEYS)
+            .unwrap()
+            .insert(tracked_pubkey_key(0, &[2; 33]), vec![0xff])
+            .unwrap();
+        write.commit().unwrap();
+        let read = WalletStore::read(&db).unwrap();
+        assert!(HydrationSnapshot::load(read.as_ref()).is_err());
+    }
+
+    #[test]
+    fn hydration_snapshot_accepts_absent_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let read = WalletStore::read(&db).unwrap();
+        let snapshot = HydrationSnapshot::load(read.as_ref()).unwrap();
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.visible_pubkeys().count(), 0);
+        assert_eq!(snapshot.change_address_pubkey(), None);
     }
 }

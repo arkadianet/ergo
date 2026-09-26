@@ -15,20 +15,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use redb::{Database, ReadableTable};
+use redb::Database;
+
 use thiserror::Error;
 
 use crate::store::StateError;
-use crate::wallet::apply::{
-    apply_block_to_scans_rescan, apply_block_to_wallet_rescan, clear_scan_tracking,
-    set_scan_cursor, BlockOutput, BlockTx,
-};
-use crate::wallet::maturity::promote_matured_boxes_rescan;
-use crate::wallet::tables::{
-    box_by_tx_key, WALLET_BOXES, WALLET_BOXES_BY_TX, WALLET_BOX_BYTES, WALLET_SCAN_HEIGHT,
-    WALLET_SCAN_INVALIDATED, WALLET_TXS,
-};
-use crate::wallet::types::WalletBox;
+use crate::wallet::store::{RedbWalletStore, WalletStore, WalletStoreError};
+use crate::wallet::tables::WALLET_SCAN_HEIGHT;
 
 /// Matches a block's output boxes against the registered `/scan/*` rules
 /// during a rescan. The `ergo-wallet` predicate matcher isn't reachable from
@@ -85,11 +78,24 @@ pub enum RescanError {
     Matcher { height: u32, reason: String },
     #[error("rescan storage failure: {0}")]
     Storage(#[source] redb::Error),
+    #[error("invalid positive rescan start {requested}; fromHeight=0 is required")]
+    InvalidStart { requested: u32, cursor: Option<u32> },
+    #[error("failed to persist scan invalidation after rescan failure: {source}")]
+    Invalidation {
+        #[source]
+        source: WalletStoreError,
+    },
 }
 
 impl From<redb::Error> for RescanError {
     fn from(error: redb::Error) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<WalletStoreError> for RescanError {
+    fn from(error: WalletStoreError) -> Self {
+        Self::Storage(redb::Error::from(error))
     }
 }
 
@@ -117,6 +123,69 @@ impl_rescan_error_from!(
 pub struct WalletScanService;
 
 impl WalletScanService {
+    pub fn validate_rescan_start(
+        store: &dyn WalletStore,
+        requested: u32,
+        tip_height: u32,
+    ) -> Result<(), RescanError> {
+        if requested == 0 {
+            return Ok(());
+        }
+        let read = store.read()?;
+        let cursor = match read.scan_cursor() {
+            Ok(cursor) => cursor,
+            Err(_) => {
+                return Err(RescanError::InvalidStart {
+                    requested,
+                    cursor: None,
+                })
+            }
+        };
+        let Some(cursor) = cursor else {
+            return Err(RescanError::InvalidStart {
+                requested,
+                cursor: None,
+            });
+        };
+        if cursor.height > tip_height
+            || (cursor.height == 0 && cursor.header_id.is_some())
+            || (cursor.height > 0 && cursor.header_id.is_none())
+        {
+            return Err(RescanError::InvalidStart {
+                requested,
+                cursor: Some(cursor.height),
+            });
+        }
+        if read.scan_invalidated()? {
+            return Err(RescanError::InvalidStart {
+                requested,
+                cursor: Some(cursor.height),
+            });
+        }
+        if cursor.height > 0
+            && read.chain_index_header(cursor.height).ok().flatten() != cursor.header_id
+        {
+            return Err(RescanError::InvalidStart {
+                requested,
+                cursor: Some(cursor.height),
+            });
+        }
+        let expected = cursor
+            .height
+            .checked_add(1)
+            .ok_or(RescanError::InvalidStart {
+                requested,
+                cursor: Some(cursor.height),
+            })?;
+        if requested != expected || requested > tip_height {
+            return Err(RescanError::InvalidStart {
+                requested,
+                cursor: Some(cursor.height),
+            });
+        }
+        Ok(())
+    }
+
     /// Full-rebuild (or range-scoped) rescan.
     ///
     /// When `start_height == 0`: full rebuild — clears WALLET_BOXES,
@@ -163,8 +232,9 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
-        let result = Self::rescan_full_rebuild_inner(
-            db,
+        let store = RedbWalletStore::new(db.clone());
+        Self::rescan_full_rebuild_store(
+            &store,
             tracked_p2pk_trees,
             cached_pubkeys,
             start_height,
@@ -173,18 +243,84 @@ impl WalletScanService {
             &mut read_tip,
             &mut is_cancelled,
             scan_matcher,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rescan_full_rebuild_store<F, T, C>(
+        store: &dyn WalletStore,
+        tracked_p2pk_trees: BTreeSet<Vec<u8>>,
+        cached_pubkeys: BTreeMap<u64, [u8; 33]>,
+        start_height: u32,
+        tip_height: u32,
+        mut read_block: F,
+        mut read_tip: T,
+        mut is_cancelled: C,
+        scan_matcher: Option<&dyn ScanRescanMatcher>,
+    ) -> Result<u32, RescanError>
+    where
+        F: FnMut(u32) -> Result<Option<RescanBlock>, RescanReadError>,
+        T: FnMut() -> Result<u32, RescanReadError>,
+        C: FnMut() -> bool,
+    {
+        Self::validate_rescan_start(store, start_height, tip_height)?;
+        if start_height > 0 && read_block(start_height)?.is_none() {
+            return Err(RescanError::Read(RescanReadError::Missing {
+                height: start_height,
+            }));
+        }
+        Self::rescan_full_rebuild_dyn_store(
+            store,
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            start_height,
+            tip_height,
+            &mut read_block,
+            &mut read_tip,
+            &mut is_cancelled,
+            scan_matcher,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rescan_full_rebuild_dyn_store<F, T, C>(
+        store: &dyn WalletStore,
+        tracked_p2pk_trees: BTreeSet<Vec<u8>>,
+        cached_pubkeys: BTreeMap<u64, [u8; 33]>,
+        start_height: u32,
+        tip_height: u32,
+        read_block: &mut F,
+        read_tip: &mut T,
+        is_cancelled: &mut C,
+        scan_matcher: Option<&dyn ScanRescanMatcher>,
+    ) -> Result<u32, RescanError>
+    where
+        F: FnMut(u32) -> Result<Option<RescanBlock>, RescanReadError>,
+        T: FnMut() -> Result<u32, RescanReadError>,
+        C: FnMut() -> bool,
+    {
+        let result = Self::rescan_full_rebuild_dyn_store_inner(
+            store,
+            tracked_p2pk_trees,
+            cached_pubkeys,
+            start_height,
+            tip_height,
+            read_block,
+            read_tip,
+            is_cancelled,
+            scan_matcher,
         );
         if result.is_err() {
-            if let Err(error) = mark_scan_invalidated(db) {
-                tracing::error!(%error, "failed to persist wallet scan invalidation after rescan failure");
+            if let Err(source) = store.persist_scan_invalidation(true) {
+                return Err(RescanError::Invalidation { source });
             }
         }
         result
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn rescan_full_rebuild_inner<F, T, C>(
-        db: &Arc<Database>,
+    fn rescan_full_rebuild_dyn_store_inner<F, T, C>(
+        store: &dyn WalletStore,
         tracked_p2pk_trees: BTreeSet<Vec<u8>>,
         cached_pubkeys: BTreeMap<u64, [u8; 33]>,
         start_height: u32,
@@ -203,174 +339,9 @@ impl WalletScanService {
         // range-rewind path). `None` matcher = a node with no scans.
         let scan_rebuild = scan_matcher.is_some() && start_height == 0;
 
-        if start_height == 0 {
-            // Full rebuild: clear all chain-derived tables + mark invalidated.
-            let txn = crate::begin_write_qr(db)?;
-            {
-                let mut inv_tbl = txn.open_table(WALLET_SCAN_INVALIDATED)?;
-                inv_tbl.insert((), true)?;
-            }
-            if scan_rebuild {
-                // Wipe scan-tracked boxes/index/txs so the replay rebuilds
-                // them from scratch (no orphan rows from a prior chain).
-                clear_scan_tracking(&txn)?;
-            }
-            {
-                let mut boxes_tbl = txn.open_table(WALLET_BOXES)?;
-                let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
-                let to_remove: Vec<[u8; 32]> = boxes_tbl
-                    .iter()?
-                    .map(|entry| entry.map(|(k, _)| k.value()))
-                    .collect::<Result<_, _>>()?;
-                for k in to_remove {
-                    boxes_tbl.remove(k)?;
-                    box_bytes_tbl.remove(k)?;
-                }
-            }
-            {
-                let mut by_tx = txn.open_table(WALLET_BOXES_BY_TX)?;
-                let to_remove: Vec<[u8; 34]> = by_tx
-                    .iter()?
-                    .map(|entry| entry.map(|(k, _)| k.value()))
-                    .collect::<Result<_, _>>()?;
-                for k in to_remove {
-                    by_tx.remove(k)?;
-                }
-            }
-            {
-                let mut txs_tbl = txn.open_table(WALLET_TXS)?;
-                let to_remove: Vec<[u8; 36]> = txs_tbl
-                    .iter()?
-                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                    .collect();
-                for k in to_remove {
-                    txs_tbl.remove(k)?;
-                }
-            }
-            set_scan_cursor(&txn, 0, None)?;
-            txn.commit()?;
-        } else {
-            // Range-scoped rebuild: delete rows >= start_height, rewind
-            // surviving rows, reset scan_height.
-            let txn = crate::begin_write_qr(db)?;
-
-            // STEP 1a: delete WALLET_BOXES rows with creation_height >= start_height.
-            let to_remove: Vec<[u8; 32]> = {
-                let tbl = txn.open_table(WALLET_BOXES)?;
-                let mut out = Vec::new();
-                for entry in tbl.iter()? {
-                    let (k, v) = entry?;
-                    let wb: WalletBox = deserialize_box(v.value().as_slice())?;
-                    if wb.creation_height >= start_height {
-                        out.push(k.value());
-                    }
-                }
-                out
-            };
-            {
-                let mut tbl = txn.open_table(WALLET_BOXES)?;
-                let mut box_bytes_tbl = txn.open_table(WALLET_BOX_BYTES)?;
-                for box_id in to_remove {
-                    tbl.remove(box_id)?;
-                    box_bytes_tbl.remove(box_id)?;
-                }
-            }
-
-            // STEP 1b: rebuild WALLET_BOXES_BY_TX from surviving WALLET_BOXES.
-            {
-                let mut by_tx = txn.open_table(WALLET_BOXES_BY_TX)?;
-                let existing_keys: Vec<[u8; 34]> = by_tx
-                    .iter()?
-                    .map(|entry| entry.map(|(k, _)| k.value()))
-                    .collect::<Result<_, _>>()?;
-                for k in existing_keys {
-                    by_tx.remove(k)?;
-                }
-                let boxes_tbl = txn.open_table(WALLET_BOXES)?;
-                for entry in boxes_tbl.iter()? {
-                    let (_, v) = entry?;
-                    let wb: WalletBox = deserialize_box(v.value().as_slice())?;
-                    by_tx.insert(
-                        box_by_tx_key(&wb.creation_tx_id, wb.creation_output_index),
-                        wb.box_id,
-                    )?;
-                }
-            }
-
-            // STEP 1c: delete WALLET_TXS rows with block_height >= start_height.
-            {
-                let mut txs_tbl = txn.open_table(WALLET_TXS)?;
-                let start_be = start_height.to_be_bytes();
-                let keys = txs_tbl
-                    .iter()?
-                    .map(|entry| entry.map(|(k, _)| k.value()))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let to_remove: Vec<[u8; 36]> = keys
-                    .into_iter()
-                    .filter(|key| key[..4] >= start_be[..])
-                    .collect();
-                for k in to_remove {
-                    txs_tbl.remove(k)?;
-                }
-            }
-
-            // STEP 1d: rewind surviving WALLET_BOXES rows whose state
-            // changed at/above start_height.
-            {
-                use crate::wallet::apply::REWARD_MATURITY_MAINNET;
-                use crate::wallet::types::{BoxProvenance, BoxStatus};
-
-                let mut tbl = txn.open_table(WALLET_BOXES)?;
-                let mut updates: Vec<([u8; 32], WalletBox)> = Vec::new();
-                for entry in tbl.iter()? {
-                    let (k, v) = entry?;
-                    let mut wb: WalletBox = deserialize_box(v.value().as_slice())?;
-                    // All remaining rows have creation_height < start_height.
-                    let mut changed = false;
-                    match wb.status {
-                        BoxStatus::Spent { spent_at, .. } if spent_at >= start_height => {
-                            // Revert to pre-spend status.
-                            wb.status = match wb.provenance {
-                                BoxProvenance::MinerReward => {
-                                    let matures_at =
-                                        wb.creation_height.saturating_add(REWARD_MATURITY_MAINNET);
-                                    if matures_at > start_height.saturating_sub(1) {
-                                        BoxStatus::Immature { matures_at }
-                                    } else {
-                                        BoxStatus::Confirmed
-                                    }
-                                }
-                                _ => BoxStatus::Confirmed,
-                            };
-                            changed = true;
-                        }
-                        BoxStatus::Confirmed
-                            if matches!(wb.provenance, BoxProvenance::MinerReward) =>
-                        {
-                            let matures_at =
-                                wb.creation_height.saturating_add(REWARD_MATURITY_MAINNET);
-                            if matures_at > start_height.saturating_sub(1) {
-                                // Pre-N this box was still Immature.
-                                wb.status = BoxStatus::Immature { matures_at };
-                                changed = true;
-                            }
-                        }
-                        _ => {}
-                    }
-                    if changed {
-                        updates.push((k.value(), wb));
-                    }
-                }
-                for (box_id, wb) in updates {
-                    let bytes = serialize_box(&wb)?;
-                    tbl.insert(box_id, bytes)?;
-                }
-            }
-
-            // STEP 1e: rewind scan height.
-            set_rescan_boundary(&txn, start_height.saturating_sub(1))?;
-            txn.commit()?;
-        }
+        let mut write = WalletStore::begin_write(store)?;
+        write.prepare_rescan(start_height, scan_rebuild)?;
+        write.commit()?;
 
         // STEP 2: replay block-by-block with maturity promotion per block.
         // Catch-up loop: after the main replay, re-read tip and replay any
@@ -434,65 +405,15 @@ impl WalletScanService {
                     } else {
                         None
                     };
-                let txn = crate::begin_write_qr(db)?;
-                {
-                    // Convert RescanBlock → per-tx owned structs so BlockOutput<'_>
-                    // can borrow from them within the txn scope.
-                    let bound: Vec<BlockTxBound<'_>> = block
-                        .txs
-                        .iter()
-                        .map(|t| BlockTxBound {
-                            tx_id: t.tx_id,
-                            inputs: t.inputs.clone(),
-                            outputs: t
-                                .outputs
-                                .iter()
-                                .map(|o| BlockOutput {
-                                    box_id: o.box_id,
-                                    output_index: o.output_index,
-                                    ergo_tree_bytes: &o.ergo_tree_bytes,
-                                    value: o.value,
-                                    assets: o.assets.clone(),
-                                    miner_reward_pubkey: o.miner_reward_pubkey,
-                                    // The replay/rescan builder serializes the
-                                    // full box, so a `/wallet/rescan` backfills
-                                    // WALLET_BOX_BYTES for boxes that predate it.
-                                    box_bytes: &o.box_bytes,
-                                })
-                                .collect(),
-                        })
-                        .collect();
-                    let btxs: Vec<BlockTx<'_>> = bound
-                        .iter()
-                        .map(|b| BlockTx {
-                            tx_id: b.tx_id,
-                            inputs: &b.inputs,
-                            outputs: &b.outputs,
-                        })
-                        .collect();
-                    apply_block_to_wallet_rescan(
-                        &txn,
-                        &tracked_p2pk_trees,
-                        &cached_pubkeys,
-                        h,
-                        &block.block_id,
-                        &btxs,
-                    )?;
-                    promote_matured_boxes_rescan(&txn, h)?;
-
-                    // Registered-scan rebuild, in the SAME per-block txn so
-                    // chain + scan state regress together. The match pass was
-                    // precomputed above (outside the txn); here we only persist
-                    // matches + spends. `None` = no rebuild active or a matcher
-                    // cardinality bug (already logged + rebuild marked incomplete).
-                    if let Some(records) = &scan_records {
-                        // Privileged variant: the rescan runs WITH
-                        // WALLET_SCAN_INVALIDATED set (it is the recovery path),
-                        // so it must bypass the live-apply gate.
-                        apply_block_to_scans_rescan(&txn, records, &btxs, h, &block.block_id)?;
-                    }
-                }
-                txn.commit()?;
+                let mut write = WalletStore::begin_write(store)?;
+                write.apply_rescan_block(
+                    h,
+                    &tracked_p2pk_trees,
+                    &cached_pubkeys,
+                    &block,
+                    scan_records.as_deref(),
+                )?;
+                write.commit()?;
                 processed += 1;
             }
 
@@ -503,26 +424,38 @@ impl WalletScanService {
                 });
             }
 
-            let new_target = read_tip()?;
-            if new_target <= current_target {
-                break; // steady state
+            let finalization_guard = crate::wallet::chain_apply_write_guard();
+            if is_cancelled() {
+                drop(finalization_guard);
+                return Err(RescanError::Cancelled {
+                    height: current_target,
+                });
             }
-            current_start = current_target + 1;
-            current_target = new_target;
-        }
+            let new_target = read_tip()?;
+            if new_target < current_target {
+                drop(finalization_guard);
+                return Err(RescanError::Cancelled {
+                    height: current_target,
+                });
+            }
+            if new_target > current_target {
+                drop(finalization_guard);
+                current_start = current_target + 1;
+                current_target = new_target;
+                continue;
+            }
 
-        // Clear the invalidated flag only after a full rebuild from height 0
-        // that fully reconstructed state. Partial rescans don't reconstruct
-        // state; a scan rebuild that skipped a block (matcher contract
-        // violation, `scan_rebuild_complete == false`) left the scan tables
-        // incomplete and must stay invalidated so the operator rescans again.
-        if start_height == 0 {
-            let txn = crate::begin_write_qr(db)?;
-            txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), false)?;
-            txn.commit()?;
+            let mut write = WalletStore::begin_write(store)?;
+            write.finish_rescan(start_height)?;
+            write.commit()?;
+            let owned = crate::wallet::wallet_finalization_owned();
+            crate::wallet::set_wallet_finalization_in_progress(true);
+            if !owned {
+                crate::wallet::set_wallet_finalization_in_progress(false);
+            }
+            drop(finalization_guard);
+            return Ok(processed);
         }
-
-        Ok(processed)
     }
 
     /// Read the current scan height from `WALLET_SCAN_HEIGHT`.
@@ -536,62 +469,6 @@ impl WalletScanService {
         };
         Ok(tbl.get(())?.map(|g| g.value()).unwrap_or(0))
     }
-}
-
-fn mark_scan_invalidated(db: &Arc<Database>) -> Result<(), redb::Error> {
-    let txn = crate::begin_write_qr(db)?;
-    txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
-    txn.commit()?;
-    Ok(())
-}
-
-fn set_rescan_boundary(txn: &redb::WriteTransaction, height: u32) -> Result<(), redb::Error> {
-    let header_id = if height == 0 {
-        None
-    } else {
-        let table = txn.open_table(crate::store::CHAIN_INDEX)?;
-        let bytes = table.get(height as u64)?.ok_or_else(|| {
-            redb::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("rescan boundary {height} missing from chain_index"),
-            ))
-        })?;
-        let bytes = bytes.value();
-        if bytes.len() != 32 {
-            return Err(redb::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("chain_index row at {height} is not 32 bytes"),
-            )));
-        }
-        let mut header_id = [0u8; 32];
-        header_id.copy_from_slice(bytes);
-        Some(header_id)
-    };
-    set_scan_cursor(txn, height, header_id.as_ref())
-}
-
-// --- internal helpers ---
-
-fn deserialize_box(bytes: &[u8]) -> Result<WalletBox, redb::Error> {
-    bincode::deserialize(bytes).map_err(|e| {
-        redb::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("WalletBox deserialize: {e}"),
-        ))
-    })
-}
-
-fn serialize_box(wb: &WalletBox) -> Result<Vec<u8>, redb::Error> {
-    bincode::serialize(wb)
-        .map_err(|e| redb::Error::Io(std::io::Error::other(format!("WalletBox serialize: {e}"))))
-}
-
-/// Intermediate struct to hold owned input/output vecs for a
-/// single replay-loop block transaction so lifetimes work out.
-struct BlockTxBound<'a> {
-    tx_id: [u8; 32],
-    inputs: Vec<[u8; 32]>,
-    outputs: Vec<BlockOutput<'a>>,
 }
 
 // --- public types ---
@@ -629,4 +506,278 @@ pub struct OwnedBlockOutput {
     /// and persist `ScanTrackedBox.box_bytes`. Empty when scan rescan is
     /// not in play.
     pub box_bytes: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::store::{
+        RedbWalletStore, WalletRead, WalletStore, WalletStoreError, WalletWrite,
+    };
+    use redb::Database;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::thread;
+
+    struct FailingInvalidationStore {
+        inner: RedbWalletStore,
+    }
+
+    impl WalletStore for FailingInvalidationStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.inner.begin_read()
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            self.inner.begin_write()
+        }
+
+        fn persist_scan_invalidation(&self, _invalidated: bool) -> Result<(), WalletStoreError> {
+            Err(WalletStoreError::Decode("injected failure".to_string()))
+        }
+    }
+
+    #[test]
+    fn rescan_finalization_holds_chain_write_lock_during_tip_read() {
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = Arc::new(RedbWalletStore::new(db));
+        let (tip_entered_tx, tip_entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let worker_store = store.clone();
+        let worker = thread::spawn(move || {
+            WalletScanService::rescan_full_rebuild_store(
+                worker_store.as_ref(),
+                BTreeSet::new(),
+                BTreeMap::new(),
+                0,
+                0,
+                |_height| Ok(None),
+                || {
+                    tip_entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(0)
+                },
+                || false,
+                None,
+            )
+        });
+
+        tip_entered_rx.recv().unwrap();
+        let read_was_blocked = crate::wallet::CHAIN_APPLY_FINALIZATION_LOCK
+            .try_read()
+            .is_err();
+        release_tx.send(()).unwrap();
+        let result = worker.join().unwrap();
+        assert!(read_was_blocked);
+        assert_eq!(result.unwrap(), 0);
+        crate::wallet::set_wallet_finalization_in_progress(false);
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn rescan_replays_a_tip_observed_during_finalization() {
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db);
+        let mut tip_reads = 0;
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            0,
+            0,
+            |height| {
+                Ok(Some(RescanBlock {
+                    block_id: [height as u8; 32],
+                    txs: Vec::new(),
+                }))
+            },
+            || {
+                tip_reads += 1;
+                Ok(1)
+            },
+            || false,
+            None,
+        );
+        crate::wallet::set_wallet_finalization_in_progress(false);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(tip_reads, 2);
+        assert_eq!(
+            store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+            1
+        );
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn rescan_rejects_tip_regression_during_finalization() {
+        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db);
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            0,
+            1,
+            |height| {
+                Ok(Some(RescanBlock {
+                    block_id: [height as u8; 32],
+                    txs: Vec::new(),
+                }))
+            },
+            || Ok(0),
+            || false,
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::Cancelled { height: 1 })));
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn positive_rescan_requires_existing_contiguous_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db.clone());
+        assert!(matches!(
+            WalletScanService::validate_rescan_start(&store, 1, 1),
+            Err(RescanError::InvalidStart { cursor: None, .. })
+        ));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        assert!(WalletScanService::validate_rescan_start(&store, 1, 1).is_ok());
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(1, Some(&[4; 32])).unwrap();
+        write.commit().unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(crate::store::CHAIN_INDEX)
+                .unwrap()
+                .insert(1u64, &[4u8; 32][..])
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        assert!(WalletScanService::validate_rescan_start(&store, 2, 2).is_ok());
+        assert!(matches!(
+            WalletScanService::validate_rescan_start(&store, 3, 3),
+            Err(RescanError::InvalidStart {
+                cursor: Some(1),
+                ..
+            })
+        ));
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            3,
+            3,
+            |_height| Ok(None),
+            || Ok(3),
+            || false,
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::InvalidStart { .. })));
+    }
+
+    #[test]
+    fn positive_rescan_rejects_invalidated_or_mismatched_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db.clone());
+        {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(crate::store::CHAIN_INDEX)
+                .unwrap()
+                .insert(1u64, &[4u8; 32][..])
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(1, Some(&[5; 32])).unwrap();
+        write.commit().unwrap();
+        assert!(matches!(
+            WalletScanService::validate_rescan_start(&store, 2, 2),
+            Err(RescanError::InvalidStart {
+                cursor: Some(1),
+                ..
+            })
+        ));
+
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.set_scan_invalidated(true).unwrap();
+        write.commit().unwrap();
+        assert!(matches!(
+            WalletScanService::validate_rescan_start(&store, 1, 1),
+            Err(RescanError::InvalidStart {
+                cursor: Some(0),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn positive_rescan_probes_start_before_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = RedbWalletStore::new(db);
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        let mut tip_read = false;
+
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            1,
+            1,
+            |height| {
+                assert_eq!(height, 1);
+                Ok(None)
+            },
+            || {
+                tip_read = true;
+                Ok(1)
+            },
+            || false,
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RescanError::Read(RescanReadError::Missing { height: 1 }))
+        ));
+        assert!(!tip_read);
+        assert_eq!(
+            store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+            0
+        );
+    }
+
+    #[test]
+    fn invalidation_failure_is_returned_as_a_distinct_rescan_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
+        let store = FailingInvalidationStore {
+            inner: RedbWalletStore::new(db),
+        };
+        let result = WalletScanService::rescan_full_rebuild_store(
+            &store,
+            BTreeSet::new(),
+            BTreeMap::new(),
+            0,
+            0,
+            |_height| Ok(None),
+            || Ok(0),
+            || true,
+            None,
+        );
+        assert!(matches!(result, Err(RescanError::Invalidation { .. })));
+    }
 }

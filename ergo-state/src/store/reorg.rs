@@ -44,6 +44,11 @@ impl StateStore {
         wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
         rescan_guard: Option<&dyn crate::wallet::apply::RescanGuard>,
     ) -> Result<(), StateError> {
+        if wallet_hook.is_some() && rescan_guard.is_none() {
+            return Err(StateError::InvalidPrecondition {
+                what: "wallet hook requires a rescan guard",
+            });
+        }
         // Capture identity fields before any mutation so the
         // `_failed` event below carries the pre-attempt values,
         // never rebuilt-from-committed values. Depth is
@@ -72,6 +77,8 @@ impl StateStore {
             );
             return Err(e);
         }
+
+        let _chain_apply_guard = crate::wallet::chain_apply_write_guard();
 
         // Mode 3: reject below-sentinel rollback AFTER
         // the pipeline flush so the sentinel reflects all

@@ -3,6 +3,7 @@
 //! See `super::mod` for the WriterContext design and grouping rationale.
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -106,7 +107,7 @@ pub(crate) async fn status(
         };
         let read = ctx
             .store
-            .begin_read()
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         let invalidated = read
             .scan_invalidated()
@@ -214,67 +215,122 @@ pub(crate) async fn restore(
     let _ = reply.send(result);
 }
 
+fn begin_rescan_process(
+    start_h: u32,
+    store: &dyn ergo_state::wallet::WalletStore,
+    tip_height: u32,
+) -> Result<crate::wallet_boot::RescanProcessStart, WalletAdminError> {
+    match crate::wallet_boot::begin_rescan_process(start_h, store, tip_height) {
+        Ok(rescan_start) => Ok(rescan_start),
+        Err(crate::wallet_boot::BeginRescanError::FullRescanRequired) => {
+            Err(WalletAdminError::RescanUnavailable(
+                "full rescan required to recover wallet state".to_string(),
+            ))
+        }
+        Err(crate::wallet_boot::BeginRescanError::AlreadyInProgress) => Err(
+            WalletAdminError::RescanUnavailable("rescan already in progress".to_string()),
+        ),
+        Err(crate::wallet_boot::BeginRescanError::FinalizationInProgress) => {
+            Err(WalletAdminError::RescanUnavailable(
+                "wallet rescan finalization in progress".to_string(),
+            ))
+        }
+        Err(crate::wallet_boot::BeginRescanError::Shutdown) => Err(
+            WalletAdminError::RescanUnavailable("wallet is shutting down".to_string()),
+        ),
+        Err(crate::wallet_boot::BeginRescanError::InvalidStart { requested, cursor }) => {
+            let cursor = cursor
+                .map(|height| height.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            Err(WalletAdminError::RescanUnavailable(format!(
+                "full rescan required: use fromHeight=0 (requested {requested}, cursor {cursor})"
+            )))
+        }
+        Err(crate::wallet_boot::BeginRescanError::Store(error)) => {
+            Err(WalletAdminError::Internal(error))
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+pub(super) fn rescan_tip(ctx: &WriterContext<'_>) -> Result<u32, WalletAdminError> {
+    if !ctx
+        .chain
+        .read_block_at_supported()
+        .map_err(map_rescan_read_error)?
+    {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read not available on this backend".to_string(),
+        ));
+    }
+    if ctx.chain.is_pruned() {
+        return Err(WalletAdminError::RestorePruningUnsupported);
+    }
+    ctx.chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))
+}
+
 #[allow(clippy::result_large_err)]
 pub(crate) async fn rescan(
     ctx: &WriterContext<'_>,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    let supported = match ctx.chain.read_block_at_supported() {
-        Ok(supported) => supported,
-        Err(e) => {
-            let _ = reply.send(Err(map_rescan_read_error(e)));
-            return;
-        }
-    };
-    if !supported {
-        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
-            "chain block-read not available on this backend".to_string(),
-        )));
-        return;
-    }
-    if ctx.chain.is_pruned() {
-        let _ = reply.send(Err(WalletAdminError::RestorePruningUnsupported));
-        return;
-    }
-    let tip_h = match ctx.chain.tip_height() {
+    let tip_h = match rescan_tip(ctx) {
         Ok(height) => height,
-        Err(e) => {
-            let _ = reply.send(Err(WalletAdminError::Internal(e.to_string())));
+        Err(error) => {
+            let _ = reply.send(Err(error));
             return;
         }
     };
-    let start_h = from_height.min(tip_h);
+    let start_h = from_height;
+    let mut registry_recovered = false;
     let scan_matcher = if start_h == 0 {
         match super::scan::build_rescan_matcher_from_store(ctx.store.as_ref()) {
-            Ok(matcher) => matcher,
-            Err(e) => {
+            Ok(Some(matcher)) => Some(matcher),
+            Ok(None) => Some(super::scan::empty_rescan_matcher()),
+            Err(super::scan::ScanRegistryLoadError::Read(error)) => {
+                tracing::error!(%error, "scan registry read failed; preserving registry");
                 let _ = reply.send(Err(WalletAdminError::Internal(format!(
-                    "scan registry unreadable; cannot rebuild scans (repair or re-register scans, then rescan): {e}"
+                    "scan registry read failed: {error}"
                 ))));
                 return;
+            }
+            Err(super::scan::ScanRegistryLoadError::Corrupt(error)) => {
+                tracing::error!(%error, "scan registry is corrupt; discarding scan registry and scan tracking for recovery");
+                if let Err(recovery_error) = recover_corrupt_scan_registry(ctx.store.as_ref()) {
+                    fail_closed_after_scan_recovery_error(ctx.store.as_ref());
+                    let _ = reply.send(Err(WalletAdminError::Internal(format!(
+                        "scan registry is corrupt and recovery failed: {recovery_error}"
+                    ))));
+                    return;
+                }
+                registry_recovered = true;
+                Some(super::scan::empty_rescan_matcher())
             }
         }
     } else {
         None
     };
-
-    if crate::wallet_boot::RESCAN_IN_PROGRESS.swap(true, Ordering::SeqCst) {
-        let _ = reply.send(Err(WalletAdminError::RescanUnavailable(
-            "rescan already in progress".to_string(),
-        )));
-        return;
-    }
-    crate::wallet_boot::RESCAN_FROM_HEIGHT.store(start_h, Ordering::SeqCst);
-    crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(start_h == 0, Ordering::SeqCst);
+    let rescan_start = match begin_rescan_process(start_h, ctx.store.as_ref(), tip_h) {
+        Ok(rescan_start) => rescan_start,
+        Err(error) => {
+            if registry_recovered {
+                fail_closed_after_scan_recovery_error(ctx.store.as_ref());
+            }
+            let _ = reply.send(Err(error));
+            return;
+        }
+    };
+    let rescan_generation = ergo_state::wallet::wallet_apply_generation();
     if let Err(error) = persist_rescan_state(
         ctx.store.as_ref(),
         &ergo_state::wallet::RescanState::Running {
             from_height: start_h,
         },
     ) {
-        crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        fail_rescan_start_with_invalidation(ctx.store.as_ref());
         let _ = reply.send(Err(WalletAdminError::Internal(error.to_string())));
         return;
     }
@@ -286,16 +342,19 @@ pub(crate) async fn rescan(
             state.cached_pubkeys().clone(),
         )
     };
-    let db = ctx.db.clone();
     let chain = ctx.chain.clone();
     let store = ctx.store.clone();
     let reached_height = std::sync::Arc::new(AtomicU32::new(start_h));
     let reached_for_block = reached_height.clone();
     let reached_for_tip = reached_height.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let _flags = RescanFlagsGuard;
-        let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild(
-            &db,
+        let mut flags = RescanFlagsGuard::new(
+            rescan_generation,
+            rescan_start.fenced_wallet_apply,
+            store.clone(),
+        );
+        let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild_store(
+            store.as_ref(),
             trees,
             pks,
             start_h,
@@ -315,21 +374,86 @@ pub(crate) async fn rescan(
                         source: e,
                     })
             },
-            || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst),
+            || {
+                crate::wallet_boot::RESCAN_CANCEL_REQUESTED.load(Ordering::SeqCst)
+                    || !crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
+            },
             scan_matcher
                 .as_ref()
                 .map(|matcher| matcher as &dyn ergo_state::wallet::scan::ScanRescanMatcher),
         );
-        let state = match result {
+        let state = match &result {
             Ok(_) => ergo_state::wallet::RescanState::Idle,
-            Err(error) => rescan_failure_state(start_h, &error),
+            Err(error) => rescan_failure_state(start_h, error),
         };
-        if let Err(error) = persist_rescan_state(store.as_ref(), &state) {
+        let state_result = persist_rescan_state(store.as_ref(), &state);
+        let generation_changed = ergo_state::wallet::wallet_apply_generation() != rescan_generation;
+        let reassert_result = if generation_changed {
+            store.persist_scan_invalidation(true)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = &reassert_result {
+            tracing::error!(%error, "failed to reassert scan invalidation after rescan generation change");
+        }
+        let scan_invalidated =
+            if state_result.is_ok() && reassert_result.is_ok() && !generation_changed {
+                store
+                    .read()
+                    .and_then(|read| read.scan_invalidated())
+                    .unwrap_or(true)
+            } else {
+                true
+            };
+        if rescan_should_stay_blocked(
+            &result,
+            state_result.is_ok(),
+            scan_invalidated,
+            generation_changed,
+        ) {
+            flags.block();
+        }
+        if let Err(error) = state_result {
             tracing::error!(%error, "failed to persist wallet rescan outcome");
         }
     });
-    drop(task);
+    if let Err(error) = crate::wallet_boot::track_wallet_task(ctx.wallet_session_id, task).await {
+        tracing::error!(%error, "wallet rescan task failed");
+        let _ = reply.send(Err(WalletAdminError::Internal(format!(
+            "wallet rescan task failed: {error}"
+        ))));
+        return;
+    }
     let _ = reply.send(Ok(()));
+}
+
+fn recover_corrupt_scan_registry(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    store.persist_scan_invalidation(true)?;
+    clear_scan_registry_for_recovery(store)
+}
+
+fn fail_rescan_start_with_invalidation(store: &dyn ergo_state::wallet::WalletStore) {
+    crate::wallet_boot::fail_rescan_start();
+    if let Err(error) = store.persist_scan_invalidation(true) {
+        tracing::error!(%error, "failed to persist invalidation after rescan start failure");
+    }
+}
+
+fn fail_closed_after_scan_recovery_error(store: &dyn ergo_state::wallet::WalletStore) {
+    crate::wallet_boot::latch_rescan_fail_closed();
+    if let Err(error) = store.persist_scan_invalidation(true) {
+        tracing::error!(%error, "failed to reassert scan invalidation after scan recovery failure");
+    }
+}
+
+fn clear_scan_registry_for_recovery(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    let mut write = store.begin_write()?;
+    write.clear_scan_registry()?;
+    write.commit()
 }
 
 fn persist_rescan_state(
@@ -352,7 +476,9 @@ fn rescan_failure_state(
         | RescanError::Read(RescanReadError::Storage { height, .. })
         | RescanError::Cancelled { height }
         | RescanError::Matcher { height, .. } => *height,
-        RescanError::Storage(_) => from_height,
+        RescanError::Storage(_)
+        | RescanError::InvalidStart { .. }
+        | RescanError::Invalidation { .. } => from_height,
     };
     ergo_state::wallet::RescanState::Failed {
         height,
@@ -360,12 +486,51 @@ fn rescan_failure_state(
     }
 }
 
-struct RescanFlagsGuard;
+fn rescan_should_stay_blocked(
+    result: &Result<u32, ergo_state::wallet::scan::RescanError>,
+    outcome_persisted: bool,
+    scan_invalidated: bool,
+    generation_changed: bool,
+) -> bool {
+    result.is_err() || !outcome_persisted || scan_invalidated || generation_changed
+}
+
+struct RescanFlagsGuard {
+    start_generation: u64,
+    fenced_wallet_apply: bool,
+    store: Arc<dyn ergo_state::wallet::WalletStore>,
+    keep_blocked: bool,
+}
+
+impl RescanFlagsGuard {
+    fn new(
+        start_generation: u64,
+        fenced_wallet_apply: bool,
+        store: Arc<dyn ergo_state::wallet::WalletStore>,
+    ) -> Self {
+        Self {
+            start_generation,
+            fenced_wallet_apply,
+            store,
+            keep_blocked: false,
+        }
+    }
+
+    fn block(&mut self) {
+        self.keep_blocked = true;
+        crate::wallet_boot::latch_rescan_fail_closed();
+    }
+}
 
 impl Drop for RescanFlagsGuard {
     fn drop(&mut self) {
-        crate::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        crate::wallet_boot::finalize_rescan_guard(
+            self.start_generation,
+            self.fenced_wallet_apply,
+            self.store.as_ref(),
+            self.keep_blocked,
+            std::thread::panicking(),
+        );
     }
 }
 
@@ -394,7 +559,7 @@ pub(crate) async fn unlock(
     let result = crate::wallet_boot::WalletBootService::unlock_and_sync(
         &mut storage,
         &mut state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.cfg.network,
         &pass,
     )
@@ -488,12 +653,11 @@ pub(crate) async fn update_change_address(
     let owned = (|| -> Result<bool, WalletAdminError> {
         let storage = ctx.storage.read();
         let unlocked = storage.unlocked().ok_or(WalletAdminError::Locked)?;
-        let txn = ctx
-            .db
-            .begin_read()
+        let read = ctx
+            .store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&txn);
-        let tracked = reader
+        let tracked = read
             .tracked_pubkeys_with_paths()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         for (_, pk, path) in tracked {
@@ -523,20 +687,16 @@ pub(crate) async fn update_change_address(
     }
     // Persist to WALLET_CHANGE_ADDRESS.
     let result: Result<(), WalletAdminError> = (|| -> Result<(), WalletAdminError> {
-        let txn = ctx
-            .db
+        let mut write = ctx
+            .store
             .begin_write()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        {
-            let mut tbl = txn
-                .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            tbl.insert((), pubkey)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        }
-        txn.commit()
+        write
+            .set_change_address(pubkey)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        Ok(())
+        write
+            .commit()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))
     })();
     if result.is_ok() {
         let mut s = ctx.state.write();
@@ -551,12 +711,11 @@ pub(crate) async fn balances(
 ) {
     let result: Result<WalletBalances, WalletAdminError> =
         (|| -> Result<WalletBalances, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let balance = reader
+            let balance = read
                 .balance()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let assets = balance
@@ -610,19 +769,18 @@ pub(crate) async fn balances_with_unconfirmed(
 
     let result: Result<WalletBalances, WalletAdminError> =
         (|| -> Result<WalletBalances, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
 
-            let confirmed = reader
+            let confirmed = read
                 .balance()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
             // Outgoing pending: confirmed wallet boxes a pool tx already spends.
             let mut subtract: Vec<UnconfirmedDelta> = Vec::new();
-            for wb in reader
+            for wb in read
                 .unspent_boxes()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
             {
@@ -705,19 +863,18 @@ pub(crate) async fn native_balance(
 
     let result: Result<WalletBalanceDto, WalletAdminError> =
         (|| -> Result<WalletBalanceDto, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
 
-            // asOf from the SAME txn (snapshot consistency — NOT chain.wallet_scan_height()).
-            let height = reader
-                .scan_height()
+            let height = read
+                .scan_cursor()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(|cursor| cursor.height)
                 .unwrap_or(0);
 
-            let bal = reader
+            let bal = read
                 .balance()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let confirmed = bal.confirmed_nano_ergs;
@@ -727,8 +884,7 @@ pub(crate) async fn native_balance(
             // reserve and the outgoing leg of the unconfirmed overlay.
             let need_boxes = ctx.cfg.reemission.is_some() || include_unconfirmed;
             let confirmed_boxes = if need_boxes {
-                reader
-                    .unspent_boxes()
+                read.unspent_boxes()
                     .map_err(|e| WalletAdminError::Internal(e.to_string()))?
             } else {
                 Vec::new()
@@ -904,12 +1060,11 @@ pub(crate) async fn boxes(
 ) {
     let result: Result<WalletBoxesPage, WalletAdminError> =
         (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let all = reader
+            let all = read
                 .all_boxes()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             Ok(super::paginate_boxes(all, page))
@@ -924,12 +1079,11 @@ pub(crate) async fn boxes_unspent(
 ) {
     let result: Result<WalletBoxesPage, WalletAdminError> =
         (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let unspent = reader
+            let unspent = read
                 .unspent_boxes()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             Ok(super::paginate_boxes(unspent, page))
@@ -944,12 +1098,11 @@ pub(crate) async fn transactions(
 ) {
     let result: Result<WalletTransactionsPage, WalletAdminError> =
         (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let all = reader
+            let all = read
                 .all_transactions()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             Ok(super::paginate_transactions(all, page))
@@ -971,12 +1124,11 @@ pub(crate) async fn transaction_by_id(
                         WalletAdminError::Internal("tx_id must be 32 bytes".to_string())
                     })
                 })?;
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let entry = reader
+            let entry = read
                 .transaction_by_id(&tx_bytes)
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
                 .map(super::wallet_tx_to_entry);
@@ -1001,19 +1153,18 @@ pub(crate) async fn transactions_by_scan_id(
     let result: Result<WalletTransactionsPage, WalletAdminError> =
         if scan_id == u32::from(ergo_wallet::scan::PAYMENTS_SCAN_ID) {
             (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-                let read_txn = ctx
-                    .db
-                    .begin_read()
+                let read = ctx
+                    .store
+                    .read()
                     .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-                let all = reader
+                let all = read
                     .all_transactions()
                     .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
                 Ok(super::paginate_transactions(all, page))
             })()
         } else {
             match u16::try_from(scan_id) {
-                Ok(id) => super::scan::scan_transactions_impl(ctx.db, id, page),
+                Ok(id) => super::scan::scan_transactions_impl(ctx.store.as_ref(), id, page),
                 // Scan ids are u16 (Scala Short); anything larger can't match.
                 Err(_) => Ok(WalletTransactionsPage::default()),
             }
@@ -1039,55 +1190,24 @@ pub(crate) async fn native_status(
             );
             let locked = !ctx.state.read().is_unlocked();
             // Scan height + scan-invalidated + change address from ONE read txn.
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let scan_height = reader
-                .scan_height()
+            let scan_height = read
+                .scan_cursor()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(|cursor| cursor.height)
                 .unwrap_or(0);
-            // A never-written table (`TableDoesNotExist`) is the legitimate default
-            // (false / unset); any OTHER storage fault is surfaced as `internal`
-            // rather than silently reported as a healthy wallet.
-            let scan_invalidated = match read_txn
-                .open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
-            {
-                Ok(t) => t
-                    .get(())
-                    .map_err(|e| WalletAdminError::Internal(format!("scan_invalidated read: {e}")))?
-                    .map(|g| g.value())
-                    .unwrap_or(false),
-                Err(redb::TableError::TableDoesNotExist(_)) => false,
-                Err(e) => {
-                    return Err(WalletAdminError::Internal(format!(
-                        "scan_invalidated table: {e}"
-                    )))
-                }
-            };
-            // changeAddress is persisted PUBLIC metadata — surfaced regardless of
-            // lock state (it must not disappear when locked); `null` only
-            // when unset. Read the stored pubkey + render to the network address.
-            let change_address = match read_txn
-                .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
-            {
-                Ok(t) => t
-                    .get(())
-                    .map_err(|e| WalletAdminError::Internal(format!("change_address read: {e}")))?
-                    .map(|g| g.value())
-                    .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, ctx.cfg.network))
-                    .transpose()
-                    .map_err(|e| {
-                        WalletAdminError::Internal(format!("change address encode: {e}"))
-                    })?,
-                Err(redb::TableError::TableDoesNotExist(_)) => None,
-                Err(e) => {
-                    return Err(WalletAdminError::Internal(format!(
-                        "change_address table: {e}"
-                    )))
-                }
-            };
+            let scan_invalidated = read
+                .scan_invalidated()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let change_address = read
+                .change_address_pubkey()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, ctx.cfg.network))
+                .transpose()
+                .map_err(|e| WalletAdminError::Internal(format!("change address encode: {e}")))?;
             let tip_height = ctx
                 .chain
                 .tip_height()
@@ -1100,10 +1220,8 @@ pub(crate) async fn native_status(
                 ergo_ser::address::NetworkPrefix::Mainnet => NetworkDto::Mainnet,
                 ergo_ser::address::NetworkPrefix::Testnet => NetworkDto::Testnet,
             };
-            let rescan_state = ctx
-                .store
-                .begin_read()
-                .and_then(|read| read.rescan_state())
+            let rescan_state = read
+                .rescan_state()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let rescan = match rescan_state {
                 ergo_state::wallet::RescanState::Running { from_height } => {
@@ -1146,17 +1264,17 @@ pub(crate) async fn native_addresses(
     let network = ctx.cfg.network;
     let result: Result<AddressPage, WalletAdminError> =
         (|| -> Result<AddressPage, WalletAdminError> {
-            let read_txn = ctx
-                .db
-                .begin_read()
+            let read = ctx
+                .store
+                .read()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-            let as_of = reader
-                .scan_height()
+            let as_of = read
+                .scan_cursor()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(|cursor| cursor.height)
                 .unwrap_or(0);
             // Ordered by path_idx ASC (the reader's contract).
-            let metas = reader
+            let metas = read
                 .tracked_addresses_with_meta()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
             let total = u32::try_from(metas.len()).unwrap_or(u32::MAX);
@@ -1197,16 +1315,16 @@ pub(crate) async fn native_boxes(
 ) {
     use ergo_api::wallet::native::dto::BoxPage;
     let result: Result<BoxPage, WalletAdminError> = (|| -> Result<BoxPage, WalletAdminError> {
-        let read_txn = ctx
-            .db
-            .begin_read()
+        let read = ctx
+            .store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let as_of = reader
-            .scan_height()
+        let as_of = read
+            .scan_cursor()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
             .unwrap_or(0);
-        let mut boxes = reader
+        let mut boxes = read
             .all_boxes()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         boxes.sort_by(|a, b| {
@@ -1240,12 +1358,11 @@ pub(crate) async fn native_box_by_id(
 ) {
     let result = (|| {
         let box_id = decode_hex32(&box_id_hex)?;
-        let read_txn = ctx
-            .db
-            .begin_read()
+        let read = ctx
+            .store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let wb = reader
+        let wb = read
             .box_by_id(&box_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         wb.map(box_to_summary).transpose()
@@ -1263,16 +1380,16 @@ pub(crate) async fn native_transactions(
 ) {
     use ergo_api::wallet::native::dto::TxPage;
     let result: Result<TxPage, WalletAdminError> = (|| -> Result<TxPage, WalletAdminError> {
-        let read_txn = ctx
-            .db
-            .begin_read()
+        let read = ctx
+            .store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let as_of = reader
-            .scan_height()
+        let as_of = read
+            .scan_cursor()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
             .unwrap_or(0);
-        let mut txs = reader
+        let mut txs = read
             .all_transactions()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         txs.sort_by(|a, b| {
@@ -1306,12 +1423,11 @@ pub(crate) async fn native_transaction_by_id(
 ) {
     let result = (|| {
         let tx_id = decode_hex32(&tx_id_hex)?;
-        let read_txn = ctx
-            .db
-            .begin_read()
+        let read = ctx
+            .store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let wt = reader
+        let wt = read
             .transaction_by_id(&tx_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         Ok(wt.map(tx_to_summary))
@@ -1498,7 +1614,12 @@ mod tests {
 #[cfg(test)]
 mod attempt_limiter_tests {
     use super::AttemptLimiter;
+    use ergo_state::wallet::{RedbWalletStore, WalletStore};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as RESCAN_GUARD;
 
     #[test]
     fn allows_below_budget_and_locks_at_max_failures() {
@@ -1567,6 +1688,110 @@ mod attempt_limiter_tests {
     }
 
     #[test]
+    fn explicit_rescan_clears_stale_fail_closed_guards() {
+        let _guard = RESCAN_GUARD.blocking_lock();
+        crate::wallet_boot::begin_wallet_session();
+        crate::wallet_boot::latch_rescan_fail_closed();
+        let (_dir, store) = tempfile::tempdir()
+            .map(|dir| {
+                let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+                (dir, RedbWalletStore::new(db))
+            })
+            .unwrap();
+        assert!(super::begin_rescan_process(5, &store, 5).is_err());
+        let rescan_start = super::begin_rescan_process(0, &store, 0).unwrap();
+        assert!(rescan_start.fenced_wallet_apply);
+        assert!(!crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+        crate::wallet_boot::clear_rescan_guards();
+        crate::wallet_boot::begin_wallet_session();
+    }
+
+    #[test]
+    fn partial_rescan_does_not_fence_wallet_apply_generation() {
+        let _guard = RESCAN_GUARD.blocking_lock();
+        crate::wallet_boot::begin_wallet_session();
+        crate::wallet_boot::clear_rescan_guards();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(db));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        let generation_before = ergo_state::wallet::wallet_apply_generation();
+        let start = (0..1000)
+            .find_map(|_| {
+                crate::wallet_boot::clear_rescan_guards();
+                super::begin_rescan_process(1, store.as_ref(), 1).ok()
+            })
+            .expect("partial rescan start should be available");
+        assert!(!start.fenced_wallet_apply);
+        let generation = ergo_state::wallet::wallet_apply_generation();
+        assert!(generation > generation_before);
+        let guard = super::RescanFlagsGuard::new(generation, false, store);
+        drop(guard);
+        crate::wallet_boot::clear_rescan_guards();
+        crate::wallet_boot::begin_wallet_session();
+    }
+
+    #[test]
+    fn invalidation_persistence_failure_keeps_rescan_blocked() {
+        let error = ergo_state::wallet::scan::RescanError::Invalidation {
+            source: ergo_state::wallet::WalletStoreError::Decode("injected".to_string()),
+        };
+        let state = super::rescan_failure_state(17, &error);
+        assert!(matches!(
+            state,
+            ergo_state::wallet::RescanState::Failed { height: 17, .. }
+        ));
+        assert!(super::rescan_should_stay_blocked(
+            &Err(error),
+            true,
+            false,
+            false
+        ));
+        assert!(!super::rescan_should_stay_blocked(
+            &Ok(0),
+            true,
+            false,
+            false
+        ));
+        assert!(super::rescan_should_stay_blocked(
+            &Ok(0),
+            false,
+            false,
+            false
+        ));
+        assert!(super::rescan_should_stay_blocked(
+            &Err(ergo_state::wallet::scan::RescanError::Cancelled { height: 1 }),
+            true,
+            false,
+            false,
+        ));
+        assert!(super::rescan_should_stay_blocked(&Ok(0), true, true, false));
+        assert!(super::rescan_should_stay_blocked(&Ok(0), true, false, true));
+    }
+
+    #[test]
+    fn rescan_generation_change_latches_and_reasserts_invalidation() {
+        let _guard = RESCAN_GUARD.blocking_lock();
+        crate::wallet_boot::clear_rescan_guards();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(db));
+        let start_generation = ergo_state::wallet::wallet_apply_generation();
+        let guard = super::RescanFlagsGuard::new(start_generation, true, store.clone());
+        ergo_state::wallet::advance_wallet_apply_generation();
+        drop(guard);
+
+        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
+        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[test]
     fn failures_outside_the_window_do_not_accumulate() {
         let limiter = AttemptLimiter::new();
         let t0 = Instant::now();
@@ -1579,5 +1804,121 @@ mod attempt_limiter_tests {
         assert!(limiter
             .gate_at(t0 + AttemptLimiter::WINDOW + Duration::from_secs(2))
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod scan_recovery_tests {
+    use super::super::scan::{build_rescan_matcher_from_store, ScanRegistryLoadError};
+    use super::recover_corrupt_scan_registry;
+    use ergo_state::wallet::{
+        RedbWalletStore, WalletRead, WalletStore, WalletStoreError, WalletWrite,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingStore {
+        inner: RedbWalletStore,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_invalidation: bool,
+    }
+
+    impl WalletStore for RecordingStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.inner.begin_read()
+        }
+
+        fn persist_scan_invalidation(&self, invalidated: bool) -> Result<(), WalletStoreError> {
+            self.events.lock().unwrap().push("persist_invalidation");
+            if self.fail_invalidation {
+                return Err(WalletStoreError::Decode("injected".to_string()));
+            }
+            self.inner.persist_scan_invalidation(invalidated)
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            self.events.lock().unwrap().push("begin_write");
+            self.inner.begin_write()
+        }
+    }
+
+    struct TransientReadStore {
+        inner: RedbWalletStore,
+    }
+
+    impl WalletStore for TransientReadStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            Err(WalletStoreError::Database(Box::new(redb::Error::Io(
+                std::io::Error::other("injected transient read failure"),
+            ))))
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            self.inner.begin_write()
+        }
+    }
+
+    fn recording_store(fail_invalidation: bool) -> (tempfile::TempDir, RecordingStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = RecordingStore {
+            inner: RedbWalletStore::new(db),
+            events: events.clone(),
+            fail_invalidation,
+        };
+        (dir, store)
+    }
+
+    #[test]
+    fn rescan_start_failure_persists_invalidation() {
+        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
+        let (_dir, store) = recording_store(false);
+        super::fail_rescan_start_with_invalidation(&store);
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+        crate::wallet_boot::clear_rescan_guards();
+    }
+
+    #[test]
+    fn transient_registry_read_error_preserves_valid_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let inner = RedbWalletStore::new(db);
+        let mut write = inner.begin_write().unwrap();
+        write.put_scan(11, b"{\"scanId\":11}".to_vec(), 11).unwrap();
+        write.commit().unwrap();
+        let store = TransientReadStore { inner };
+        assert!(matches!(
+            build_rescan_matcher_from_store(&store),
+            Err(ScanRegistryLoadError::Read(_))
+        ));
+        assert_eq!(
+            store
+                .inner
+                .read()
+                .unwrap()
+                .scan_registry()
+                .unwrap()
+                .scans
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn corrupt_registry_recovery_persists_invalidation_before_cleanup() {
+        let (_dir, store) = recording_store(false);
+        recover_corrupt_scan_registry(&store).unwrap();
+        assert_eq!(
+            *store.events.lock().unwrap(),
+            vec!["persist_invalidation", "begin_write"]
+        );
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn corrupt_registry_recovery_does_not_clear_when_invalidation_fails() {
+        let (_dir, store) = recording_store(true);
+        assert!(recover_corrupt_scan_registry(&store).is_err());
+        assert_eq!(*store.events.lock().unwrap(), vec!["persist_invalidation"]);
     }
 }

@@ -31,8 +31,13 @@ pub(crate) async fn native_select_boxes(
         let _ = reply.send(Err(WalletAdminError::Locked));
         return;
     }
-    let result =
-        super::select_boxes_impl(&req, ctx.state, ctx.db, ctx.chain.as_ref(), ctx.cfg.network);
+    let result = super::select_boxes_impl(
+        &req,
+        ctx.state,
+        ctx.store.as_ref(),
+        ctx.chain.as_ref(),
+        ctx.cfg.network,
+    );
     let _ = reply.send(result);
 }
 
@@ -50,7 +55,7 @@ pub(crate) async fn native_build_transaction(
     let result = super::build_transaction_impl(
         &intent,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
     )
@@ -70,7 +75,7 @@ pub(crate) async fn native_sign_transaction(
         &req,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
     )
     .await;
@@ -96,7 +101,7 @@ pub(crate) async fn native_send_transaction(
         &req,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
         ctx.cfg.network,
@@ -117,7 +122,7 @@ pub(crate) async fn payment_send(
         None,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
         ctx.cfg.network,
@@ -153,7 +158,7 @@ pub(crate) async fn retrieve_rewards(
         req.dry_run,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
         ctx.mempool.as_ref(),
@@ -196,7 +201,7 @@ pub(crate) async fn transaction_generate(
         request.fee,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
     )
@@ -223,7 +228,7 @@ pub(crate) async fn transaction_generate_unsigned(
         request.fee,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
     )
@@ -249,7 +254,7 @@ pub(crate) async fn transaction_sign(
         request.hints.as_ref(),
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
     )
     .await;
@@ -275,7 +280,7 @@ pub(crate) async fn transaction_send(
         request.fee,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
         ctx.cfg.network,
@@ -289,7 +294,12 @@ pub(crate) async fn boxes_collect(
     request: BoxesCollectRequest,
     reply: oneshot::Sender<Result<BoxesCollectResponse, WalletAdminError>>,
 ) {
-    let result =
-        super::boxes_collect_impl(&request, ctx.storage, ctx.state, ctx.db, ctx.chain.as_ref());
+    let result = super::boxes_collect_impl(
+        &request,
+        ctx.storage,
+        ctx.state,
+        ctx.store.as_ref(),
+        ctx.chain.as_ref(),
+    );
     let _ = reply.send(result);
 }

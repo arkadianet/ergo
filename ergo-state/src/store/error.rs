@@ -583,6 +583,15 @@ pub enum StateError {
     },
 }
 
+impl From<crate::wallet::WalletStoreError> for StateError {
+    fn from(e: crate::wallet::WalletStoreError) -> Self {
+        match e {
+            crate::wallet::WalletStoreError::Database(error) => StateError::from(*error),
+            crate::wallet::WalletStoreError::Decode(message) => StateError::Serialization(message),
+        }
+    }
+}
+
 impl From<redb::Error> for StateError {
     fn from(e: redb::Error) -> Self {
         StateError::Db(Box::new(e))
