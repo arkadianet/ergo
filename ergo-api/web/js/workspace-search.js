@@ -40,13 +40,25 @@ export function initWorkspaceSearch({ trigger, canOpen, navigate, search }) {
     badge.className = 'command-search__kind';
     copy.append(label, detail);
     button.append(copy, badge);
-    button.onclick = () => { dialog.close(); action(); };
+    button.onclick = () => { previousFocus = null; dialog.close(); action(); };
     return button;
+  }
+  function openPage(id) {
+    const focusHeading = () => {
+      const page = document.getElementById(`section-${id}`);
+      const heading = page && !page.hidden && page.querySelector('h1');
+      if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus({ preventScroll: true }); }
+    };
+    const sameRoute = location.hash === `#${id}`;
+    // Run after the router mounts the destination; a veto leaves it hidden.
+    if (!sameRoute) window.addEventListener('hashchange', focusHeading, { once: true });
+    navigate(id);
+    if (sameRoute) focusHeading();
   }
   function render() {
     const query = input.value.trim();
     const matches = destinations.filter(d => d.join(' ').toLowerCase().includes(query.toLowerCase()));
-    results.replaceChildren(...matches.map(([id, title, description]) => item(title, description, () => navigate(id), 'Page')));
+    results.replaceChildren(...matches.map(([id, title, description]) => item(title, description, () => openPage(id), 'Page')));
     if (query) results.append(item(`Search chain: ${query}`, 'Look up a block height, address, or block / transaction / box / token ID.', () => search(query), 'Lookup'));
     dialog.querySelector('[data-count]').textContent = query ? `${results.children.length} options` : 'Jump to a page';
   }

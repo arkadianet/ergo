@@ -826,7 +826,6 @@ async function refresh() {
     const res = await api.wallet.status();
     if (epoch !== generation || res.status === 403) return;
     if (!res.ok) {
-      builder?.update(walletBalance, { ...walletStatus, isUnlocked: false });
       walletStatus = null; unlockRendered = false;
       q('[data-status-body]').replaceChildren(el('p', { class: 'banner banner--warn', text: 'Wallet status unavailable. Reconnecting…' }));
       return;

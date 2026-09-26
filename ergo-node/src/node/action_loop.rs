@@ -216,7 +216,12 @@ pub(super) async fn action_loop(
             // is unreachable in practice — the rejection is defense
             // in depth.
             Some(req) = mining_submit_rx.recv() => {
-                handle_mining_request(&mut state, mining.as_ref().map(|m| &m.handle), req);
+                handle_mining_request(
+                    &mut state,
+                    mining.as_ref().map(|m| &m.handle),
+                    mining.as_ref().is_some_and(|m| m.offline_generation),
+                    req,
+                );
             }
             _ = mem_tick.tick() => {
                 if let Some(path) = mem_csv_path.as_deref() {

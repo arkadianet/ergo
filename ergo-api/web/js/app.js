@@ -160,7 +160,9 @@ function show(s, tail) {
 // Asked by the router before leaving `prev`; a section may veto (return false).
 function beforeLeave(prev) {
   const r = renderers[prev];
-  return !r || !r.canLeave || r.canLeave();
+  const allowed = !r || !r.canLeave || r.canLeave();
+  if (!allowed) pendingChainQuery = null;
+  return allowed;
 }
 
 function boot() {

@@ -145,7 +145,12 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
       el('div', { class: 'wb-total' }, el('span', { text: p.reemissionBurn ? 'Payments + fee + re-emission' : 'Payments + fee' }), el('strong', { text: money(total.toString()) })),
       ...intent.outputs.map((o, i) => el('div', { class: 'wb-review-payment' }, line(`Recipient ${i + 1}`, money(o.value)),
         el('code', { class: 'wb-address', text: o.address }),
-        ...o.assets.map(a => el('div', {}, line(tokenLabel(a.tokenId), `${a.amount} raw unit${a.amount === '1' ? '' : 's'}`), el('code', { class: 'wb-address', text: a.tokenId }))))),
+        ...o.assets.map(a => {
+          const precision = getTokenMeta(a.tokenId)?.decimals || 0;
+          const raw = `${a.amount} raw unit${a.amount === '1' ? '' : 's'}`;
+          return el('div', {}, line(tokenLabel(a.tokenId), precision ? decimal(a.amount, precision) : raw),
+            ...(precision ? [note(raw)] : []), el('code', { class: 'wb-address', text: a.tokenId }));
+        }))),
       line('Actual network fee', money(p.fee)),
       ...(p.fee !== intent.fee ? [note('The node added dust change to your requested fee. Review the actual amount above.')] : []),
       ...(p.reemissionBurn ? [line('Required re-emission payment', money(burn)), note(`${p.reemissionBurn.tokensBurned} re-emission token units will be burned.`)] : []),
@@ -197,8 +202,8 @@ export function createWalletBuilder(host, { api, active, onBusy, onSent }) {
   reset();
   return {
     update(nextBalance, nextStatus) {
-      if (status && (status.changeAddress !== nextStatus.changeAddress || status.isUnlocked !== nextStatus.isUnlocked)) session.invalidate();
-      const accessChanged = status && (status.changeAddress !== nextStatus.changeAddress || status.isUnlocked !== nextStatus.isUnlocked);
+      const accessChanged = !session.signed && status && (status.changeAddress !== nextStatus.changeAddress || status.isUnlocked !== nextStatus.isUnlocked);
+      if (accessChanged) session.invalidate();
       balance = nextBalance; status = nextStatus;
       available.textContent = balance ? `${money(balance.nanoErg.available)} available` : 'Balance unavailable';
       change.textContent = status?.changeAddress || 'No change address';
