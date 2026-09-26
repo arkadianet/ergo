@@ -1,0 +1,392 @@
+[
+  {
+    "name": "rent-int-index-p2pk",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0400",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-int-index-true-box",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0400",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c09ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-true-box-below-floor",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "bf9ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 50,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "unavailable",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-true-box-at-floor",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c09ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "Accept",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 50,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "unavailable",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-factor-zero-bad-output",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 0
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 50,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "unavailable",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-true-box-below-floor-low-limit",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0300",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 49,
+      "init_cost_block": 17,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "bf9ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 0,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 50,
+      "rent_path": true,
+      "total_block_cost": 67,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "unavailable",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-short-index-1-p2pk",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0302",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-short-index-1-true-box",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0302",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c09ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-short-index-minus-1-p2pk",
+    "request": {
+      "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "ctx_ext_hex": "017f0301",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "c0843d0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179800000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c0843d0008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "RejectScript",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 398,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 403,
+      "failure_class": null,
+      "rejection_detail": "Script reduced to false or proof invalid",
+      "legacy": "P:cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  },
+  {
+    "name": "rent-short-index-minus-1-true-box",
+    "request": {
+      "tree_hex": "0008d3",
+      "ctx_ext_hex": "017f0301",
+      "proof_hex": "",
+      "message_hex": "",
+      "cost_limit_block": 1000000,
+      "init_cost_block": 0,
+      "activated_version": 3,
+      "tree_version_expected": 0,
+      "self_box_hex": "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000",
+      "inputs_hex": [
+        "8094ebdc030008d3000000000000000000000000000000000000000000000000000000000000000000000000"
+      ],
+      "data_inputs_hex": [],
+      "outputs_hex": [
+        "c09ccec2030008d3c094400000"
+      ],
+      "headers_hex": [],
+      "pre_header_hex": "0400000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000100a400279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000",
+      "rent": true,
+      "storage_fee_factor": 1250000
+    },
+    "expected": {
+      "wrapped_rule_id": null,
+      "wrapped_rule_args": null,
+      "verdict": "Accept",
+      "eval_block_cost": 5,
+      "crypto_block_cost": 0,
+      "rent_block_cost": 0,
+      "rent_path": true,
+      "total_block_cost": 5,
+      "failure_class": null,
+      "rejection_detail": "",
+      "legacy": "P:d3|5",
+      "evaluator_failure_block_cost": "unavailable"
+    }
+  }
+]
