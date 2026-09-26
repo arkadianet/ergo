@@ -1,5 +1,7 @@
 //! Authenticated, on-demand reads from the snapshot's single held transaction.
 
+use std::collections::HashMap;
+
 use ergo_primitives::digest::{ADDigest, Digest32};
 use redb::ReadOnlyTable;
 
@@ -23,6 +25,7 @@ pub(super) fn prove(
     let mut nodes = SnapshotNodes {
         table: snapshot.txn.open_table(AVL_NODES)?,
         reads: 0,
+        labels: HashMap::new(),
     };
     let mut label = [0; 32];
     label.copy_from_slice(&meta.root_digest[..32]);
@@ -41,6 +44,9 @@ pub(super) fn prove(
 struct SnapshotNodes {
     table: ReadOnlyTable<u64, &'static [u8]>,
     reads: usize,
+    /// Labels derived for legacy children during this proof. The held
+    /// transaction is immutable, so a row's label cannot change while cached.
+    labels: HashMap<NodeId, Digest32>,
 }
 
 impl SnapshotNodes {
@@ -87,23 +93,32 @@ impl SnapshotNodes {
     }
 
     fn label(&mut self, id: NodeId, depth: u16) -> Result<Digest32, StateError> {
-        match self.normalized(id, depth)? {
+        // Expanding a legacy node re-derives its children's labels; without
+        // the cache every expansion would re-read its whole legacy subtree.
+        if let Some(label) = self.labels.get(&id) {
+            return Ok(*label);
+        }
+        let label = match self.normalized(id, depth)? {
             AvlNode::Leaf {
                 key,
                 value,
                 next_key,
                 ..
-            } => Ok(leaf_label(&key, &value, &next_key)),
+            } => leaf_label(&key, &value, &next_key),
             AvlNode::Internal {
                 balance,
                 left_label: Some(left),
                 right_label: Some(right),
                 ..
-            } => Ok(internal_label(balance, &left, &right)),
-            _ => Err(StateError::InternalInvariant {
-                what: "snapshot prover: child labels not normalized",
-            }),
-        }
+            } => internal_label(balance, &left, &right),
+            _ => {
+                return Err(StateError::InternalInvariant {
+                    what: "snapshot prover: child labels not normalized",
+                })
+            }
+        };
+        self.labels.insert(id, label);
+        Ok(label)
     }
 }
 
@@ -144,6 +159,19 @@ mod tests {
         let mut store = StateStore::open(&tmp.path().join("state.redb")).unwrap();
         let boxes: Vec<_> = (0..count).map(|n| (key(n), vec![n as u8; 128])).collect();
         store.initialize_genesis(&boxes).unwrap();
+        (tmp, store)
+    }
+
+    fn legacy_fixture(count: u32) -> (tempfile::TempDir, StateStore) {
+        let (tmp, store) = fixture(count);
+        let write = crate::begin_write_qr(&store.db).unwrap();
+        {
+            let mut table = write.open_table(AVL_NODES).unwrap();
+            for (id, node) in store.tree.all_nodes() {
+                table.insert(id, legacy_bytes(&node).as_slice()).unwrap();
+            }
+        }
+        write.commit().unwrap();
         (tmp, store)
     }
 
@@ -301,15 +329,7 @@ mod tests {
 
     #[test]
     fn legacy_nodes_match_the_full_prover_and_cycles_are_bounded() {
-        let (_tmp, store) = fixture(128);
-        let write = crate::begin_write_qr(&store.db).unwrap();
-        {
-            let mut table = write.open_table(AVL_NODES).unwrap();
-            for (id, node) in store.tree.all_nodes() {
-                table.insert(id, legacy_bytes(&node).as_slice()).unwrap();
-            }
-        }
-        write.commit().unwrap();
+        let (_tmp, store) = legacy_fixture(128);
         let snap = store.committed_snapshot().unwrap().unwrap();
         compare(
             &snap,
@@ -346,6 +366,22 @@ mod tests {
             ),
             Err(StateError::DbCorruption { .. })
         ));
+    }
+
+    #[test]
+    fn legacy_nodes_are_read_at_most_twice_per_proof() {
+        let (_tmp, store) = legacy_fixture(1024);
+        let stored = store.tree.all_nodes().len();
+        let snap = store.committed_snapshot().unwrap().unwrap();
+        let lookup: Vec<_> = (512..528).map(key).collect();
+        let remove: DryRunRemoveMap = (0..16).map(|n| (key(n), ())).collect();
+        let insert: DryRunInsertMap = (2000..2016).map(|n| (key(n), vec![7; 32])).collect();
+        let reads = compare(&snap, &lookup, &remove, &insert);
+        // Once to derive the row's label, once more if the prover expands it.
+        assert!(
+            reads <= 2 * stored,
+            "read {reads} rows for {stored} stored nodes"
+        );
     }
 
     #[test]

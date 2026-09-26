@@ -31,7 +31,8 @@ cold-storage throughput, live mainnet RSS, or comparisons with a reused cached
 base. The cached mode may still benefit repeated large same-tip builds. Legacy
 v1 database nodes lack child labels and require subtree reads to derive them;
 they remain supported without retaining a full graph, but do not have the same
-path-only I/O bound as v2 nodes.
+path-only I/O bound as v2 nodes. Derived labels are cached for the duration of
+one proof, so each stored node is read at most twice per proof.
 
 ## Correctness checks
 
