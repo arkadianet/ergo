@@ -45,14 +45,21 @@ pub(crate) async fn derive_key(
     request: DeriveKeyRequest,
     reply: oneshot::Sender<Result<DeriveKeyResponse, WalletAdminError>>,
 ) {
-    let result = super::derive_key_impl(
-        &request,
-        ctx.storage,
-        ctx.state,
-        ctx.store.as_ref(),
-        ctx.chain.as_ref(),
-        ctx.cfg.network,
-    )
+    let result = async {
+        // Check recovery is available before committing a key that fences apply.
+        super::admin::rescan_tip(ctx)?;
+        let key = super::derive_key_impl(
+            &request,
+            ctx.storage,
+            ctx.state,
+            ctx.store.as_ref(),
+            ctx.chain.as_ref(),
+            ctx.cfg.network,
+        )
+        .await?;
+        rescan_after_derivation(ctx).await?;
+        Ok(key)
+    }
     .await;
     let _ = reply.send(result);
 }
@@ -61,15 +68,31 @@ pub(crate) async fn derive_next_key(
     ctx: &WriterContext<'_>,
     reply: oneshot::Sender<Result<DeriveNextKeyResponse, WalletAdminError>>,
 ) {
-    let result = super::derive_next_key_impl(
-        ctx.storage,
-        ctx.state,
-        ctx.store.as_ref(),
-        ctx.chain.as_ref(),
-        ctx.cfg.network,
-    )
+    let result = async {
+        super::admin::rescan_tip(ctx)?;
+        let key = super::derive_next_key_impl(
+            ctx.storage,
+            ctx.state,
+            ctx.store.as_ref(),
+            ctx.chain.as_ref(),
+            ctx.cfg.network,
+        )
+        .await?;
+        rescan_after_derivation(ctx).await?;
+        Ok(key)
+    }
     .await;
     let _ = reply.send(result);
+}
+
+async fn rescan_after_derivation(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError> {
+    // Key persistence invalidates historical ownership and fences live apply.
+    // Start the normal supervised rebuild so the fence clears on completion.
+    let (reply, result) = oneshot::channel();
+    super::admin::rescan(ctx, 0, reply).await;
+    result
+        .await
+        .map_err(|error| WalletAdminError::Internal(error.to_string()))?
 }
 
 pub(crate) async fn get_private_key(

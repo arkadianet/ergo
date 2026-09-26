@@ -258,6 +258,94 @@ fn spawn_writer_with_chain(
 
 static WALLET_ADMIN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct DerivationChain;
+
+impl ChainStateAccessor for DerivationChain {
+    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(0)
+    }
+    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        Ok(2)
+    }
+    fn is_pruned(&self) -> bool {
+        false
+    }
+    fn read_block_at(
+        &self,
+        height: u32,
+    ) -> Result<
+        Option<ergo_state::wallet::scan::RescanBlock>,
+        ergo_state::wallet::scan::RescanReadError,
+    > {
+        Ok((1..=2)
+            .contains(&height)
+            .then_some(ergo_state::wallet::scan::RescanBlock {
+                block_id: [height as u8; 32],
+                txs: Vec::new(),
+            }))
+    }
+}
+
+#[tokio::test]
+async fn derived_keys_automatically_rescan_and_restore_wallet_operations() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
+    let (admin, db, _dir) =
+        spawn_writer_with_chain(Arc::new(DerivationChain), Arc::new(StubTxSubmitter));
+    let store = RedbWalletStore::new(db);
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    admin.unlock("pw".into()).await.unwrap();
+    for next in [true, false] {
+        let address = if next {
+            admin.derive_next_key().await.unwrap().address
+        } else {
+            admin
+                .derive_key(ergo_api::wallet::admin_advanced::DeriveKeyRequest {
+                    derivation_path: "m/0".to_string(),
+                })
+                .await
+                .unwrap()
+                .address
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst)
+                || ergo_state::wallet::wallet_apply_fenced()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("automatic key rescan must finish");
+        let read = store.read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 2);
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(
+            read.rescan_state().unwrap(),
+            ergo_state::wallet::RescanState::Idle
+        );
+        assert!(admin.addresses().await.unwrap().0.contains(&address));
+    }
+}
+
+#[tokio::test]
+async fn derivation_without_recovery_support_does_not_fence_or_persist_a_key() {
+    let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
+    let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
+    let store = RedbWalletStore::new(db);
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    admin.unlock("pw".into()).await.unwrap();
+    let keys = store.read().unwrap().tracked_pubkeys_with_paths().unwrap();
+    assert!(matches!(
+        admin.derive_next_key().await,
+        Err(WalletAdminError::RescanUnavailable(_))
+    ));
+    assert_eq!(
+        store.read().unwrap().tracked_pubkeys_with_paths().unwrap(),
+        keys
+    );
+    assert!(!ergo_state::wallet::wallet_apply_fenced());
+    assert!(admin.addresses().await.is_ok());
+}
+
 #[tokio::test]
 async fn rescan_runs_in_background_and_reports_durable_failure() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
