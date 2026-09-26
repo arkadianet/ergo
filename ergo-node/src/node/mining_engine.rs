@@ -319,7 +319,7 @@ pub(super) fn run_build_worker(
     // The per-tip pristine dry-run base, owned across requests so a same-tip
     // rebuild reuses it. `!Send` (an `Rc<RefCell<Node>>` graph) — sound here
     // because this worker is the single serial consumer. `None` when the cache
-    // is disabled; then every build full-hydrates exactly as before.
+    // is disabled; then builds expand only authenticated operation paths.
     let mut base: Option<DryRunBase> = None;
     while let Ok(BuildRequest {
         intent,
