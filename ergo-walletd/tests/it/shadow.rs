@@ -1577,9 +1577,11 @@ impl EmbeddedSide {
 /// the chain-apply seam.
 fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::WalletStateHook {
     let read = store.read().expect("hook hydration read");
+    let hydration = ergo_wallet_service::wallet::hydration::HydrationSnapshot::load(read.as_ref())
+        .expect("hook hydration snapshot");
     let mut state = WalletState::empty(false);
     state
-        .hydrate_from_reader(&*read, ergo_ser::address::NetworkPrefix::Mainnet)
+        .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
         .expect("hook hydration from the tracked-pubkey table");
     ergo_node::node::wallet_bridge::WalletStateHook {
         wallet: Arc::new(parking_lot::RwLock::new(state)),
