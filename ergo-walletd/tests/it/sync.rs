@@ -58,6 +58,32 @@ fn forward_sync_uses_requested_cursor_and_limit_across_batches() {
     assert_eq!(chain.requests(), vec![(0, 3), (3, 3), (6, 2)]);
 }
 
+#[test]
+fn regressed_forward_tip_is_retryable_without_applying_the_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = FakeChain::with_responses(
+        CommittedTip::new(3, [3; 32]),
+        [BlocksSinceResponse::Forward(
+            ergo_wallet_service::ForwardBlocksSince {
+                tip: CommittedTip::new(2, [2; 32]),
+                blocks: vec![block(1), block(2)],
+            },
+        )],
+    );
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = build_syncer(chain, store.clone(), 3);
+    assert!(syncer.sync_once().unwrap_err().retryable());
+    assert!(store
+        .read()
+        .unwrap()
+        .scan_cursor()
+        .unwrap()
+        .is_none_or(|cursor| cursor.height == 0));
+    let report = syncer.sync_once().unwrap();
+    assert!(report.completed);
+    assert_eq!(report.blocks_processed, 3);
+}
+
 /// The apply budget and the HTTP page size are separate knobs. A pass applies
 /// up to `batch` blocks, but no single call may ask for more than `page`, so a
 /// large apply budget cannot turn into one unbounded response body.

@@ -174,9 +174,9 @@ impl StandaloneSyncer {
         let mut from_height = start.from_height;
         let mut tip = self.tip()?;
         if cursor.height > tip.height {
-            return Err(SyncError::Protocol(format!(
-                "wallet cursor {} is ahead of node tip {}",
-                cursor.height, tip.height
+            return Err(SyncError::Chain(ChainClientError::stale_tip(
+                CommittedTip::new(cursor.height, cursor.header_id),
+                tip,
             )));
         }
         let mut processed = 0u32;
@@ -237,9 +237,10 @@ impl StandaloneSyncer {
             match response {
                 ergo_wallet_service::BlocksSinceResponse::Forward(forward) => {
                     if forward.tip.height < tip.height {
-                        return Err(SyncError::Protocol(
-                            "chain tip regressed during forward sync".to_string(),
-                        ));
+                        return Err(SyncError::Chain(ChainClientError::stale_tip(
+                            tip,
+                            forward.tip,
+                        )));
                     }
                     if forward.tip.height < cursor.height {
                         return Err(SyncError::Protocol(

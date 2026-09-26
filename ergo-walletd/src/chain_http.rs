@@ -563,12 +563,12 @@ fn neutral_snapshot(snapshot: wire::ChainSnapshot) -> Result<ChainSnapshot, Chai
             ));
         }
         if let Some(previous) = &previous {
-            if header.height != previous.height.saturating_add(1) {
+            if previous.height.checked_sub(1) != Some(header.height) {
                 return Err(ChainClientError::Protocol(
                     "snapshot headers are not height-contiguous".to_string(),
                 ));
             }
-            if parent_id != previous.header_id {
+            if previous.parent_id != header_id {
                 return Err(ChainClientError::Protocol(
                     "snapshot header parent continuity is invalid".to_string(),
                 ));
@@ -583,10 +583,10 @@ fn neutral_snapshot(snapshot: wire::ChainSnapshot) -> Result<ChainSnapshot, Chai
         previous = Some(value.clone());
         headers.push(value);
     }
-    if let Some(last) = headers.last() {
-        if last.height == tip.height && last.header_id != tip.header_id {
+    if let Some(first) = headers.first() {
+        if first.height != tip.height || first.header_id != tip.header_id {
             return Err(ChainClientError::Protocol(
-                "snapshot tip does not match its last header".to_string(),
+                "snapshot tip does not match its first header".to_string(),
             ));
         }
     }
@@ -1052,6 +1052,37 @@ mod tests {
             Err(ChainClientError::Protocol(_))
         ));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn snapshot_checks_descending_height_parent_and_tip_identity() {
+        let valid = serde_json::json!({
+            "tip": { "height": 3, "headerId": id(3) },
+            "headers": [
+                { "height": 3, "headerId": id(3), "parentId": id(2), "timestampUnixMs": 3 },
+                { "height": 2, "headerId": id(2), "parentId": id(1), "timestampUnixMs": 2 }
+            ],
+            "activeParameters": {},
+            "reemissionInputs": [],
+            "snapshotId": id(9)
+        });
+        assert!(neutral_snapshot(serde_json::from_value(valid.clone()).unwrap()).is_ok());
+        for (field, replacement) in [
+            ("/headers/1/height", serde_json::json!(1)),
+            ("/headers/0/parentId", serde_json::json!(id(8))),
+            ("/tip/headerId", serde_json::json!(id(8))),
+            ("/tip/height", serde_json::json!(4)),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(field).unwrap() = replacement;
+            assert!(
+                matches!(
+                    neutral_snapshot(serde_json::from_value(invalid).unwrap()),
+                    Err(ChainClientError::Protocol(_))
+                ),
+                "invalid snapshot field accepted: {field}"
+            );
+        }
     }
 
     #[test]

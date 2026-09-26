@@ -493,6 +493,25 @@ fn blocks_since_path(height: u32, id: &str, limit: u32) -> String {
 
 // ----- tests -----
 
+#[test]
+fn real_node_snapshot_preserves_newest_first_headers() {
+    let node_dir = tempfile::tempdir().unwrap();
+    let (store, _) = seeded_node(node_dir.path());
+    let node = serve_node_api(&store);
+    let client = daemon_client(&node.url(), NODE_API_KEY);
+    let tip = client.committed_tip().unwrap();
+    let snapshot = client
+        .snapshot()
+        .expect("real node snapshot must be usable");
+    assert_eq!(snapshot.tip, tip);
+    assert_eq!(snapshot.headers.first().unwrap().header_id, tip.header_id);
+    assert!(snapshot.headers.len() > 1);
+    for pair in snapshot.headers.windows(2) {
+        assert_eq!(pair[0].height, pair[1].height + 1);
+        assert_eq!(pair[0].parent_id, pair[1].header_id);
+    }
+}
+
 /// The daemon's real HTTP client reads the real node tip and real forward
 /// pages, and the real sync loop carries a standalone wallet from genesis to
 /// the node tip through that same HTTP path.
@@ -918,6 +937,19 @@ fn real_node_reorg_returns_the_common_ancestor_and_the_daemon_follows_it() {
     // the new chain without a restart.
     store.rollback_to(1, None, None).unwrap();
     assert_eq!(store.height(), 1);
+    let error = syncer.sync_once().unwrap_err();
+    assert!(
+        error.retryable(),
+        "a temporary node rollback must be retried: {error}"
+    );
+    let read = store_wallet.read().unwrap();
+    assert_eq!(read.scan_cursor().unwrap().unwrap().height, TIP_HEIGHT);
+    assert_eq!(
+        read.rescan_state().unwrap(),
+        ergo_wallet_service::RescanState::Idle
+    );
+    assert!(!read.scan_invalidated().unwrap());
+    drop(read);
     let mut parent = ModifierId::from_bytes(committed_id(&store, 1));
     for height in 2..=TIP_HEIGHT {
         let id = apply_block(&mut store, height, parent, [0xA0 + height as u8; 8]);

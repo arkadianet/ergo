@@ -481,7 +481,7 @@ mod tests {
             node_url = "http://127.0.0.1:9053"
             api_key_file = "/tmp/key"
             descriptor_file = "/tmp/desc"
-            unix_socket = "/tmp/wallet.sock"
+            tcp_fallback = "127.0.0.1:3033"
         "#,
         )
         .unwrap();
@@ -570,10 +570,10 @@ mod tests {
         fs::write(
             &config_path,
             format!(
-                "data_dir = \"{}\"\nnode_url = \"http://127.0.0.1:9053\"\napi_key_file = \"{}\"\ndescriptor_file = \"{}\"\ntcp_fallback = \"127.0.0.1:3033\"\n",
-                dir.path().display(),
-                key.display(),
-                descriptors.display()
+                "data_dir = {}\nnode_url = \"http://127.0.0.1:9053\"\napi_key_file = {}\ndescriptor_file = {}\ntcp_fallback = \"127.0.0.1:3033\"\n",
+                toml::Value::String(dir.path().to_str().unwrap().to_string()),
+                toml::Value::String(key.to_str().unwrap().to_string()),
+                toml::Value::String(descriptors.to_str().unwrap().to_string())
             ),
         )
         .unwrap();
