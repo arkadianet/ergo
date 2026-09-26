@@ -348,6 +348,30 @@ def _config_path(name):
     return os.environ.get(CONFIG_ENV[name]) or str(HERE / DEFAULT_CONFIG[name])
 
 
+def _state_root_pending(state_root):
+    """True before a node's genesis snapshot has reached its `/info`
+    handler: the key absent (`None`) or present but still the type's
+    default (`''`). Both mean "poll again", not "wrong genesis".
+
+    rm-A-steady-armA-1: `spawn('rust')`, called from `restart_follower`
+    a few hundred ms into a freshly-started process, read `stateRoot:
+    ""` on its first successful `/info` response — the API had started
+    listening (`ergo_api::server: api listening`) fractionally before
+    the snapshot handle's first swap populated `best_full_block`
+    (`ergo-node/src/api_bridge/scala_compat/mod.rs`, whose `ScalaInfo`
+    default carries `state_root: String::new()`, see
+    `ergo-api/src/compat/types.rs`). `None` was already retried via
+    `ValueError`; `''` fell through to the genesis-mismatch branch and
+    raised an unretried `RuntimeError`, aborting the scenario although
+    the same process's own heartbeat a few ms later logged the correct
+    `tip_state`. A node whose root is genuinely wrong never starts
+    reporting `''` — it is absent or wrong from the first response — so
+    treating `''` as "not yet" costs nothing but the existing 0.5 s
+    retry step, up to the existing deadline.
+    """
+    return state_root is None or state_root == ''
+
+
 def spawn(name):
     """Launch one node and wait for its REST `/info` to report a live state."""
     WORK.mkdir(exist_ok=True)
@@ -366,7 +390,7 @@ def spawn(name):
             with urllib.request.urlopen(
                     f'http://127.0.0.1:{REST[name]}/info', timeout=2) as response:
                 info = json.load(response)
-            if info.get('stateRoot') is None:
+            if _state_root_pending(info.get('stateRoot')):
                 raise ValueError('node state is not initialized yet')
             if name.startswith('scala'):
                 version = info.get('appVersion')
@@ -495,6 +519,20 @@ def start(names=None):
         raise
 
 
+def _self_test():
+    """Pure: no I/O, so `--self-test` drives it directly."""
+    assert _state_root_pending(None) is True
+    assert _state_root_pending('') is True
+    # A real hash, even one that will fail the caller's equality check
+    # against GENESIS_STATE_ROOT, is never "pending" — only absent or
+    # default-empty is.
+    assert _state_root_pending('deadbeef') is False
+    assert _state_root_pending(GENESIS_STATE_ROOT) is False
+    print('self-test OK: _state_root_pending treats None and "" as not '
+          'ready yet, and any other string as a reportable root')
+
+
 if __name__ == '__main__':
     os.chdir(ROOT)
-    {'start': start, 'stop': stop}[sys.argv[1]]()
+    {'start': start, 'stop': stop,
+     'self-test': _self_test}[sys.argv[1]]()
