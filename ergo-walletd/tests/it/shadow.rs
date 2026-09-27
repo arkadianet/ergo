@@ -2543,16 +2543,27 @@ fn shadow_reorg_rewinds_and_reapplies_on_both_sides() {
     // old tip, which is exactly the production situation.
     shadow.embedded.rollback_to(ANCESTOR);
     assert_eq!(shadow.embedded.height(), ANCESTOR);
-    let error = shadow.daemon.syncer().sync_once().unwrap_err();
-    assert!(
-        error.retryable(),
-        "mid-reorg node tip must be recoverable: {error}"
+    // The node's tip is now below the daemon's cursor. The daemon cannot ask
+    // the node for an ancestor above its tip, so it probes its own retained
+    // headers at the node's tip height, learns that height is canonical, and
+    // rewinds to it in the same pass — the mid-reorg rewind path this scenario
+    // exists to compare.
+    let report = shadow
+        .daemon
+        .syncer()
+        .sync_once()
+        .expect("mid-reorg node tip must be recoverable");
+    assert!(report.completed, "{report:?}");
+    assert_eq!(
+        report.wallet_height, ANCESTOR,
+        "daemon must rewind to the common ancestor: {report:?}"
     );
 
     // Re-derive the fork. Same transactions, different solution nonce, so the
     // headers — and therefore the block ids the node will now serve — differ
     // from the ones the daemon already applied. Once the replacement fork
-    // catches up, retrying the same daemon must take the rewind path.
+    // catches up, the same daemon must apply the fork forward from the
+    // ancestor it already rewound to.
     while shadow.embedded.height() < BLOCKS {
         shadow.advance_embedded_one(FORK_NONCE);
     }
