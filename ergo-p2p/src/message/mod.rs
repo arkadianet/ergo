@@ -132,6 +132,15 @@ pub fn deserialize_inv(payload: &[u8]) -> Result<InvData, MessageError> {
 
 // ---- ModifiersData (code 33) ----
 
+const MODIFIERS_HEADER_RESERVE: usize = 5;
+const MODIFIER_ENTRY_RESERVE: usize = MODIFIER_ID_SIZE + 4;
+
+/// Whether a single stored modifier fits the code-33 encoder's size reserve.
+/// Uses lengths only, avoiding a payload allocation/copy for inventory checks.
+pub fn single_modifier_fits(byte_len: usize) -> bool {
+    byte_len <= MAX_MODIFIER_WITH_RESERVE - MODIFIERS_HEADER_RESERVE - MODIFIER_ENTRY_RESERVE
+}
+
 pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError> {
     if data.modifiers.is_empty() {
         return Err(MessageError::EmptyModifiers);
@@ -140,11 +149,11 @@ pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError
     w.put_u8(data.type_id);
 
     // Count modifiers that fit within the size reserve.
-    let header_len = 5; // type_id(1) + count(4 VLQ worst case)
+    let header_len = MODIFIERS_HEADER_RESERVE; // type_id + count VLQ reserve
     let mut msg_size = header_len;
     let mut msg_count = 0usize;
     for (_, modifier) in &data.modifiers {
-        let entry_size = MODIFIER_ID_SIZE + 4 + modifier.len(); // id + len + data
+        let entry_size = MODIFIER_ENTRY_RESERVE + modifier.len(); // id + len + data
         if msg_size + entry_size <= MAX_MODIFIER_WITH_RESERVE {
             msg_count += 1;
         }
@@ -191,7 +200,7 @@ pub fn deserialize_modifiers(payload: &[u8]) -> Result<ModifiersData, MessageErr
         id.copy_from_slice(id_bytes);
         let obj_len = r.get_u32_exact()? as usize;
         // Size accounting MUST mirror serialize_modifiers' entry_size
-        // (`MODIFIER_ID_SIZE + 4 + modifier.len()`) — the +4 is the
+        // (`MODIFIER_ENTRY_RESERVE + modifier.len()`) — the +4 is the
         // u32 length prefix written before each payload. Without it
         // the reserve check undercounts by 4 × count and a crafted
         // payload of `count` entries with `obj_len` close to the cap

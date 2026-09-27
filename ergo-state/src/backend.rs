@@ -314,6 +314,24 @@ impl StateBackendKind {
         }
     }
 
+    /// Read independently committed section tables without consuming apply's
+    /// persist-result channel. Availability is not a durability claim.
+    pub fn read_section_for_serving(
+        &self,
+        id: &[u8; 32],
+        sentinel: u32,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        match self {
+            Self::Utxo(s) => s.read_section_for_serving(id, sentinel),
+            Self::Digest(d) => {
+                if sentinel > 1 && d.get_section_height(id)?.is_none_or(|h| h < sentinel) {
+                    return Ok(None);
+                }
+                d.get_block_section(id)
+            }
+        }
+    }
+
     /// The deepest reorg this backend can roll back, or `None` if unbounded.
     ///
     /// The UTXO store prunes `UNDO_LOG` below `tip - ROLLBACK_WINDOW` on every

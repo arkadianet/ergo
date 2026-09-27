@@ -128,6 +128,7 @@ impl SyncExecutor {
                 guard.success(processed.height);
                 self.update_block_context_cache(&processed);
                 coordinator.on_block_applied(processed.header_id, processed.height);
+                self.record_applied_block(processed.header_id);
                 if processed.height % 100 == 0 {
                     info!(height = processed.height, "block applied");
                 }

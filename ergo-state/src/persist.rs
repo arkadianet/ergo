@@ -486,6 +486,28 @@ where
 }
 
 impl PersistPipeline {
+    /// Deterministic pending-result fixture, without a background worker.
+    #[cfg(feature = "test-utils")]
+    pub(crate) fn with_pending_failure_for_test(height: u32) -> Self {
+        let (tx, _rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        result_tx
+            .send(PersistResult::Err {
+                height,
+                error: "injected pending persistence failure".into(),
+            })
+            .unwrap();
+        let commit_watch = CommitWatch::new(None);
+        commit_watch.record_closed();
+        Self {
+            tx: Some(tx),
+            result_rx,
+            thread: None,
+            commit_watch,
+            sent_count: AtomicU64::new(0),
+        }
+    }
+
     /// Spawn the persist thread with a bounded job queue.
     ///
     /// `queue_depth`: max in-flight jobs before backpressure blocks the sender.

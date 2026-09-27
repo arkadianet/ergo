@@ -34,6 +34,7 @@
 //! small — the honest-peer cost of a false eviction is much higher than
 //! the cost of a slightly cheaper trickle.
 
+use crate::node::section_serving::{servable_section, serving_sentinel};
 use std::time::Instant;
 
 use ergo_p2p::handshake::PeerSpec;
@@ -263,58 +264,14 @@ pub(in crate::node) fn handle_message(
                         | ModifierTypeId::ADProofs
                         | ModifierTypeId::Extension,
                     ) => {
-                        // Mode 3 serve gating. Silently
-                        // skip sections whose parent header is
-                        // below our prune sentinel. The peer is
-                        // not penalized — they may legitimately
-                        // not know our pruned suffix-window
-                        // setting, and serving stale section bytes
-                        // for a pruned height would advertise
-                        // availability we can't sustainably honor.
-                        // Matches Scala's
-                        // `ErgoNodeViewSynchronizer.processModifierRequest`
-                        // silent-skip.
-                        //
-                        // Fail-CLOSED on missing or unreadable
-                        // SECTION_HEIGHT_INDEX rows (see the
-                        // get_section_height docstring at
-                        // ergo-state/src/store/mod.rs): a pruned
-                        // node only serves sections it can prove
-                        // are above its sentinel. Unindexed
-                        // sections (legacy / never seen) are
-                        // denied even if BLOCK_SECTIONS would
-                        // return bytes — otherwise an attacker
-                        // could resurrect pruned content via
-                        // orphan-id requests.
-                        // Sentinel unreadable → serve nothing
-                        // (fail-closed).
-                        let sentinel: u32 = match state.store.read_minimal_full_block_height() {
-                            Ok(s) => s,
-                            Err(_) => return Vec::new(),
+                        let Some(sentinel) = serving_sentinel(&state.store) else {
+                            return Vec::new();
                         };
-                        // Gate fires on `sentinel > 1`: covers
-                        // Mode 2 / NiPoPoW bootstrapped nodes, not just
-                        // pruned mode. Fresh archive-from-genesis reads
-                        // sentinel = 1 (default) → no gating, full serve.
-                        let gate_active = sentinel > 1;
                         inv.ids
                             .iter()
                             .filter_map(|id| {
-                                if gate_active {
-                                    match state.store.get_section_height(id) {
-                                        Ok(Some(h)) if h >= sentinel => {}
-                                        // sub-sentinel: deny
-                                        Ok(Some(_)) => return None,
-                                        // unindexed / unreadable: fail-closed
-                                        Ok(None) | Err(_) => return None,
-                                    }
-                                }
-                                state
-                                    .store
-                                    .get_block_section(id)
-                                    .ok()
-                                    .flatten()
-                                    .map(|b| (*id, b))
+                                servable_section(&state.store, id, sentinel)
+                                    .map(|bytes| (*id, bytes))
                             })
                             .collect()
                     }

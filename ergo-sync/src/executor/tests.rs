@@ -106,7 +106,11 @@ fn persist_failed_propagation_does_not_duplicate_worker_event() {
 /// synthesized meta written by `persist_apply` under the
 /// `test-helpers` feature: timestamp = `1_700_000_000 + height`,
 /// parent_id = previous `best_full_block_id`.
-fn apply_empty_block(store: &mut StateStore, height: u32, parent_id: [u8; 32]) -> [u8; 32] {
+pub(super) fn apply_empty_block(
+    store: &mut StateStore,
+    height: u32,
+    parent_id: [u8; 32],
+) -> [u8; 32] {
     let header = Header {
         version: 2,
         parent_id: ModifierId::from_bytes(parent_id),

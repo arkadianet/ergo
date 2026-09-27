@@ -593,7 +593,12 @@ fn handle_event(state: &mut NodeState, event: PeerEvent) {
 ///    otherwise it no-ops and the block waits for `try_apply_next_blocks`
 ///    to pick it up later.
 /// 5. Follow-up actions (chain-extension Inv broadcasts after a
-///    successful apply, etc.) are flushed via `flush_actions`.
+///    successful apply, etc.) are flushed via `flush_actions`, whose
+///    applied-block relay announces the block with the remote freshness
+///    and tip-window gates. Deliberate deviation: Scala `postBlocksR`
+///    announces the submission before apply, ungated
+///    (BlocksApiRoute.scala:127-146 at v6.0.6 23aabead8); this outside
+///    input is announced only once it applies.
 ///
 /// Returns `Ok(header_id_hex)` when the header is in the store after
 /// the apply pipeline runs — matches Scala's `sendMinedBlock`

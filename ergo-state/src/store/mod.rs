@@ -911,6 +911,14 @@ impl StateStore {
         ));
     }
 
+    /// Install a pending result to exercise callers' preservation of apply errors.
+    #[cfg(feature = "test-utils")]
+    pub fn inject_pending_persist_failure_for_test(&mut self, height: u32) {
+        assert!(self.persist_pipeline.is_none());
+        self.persist_pipeline =
+            Some(crate::persist::PersistPipeline::with_pending_failure_for_test(height));
+    }
+
     fn drain_persist_results(&self) -> Result<(), StateError> {
         let Some(ref pipeline) = self.persist_pipeline else {
             return Ok(());
@@ -2162,6 +2170,25 @@ impl StateStore {
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    /// Side-effect-free section eligibility read for network serving/relay.
+    /// Section tables commit independently of the AVL persist pipeline. Never
+    /// drain its results here: the next apply must still observe PersistFailed.
+    pub fn read_section_for_serving(
+        &self,
+        id: &[u8; 32],
+        sentinel: u32,
+    ) -> Result<Option<Vec<u8>>, StateError> {
+        if sentinel > 1
+            && self
+                .headers
+                .get_section_height(id)?
+                .is_none_or(|h| h < sentinel)
+        {
+            return Ok(None);
+        }
+        self.headers.get_block_section(id)
     }
 
     /// Retrieve a header by its ID. Checks the batch buffer first.

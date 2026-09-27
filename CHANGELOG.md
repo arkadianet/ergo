@@ -16,6 +16,18 @@ infrastructure.
 
 ## [Unreleased]
 
+- Applied fresh remote blocks near the header tip now announce their header
+  and servable sections to peers. Rust-mined blocks announce on mainnet and
+  testnet as well as devnet, including servable sections instead of only headers.
+  A mined block that becomes the best header is announced before it is
+  applied, once its header is validated, its sections are stored and their
+  bytes match the header roots (Scala announces every mined block before
+  storing it). If that apply fails, the node logs an error, the announcement
+  stands, and later blocks on the same parent are announced only after they
+  apply. POST /blocks announces after a successful apply, with the remote
+  freshness/tip gates; Scala announces submissions before apply, ungated.
+
+
 ## [0.9.0] - 2026-09-25
 
 Consensus, P2P, NiPoPoW and snapshot hardening release, continuing conformance

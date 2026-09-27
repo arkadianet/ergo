@@ -222,9 +222,8 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         let next_height = cs.best_full_block_height + 1;
         let next_header_height = cs.best_header_height;
         if next_height <= next_header_height {
-            // Try to assemble and apply blocks sequentially. No actions to
-            // flush — try_apply_next_blocks emits state mutations only
-            // (best_full_block_height, assembly), per executor doc.
+            // Try to assemble and apply blocks sequentially. Successful applies
+            // are relayed by flush_actions below, alongside missing-section requests.
             //
             // M5 wallet-hook plumbing: build a `WalletWiring` (hook +
             // rescan guard) and thread it through the executor so chain +

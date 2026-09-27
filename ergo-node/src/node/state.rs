@@ -354,6 +354,13 @@ pub(crate) struct NodeState {
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).
     pub(super) mining_enabled: bool,
+    /// Parent of a self-mined block that became the best header and then
+    /// failed to apply. While a mined block's parent equals it, the block is
+    /// announced only after it applies: the failed block's template stays
+    /// cached, so each further solution on it would otherwise advertise
+    /// another block this node rejects. Cleared when a block applies (the
+    /// full tip moves); see `block_relay`.
+    pub(super) mined_apply_failed_parent: Option<[u8; 32]>,
     /// True for a non-loopback API bind or `config.api_local_reverse_proxy`.
     /// The `api_key` gate never covers `POST /transactions*` /
     /// `/api/v1/mempool/{submit,check}` (read/submit routes are

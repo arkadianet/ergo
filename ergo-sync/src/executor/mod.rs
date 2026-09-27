@@ -238,6 +238,10 @@ pub struct SyncExecutor {
     /// once per [`header_pipeline::ORPHAN_ROOT_WALK_MIN_INTERVAL`]; the batch
     /// drain path and reciprocal SyncInfo still surface missing parents.
     orphan_root_walk_last: Option<Instant>,
+    /// Successful full-block applications since the runtime's last drain.
+    /// Rollback is not an apply. Runtime callers drain after each batch.
+    /// Non-draining embedders retain only the newest 4096 ids (oldest dropped).
+    applied_blocks: VecDeque<[u8; 32]>,
 }
 
 impl SyncExecutor {
@@ -264,7 +268,23 @@ impl SyncExecutor {
             deep_fork_wedge: None,
             deep_fork_wedge_last_warn: None,
             orphan_root_walk_last: None,
+            applied_blocks: VecDeque::new(),
         }
+    }
+
+    /// Drain successful block applications after each execution/apply batch.
+    /// The runtime distinguishes its locally submitted id before broadcasting.
+    /// Drain after each batch; only the newest 4096 ids survive without drains.
+    pub fn take_applied_blocks(&mut self) -> Vec<[u8; 32]> {
+        self.applied_blocks.drain(..).collect()
+    }
+
+    fn record_applied_block(&mut self, id: [u8; 32]) {
+        const MAX_APPLIED_BLOCKS: usize = 4096;
+        if self.applied_blocks.len() == MAX_APPLIED_BLOCKS {
+            self.applied_blocks.pop_front();
+        }
+        self.applied_blocks.push_back(id);
     }
 
     /// Shared apply-phase metrics (clone into the API read bridge).
@@ -558,3 +578,6 @@ impl SyncExecutor {
         )
     }
 }
+
+#[cfg(test)]
+mod relay_tests;

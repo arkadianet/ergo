@@ -242,7 +242,8 @@ pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAd
     }
 }
 
-pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
+pub(super) fn flush_actions(state: &mut NodeState, mut actions: Vec<Action>) {
+    actions.extend(super::block_relay::applied_block_announcements(state, None));
     let now = Instant::now();
     // Fold any first-deliverer observations the coordinator accumulated
     // during the just-completed execute batch into the bounded ring. The

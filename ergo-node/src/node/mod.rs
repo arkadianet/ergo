@@ -27,6 +27,7 @@ macro_rules! shutdown_log {
 
 mod action_loop;
 mod admission;
+mod block_relay;
 mod boot;
 mod event_feed;
 mod events;
@@ -41,6 +42,7 @@ mod mining_engine;
 mod peer_actions;
 mod prune_activation;
 mod reorg_history;
+mod section_serving;
 mod shadow_watch;
 mod snapshot_emit;
 mod snapshot_state;
