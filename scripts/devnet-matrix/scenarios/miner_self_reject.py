@@ -354,7 +354,7 @@ def run(ctx):
             reached = smoke.scala_height(ctx.run)
         except Unavailable:
             pass
-        if reached > last:
+        if last < reached < target:
             last = reached
             common.pump_payments(ctx, address, sent, miner_node,
                                  PAYMENTS_PER_BLOCK, PAYMENT_NANOERG,

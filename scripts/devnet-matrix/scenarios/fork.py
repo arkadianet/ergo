@@ -148,7 +148,7 @@ def run(ctx):
             peers_seen = max(peers_seen,
                              len(smoke.api('rust', '/peers/connected') or []))
             height = smoke.scala_height(ctx.run)
-            if height > reached:
+            if reached < height < target:
                 pump()
             reached = height
         except smoke.Unavailable:

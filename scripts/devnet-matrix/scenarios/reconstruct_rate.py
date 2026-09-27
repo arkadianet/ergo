@@ -212,7 +212,7 @@ def run(ctx):
             reached = smoke.scala_height(ctx.run)
         except Unavailable:
             pass
-        if reached > last:
+        if last < reached < target:
             last = reached
             common.pump_payments(ctx, address, sent, miner_node,
                                  PAYMENTS_PER_BLOCK, PAYMENT_NANOERG,
@@ -334,9 +334,11 @@ def run(ctx):
                  ids=[m['header'] for m in reconciliation['missing'][:5]])
     not_announced = len(reconciliation['not_announced'])
     ctx.evidence['rust_outcomes']['not_announced_downloaded_by_ordinary_sync'] = not_announced
+    known_before = len(reconciliation['known_before_announcement'])
+    ctx.evidence['rust_outcomes']['known_before_announcement'] = known_before
+    all_blocks = decided + not_announced + known_before
     ctx.evidence['rust_outcomes']['reconstructed_over_all_blocks'] = (
-        round(len(reconstructed) / (decided + not_announced), 4)
-        if decided + not_announced else None)
+        round(len(reconstructed) / all_blocks, 4) if all_blocks else None)
     if reconciliation['unmatched']:
         ctx.fail(f"{len(reconciliation['unmatched'])} reconstruct-or-download outcomes "
                  'name a header that is not a block of this window (matched by '

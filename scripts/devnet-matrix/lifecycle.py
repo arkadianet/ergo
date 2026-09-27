@@ -398,12 +398,14 @@ def _state_root_pending(state_root):
 FATAL_STARTUP_LOG_PATTERNS = ('Failed to initialize storage',)
 
 
-def _fatal_startup_error(log_path, patterns=FATAL_STARTUP_LOG_PATTERNS):
-    """The first known-fatal line in a node's own log so far, or `None`.
+def _fatal_startup_error(log_path, patterns=FATAL_STARTUP_LOG_PATTERNS, start_offset=0):
+    """The first known-fatal line after this launch's byte offset, or `None`.
     Pure over the file's current contents, so `--self-test` drives it
     directly against a real temp file."""
     try:
-        text = log_path.read_text(errors='replace')
+        with log_path.open('rb') as log:
+            log.seek(start_offset)
+            text = log.read().decode(errors='replace')
     except OSError:
         return None
     for pattern in patterns:
@@ -421,6 +423,7 @@ def spawn(name):
     env.setdefault('RUST_LOG', DEFAULT_RUST_LOG)
     log_path = WORK / (name + '.log')
     with log_path.open('a') as log:
+        start_offset = log.tell()
         process = subprocess.Popen(_command(name), cwd=ROOT, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True,
                                    env=env)
@@ -456,7 +459,7 @@ def spawn(name):
             (WORK / (name + '.appVersion')).write_text(str(info.get('appVersion')))
             return info
         except (OSError, ValueError):
-            fatal = _fatal_startup_error(log_path)
+            fatal = _fatal_startup_error(log_path, start_offset=start_offset)
             if fatal:
                 raise RuntimeError(
                     f'{name} logged a fatal startup error and will never become '

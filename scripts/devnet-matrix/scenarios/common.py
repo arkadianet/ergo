@@ -35,7 +35,7 @@ def wait_ordering_blocks(ctx, blocks, what, on_block=None):
     while time.monotonic() < ctx.run.deadline:
         try:
             now = smoke.scala_height(ctx.run)
-            if on_block is not None and now > reached:
+            if on_block is not None and reached < now < target:
                 on_block()
             reached = now
         except Unavailable:
@@ -2492,7 +2492,12 @@ def open_measurement_window(ctx, collector):
     Returns the per-node line offsets, which the scenario records as
     evidence: a window has to be quotable, not merely applied.
     """
+    failures = collector.failed_polls
     collector.poll()
+    if collector.failed_polls > failures:
+        ctx.fail('the event feed was unavailable at the opening boundary; '
+                 'the measurement window has no reliable starting watermark',
+                 {'collection': collector.summary()})
     ctx.collector = collector
     ctx.collector_watermark = collector.highest_seen
     ctx.scala_log_offsets = {
@@ -2519,7 +2524,12 @@ def close_measurement_window(ctx):
         return snapshot
     collector = getattr(ctx, 'collector', None)
     if collector is not None:
+        failures = collector.failed_polls
         collector.poll()
+        if collector.failed_polls > failures:
+            ctx.fail('the event feed was unavailable at the closing boundary; '
+                     'the measurement window may be missing final outcomes',
+                     {'collection': collector.summary(ctx.collector_watermark)})
     offsets = getattr(ctx, 'scala_log_offsets', None) or {}
     snapshot = {
         'rust_event_seq': collector.highest_seen if collector is not None

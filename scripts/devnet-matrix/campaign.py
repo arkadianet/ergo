@@ -2641,6 +2641,7 @@ def _self_test():
         def __init__(self, events):
             self.events = list(events)
             self.highest_seen = 41
+            self.failed_polls = 0
 
         def poll(self):
             return self.events

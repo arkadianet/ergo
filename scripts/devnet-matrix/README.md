@@ -181,6 +181,12 @@ unit-tested on synthetic series:
 python3 scripts/devnet-matrix/smoke.py --self-test
 ```
 
+`verdict_self_test.py --self-test` drives the scenarios' window and
+workload bookkeeping (payment windows, event-feed boundaries, the
+reconstruction-rate denominator, settle candidates and committed
+confirmations, the startup-log scan) through the real evaluators with
+mocked nodes; run it from `scripts/devnet-matrix/`.
+
 The run keeps the raw series in `smoke-evidence.json`
 (`agreement_series_sample`), so a verdict can be recomputed from the
 evidence rather than trusted because the harness printed it.

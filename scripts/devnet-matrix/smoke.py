@@ -1603,14 +1603,15 @@ def rust_lead_mined(scala_chain, rust_chain, mined):
     return 0
 
 
-def evaluate_tip_consistency(samples, mined=None):
+def evaluate_tip_consistency(samples, mined=None, confirmed_committed=None):
     """Assertion 2. Every Rust tip must be a block Scala had on its best
     chain for the same ordering block, the lag must stay inside the
     bounds, and there must be enough qualifying samples to say so.
 
     `mined` is the miner's own list of input blocks it mined: a tip that
     leads the miner's sampled chain is confirmed by it only through
-    `rust_lead_mined`."""
+    `rust_lead_mined`. A committed child may also confirm the exact
+    (ordering, tip), without supplying a live lag measurement."""
     scala_seen = {}          # ordering -> set of every id Scala ever listed
     scala_later = {}         # ordering -> [ (index, ids) ], for "at or later"
     for i, s in enumerate(samples):
@@ -1632,9 +1633,10 @@ def evaluate_tip_consistency(samples, mined=None):
         compared += 1
         if rust_tip == s.get('scala_tip'):
             exact += 1
-        confirmed = any(rust_tip in ids
-                        for j, ids in scala_later.get(ordering, ())
-                        if j >= i)
+        confirmed = ((ordering, rust_tip) in (confirmed_committed or ())
+                     or any(rust_tip in ids
+                            for j, ids in scala_later.get(ordering, ())
+                            if j >= i))
         # Rust's tip is read AFTER its chain in the same sweep, so it can
         # be a block the chain read did not list yet
         # (rm-B-reconstruct_rate-2562f-1, the last sample). Judged on the
@@ -1704,7 +1706,8 @@ def evaluate_tip_consistency(samples, mined=None):
 
 def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
                                settle_absent=None, settle_unreachable=None,
-                               settle_inconclusive=None):
+                               settle_inconclusive=None, confirmed_committed=None,
+                               settle_candidates=None):
     """Assertion 3, as amended by the controller after round 1.
 
     `settle_grace_s`, `settle_absent`, `settle_unreachable`,
@@ -1752,6 +1755,11 @@ def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
     lead block is the miner's own (`rust_lead_mined`): the miner is read
     first in a sweep and the follower later. Counted apart
     (`allowed_ahead_by_miner_log`, with the longest lead), never silently.
+
+    `confirmed_committed` contains exact (ordering, tip) keys verified
+    against the ordering child. It allows only an otherwise valid
+    ahead-by-one prefix, never a different history. `settle_candidates`,
+    when supplied, collects every distinct unresolved ahead-by-one key.
 
     Counts are TOTALS; the recorded lists are samples of them.
     """
@@ -1804,7 +1812,8 @@ def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
         if ahead_by_one:
             tip = rust_old[-1]
             confirmed_at = scala_last_listed.get((s['ordering'], tip))
-            if confirmed_at is not None and confirmed_at > i:
+            if ((confirmed_at is not None and confirmed_at > i)
+                    or (s['ordering'], tip) in (confirmed_committed or ())):
                 allowed_by_one += 1
                 if len(allowed_samples) < 10:
                     allowed_samples.append({
@@ -1847,6 +1856,10 @@ def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
             longest_lead = max(longest_lead, lead)
             continue
         violation_count += 1
+        # Settle every distinct unresolved tip; report samples are capped.
+        if ahead_by_one and settle_candidates is not None:
+            settle_candidates.setdefault((s['ordering'], tip), {
+                'ordering': s['ordering'], 'rust_chain': rust_chain})
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
                                'scala_chain': scala_chain,
@@ -3463,8 +3476,8 @@ def _self_test_settle_via_committed_extension():
         assert result['confirmed'] == 1, result
         assert result['absent'] == set(), result
         assert result['moved_on_inconclusive'] == set(), result
-        assert any(s.get('settle_read_via') == 'committed_extension'
-                  for s in r.series), r.series
+        assert result['confirmed_committed'] == {(ordering, tip)}, result
+        assert r.series == unsettled_series, r.series
     finally:
         globals()['api'] = real_api
 
@@ -3857,21 +3870,23 @@ def settle_unconfirmed_chain_tips(run, mined):
     (rm-C-steady-soak-1, rm-C-fork-soak-1 — the prior version recorded
     `absent` here unconditionally, on the strength of a single poll,
     which is what made a harness artifact read as a chain divergence).
-    A confirmation from committed data is recorded exactly like a live
-    one; a definite "not named" is `absent`, same as before; a walk that
+    A confirmation from committed data records only its (ordering, tip),
+    without inventing a sampled chain or lag. A definite "not named" is
+    `absent`; a walk that
     cannot reach `ordering`'s child at all is its own outcome,
     `moved_on_inconclusive` — not `absent`, because nothing was actually
     checked.
     """
-    trial = evaluate_chain_consistency(run.series, mined)
-    candidates = [v for v in trial['prefix_violations_sample'] if v.get('ahead_by_one')]
+    candidates = {}
+    evaluate_chain_consistency(run.series, mined, settle_candidates=candidates)
     result = {'checked': len(candidates), 'confirmed': 0, 'absent': set(),
-             'unreachable': set(), 'moved_on_inconclusive': set()}
+             'unreachable': set(), 'moved_on_inconclusive': set(),
+             'confirmed_committed': set()}
     if not candidates:
         return result
     grace = max(30.0, max(run.propagation_lags, default=0.0))
     result['grace_s'] = grace
-    for v in candidates:
+    for v in candidates.values():
         ordering = v['ordering']
         rust_old = list(reversed(v.get('rust_chain') or []))
         if not rust_old:
@@ -3902,12 +3917,7 @@ def settle_unconfirmed_chain_tips(run, mined):
                     'scala', chain_now['bestOrdering'], ordering)
                 verdict = _confirm_via_committed_tip(walk, ordering, tip)
                 if verdict == 'confirmed':
-                    run.series.append({
-                        'ordering': ordering, 'scala_chain': None,
-                        'rust_chain': v.get('rust_chain'), 'scala_tip': tip,
-                        'rust_tip': (v.get('rust_chain') or [None])[0],
-                        'at': time.time(), 'settle_read': True,
-                        'settle_read_via': 'committed_extension'})
+                    result['confirmed_committed'].add(key)
                     outcome = 'confirmed'
                 elif verdict == 'not_named':
                     outcome = 'absent'
@@ -3950,12 +3960,14 @@ def finalize_agreement(run, evidence):
             "shows input blocks on a chain; treat this run's miner-log-"
             'derived allowances as unmeasured, not proof of a violation')
     settle = settle_unconfirmed_chain_tips(run, mined)
-    tip = evaluate_tip_consistency(run.series, mined)
+    tip = evaluate_tip_consistency(
+        run.series, mined, confirmed_committed=settle['confirmed_committed'])
     lags = [round(v, 3) for v in run.propagation_lags]
     chain = evaluate_chain_consistency(
         run.series, mined, settle_grace_s=max(30.0, max(lags) if lags else 0.0),
         settle_absent=settle['absent'], settle_unreachable=settle['unreachable'],
-        settle_inconclusive=settle.get('moved_on_inconclusive'))
+        settle_inconclusive=settle.get('moved_on_inconclusive'),
+        confirmed_committed=settle['confirmed_committed'])
     evidence['chain_consistency_settle'] = {
         k: (sorted(v) if isinstance(v, set) else v) for k, v in settle.items()}
     evidence['2_best_input_block'] = {
