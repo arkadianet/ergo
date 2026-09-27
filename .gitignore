@@ -94,3 +94,9 @@ docs/research/
 # L4 replay inputs come from the hash-pinned data release (scripts/fetch-l4-inputs.sh)
 test-vectors/mainnet/*.json.gz
 test-vectors/mainnet/.l4-inputs.sha256
+
+# scripts/shadow-compare.sh redirects CARGO_TARGET_DIR and TMPDIR here so a
+# shadow run cannot evict (or be evicted by) the developer's normal build
+# cache, and so the redb databases the harness creates do not land on a shared
+# /tmp. Removed at the end of a successful run; see SHADOW_KEEP in the script.
+/.shadow-target/

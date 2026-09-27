@@ -50,6 +50,23 @@ tempfile = { workspace = true }
 ergo-api = { workspace = true }
 ergo-node = { workspace = true }
 ergo-state = { workspace = true, features = ["test-helpers"] }
+# TEST-TARGET ONLY, and only because of `tests/it/shadow.rs`. The shadow
+# harness drives the *embedded* side through the production
+# `StateStore::apply_block`, whose argument is a `CheckedBlock`. Building
+# one needs `CheckedBlock::from_parts` (already `test-helpers`-gated in
+# ergo-validation) and a `CheckedTransaction`, whose only constructors are
+# `validate_transaction` / `validate_transaction_parsed`. Without this
+# dev-dependency the embedded side would have to fall back to
+# `apply_block_unchecked_with_wallet_for_test`, which passes an EMPTY
+# `block_txs_owned` and therefore tracks no boxes at all — the shadow
+# comparison would be vacuous exactly where it matters. Dev-only: the
+# released binary's dependency graph is unchanged.
+ergo-validation = { workspace = true, features = ["test-helpers"] }
+# TEST-TARGET ONLY. `tests/it/shadow.rs` builds the real production
+# `ergo-node` `WalletStateHook`, whose shared wallet state is a
+# `parking_lot::RwLock<WalletState>`. Same workspace version ergo-node uses,
+# so the lock type is the same type.
+parking_lot    = { workspace = true }
 bincode = { workspace = true }
 redb = { workspace = true }
 
