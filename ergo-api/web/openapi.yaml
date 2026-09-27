@@ -2430,6 +2430,47 @@ components:
             chain era (parent changed) vs the previously published one — the
             getblocktemplate clean_jobs signal (discard prior jobs).
           example: true
+        metrics:
+          $ref: '#/components/schemas/CandidateMetrics'
+
+    CandidateMetrics:
+      type: object
+      description: >-
+        Node-specific observations of this exact template after transaction
+        selection and trimming. Older nodes may omit metrics entirely.
+      required: [transaction_count, selected_transaction_count, fees_nano_erg, transactions_size_bytes, max_block_size_bytes, validation_cost, max_block_cost]
+      properties:
+        transaction_count:
+          type: integer
+          minimum: 0
+          description: All template transactions, including emission, rent self-claim and fee collection when present.
+        selected_transaction_count:
+          type: integer
+          minimum: 0
+          description: Mempool transactions retained in the final template.
+        fees_nano_erg:
+          type: string
+          pattern: '^[0-9]+$'
+          description: Exact nanoERG paid by the fee-collection transaction; excludes emission and rent self-claims.
+          example: '1100000'
+        transactions_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Serialized BlockTransactions section including framing; excludes header, extension and AD proofs.
+        max_block_size_bytes:
+          type: integer
+          format: int64
+          description: Protocol size limit governing this template's transaction section.
+        validation_cost:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Sum of validated transaction costs in protocol block-cost units, not JIT units or milliseconds.
+        max_block_cost:
+          type: integer
+          format: int64
+          description: Protocol block-cost limit governing this template.
 
     Peer:
       type: object

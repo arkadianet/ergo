@@ -69,6 +69,16 @@ pub trait NodeReadState: Send + Sync {
     fn events(&self) -> crate::types::ApiNodeEvents {
         crate::types::ApiNodeEvents::default()
     }
+    /// Operator-only recent structured logs. None means unavailable, never an
+    /// empty successful history. Production reads a bounded capture buffer.
+    fn activity(
+        &self,
+        _session: Option<&str>,
+        _since: u64,
+        _limit: usize,
+    ) -> Option<crate::types::ApiActivityPage> {
+        None
+    }
     /// Postmortem reorg ring (`GET /api/v1/diagnostics/reorgs`). Default
     /// empty for test fixtures; production `SnapshotReadState` overrides.
     fn reorgs(&self) -> crate::types::ApiReorgHistory {

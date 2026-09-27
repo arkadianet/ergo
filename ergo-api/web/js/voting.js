@@ -28,7 +28,7 @@ let loadFailed = false;
 let votingAuthUnsub = null;
 let latestVotes = null;
 let epochLength = null;
-const displayName = (name) => ({ storageFeeFactor: 'Storage rent', minValuePerByte: 'Minimum value per byte', maxBlockSize: 'Maximum block size', maxBlockCost: 'Maximum block cost', tokenAccessCost: 'Token access cost', inputCost: 'Input cost', dataInputCost: 'Data input cost', outputCost: 'Output cost', blockVersion: 'Block version' })[name] || name;
+const displayName = (name) => ({ storageFeeFactor: 'Storage rent', minValuePerByte: 'Minimum value per byte', maxBlockSize: 'Maximum block size', maxBlockCost: 'Maximum block cost', tokenAccessCost: 'Token access cost', inputCost: 'Input cost', dataInputCost: 'Data input cost', outputCost: 'Output cost', blockVersion: 'Block version', subblocksPerBlock: 'Sub-blocks per block' })[name] || name;
 
 function refreshSummary() {
   if (!root || !latestVotes) return;
@@ -66,6 +66,20 @@ function refreshDraft() {
   }
   root.querySelector('[data-draft]').textContent = changes ? `${changes} unsaved change${changes === 1 ? '' : 's'}` : 'Draft matches saved targets';
   root.querySelector('[data-reset]').disabled = !changes;
+  root.querySelector('.vt-actions').classList.toggle('vt-actions--dirty', changes > 0);
+}
+
+function filterParameters() {
+  const query = root.querySelector('[data-parameter-search]').value.trim().toLowerCase();
+  let shown = 0;
+  const rows = root.querySelectorAll('tr[data-id]');
+  for (const row of rows) {
+    row.hidden = !row.dataset.search.includes(query);
+    if (!row.hidden) shown++;
+  }
+  root.querySelector('[data-filter-count]').textContent = `${shown} of ${rows.length} parameters`;
+  root.querySelector('[data-filter-empty]').hidden = shown > 0 || rows.length === 0;
+  root.querySelector('[data-clear-search]').hidden = !query;
 }
 
 export function onFast({ status }) {
@@ -158,6 +172,7 @@ function buildRows(params, configured) {
     const hasConfiguredVote = cfg.has(r.id);
     const tr = document.createElement('tr');
     tr.dataset.id = String(r.id);
+    tr.dataset.search = `${displayName(r.name)} ${r.name} ${r.description || ''}`.toLowerCase();
     tr.classList.toggle('vt-row--active', hasConfiguredVote);
     const nameTd = document.createElement('td');
     nameTd.dataset.label = 'Parameter';
@@ -249,6 +264,7 @@ function buildRows(params, configured) {
     tbody.append(tr);
   }
   builtKey = rowsKey(params, configured);
+  filterParameters();
 }
 
 function paintLiveCell(cellEl, active, value) {
@@ -376,6 +392,12 @@ export function mount(el) {
     </div></details>
     <div class="vt-section-head"><div><h2>Protocol parameters</h2><p data-param-count>Loading parameters…</p></div><span>Desired value = your long-term goal</span></div>
     <p class="vt-target-help">Set the value you want the protocol to reach. Your miner votes toward it; the network decides each change. One-step buttons choose a value relative to the current parameter. You can also enter a goal manually. Nothing changes until you save.</p>
+    <div class="filter-bar vt-filter">
+      <label class="filter-bar__search">Find a parameter<input class="input" type="search" data-parameter-search placeholder="Name or purpose, e.g. storage or block size" autocomplete="off"></label>
+      <span class="filter-count" data-filter-count role="status"></span>
+      <button class="btn btn--ghost" type="button" data-clear-search hidden>Clear search</button>
+    </div>
+    <p class="banner" data-filter-empty hidden>No parameters match this search. Your draft is preserved.</p>
     <table class="table vt-parameters" aria-label="Protocol voting parameters">
       <thead><tr>
         <th>Parameter</th><th class="table__num">Current</th><th class="table__num">Range</th>
@@ -406,6 +428,12 @@ export function mount(el) {
       <div data-history></div>
     </div>`;
   el.querySelector('[data-save]').addEventListener('click', save);
+  el.querySelector('[data-parameter-search]').addEventListener('input', filterParameters);
+  el.querySelector('[data-clear-search]').addEventListener('click', () => {
+    el.querySelector('[data-parameter-search]').value = '';
+    el.querySelector('[data-parameter-search]').focus();
+    filterParameters();
+  });
   el.querySelector('[data-reset]').addEventListener('click', () => {
     const saved = new Map((latestVotes?.configuredVotes || []).map(v => [v.parameterId, v.target]));
     for (const input of root.querySelectorAll('.vt-input')) input.value = saved.get(Number(input.dataset.id)) ?? '';

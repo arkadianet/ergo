@@ -270,6 +270,16 @@ export function focusSearch() {
   }
 }
 
+export async function searchQuery(query) {
+  const routeAt = seq;
+  const ticket = ++searchSeq;
+  if (input) input.value = query;
+  setStatus('Checking search availability…');
+  await refreshIndexerStatus();
+  if (routeAt !== seq || ticket !== searchSeq) return;
+  return runSearch(query);
+}
+
 // ---- views ----
 
 function loading() {
