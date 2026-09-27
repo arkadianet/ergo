@@ -1589,8 +1589,6 @@ async fn run_wallet_writer_inner(
 // `commands::WriterContext` plus the per-command params +
 // reply oneshot.
 mod commands;
-
-mod support;
 #[cfg(test)]
 mod command_fencing_tests {
     use super::*;

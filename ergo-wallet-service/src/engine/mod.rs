@@ -14,12 +14,36 @@
 //!   [`WalletRescanGuard`].
 //! - [`config`] — [`WalletEngineConfig`]: network, operator flags, EIP-27
 //!   rules and admission limits.
+//!
+//! Wallet logic modules:
+//!
+//! - [`build`] — the shared burn-aware unsigned-tx builder + native
+//!   `boxes/select` / `transactions/build`.
+//! - [`sign`] — native `transactions/sign` + `transactions/send`, and the
+//!   shared sign/self-verify/serialize building blocks.
+//! - [`send`] — `PaymentSend` / `TransactionGenerate*` / `TransactionSign` /
+//!   `BoxesCollect`.
+//! - [`sweep`] — the "retrieve matured mining rewards" sweep.
+//! - [`dto`] — box/tx status strings, wallet-row → wire-entry projections,
+//!   pagination.
+//! - [`multisig`] — input/data-input resolution + `generateCommitments` /
+//!   `extractHints`.
+//! - [`hints_codec`] — `TransactionHintsBag` ↔ `TxHintsBagDto` JSON converters.
+//! - [`keys`] — `deriveKey` / `deriveNextKey` / `getPrivateKey`.
 
+pub mod build;
 pub mod chain;
 pub mod config;
+pub mod dto;
+pub mod hints_codec;
+pub mod keys;
 pub mod mempool;
+pub mod multisig;
 pub mod rescan;
+pub mod send;
+pub mod sign;
 pub mod submit;
+pub mod sweep;
 
 pub use chain::{map_chain_error, ChainAccessError, SigningView, WalletChainAccess};
 pub use config::WalletEngineConfig;

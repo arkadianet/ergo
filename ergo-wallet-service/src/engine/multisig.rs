@@ -4,9 +4,9 @@
 use parking_lot::RwLock;
 
 use super::hints_codec::tx_hints_bag_to_dto;
-use super::sign_submit::decode_external_secret;
+use super::sign::decode_external_secret;
+use crate::engine::{map_chain_error, SigningView, WalletChainAccess};
 use ergo_wallet_protocol::WalletAdminError;
-use ergo_wallet_service::engine::{map_chain_error, SigningView, WalletChainAccess};
 
 /// Collect all `SigmaBoolean` propositions the registry can prove.
 ///
@@ -18,7 +18,7 @@ use ergo_wallet_service::engine::{map_chain_error, SigningView, WalletChainAcces
 /// which leaves to generate commitments for.
 fn collect_generate_for(
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<Vec<ergo_ser::sigma_value::SigmaBoolean>, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -68,7 +68,7 @@ fn collect_generate_for(
 /// - **JSON object**: `{"g":"<hex>","h":"<hex>","u":"<hex>","v":"<hex>"}` →
 ///   `ProveDHTuple`. Detect by trying `serde_json::from_str` first; fall back
 ///   to hex-DLog parse on failure.
-pub(crate) fn hex_pk_to_sigma_boolean(
+pub fn hex_pk_to_sigma_boolean(
     s: &str,
 ) -> Result<ergo_ser::sigma_value::SigmaBoolean, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -135,7 +135,7 @@ fn lookup_snapshot_utxo(
 
 /// Resolve input box IDs: use `override_ids` if supplied, else look up every
 /// input in the unsigned transaction from the UTXO set via `chain`.
-pub(crate) fn resolve_inputs_for_unsigned(
+pub fn resolve_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -169,7 +169,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
 }
 
 /// Resolve data-input box IDs (same logic, from `unsigned_tx.data_inputs`).
-pub(crate) fn resolve_data_inputs_for_unsigned(
+pub fn resolve_data_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -202,7 +202,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
 }
 
 /// Resolve input box IDs for a signed transaction.
-pub(crate) fn resolve_inputs_for_signed(
+pub fn resolve_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -233,7 +233,7 @@ pub(crate) fn resolve_inputs_for_signed(
 }
 
 /// Resolve data-input boxes for a signed transaction.
-pub(crate) fn resolve_data_inputs_for_signed(
+pub fn resolve_data_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -270,10 +270,10 @@ pub(crate) fn resolve_data_inputs_for_signed(
 /// Decodes the unsigned tx, collects all propositions the wallet knows
 /// secrets for (HD-derived + external), builds a signing context, and
 /// calls `generate_commitments_for_tx`.
-pub(crate) async fn generate_commitments_impl(
+pub fn generate_commitments_impl(
     request: &ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
 ) -> Result<ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
     use ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse;
@@ -334,7 +334,7 @@ pub(crate) async fn generate_commitments_impl(
 ///
 /// Decodes the signed tx, parses the `real` / `simulated` pubkey lists,
 /// and calls `bag_for_transaction`.
-pub(crate) async fn extract_hints_impl(
+pub fn extract_hints_impl(
     request: &ergo_wallet_protocol::scala::multi_sig::HintExtractionRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     chain: &dyn WalletChainAccess,

@@ -32,23 +32,26 @@ use ergo_wallet_service::engine::{
 use ergo_wallet_service::runtime::WalletService;
 use ergo_wallet_service::state::WalletState;
 
-// Re-export the `support::*` business-logic helpers the per-command
-// handlers call, so each handler file gets a single one-level
-// `super::<name>` path instead of `super::support::<submodule>::<name>`.
-pub(super) use super::support::dto::{paginate_boxes, paginate_transactions, wallet_tx_to_entry};
-pub(super) use super::support::generate_sign::{
+// Re-export the engine's business-logic helpers the per-command handlers
+// call, so each handler file gets a single one-level `super::<name>` path.
+pub(super) use ergo_wallet_service::engine::build::{build_transaction_impl, select_boxes_impl};
+pub(super) use ergo_wallet_service::engine::dto::{
+    paginate_boxes, paginate_transactions, tx_to_summary, wallet_tx_to_entry,
+};
+pub(super) use ergo_wallet_service::engine::keys::{
+    derive_key_impl, derive_next_key_impl, get_private_key_impl, render_derivation_path,
+};
+pub(super) use ergo_wallet_service::engine::multisig::{
+    extract_hints_impl, generate_commitments_impl,
+};
+pub(super) use ergo_wallet_service::engine::send::{
     boxes_collect_impl, payment_send_impl, transaction_generate_impl,
     transaction_generate_unsigned_impl, transaction_sign_impl,
 };
-pub(super) use super::support::key_derivation::{
-    derive_key_impl, derive_next_key_impl, get_private_key_impl, render_derivation_path,
-};
-pub(super) use super::support::multisig_helpers::{extract_hints_impl, generate_commitments_impl};
-pub(super) use super::support::sign_submit::{
+pub(super) use ergo_wallet_service::engine::sign::{
     send_transaction_native_impl, sign_transaction_native_impl,
 };
-pub(super) use super::support::sweep::retrieve_rewards_impl;
-pub(super) use super::support::tx_build::{build_transaction_impl, select_boxes_impl};
+pub(super) use ergo_wallet_service::engine::sweep::retrieve_rewards_impl;
 
 pub(super) mod admin;
 pub(super) mod multisig;

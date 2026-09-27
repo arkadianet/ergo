@@ -3,17 +3,17 @@
 
 use parking_lot::RwLock;
 
-use super::generate_sign::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
-use super::tx_build::build_transaction_impl;
-use ergo_wallet_protocol::WalletAdminError;
-use ergo_wallet_service::engine::{
+use super::build::build_transaction_impl;
+use super::send::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
+use crate::engine::{
     map_chain_error, map_submit_error, SigningView, TxSubmitter, WalletChainAccess,
 };
+use ergo_wallet_protocol::WalletAdminError;
 
 /// Convert a native [`ExternalSecret`](ergo_wallet_protocol::native::dto::ExternalSecret)
 /// to the compat `ExternalSecretDto` so the single existing prover decoder
 /// ([`decode_external_secret`]) is reused. (`secret` maps to the compat `dlog`/`x`.)
-pub(crate) fn native_external_to_compat(
+pub fn native_external_to_compat(
     s: &ergo_wallet_protocol::native::dto::ExternalSecret,
 ) -> ergo_wallet_protocol::scala::sending::ExternalSecretDto {
     use ergo_wallet_protocol::native::dto::ExternalSecret as N;
@@ -33,7 +33,7 @@ pub(crate) fn native_external_to_compat(
 }
 
 /// `(transaction, tx_id_hex)` from serialized signed-tx bytes.
-pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
+pub fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
     let mut r = ergo_primitives::reader::VlqReader::new(signed_bytes);
     let tx = ergo_ser::transaction::read_transaction(&mut r)
         .map_err(|e| WalletAdminError::Internal(format!("signed tx decode: {e:?}")))?;
@@ -47,11 +47,11 @@ pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdmi
 /// prover's missing-secret surfaces as `missing_secret(422)`. The EIP-27
 /// self-verify gate runs inside [`sign_unsigned_tx`], so an unsigned tx that
 /// violates the burn rule is caught here rather than network-rejected.
-pub(crate) async fn sign_transaction_native_impl(
+pub fn sign_transaction_native_impl(
     req: &ergo_wallet_protocol::native::dto::SignTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
 ) -> Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError> {
     let externals: Vec<ergo_wallet_protocol::scala::sending::ExternalSecretDto> = req
@@ -67,8 +67,7 @@ pub(crate) async fn sign_transaction_native_impl(
         state,
         store,
         chain,
-    )
-    .await?;
+    )?;
     let tx_id = signed_tx_id_hex(&signed_bytes)?;
     Ok(ergo_wallet_protocol::native::dto::SignTxResponse {
         signed_transaction: ergo_wallet_protocol::native::dto::TxRepr::from_bytes(&signed_bytes),
@@ -82,7 +81,7 @@ pub(crate) async fn sign_transaction_native_impl(
 /// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); an
 /// input whose script the prover's gate rejects becomes `unsupported_script`. The
 /// unsupported-script message is the one the prover emits (`prover.rs`).
-pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+pub fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     use ergo_wallet::error::WalletError as W;
     match e {
         W::MissingSecret(_) => WalletAdminError::MissingSecret,
@@ -99,11 +98,11 @@ pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminE
 /// `signed` submits caller-supplied bytes. A `duplicate` submit reason maps to an
 /// idempotent `accepted` (never a 5xx on a re-seen tx).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn send_transaction_native_impl(
+pub async fn send_transaction_native_impl(
     req: &ergo_wallet_protocol::native::dto::SendTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
@@ -113,7 +112,7 @@ pub(crate) async fn send_transaction_native_impl(
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, store, chain, network).await?;
+            let built = build_transaction_impl(intent, state, store, chain, network)?;
             let snapshot = chain.signing_view().map_err(map_chain_error)?;
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
@@ -161,9 +160,7 @@ pub(crate) async fn send_transaction_native_impl(
             return Ok(SendTxResponse {
                 tx_id: tx_id_hex,
                 accepted: true,
-                transaction: Some(crate::node::wallet_bridge::commands::admin::tx_to_summary(
-                    wt,
-                )),
+                transaction: Some(super::dto::tx_to_summary(wt)),
             });
         }
     }
@@ -191,7 +188,7 @@ pub(crate) async fn send_transaction_native_impl(
     }
 }
 
-pub(crate) fn serialize_unsigned_tx(
+pub fn serialize_unsigned_tx(
     utx: &ergo_ser::transaction::UnsignedTransaction,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
@@ -200,7 +197,7 @@ pub(crate) fn serialize_unsigned_tx(
     Ok(w.result())
 }
 
-pub(crate) fn serialize_signed_tx(
+pub fn serialize_signed_tx(
     tx: &ergo_ser::transaction::Transaction,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
@@ -210,7 +207,7 @@ pub(crate) fn serialize_signed_tx(
 }
 
 /// Decode an `ExternalSecretDto` hex payload into `ProverExternalSecret`.
-pub(crate) fn decode_external_secret(
+pub fn decode_external_secret(
     dto: &ergo_wallet_protocol::scala::sending::ExternalSecretDto,
 ) -> Result<ergo_wallet::proving::external::ProverExternalSecret, WalletAdminError> {
     use ergo_wallet::proving::external::ProverExternalSecret;
@@ -281,9 +278,9 @@ pub(crate) fn decode_external_secret(
 /// starts empty and relies on `externals` to cover all required propositions.
 /// A locked wallet with no externals will produce a registry that fails at
 /// proof time with `MissingSecret` — that is the correct failure mode.
-pub(crate) fn build_prover(
+pub fn build_prover(
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     params: &ergo_wallet::tx_context::BlockchainParameters,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<ergo_wallet::proving::prover::Prover, WalletAdminError> {
@@ -327,10 +324,10 @@ pub(crate) fn build_prover(
 /// `hints` is threaded through to the prover so multi-sig callers can
 /// supply a populated `TransactionHintsBag`; single-sig callers pass
 /// `&TransactionHintsBag::empty()`.
-pub(crate) fn sign_unsigned_tx(
+pub fn sign_unsigned_tx(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     snapshot: &dyn SigningView,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
     hints: &ergo_wallet::proving::hints::TransactionHintsBag,
@@ -417,7 +414,7 @@ pub(crate) fn sign_unsigned_tx(
 /// The per-call `verify_spending_proof_with_context_and_cost` still fires
 /// its own cost check, so a single input that alone exceeds the limit is
 /// still caught immediately.
-pub(crate) fn self_verify_signed_tx(
+pub fn self_verify_signed_tx(
     tx: &ergo_ser::transaction::Transaction,
     boxes_to_spend: &[ergo_ser::ergo_box::ErgoBox],
     data_boxes: &[ergo_ser::ergo_box::ErgoBox],

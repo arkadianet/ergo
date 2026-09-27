@@ -1118,16 +1118,20 @@ dependencies = [
  "bincode",
  "ergo-primitives",
  "ergo-ser",
+ "ergo-sigma",
  "ergo-validation",
  "ergo-wallet",
  "ergo-wallet-protocol",
  "hex",
+ "k256",
+ "parking_lot",
  "redb",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

@@ -15,7 +15,7 @@ use ergo_wallet_protocol::scala::types::{
 use ergo_wallet_protocol::WalletAdminError;
 use ergo_wallet_service::engine::{BeginRescanError, RescanCoordinator};
 
-use super::WriterContext;
+use super::{tx_to_summary, WriterContext};
 
 /// Failed-attempt budget for a sensitive wallet operation, enforced in the
 /// writer task so every surface (compat `/wallet/unlock`, native
@@ -1602,20 +1602,6 @@ fn box_to_summary(
         status,
         provenance,
     })
-}
-
-/// Map a stored [`ergo_wallet_service::wallet::types::WalletTransaction`] to the lean summary.
-pub(crate) fn tx_to_summary(
-    wt: ergo_wallet_service::wallet::types::WalletTransaction,
-) -> ergo_wallet_protocol::native::dto::WalletTransactionSummary {
-    use ergo_wallet_protocol::native::dto::WalletTransactionSummary;
-    WalletTransactionSummary {
-        tx_id: hex::encode(wt.tx_id),
-        block_id: hex::encode(wt.block_id),
-        block_height: wt.block_height,
-        wallet_input_box_ids: wt.wallet_inputs.iter().map(hex::encode).collect(),
-        wallet_output_box_ids: wt.wallet_outputs.iter().map(hex::encode).collect(),
-    }
 }
 
 #[cfg(test)]

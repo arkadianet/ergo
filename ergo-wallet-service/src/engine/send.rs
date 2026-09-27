@@ -7,11 +7,11 @@ use ergo_wallet_protocol::scala::sending::{
     BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto,
 };
 
+use super::build::{build_unsigned_tx, MIN_BOX_VALUE};
 use super::hints_codec::tx_hints_bag_from_dto;
-use super::sign_submit::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
-use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE};
+use super::sign::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
+use crate::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess};
 use ergo_wallet_protocol::WalletAdminError;
-use ergo_wallet_service::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess};
 
 /// `PaymentSend` + `TransactionSend` shared path: build, sign, self-verify, submit.
 ///
@@ -21,14 +21,14 @@ use ergo_wallet_service::engine::{map_chain_error, SigningView, TxSubmitter, Wal
 /// confusing Internal/500 from `MissingSecret` deep in the signing path.
 /// `transaction_sign` is the only route that accepts the locked + externals path.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn payment_send_impl(
+pub async fn payment_send_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
@@ -49,8 +49,7 @@ pub(crate) async fn payment_send_impl(
         store,
         chain,
         network,
-    )
-    .await?
+    )?
     .bytes;
 
     let unsigned_tx = {
@@ -102,14 +101,14 @@ pub(crate) async fn payment_send_impl(
 /// Requires an unlocked wallet for the same reason as `payment_send_impl`.
 /// Returns `WalletAdminError::Locked` (400 wallet_locked) when locked.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn transaction_generate_impl(
+pub fn transaction_generate_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -127,8 +126,7 @@ pub(crate) async fn transaction_generate_impl(
         store,
         chain,
         network,
-    )
-    .await?
+    )?
     .bytes;
 
     let unsigned_tx = {
@@ -155,14 +153,14 @@ pub(crate) async fn transaction_generate_impl(
 
 /// `TransactionGenerateUnsigned` path: build only; no sign, no submit.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn transaction_generate_unsigned_impl(
+pub fn transaction_generate_unsigned_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -181,19 +179,18 @@ pub(crate) async fn transaction_generate_unsigned_impl(
         chain,
         network,
     )
-    .await
     .map(|built| built.bytes)
 }
 
 /// `TransactionSign` path: decode an unsigned tx hex, sign it, self-verify.
 /// Works with external secrets even when the wallet is locked.
-pub(crate) async fn transaction_sign_impl(
+pub fn transaction_sign_impl(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
     hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let snapshot = chain.signing_view().map_err(map_chain_error)?;
@@ -208,13 +205,13 @@ pub(crate) async fn transaction_sign_impl(
     )
 }
 
-pub(crate) fn transaction_sign_impl_with_snapshot(
+pub fn transaction_sign_impl_with_snapshot(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
     hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    _state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    _state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     snapshot: &dyn SigningView,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let unsigned_tx_bytes = hex::decode(unsigned_tx_hex)
@@ -252,11 +249,11 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
 }
 
 /// `BoxesCollect` path: run box selection; no signing, no submit.
-pub(crate) fn boxes_collect_impl(
+pub fn boxes_collect_impl(
     request: &BoxesCollectRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    _state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    _state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
     chain: &dyn WalletChainAccess,
 ) -> Result<BoxesCollectResponse, WalletAdminError> {
     let _ = chain; // used for UTXO lookup in future phases
@@ -267,9 +264,9 @@ pub(crate) fn boxes_collect_impl(
         .unspent_boxes()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-    let summaries: Vec<ergo_wallet_service::box_selector::BoxSummary> = unspent
+    let summaries: Vec<crate::box_selector::BoxSummary> = unspent
         .iter()
-        .map(|wb| ergo_wallet_service::box_selector::BoxSummary {
+        .map(|wb| crate::box_selector::BoxSummary {
             box_id: wb.box_id,
             value: wb.value,
             tokens: wb.assets.iter().copied().collect(),
@@ -290,16 +287,15 @@ pub(crate) fn boxes_collect_impl(
         })
         .collect::<Result<_, WalletAdminError>>()?;
 
-    let target = ergo_wallet_service::box_selector::SelectionTarget {
+    let target = crate::box_selector::SelectionTarget {
         erg_amount: request.target_balance,
         tokens: target_tokens,
         min_change_value: MIN_BOX_VALUE,
     };
 
-    let selector = ergo_wallet_service::box_selector::default::DefaultBoxSelector;
-    let selection =
-        ergo_wallet_service::box_selector::BoxSelector::select(&selector, &summaries, &target)
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let selector = crate::box_selector::default::DefaultBoxSelector;
+    let selection = crate::box_selector::BoxSelector::select(&selector, &summaries, &target)
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     let boxes = selection.selected_ids.iter().map(hex::encode).collect();
     let change_boxes = if selection.change_erg > 0 || !selection.change_tokens.is_empty() {

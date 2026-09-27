@@ -58,8 +58,7 @@ pub(crate) async fn native_build_transaction(
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
-    )
-    .await;
+    );
     let _ = reply.send(result);
 }
 
@@ -79,8 +78,7 @@ pub(crate) async fn native_sign_transaction(
         ctx.state,
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
-    )
-    .await;
+    );
     let _ = reply.send(result);
 }
 
@@ -210,8 +208,7 @@ pub(crate) async fn transaction_generate(
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
-    )
-    .await;
+    );
     let _ = reply.send(result.map(|signed_tx_bytes| {
         use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionGenerateResponse};
         TransactionGenerateResponse {
@@ -237,8 +234,7 @@ pub(crate) async fn transaction_generate_unsigned(
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
-    )
-    .await;
+    );
     let _ = reply.send(result.map(|unsigned_tx_bytes| {
         use ergo_wallet_protocol::scala::sending::{
             TransactionGenerateUnsignedResponse, UnsignedTxDto,
@@ -264,8 +260,7 @@ pub(crate) async fn transaction_sign(
         ctx.state,
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
-    )
-    .await;
+    );
     let _ = reply.send(result.map(|signed_tx_bytes| {
         use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionSignResponse};
         TransactionSignResponse {

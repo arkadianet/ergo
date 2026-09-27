@@ -5,27 +5,23 @@ use ergo_wallet_protocol::scala::types::{
     Page, WalletBoxEntry, WalletBoxesPage, WalletTransactionEntry, WalletTransactionsPage,
 };
 
-pub(crate) fn box_status_str(status: &ergo_wallet_service::wallet::types::BoxStatus) -> String {
+pub fn box_status_str(status: &crate::wallet::types::BoxStatus) -> String {
     match status {
-        ergo_wallet_service::wallet::types::BoxStatus::Confirmed => "Confirmed".to_string(),
-        ergo_wallet_service::wallet::types::BoxStatus::Immature { .. } => "Immature".to_string(),
-        ergo_wallet_service::wallet::types::BoxStatus::Spent { .. } => "Spent".to_string(),
+        crate::wallet::types::BoxStatus::Confirmed => "Confirmed".to_string(),
+        crate::wallet::types::BoxStatus::Immature { .. } => "Immature".to_string(),
+        crate::wallet::types::BoxStatus::Spent { .. } => "Spent".to_string(),
     }
 }
 
-pub(crate) fn box_provenance_str(
-    provenance: &ergo_wallet_service::wallet::types::BoxProvenance,
-) -> String {
+pub fn box_provenance_str(provenance: &crate::wallet::types::BoxProvenance) -> String {
     match provenance {
-        ergo_wallet_service::wallet::types::BoxProvenance::Owned => "Owned".to_string(),
-        ergo_wallet_service::wallet::types::BoxProvenance::MinerReward => "MinerReward".to_string(),
-        ergo_wallet_service::wallet::types::BoxProvenance::Custom { .. } => "Custom".to_string(),
+        crate::wallet::types::BoxProvenance::Owned => "Owned".to_string(),
+        crate::wallet::types::BoxProvenance::MinerReward => "MinerReward".to_string(),
+        crate::wallet::types::BoxProvenance::Custom { .. } => "Custom".to_string(),
     }
 }
 
-pub(crate) fn wallet_box_to_entry(
-    wb: ergo_wallet_service::wallet::types::WalletBox,
-) -> WalletBoxEntry {
+pub fn wallet_box_to_entry(wb: crate::wallet::types::WalletBox) -> WalletBoxEntry {
     WalletBoxEntry {
         box_id: hex::encode(wb.box_id),
         value: wb.value,
@@ -35,9 +31,7 @@ pub(crate) fn wallet_box_to_entry(
     }
 }
 
-pub(crate) fn wallet_tx_to_entry(
-    wt: ergo_wallet_service::wallet::types::WalletTransaction,
-) -> WalletTransactionEntry {
+pub fn wallet_tx_to_entry(wt: crate::wallet::types::WalletTransaction) -> WalletTransactionEntry {
     WalletTransactionEntry {
         tx_id: hex::encode(wt.tx_id),
         block_height: wt.block_height,
@@ -50,10 +44,7 @@ pub(crate) fn wallet_tx_to_entry(
     }
 }
 
-pub(crate) fn paginate_boxes(
-    all: Vec<ergo_wallet_service::wallet::types::WalletBox>,
-    page: Page,
-) -> WalletBoxesPage {
+pub fn paginate_boxes(all: Vec<crate::wallet::types::WalletBox>, page: Page) -> WalletBoxesPage {
     let total = all.len() as u32;
     let offset = page.offset as usize;
     let limit = page.limit as usize;
@@ -66,8 +57,8 @@ pub(crate) fn paginate_boxes(
     WalletBoxesPage { total, items }
 }
 
-pub(crate) fn paginate_transactions(
-    all: Vec<ergo_wallet_service::wallet::types::WalletTransaction>,
+pub fn paginate_transactions(
+    all: Vec<crate::wallet::types::WalletTransaction>,
     page: Page,
 ) -> WalletTransactionsPage {
     let total = all.len() as u32;
@@ -80,4 +71,18 @@ pub(crate) fn paginate_transactions(
         .map(wallet_tx_to_entry)
         .collect();
     WalletTransactionsPage { total, items }
+}
+
+/// Map a stored [`crate::wallet::types::WalletTransaction`] to the lean summary.
+pub fn tx_to_summary(
+    wt: crate::wallet::types::WalletTransaction,
+) -> ergo_wallet_protocol::native::dto::WalletTransactionSummary {
+    use ergo_wallet_protocol::native::dto::WalletTransactionSummary;
+    WalletTransactionSummary {
+        tx_id: hex::encode(wt.tx_id),
+        block_id: hex::encode(wt.block_id),
+        block_height: wt.block_height,
+        wallet_input_box_ids: wt.wallet_inputs.iter().map(hex::encode).collect(),
+        wallet_output_box_ids: wt.wallet_outputs.iter().map(hex::encode).collect(),
+    }
 }

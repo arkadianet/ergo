@@ -26,8 +26,7 @@ pub(crate) async fn generate_commitments(
         ctx.storage,
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
-    )
-    .await;
+    );
     let _ = reply.send(result);
 }
 
@@ -36,7 +35,7 @@ pub(crate) async fn extract_hints(
     request: HintExtractionRequest,
     reply: oneshot::Sender<Result<HintExtractionResponse, WalletAdminError>>,
 ) {
-    let result = super::extract_hints_impl(&request, ctx.storage, ctx.chain.as_ref()).await;
+    let result = super::extract_hints_impl(&request, ctx.storage, ctx.chain.as_ref());
     let _ = reply.send(result);
 }
 
@@ -52,8 +51,7 @@ pub(crate) async fn derive_key(
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
-    )
-    .await;
+    );
     let _ = reply.send(result);
 }
 
@@ -67,8 +65,7 @@ pub(crate) async fn derive_next_key(
         ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
-    )
-    .await;
+    );
     let _ = reply.send(result);
 }
 
@@ -77,7 +74,6 @@ pub(crate) async fn get_private_key(
     request: GetPrivateKeyRequest,
     reply: oneshot::Sender<Result<GetPrivateKeyResponse, WalletAdminError>>,
 ) {
-    let result =
-        super::get_private_key_impl(&request, ctx.storage, ctx.store.as_ref(), ctx.cfg).await;
+    let result = super::get_private_key_impl(&request, ctx.storage, ctx.store.as_ref(), ctx.cfg);
     let _ = reply.send(result);
 }
