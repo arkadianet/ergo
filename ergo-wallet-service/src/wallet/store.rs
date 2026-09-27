@@ -54,6 +54,11 @@ pub type TrackedPubkeyPath = (u64, [u8; 33], Vec<u32>);
 pub trait WalletRead {
     fn scan_cursor(&self) -> Result<Option<WalletScanCursor>, WalletStoreError>;
     fn chain_index_header(&self, height: u32) -> Result<Option<[u8; 32]>, WalletStoreError>;
+    /// Highest header actually applied by this wallet at or below `height`.
+    fn applied_header_at_or_below(
+        &self,
+        height: u32,
+    ) -> Result<Option<(u32, [u8; 32])>, WalletStoreError>;
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError>;
     fn rescan_state(&self) -> Result<RescanState, WalletStoreError>;
     fn all_boxes(&self) -> Result<Vec<WalletBox>, WalletStoreError>;
@@ -320,6 +325,29 @@ impl WalletRead for RedbWalletRead {
             }
         }
         Ok(None)
+    }
+
+    fn applied_header_at_or_below(
+        &self,
+        height: u32,
+    ) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+        let table = match self
+            .txn
+            .open_table(crate::wallet::tables::WALLET_APPLIED_HEADERS)
+        {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut rows = table.range(..=u64::from(height))?;
+        let Some(row) = rows.next_back() else {
+            return Ok(None);
+        };
+        let (key, value) = row?;
+        Ok(Some((
+            key.value() as u32,
+            applied_header_id(value.value(), key.value())?,
+        )))
     }
 
     fn scan_invalidated(&self) -> Result<bool, WalletStoreError> {
@@ -1573,6 +1601,15 @@ mod tests {
             }
         );
         assert_eq!(read.chain_index_header(1).unwrap(), Some(header_id));
+        assert_eq!(read.applied_header_at_or_below(0).unwrap(), None);
+        assert_eq!(
+            read.applied_header_at_or_below(1).unwrap(),
+            Some((1, header_id))
+        );
+        assert_eq!(
+            read.applied_header_at_or_below(10).unwrap(),
+            Some((1, header_id))
+        );
         let txn = reopened.db.begin_read().unwrap();
         assert!(txn
             .open_table(crate::wallet::tables::WALLET_SCHEMA_VERSION_TABLE)

@@ -390,17 +390,17 @@ fn daemon_client(url: &str, key: &[u8]) -> HttpChainClient {
 }
 
 /// Records the `(cursor height, limit)` of every `blocks-since` call so the
-/// sync path's paging can be asserted. Everything else delegates, so the HTTP
-/// work is still done by the real `HttpChainClient`.
+/// sync path's paging can be asserted. Everything else delegates to the real
+/// HTTP client or the real node's in-process client.
 struct CountingChain {
-    inner: HttpChainClient,
+    inner: Box<dyn ChainClient>,
     requests: Mutex<VecDeque<(u32, u32)>>,
 }
 
 impl CountingChain {
-    fn new(inner: HttpChainClient) -> Arc<Self> {
+    fn new(inner: impl ChainClient + 'static) -> Arc<Self> {
         Arc::new(Self {
-            inner,
+            inner: Box::new(inner),
             requests: Mutex::new(VecDeque::new()),
         })
     }
@@ -923,9 +923,29 @@ fn real_node_reorg_returns_the_common_ancestor_and_the_daemon_follows_it() {
     let (mut store, ids) = seeded_node(node_dir.path());
     let node = serve_node_api(&store);
 
+    let chain = CountingChain::new(daemon_client(&node.url(), NODE_API_KEY));
+    assert_real_node_reorg(&mut store, &ids, chain);
+}
+
+/// Exercise the identical real-node rollback without requiring socket access.
+#[test]
+fn real_node_reorg_in_process_probes_rewinds_and_resumes() {
+    let node_dir = tempfile::tempdir().unwrap();
+    let (mut store, ids) = seeded_node(node_dir.path());
+    let chain = CountingChain::new(
+        ergo_node::node::wallet_bridge::InProcessChainClient::from_chain_reader(
+            store.reader_handle(),
+            None::<Arc<dyn ergo_api::NodeSubmit>>,
+            false,
+            None,
+        ),
+    );
+    assert_real_node_reorg(&mut store, &ids, chain);
+}
+
+fn assert_real_node_reorg(store: &mut StateStore, ids: &[[u8; 32]], chain: Arc<CountingChain>) {
     let wallet_dir = tempfile::tempdir().unwrap();
     let store_wallet = standalone_wallet(wallet_dir.path());
-    let chain = CountingChain::new(daemon_client(&node.url(), NODE_API_KEY));
     let syncer = syncer(chain.clone(), store_wallet.clone());
     let report = syncer.sync_once().unwrap();
     assert!(report.completed, "{report:?}");
@@ -937,32 +957,31 @@ fn real_node_reorg_returns_the_common_ancestor_and_the_daemon_follows_it() {
     // the new chain without a restart.
     store.rollback_to(1, None, None).unwrap();
     assert_eq!(store.height(), 1);
-    let error = syncer.sync_once().unwrap_err();
-    assert!(
-        error.retryable(),
-        "a temporary node rollback must be retried: {error}"
-    );
+    let before_rollback = chain.requests().len();
+    let report = syncer.sync_once().unwrap();
+    assert!(report.completed);
+    assert_eq!(report.wallet_height, 1);
+    assert_eq!(chain.requests()[before_rollback..], vec![(1, 1)]);
     let read = store_wallet.read().unwrap();
-    assert_eq!(read.scan_cursor().unwrap().unwrap().height, TIP_HEIGHT);
+    assert_eq!(read.scan_cursor().unwrap().unwrap().height, 1);
     assert_eq!(
         read.rescan_state().unwrap(),
         ergo_wallet_service::RescanState::Idle
     );
     assert!(!read.scan_invalidated().unwrap());
     drop(read);
-    let mut parent = ModifierId::from_bytes(committed_id(&store, 1));
+    let mut parent = ModifierId::from_bytes(committed_id(store, 1));
     for height in 2..=TIP_HEIGHT {
-        let id = apply_block(&mut store, height, parent, [0xA0 + height as u8; 8]);
+        let id = apply_block(store, height, parent, [0xA0 + height as u8; 8]);
         parent = ModifierId::from_bytes(id);
     }
     assert_eq!(store.height(), TIP_HEIGHT);
-    let new_tip_id = committed_id(&store, TIP_HEIGHT);
+    let new_tip_id = committed_id(store, TIP_HEIGHT);
     assert_ne!(new_tip_id, old_tip.header_id);
     assert_ne!(new_tip_id, ids[1]);
 
-    // The next pass asks at the stale cursor, is told "rewind to 1", then asks
-    // again from the ancestor and receives the whole replacement fork. No panic,
-    // no terminal failure, and the cursor ends on the new tip.
+    // The rollback pass already proved height 1 canonical and rewound there.
+    // The next pass receives the replacement fork directly from that ancestor.
     let before_reorg = chain.requests().len();
     let report = syncer.sync_once().unwrap();
     assert!(report.completed, "{report:?}");
@@ -971,9 +990,8 @@ fn real_node_reorg_returns_the_common_ancestor_and_the_daemon_follows_it() {
     assert_eq!(report.tip.header_id, new_tip_id);
     assert_eq!(
         chain.requests()[before_reorg..],
-        vec![(TIP_HEIGHT, 1), (1, 1), (2, 1)],
-        "one ancestor probe at the stale cursor, then the two replacement blocks one \
-         bounded page at a time"
+        vec![(1, 1), (2, 1)],
+        "the two replacement blocks follow the already-proven ancestor"
     );
     let read = store_wallet.read().unwrap();
     let cursor = read.scan_cursor().unwrap().unwrap();
