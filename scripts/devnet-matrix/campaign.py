@@ -910,27 +910,43 @@ def _holds_resources(pid):
     return state != 'Z' 
 
 
+# Which locking primitive actually protects each file. On Linux, BSD
+# `flock` and POSIX `fcntl`/`lockf` locks are two INDEPENDENT
+# namespaces over the same file: a `lockf` probe against a file only
+# ever `flock`ed elsewhere always succeeds, even while that lock is
+# genuinely held (main, on 4737af7d: redb 2.6.3 locks its file with
+# `libc::flock(fd, LOCK_EX | LOCK_NB)`, `file_backend/unix.rs:37` — the
+# first version of this probe used `lockf` for `*.redb` too and so
+# never actually waited for the Rust side at all). LevelDB and Java's
+# `FileChannel.tryLock` both use POSIX locks on Linux, so `LOCK` files
+# still want `lockf`.
+_LOCK_KIND = {'LOCK': 'lockf', '.redb': 'flock'}
+_PROC_LOCKS_TYPE = {'lockf': 'POSIX', 'flock': 'FLOCK'}
+
+
 def _lock_files_under(data_root, names):
-    """Every `LOCK` file (Scorex/LevelDB: `peers/LOCK`, and one per
-    history/state store) and `*.redb` file (the Rust store's own lock is
-    on the database file itself, not a separate `LOCK`) under each
-    node's data directory. Sorted, so a probe's "still held" message
-    always names the same file first for the same fixture."""
+    """`(path, kind)` for every lock-bearing file under each node's data
+    directory — `LOCK` (Scorex/LevelDB) and `*.redb` (the Rust store),
+    each tagged with the primitive that actually locks it (`_LOCK_KIND`).
+    Sorted by path, so a probe's "still held" message always names the
+    same file first for the same fixture."""
     found = []
     for name in names:
         root = data_root / name
         if not root.is_dir():
             continue
-        found += root.rglob('LOCK')
-        found += root.rglob('*.redb')
-    return sorted(set(found))
+        found += [(p, 'lockf') for p in root.rglob('LOCK')]
+        found += [(p, 'flock') for p in root.rglob('*.redb')]
+    return sorted(set(found), key=lambda pair: pair[0])
 
 
-def _pid_holding_lock(path):
-    """The PID `/proc/locks` says holds `path`'s inode, or `None` if it
-    cannot be determined (the file has no POSIX lock on it right now, or
-    `/proc/locks` cannot be read). Best-effort diagnostic only — never
-    part of the wait condition itself."""
+def _pid_holding_lock(path, kind):
+    """The PID `/proc/locks` says holds `path`'s inode with the SAME
+    locking primitive (`kind`: `'lockf'` → its `POSIX` rows, `'flock'` →
+    its `FLOCK` rows — the two are listed separately and a match against
+    the wrong one names an unrelated holder, or misses the real one), or
+    `None` if it cannot be determined. Best-effort diagnostic only —
+    never part of the wait condition itself."""
     try:
         inode = path.stat().st_ino
     except OSError:
@@ -939,10 +955,11 @@ def _pid_holding_lock(path):
         lines = Path('/proc/locks').read_text().splitlines()
     except OSError:
         return None
+    want = _PROC_LOCKS_TYPE[kind]
     for line in lines:
         fields = line.split()
-        # id: type mode kind pid major:minor:inode start end
-        if len(fields) < 6:
+        # id: type mode access pid major:minor:inode start end
+        if len(fields) < 6 or fields[1] != want:
             continue
         try:
             pid = int(fields[4])
@@ -956,18 +973,18 @@ def _pid_holding_lock(path):
 
 def wait_for_lock_files_releasable(data_root, names, timeout=60.0):
     """Poll until every LOCK/`*.redb` file under these nodes' data
-    directories can be taken with a non-blocking POSIX lock from THIS
-    process, releasing it again immediately — a probe, never held.
+    directories can be taken — with the SAME primitive that actually
+    locks it, `_LOCK_KIND` — from THIS process, releasing it again
+    immediately: a probe, never held.
 
-    Scorex/LevelDB's LOCK files (and the Rust store's lock on its own
-    `.redb` file) are fcntl-based: the kernel releases one only once the
-    OLD process is FULLY gone, which can lag "gone from /proc" while a
-    SIGKILLed JVM is still unmapping memory or is a zombie awaiting reap
-    (rm-A-restart-armA-3: scala2's respawn hit `Failed to initialize
-    storage ... lock .../peers/LOCK: Resource temporarily unavailable`
-    despite the PID already being confirmed gone). Replaces a fixed
-    settle time, which either wastes time when the kernel was already
-    done or is not always enough under load.
+    The kernel releases a lock only once the OLD process is FULLY gone,
+    which can lag "gone from /proc" while a SIGKILLed JVM is still
+    unmapping memory or is a zombie awaiting reap (rm-A-restart-armA-3:
+    scala2's respawn hit `Failed to initialize storage ... lock
+    .../peers/LOCK: Resource temporarily unavailable` despite the PID
+    already being confirmed gone). Replaces a fixed settle time, which
+    either wastes time when the kernel was already done or is not
+    always enough under load.
 
     Raises RuntimeError — a harness STALL, not a node divergence — naming
     the still-held file and, if `/proc/locks` can identify it, the PID
@@ -977,16 +994,20 @@ def wait_for_lock_files_releasable(data_root, names, timeout=60.0):
     deadline = time.monotonic() + timeout
     while True:
         blocking = None
-        for lock_path in _lock_files_under(data_root, names):
+        for lock_path, kind in _lock_files_under(data_root, names):
             try:
                 fd = os.open(str(lock_path), os.O_RDWR)
             except OSError:
                 continue
             try:
-                fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.lockf(fd, fcntl.LOCK_UN)
+                if kind == 'flock':
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                else:
+                    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.lockf(fd, fcntl.LOCK_UN)
             except OSError:
-                blocking = lock_path
+                blocking = (lock_path, kind)
             finally:
                 os.close(fd)
             if blocking:
@@ -994,9 +1015,10 @@ def wait_for_lock_files_releasable(data_root, names, timeout=60.0):
         if blocking is None:
             return
         if time.monotonic() >= deadline:
-            holder = _pid_holding_lock(blocking)
+            path, kind = blocking
+            holder = _pid_holding_lock(path, kind)
             raise RuntimeError(
-                f'{blocking} is still locked {timeout:.0f}s after every '
+                f'{path} is still locked {timeout:.0f}s after every '
                 'victim PID was confirmed gone' +
                 (f' (held by PID {holder})' if holder else
                  ' (holding PID could not be determined)'))
@@ -3968,7 +3990,8 @@ def _self_test_remeasure():
         _redb_path = _lock_root / 'victim_a' / 'state.redb'
         _redb_path.touch()
         assert _lock_files_under(_lock_root, ['victim_a']) == \
-            [_lock_path, _redb_path], _lock_files_under(_lock_root, ['victim_a'])
+            [(_lock_path, 'lockf'), (_redb_path, 'flock')], \
+            _lock_files_under(_lock_root, ['victim_a'])
         # No lock held at all: returns immediately regardless of timeout.
         _t0 = time.monotonic()
         wait_for_lock_files_releasable(_lock_root, ['victim_a'], timeout=10.0)
@@ -4026,6 +4049,57 @@ def _self_test_remeasure():
         finally:
             _holder.kill()
             _holder.wait(timeout=5)
+            _ready.unlink(missing_ok=True)
+
+        # The redb/flock case, specifically: `flock` and POSIX `lockf`
+        # are independent lock namespaces on Linux. A helper holds a
+        # REAL flock (not lockf) on the `.redb` file, matching redb
+        # 2.6.3's own `libc::flock(fd, LOCK_EX | LOCK_NB)`
+        # (file_backend/unix.rs:37). A naive lockf-only probe — main,
+        # on 4737af7d's first cut — must report it releasable EARLY
+        # (RED: it is not actually testing redb's lock at all); the real
+        # probe, which uses flock for `.redb` files, must not.
+        def _naive_lockf_probe(path):
+            fd = os.open(str(path), os.O_RDWR)
+            try:
+                fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.lockf(fd, fcntl.LOCK_UN)
+                return True  # "releasable" — wrongly, while flock holds it
+            except OSError:
+                return False
+            finally:
+                os.close(fd)
+
+        def _flock_holder_script(hold_s):
+            return (f'import fcntl, time\n'
+                    f'f = open({str(_redb_path)!r}, "r+")\n'
+                    f'fcntl.flock(f, fcntl.LOCK_EX)\n'
+                    f'open({str(_ready)!r}, "w").close()\n'
+                    f'time.sleep({hold_s})\n')
+
+        _ready.unlink(missing_ok=True)
+        _holder = subprocess.Popen(['python3', '-c', _flock_holder_script(3.0)])
+        try:
+            _deadline = time.monotonic() + 5
+            while not _ready.exists() and time.monotonic() < _deadline:
+                time.sleep(0.05)
+            assert _ready.exists(), 'the flock holder never confirmed taking it'
+            assert _naive_lockf_probe(_redb_path) is True, (
+                'lockf and flock are independent on Linux: a lockf probe must '
+                'see the file as free even while a REAL flock holds it — this '
+                'is exactly the bug 4737af7d fixed')
+            _t0 = time.monotonic()
+            wait_for_lock_files_releasable(_lock_root, ['victim_a'], timeout=10.0)
+            _elapsed = time.monotonic() - _t0
+            assert _elapsed >= 2.0, (
+                f'the flock-aware probe returned after {_elapsed:.1f}s while redb\'s '
+                'own lock (flock) was still genuinely held — it is probing with '
+                'the wrong primitive again')
+            assert _holder.wait(timeout=5) == 0
+        finally:
+            if _holder.poll() is None:
+                _holder.kill()
+                _holder.wait(timeout=5)
             _ready.unlink(missing_ok=True)
 
     # ----- flood: the shipped caps and the two adversary shapes -----
