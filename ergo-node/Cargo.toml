@@ -54,7 +54,6 @@ reqwest            = { workspace = true, features = ["rustls-tls", "json"] }
 thiserror          = { workspace = true }
 sysinfo            = { workspace = true }
 k256               = { workspace = true }
-zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
