@@ -98,7 +98,8 @@ pub struct MiningConfig {
     /// between candidate builds, keyed on the committed tip. The first build per
     /// block pays the full hydration; same-tip rebuilds (the enriched refresh
     /// and every mempool-driven rebuild) then reuse it and are near-instant.
-    /// Default `false` — it holds the full UTXO AVL node graph resident
+    /// Default `false` uses authenticated on-demand snapshot reads instead.
+    /// The opt-in cache holds the full UTXO AVL node graph resident
     /// (multi-GB on a mainnet archival node, scaling with the UTXO-set size), so
     /// it is opt-in for mining nodes with RAM headroom.
     #[serde(default)]

@@ -53,6 +53,7 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         super::handlers::tip_handler,
         super::handlers::recent_blocks_handler,
         super::handlers::events_handler,
+        super::handlers::activity_handler,
         super::handlers::sync_handler,
         super::handlers::peers_handler,
         super::handlers::health_handler,
@@ -80,6 +81,8 @@ appear here. Query `GET /api/v1/health` to confirm a running node's state."
         crate::wallet::native::retrieve_rewards,
     ),
     components(schemas(
+        crate::types::ApiActivityRecord,
+        crate::types::ApiActivityPage,
         ApiInfo,
         ApiIdentity,
         ApiHost,

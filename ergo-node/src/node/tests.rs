@@ -4607,6 +4607,7 @@ mod block_relay {
             target: block.candidate.target.clone(),
             height: block.candidate.header.height,
             pk: MINER_PK,
+            metrics: Default::default(),
         };
         assert!(handle
             .publish_if_current(
@@ -4630,6 +4631,7 @@ mod block_relay {
         super::super::mining_dispatch::handle_mining_request(
             state,
             Some(handle),
+            false,
             crate::mining_bridge::MiningRequest::SubmitSolution {
                 solution: ergo_rest_json::mining::AutolykosSolutionJson {
                     pk: None,
@@ -4862,7 +4864,7 @@ mod block_relay {
             state.store.as_utxo().unwrap(),
             spec.network,
             ergo_mining::candidate::BuildMode::Full,
-            ergo_mempool::MempoolReadSnapshot::empty(),
+            &ergo_mempool::MempoolReadSnapshot::empty(),
             &MINER_PK,
             &spec.monetary,
             spec.reemission.as_ref(),

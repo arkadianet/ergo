@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use crate::config::IndexerConfig;
 use crate::error::IndexerError;
 use crate::segment::SEGMENT_THRESHOLD;
+use crate::store::paging::{PageOwner, PageReader};
 use crate::store::IndexerStore;
 use crate::{BoxId, TemplateHash, TokenId, TreeHash, TxId};
 use ergo_indexer_types::{
@@ -64,6 +65,17 @@ struct HandleInner {
 }
 
 impl IndexerHandle {
+    fn page_reader(&self, handler: &'static str) -> Option<PageReader> {
+        self.inner
+            .store
+            .as_ref()?
+            .page_reader()
+            .inspect_err(|error| {
+                tracing::warn!(handler, %error, "indexer read failed");
+            })
+            .ok()
+    }
+
     /// Apply the boot contract:
     /// - `config.enabled = false` → `None`. (No `/blockchain/*` router
     ///   mounts; `ergo-api` returns 404 on any indexed path.)
@@ -365,10 +377,10 @@ impl IndexerQuery for IndexerHandle {
         })
     }
     fn address_txs_paged(&self, tree_hash: &TreeHash, p: Page, dir: SortDir) -> Vec<IndexedTxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("address_txs_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_address_tx_entries(tree_hash) {
+        let entries = match store.entries(PageOwner::AddressTxs(*tree_hash), p, dir, false) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -380,9 +392,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        slice_paged(&entries, p, dir)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_tx(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_tx(&store, entry))
             .collect()
     }
     fn address_boxes_paged(
@@ -391,10 +403,10 @@ impl IndexerQuery for IndexerHandle {
         p: Page,
         dir: SortDir,
     ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("address_boxes_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_address_box_entries(tree_hash) {
+        let entries = match store.entries(PageOwner::AddressBoxes(*tree_hash), p, dir, false) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -406,9 +418,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        slice_paged(&entries, p, dir)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
     fn address_unspent_paged(
@@ -417,10 +429,10 @@ impl IndexerQuery for IndexerHandle {
         p: Page,
         dir: SortDir,
     ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("address_unspent_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_address_box_entries(tree_hash) {
+        let entries = match store.entries(PageOwner::AddressBoxes(*tree_hash), p, dir, true) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -432,12 +444,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        // Filter THEN paginate — `unspent/byAddress` exposes only
-        // positive entries, then applies `(offset, limit)`.
-        let unspent: Vec<i64> = entries.into_iter().filter(|&e| e > 0).collect();
-        slice_paged(&unspent, p, dir)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
     fn address_total_txs(&self, tree_hash: &TreeHash) -> u64 {
@@ -476,10 +485,10 @@ impl IndexerQuery for IndexerHandle {
     }
 
     fn template_boxes_paged(&self, h: &TemplateHash, p: Page) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("template_boxes_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_template_box_entries(h) {
+        let entries = match store.entries(PageOwner::Template(*h), p, SortDir::Desc, false) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -491,12 +500,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        // No `dir` parameter on the trait — Scala `byTemplateHash` exposes
-        // only paged (no `sortDirection`); the implementation pins newest-
-        // first to mirror the address-keyed default.
-        slice_paged(&entries, p, SortDir::Desc)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
     fn template_unspent_paged(
@@ -505,10 +511,10 @@ impl IndexerQuery for IndexerHandle {
         p: Page,
         dir: SortDir,
     ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("template_unspent_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_template_box_entries(h) {
+        let entries = match store.entries(PageOwner::Template(*h), p, dir, true) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -520,13 +526,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        // Mirrors `address_unspent_paged` — filter positives THEN
-        // paginate; `unspent/byTemplateHash` exposes only positive
-        // entries.
-        let unspent: Vec<i64> = entries.into_iter().filter(|&e| e > 0).collect();
-        slice_paged(&unspent, p, dir)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
 
@@ -540,17 +542,18 @@ impl IndexerQuery for IndexerHandle {
             .inner
             .store
             .as_ref()
-            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
+            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?
+            .page_reader()
+            .map_err(|error| IndexerReadError::new(error.to_string()))?;
         let Some(entries) = store
-            .read_template_box_entries(h)
+            .entries(PageOwner::Template(*h), p, dir, true)
             .map_err(|error| IndexerReadError::new(error.to_string()))?
         else {
             return Ok(Vec::new());
         };
-        let unspent: Vec<i64> = entries.into_iter().filter(|&entry| entry > 0).collect();
-        slice_paged(&unspent, p, dir)
+        entries
             .into_iter()
-            .map(|entry| try_dereference_box(store.as_ref(), entry))
+            .map(|entry| try_dereference_box(&store, entry))
             .collect()
     }
     fn template_total_boxes(&self, h: &TemplateHash) -> u64 {
@@ -624,10 +627,10 @@ impl IndexerQuery for IndexerHandle {
             .collect()
     }
     fn token_boxes_paged(&self, token_id: &TokenId, p: Page) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("token_boxes_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_token_box_entries(token_id) {
+        let entries = match store.entries(PageOwner::Token(*token_id), p, SortDir::Desc, false) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -639,18 +642,16 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        // Scala `byTokenId` exposes only paged (no `sortDirection`);
-        // we pin newest-first to mirror the address-keyed default.
-        slice_paged(&entries, p, SortDir::Desc)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
     fn token_unspent_paged(&self, token_id: &TokenId, p: Page, dir: SortDir) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.inner.store.as_ref() else {
+        let Some(store) = self.page_reader("token_unspent_paged") else {
             return Vec::new();
         };
-        let entries = match store.read_token_box_entries(token_id) {
+        let entries = match store.entries(PageOwner::Token(*token_id), p, dir, true) {
             Ok(Some(e)) => e,
             Ok(None) => return Vec::new(),
             Err(e) => {
@@ -662,12 +663,9 @@ impl IndexerQuery for IndexerHandle {
                 return Vec::new();
             }
         };
-        // Mirrors `template_unspent_paged` — filter positives THEN
-        // paginate; `unspent/byTokenId` exposes only positive entries.
-        let unspent: Vec<i64> = entries.into_iter().filter(|&e| e > 0).collect();
-        slice_paged(&unspent, p, dir)
+        entries
             .iter()
-            .filter_map(|&entry| dereference_box(store.as_ref(), entry))
+            .filter_map(|&entry| dereference_box(&store, entry))
             .collect()
     }
     fn token_total_boxes(&self, token_id: &TokenId) -> u64 {
@@ -746,6 +744,7 @@ fn total_count(segment_count: i32, head_len: usize) -> u64 {
 
 /// Apply `(offset, limit)` after sort direction. Returns a slice of the
 /// caller's `entries` buffer; ASC keeps oldest-first order, DESC reverses.
+#[cfg(test)]
 fn slice_paged(entries: &[i64], page: Page, dir: SortDir) -> Vec<i64> {
     let len = entries.len();
     let offset = (page.offset as usize).min(len);
@@ -769,7 +768,7 @@ fn slice_paged(entries: &[i64], page: Page, dir: SortDir) -> Vec<i64> {
 /// they would indicate apply/rollback skew, not a normal "not indexed"
 /// case (segment entries always reference a row written in the same
 /// block).
-fn dereference_tx(store: &IndexerStore, entry: i64) -> Option<IndexedTxDto> {
+fn dereference_tx(store: &PageReader, entry: i64) -> Option<IndexedTxDto> {
     if entry < 0 {
         tracing::warn!(
             handler = "address_txs_paged",
@@ -819,7 +818,7 @@ fn dereference_tx(store: &IndexerStore, entry: i64) -> Option<IndexedTxDto> {
 /// Resolve a box-segment entry to its full `IndexedBoxDto`.
 /// Sign-flipped entries dereference via `abs(entry)` — the box record
 /// stays under its positive global index.
-fn dereference_box(store: &IndexerStore, entry: i64) -> Option<IndexedBoxDto> {
+fn dereference_box(store: &PageReader, entry: i64) -> Option<IndexedBoxDto> {
     let n = entry.unsigned_abs();
     let id = match store.read_numeric_box(n) {
         Ok(Some(id)) => id,
@@ -858,10 +857,7 @@ fn dereference_box(store: &IndexerStore, entry: i64) -> Option<IndexedBoxDto> {
     }
 }
 
-fn try_dereference_box(
-    store: &IndexerStore,
-    entry: i64,
-) -> Result<IndexedBoxDto, IndexerReadError> {
+fn try_dereference_box(store: &PageReader, entry: i64) -> Result<IndexedBoxDto, IndexerReadError> {
     let n = entry.unsigned_abs();
     let id = store
         .read_numeric_box(n)

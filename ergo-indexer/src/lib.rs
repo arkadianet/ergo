@@ -56,7 +56,8 @@ pub use store::{
     ROLLBACK_WINDOW,
 };
 pub use task::{
-    ChainTip, IndexerChainSource, IndexerFullBlock, IndexerPoll, IndexerTask, MAX_SECTION_RETRIES,
+    ChainTip, IndexerChainSource, IndexerFullBlock, IndexerPoll, IndexerTask, IndexerWorker,
+    MAX_SECTION_RETRIES,
 };
 
 pub use ergo_indexer_types::{

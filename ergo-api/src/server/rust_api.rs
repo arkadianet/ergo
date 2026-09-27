@@ -97,6 +97,25 @@ pub(super) fn admin_router(
     ))
 }
 
+/// Log data is operator-only even when no admin/write handle is wired.
+pub(super) fn activity_router(
+    read: Arc<dyn NodeReadState>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> FamilyRouter {
+    FamilyRouter::new(ApiFamily::Rust)
+        .route(
+            "/api/v1/diagnostics/activity",
+            "/api/v1/diagnostics/activity",
+            &["get"],
+            get(super::handlers::activity_handler),
+        )
+        .with_state(read)
+        .route_layer(axum::middleware::from_fn_with_state(
+            security,
+            crate::auth::require_api_key,
+        ))
+}
+
 pub(super) fn conditional_chain_router(
     chain: Option<Arc<dyn crate::compat::NodeChainQuery>>,
     network: NetworkPrefix,

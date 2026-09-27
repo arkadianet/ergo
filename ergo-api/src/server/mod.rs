@@ -47,9 +47,11 @@ use crate::compat::traits::NodeChainQuery;
 use crate::traits::ChainParamsView;
 use crate::traits::{MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView};
 use crate::web::{
-    JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHART, JS_EXPLORER, JS_FEE_STATS, JS_FORMAT, JS_MEMPOOL,
-    JS_MINERS, JS_MINING, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_TABLE,
-    JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WS_CLIENT,
+    JS_API_CLIENT, JS_APP, JS_AUTH, JS_CHAIN_ACTIVITY, JS_CHART, JS_EXPLORER, JS_FEE_STATS,
+    JS_FORMAT, JS_MEMPOOL, JS_MINERS, JS_MINING, JS_MINING_REWARD, JS_MINING_WORK,
+    JS_NODE_GUIDANCE, JS_OVERVIEW, JS_PEERS, JS_ROUTER, JS_SETTINGS, JS_SPARKLINE, JS_STORAGE_RENT,
+    JS_SYNC_RINGS, JS_TABLE, JS_TOKEN_META, JS_VOTING, JS_WALLET, JS_WALLET_BUILDER,
+    JS_WALLET_TRANSACTION, JS_WORKSPACE_SEARCH, JS_WS_CLIENT,
 };
 use ergo_indexer_types::IndexerQuery;
 use ergo_ser::address::NetworkPrefix;
@@ -722,6 +724,14 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/fonts/jetbrains-mono.woff2", get(jetbrains_mono_woff2))
         .route("/fonts/inter-variable.woff2", get(inter_variable_woff2))
         .route("/js/app.js", get(|| async { js(JS_APP) }))
+        .route(
+            "/js/activity.js",
+            get(|| async { js(crate::web::JS_ACTIVITY) }),
+        )
+        .route(
+            "/js/activity-model.js",
+            get(|| async { js(crate::web::JS_ACTIVITY_MODEL) }),
+        )
         .route("/js/api-client.js", get(|| async { js(JS_API_CLIENT) }))
         .route("/js/auth.js", get(|| async { js(JS_AUTH) }))
         .route("/js/format.js", get(|| async { js(JS_FORMAT) }))
@@ -732,14 +742,41 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/js/sparkline.js", get(|| async { js(JS_SPARKLINE) }))
         .route("/js/chart.js", get(|| async { js(JS_CHART) }))
         .route("/js/overview.js", get(|| async { js(JS_OVERVIEW) }))
+        .route(
+            "/js/chain-activity.js",
+            get(|| async { js(JS_CHAIN_ACTIVITY) }),
+        )
+        .route(
+            "/js/node-guidance.js",
+            get(|| async { js(JS_NODE_GUIDANCE) }),
+        )
+        .route("/js/sync-rings.js", get(|| async { js(JS_SYNC_RINGS) }))
+        .route("/js/storage-rent.js", get(|| async { js(JS_STORAGE_RENT) }))
+        .route(
+            "/js/workspace-search.js",
+            get(|| async { js(JS_WORKSPACE_SEARCH) }),
+        )
         .route("/js/explorer.js", get(|| async { js(JS_EXPLORER) }))
         .route("/js/token-meta.js", get(|| async { js(JS_TOKEN_META) }))
         .route("/js/peers.js", get(|| async { js(JS_PEERS) }))
         .route("/js/mempool.js", get(|| async { js(JS_MEMPOOL) }))
         .route("/js/voting.js", get(|| async { js(JS_VOTING) }))
         .route("/js/wallet.js", get(|| async { js(JS_WALLET) }))
+        .route(
+            "/js/wallet-builder.js",
+            get(|| async { js(JS_WALLET_BUILDER) }),
+        )
+        .route(
+            "/js/wallet-transaction.js",
+            get(|| async { js(JS_WALLET_TRANSACTION) }),
+        )
         .route("/js/miners.js", get(|| async { js(JS_MINERS) }))
         .route("/js/mining.js", get(|| async { js(JS_MINING) }))
+        .route("/js/mining-work.js", get(|| async { js(JS_MINING_WORK) }))
+        .route(
+            "/js/mining-reward.js",
+            get(|| async { js(JS_MINING_REWARD) }),
+        )
         .route("/js/ws-client.js", get(|| async { js(JS_WS_CLIENT) }))
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
@@ -758,6 +795,12 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         operator,
         &mut inventory,
         rust_api::legacy_router(read.clone()),
+    );
+
+    let operator = route_registry::merge_family_router(
+        operator,
+        &mut inventory,
+        rust_api::activity_router(read.clone(), security.clone()),
     );
 
     let operator = route_registry::merge_family_router(

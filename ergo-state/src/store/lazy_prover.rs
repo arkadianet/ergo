@@ -78,7 +78,7 @@ impl Resolver {
         let mut loaded = loaded.borrow_mut();
         if loaded.label() != *label {
             return Err(failure(
-                "prover: arena node does not match authenticated label",
+                "prover: stored node does not match authenticated label",
             ));
         }
         loaded.reset();
@@ -113,6 +113,28 @@ pub(super) fn prove(
     let root_label = *tree.root_label().as_bytes();
     let height = tree.tree_height();
     let _session = tree.begin_read_session();
+    prove_from_reader(
+        root_id,
+        root_label,
+        height,
+        to_lookup,
+        to_remove,
+        to_insert,
+        |id| tree.prover_node(id),
+    )
+}
+
+/// The caller retains ownership of the read view. Both the live arena and a
+/// committed database snapshot use the same authenticated, scoped resolver.
+pub(super) fn prove_from_reader(
+    root_id: NodeId,
+    root_label: [u8; 32],
+    height: u8,
+    to_lookup: &[[u8; 32]],
+    to_remove: &DryRunRemoveMap,
+    to_insert: &DryRunInsertMap,
+    mut read_node: impl FnMut(NodeId) -> Result<AvlNode, StateError>,
+) -> Result<(ADDigest, Vec<u8>), StateError> {
     let (requests, requested) = channel();
     let (replies, reply) = channel();
     std::thread::scope(|scope| {
@@ -145,9 +167,8 @@ pub(super) fn prove(
             })
             .map_err(|_| failure("prover: failed to start worker"))?;
         while let Ok(id) = requested.recv() {
-            let node =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tree.prover_node(id)))
-                    .unwrap_or_else(|_| Err(failure("prover: arena read panicked")));
+            let node = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_node(id)))
+                .unwrap_or_else(|_| Err(failure("prover: node read panicked")));
             if replies.send(node).is_err() {
                 break;
             }

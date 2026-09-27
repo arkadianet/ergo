@@ -216,9 +216,8 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// action loop regardless.
 ///
 /// `base` is the optional per-tip dry-run base cache slot. `None` ⇒ the
-/// uncached path: every build full-hydrates the AVL tree (today's behaviour;
-/// all existing callers and tests pass `None`). `Some(slot)` ⇒ the build's
-/// AVL dry-run routes through [`CachedSnapshotView`], reusing the memoized
+/// uncached path: each build loads authenticated AVL paths on demand.
+/// `Some(slot)` ⇒ the AVL dry-run routes through [`CachedSnapshotView`], reusing the memoized
 /// pristine tree when the slot already holds one for this committed tip and
 /// rehydrating on a miss/tip-change. The slot is `!Send` (it owns an
 /// `Rc<RefCell<Node>>` graph), so it must be owned by the single dedicated
@@ -289,8 +288,11 @@ pub fn build_and_publish(
     // Minimal builds freeze nothing from the pool and never touch the
     // indexer: the emission-only template needs neither, and skipping both
     // is what makes the minimal publish fast.
+    // The intent already owns a frozen snapshot. Borrow it for a full build;
+    // cloning it would copy every entry's vectors and materialized output boxes.
+    let empty_mempool = MempoolReadSnapshot::empty();
     let (mempool, eligible_rent_boxes) = match mode {
-        BuildMode::Minimal => (MempoolReadSnapshot::empty(), Vec::new()),
+        BuildMode::Minimal => (&empty_mempool, Vec::new()),
         BuildMode::Full => {
             // Storage-rent eligibility, resolved HERE so each box is materialized
             // against THIS committed snapshot — never a newer live view (a box
@@ -306,17 +308,16 @@ pub fn build_and_publish(
             } else {
                 Vec::new()
             };
-            ((*intent.mempool).clone(), eligible)
+            (intent.mempool.as_ref(), eligible)
         }
     };
 
-    // The dry-run is the build's dominant cost (full AVL hydration). When a
-    // base-cache slot is supplied, route the build through `CachedSnapshotView`
+    // When a base-cache slot is supplied, route the build through `CachedSnapshotView`
     // so same-tip rebuilds reuse the memoized pristine tree; otherwise build
-    // directly against the snapshot (every build full-hydrates). Both views
+    // directly against the snapshot (authenticated paths loaded on demand). Both views
     // serve every non-dry-run read from the same one held transaction, so the
-    // candidate is identical bar the dry-run's hydration source — which is
-    // itself byte-identical (proven against the uncached oracle in ergo-state).
+    // candidate proof is byte-identical (checked against full hydration in
+    // ergo-state's snapshot tests).
     // Snapshot the operator's current voting targets once for this build (read
     // under the shared lock); both build paths pass it by reference.
     let voting_targets = handle.voting_targets();
