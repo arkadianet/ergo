@@ -267,14 +267,12 @@ pub(super) async fn bind(
         // guard; the session registry keeps it so shutdown can cancel a
         // running rescan.
         let rescan = Arc::new(ergo_wallet_service::engine::RescanCoordinator::new());
-        crate::wallet_boot::begin_wallet_session(rescan.clone());
+        wallet_session_id = crate::wallet_boot::begin_wallet_session(rescan.clone());
         if let Err(error) =
             ergo_wallet_service::engine::recover_interrupted_rescan(wallet_store.as_ref(), &rescan)
         {
             tracing::warn!(%error, "wallet boot: failed to recover interrupted rescan; wallet remains fail-closed");
         }
-        let session_id = crate::wallet_boot::wallet_session_id();
-        wallet_session_id = session_id;
         let (chain_client, chain_accessor) = wallet_writer_chain.take().ok_or_else(|| {
             NodeError::from("wallet boot: chain client was not constructed".to_string())
         })?;
