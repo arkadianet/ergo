@@ -104,7 +104,7 @@ fn read_value_file_bounded(path: &std::path::Path) -> Result<String, ReadValueFi
 }
 
 use crate::reemission::ReemissionSettings;
-use crate::solution::{verify_solution, SolutionOutcome};
+use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
 /// Upper bound on templates retained in the [`MiningCache`] ring — the number
@@ -685,14 +685,38 @@ impl MiningHandle {
         solution: &MinerSolution,
         state: &StateStore,
     ) -> Result<SolutionOutcome, MiningError> {
+        self.verify_solution_preferring(solution, state, |_| Ok(true))
+    }
+
+    /// Prefer an accepting offered template selected by the caller, falling
+    /// back to the newest accepting offered template. The predicate only sees
+    /// blocks with valid PoW on the live full parent, never withdrawn templates.
+    /// Both preference and fallback ties resolve newest-first.
+    ///
+    /// The node uses this to recover a stored header with missing sections.
+    /// Errors from the predicate propagate; a failed storage read must not
+    /// silently select another block. The predicate runs under the cache read
+    /// lock and must not mutate the handle.
+    pub fn verify_solution_preferring(
+        &self,
+        solution: &MinerSolution,
+        state: &StateStore,
+        mut prefer: impl FnMut(&SubmittedBlock) -> Result<bool, MiningError>,
+    ) -> Result<SolutionOutcome, MiningError> {
         let cache = self.cache.read().expect("cache poisoned");
+        let mut newest = None;
         let mut saw_stale: Option<SolutionOutcome> = None;
         for retained in cache.templates.iter().rev() {
             let candidate = &retained.template.candidate;
             match verify_solution(candidate, solution, state)? {
                 SolutionOutcome::InvalidPow => continue,
                 SolutionOutcome::Accepted(b) if !retained.withdrawn => {
-                    return Ok(SolutionOutcome::Accepted(b));
+                    if prefer(&b)? {
+                        return Ok(SolutionOutcome::Accepted(b));
+                    }
+                    if newest.is_none() {
+                        newest = Some(SolutionOutcome::Accepted(b));
+                    }
                 }
                 // The PoW passes on the live parent, but the template was
                 // withdrawn: the block would repeat the one that failed.
@@ -709,7 +733,7 @@ impl MiningHandle {
                 }
             }
         }
-        Ok(saw_stale.unwrap_or(SolutionOutcome::InvalidPow))
+        Ok(newest.or(saw_stale).unwrap_or(SolutionOutcome::InvalidPow))
     }
 
     /// Select the network whose genesis mining rules apply.
@@ -1813,6 +1837,66 @@ mod tests {
             "verify must scan past the PoW-failing newest templates to the deep \
              PoW-passing one, got {outcome:?}",
         );
+    }
+
+    #[test]
+    fn verify_solution_preferring_withdrawn_template_accepts_offered_fallback() {
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        h.set_best_tip(synced_tip(parent));
+        for timestamp in [1, 2] {
+            let (mut c, w) = candidate_pair_msg_nbits(parent, [timestamp as u8; 32], 0x03000001);
+            c.header.timestamp = timestamp;
+            assert!(h
+                .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+                .is_some());
+            if timestamp == 1 {
+                h.withdraw_templates_for_parent(&parent);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let solution = MinerSolution {
+            nonce: [0; 8],
+            pk: None,
+        };
+        let outcome = h
+            .verify_solution_preferring(&solution, &state, |block| Ok(block.header.timestamp == 1))
+            .unwrap();
+        let SolutionOutcome::Accepted(block) = outcome else {
+            panic!("offered fallback")
+        };
+        assert_eq!(
+            block.header.timestamp, 2,
+            "a withdrawn match cannot be preferred"
+        );
+    }
+
+    #[test]
+    fn verify_solution_preferring_storage_error_returns_error() {
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        h.set_best_tip(synced_tip(parent));
+        let (c, w) = candidate_pair_msg_nbits(parent, [1; 32], 0x03000001);
+        assert!(h
+            .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let solution = MinerSolution {
+            nonce: [0; 8],
+            pk: None,
+        };
+        let result = h.verify_solution_preferring(&solution, &state, |_| {
+            Err(MiningError::StateRead {
+                op: "recovery",
+                reason: "injected read failure".into(),
+            })
+        });
+        assert!(matches!(
+            result,
+            Err(MiningError::StateRead { op: "recovery", .. })
+        ));
     }
 
     #[test]

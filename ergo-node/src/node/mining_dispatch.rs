@@ -620,13 +620,37 @@ pub(super) fn handle_mining_request(
                     return false;
                 }
             };
-            // 1. Verify against cached candidate (current then previous).
-            let outcome = match handle.verify_solution(
+            // 1. Prefer recovery of a known header with missing sections.
+            // Otherwise keep newest-first selection, as Scala's
+            // CandidateGenerator.scala:256-261 does for normal mining.
+            let outcome = match handle.verify_solution_preferring(
                 &typed,
                 state
                     .store
                     .as_utxo()
                     .expect("utxo-only: mining solution verify is gated off in digest mode"),
+                |block| {
+                    use ergo_mining::error::MiningError;
+                    let store = state.store.as_utxo().expect("utxo-only: mining recovery");
+                    let (_, id) = ergo_ser::header::serialize_header(&block.header)?;
+                    let read_error = |e: ergo_state::store::StateError| MiningError::StateRead {
+                        op: "mined_recovery",
+                        reason: e.to_string(),
+                    };
+                    if store
+                        .get_header(id.as_bytes())
+                        .map_err(read_error)?
+                        .is_none()
+                    {
+                        return Ok(false);
+                    }
+                    let mined = ergo_mining::submit::prepare_mined_block(store, block.clone())
+                        .map_err(|e| MiningError::IdComputation {
+                            op: "prepare_mined_recovery",
+                            reason: e.to_string(),
+                        })?;
+                    Ok(!mined.sections_stored(store).map_err(read_error)?)
+                },
             ) {
                 Ok(o) => o,
                 Err(e) => {
@@ -819,12 +843,10 @@ pub(super) fn handle_mining_request(
             //      gone. A failed write is not a failed apply, so its
             //      template is not withdrawn and no rebuild is requested
             //      (step 4 does both only after apply), and step 1 still
-            //      accepts the resubmission for it. The new best header does
-            //      start a tip build, which publishes a newer template on the
-            //      same parent, and step 1 tries that one first: a nonce that
-            //      meets it too (one in the difficulty; every nonce at the
-            //      devnet's difficulty one) makes a different block on it,
-            //      which ties this header and is stored as a fork.
+            //      accepts the resubmission for it. A tip build may publish
+            //      a newer template on the same parent; step 1 prefers the
+            //      stored incomplete header even when its nonce also solves
+            //      the newer template.
             if let Err(e) = ergo_mining::submit::store_mined_sections(
                 state
                     .store
