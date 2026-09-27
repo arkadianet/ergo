@@ -708,6 +708,21 @@ impl MiningHandle {
         let mut saw_stale: Option<SolutionOutcome> = None;
         for retained in cache.templates.iter().rev() {
             let candidate = &retained.template.candidate;
+            // Once a fallback accepts, only offered templates on the live full
+            // parent can improve selection. Before that, PoW distinguishes
+            // stale work from invalid work, including withdrawn templates.
+            if newest.is_some()
+                && (retained.withdrawn
+                    || candidate.parent_id != state.chain_state().best_full_block_id)
+            {
+                continue;
+            }
+            #[cfg(test)]
+            tests::VERIFIED_TIMESTAMPS.with_borrow_mut(|timestamps| {
+                if let Some(timestamps) = timestamps {
+                    timestamps.push(candidate.header.timestamp);
+                }
+            });
             match verify_solution(candidate, solution, state)? {
                 SolutionOutcome::InvalidPow => continue,
                 SolutionOutcome::Accepted(b) if !retained.withdrawn => {
@@ -981,6 +996,12 @@ mod tests {
     }
 
     // ----- helpers -----
+
+    thread_local! {
+        pub(super) static VERIFIED_TIMESTAMPS: std::cell::RefCell<Option<Vec<u64>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
 
     /// Fixed wall-clock stamp the `now_ms` closures passed to
     /// `publish_if_current` return in tests. The cache stores it verbatim and no
@@ -1840,6 +1861,52 @@ mod tests {
     }
 
     #[test]
+    fn verify_solution_preferring_fallback_skips_ineligible_pow() {
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let live_parent = [0; 32];
+        // Newest-first: withdrawn, stale, fallback, stale, withdrawn, offered.
+        for timestamp in 0..6 {
+            let parent = if matches!(timestamp, 2 | 4) {
+                [1; 32]
+            } else {
+                live_parent
+            };
+            h.set_best_tip(synced_tip(parent));
+            let (mut c, w) = candidate_pair_msg_nbits(parent, [timestamp as u8; 32], 0x03000001);
+            c.header.timestamp = timestamp;
+            assert!(h
+                .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+                .is_some());
+        }
+        for retained in &mut h.cache.write().unwrap().templates {
+            retained.withdrawn = matches!(retained.template.candidate.header.timestamp, 1 | 5);
+        }
+        // The authoritative live parent comes from state, not the cache tip.
+        h.set_best_tip(synced_tip([9; 32]));
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let solution = MinerSolution {
+            nonce: [0; 8],
+            pk: None,
+        };
+        VERIFIED_TIMESTAMPS.with_borrow_mut(|timestamps| *timestamps = Some(Vec::new()));
+        let mut visited = Vec::new();
+        let outcome = h
+            .verify_solution_preferring(&solution, &state, |block| {
+                visited.push(block.header.timestamp);
+                Ok(false)
+            })
+            .unwrap();
+        let verified = VERIFIED_TIMESTAMPS.with_borrow_mut(Option::take).unwrap();
+        assert_eq!(verified, [5, 4, 3, 0]);
+        assert_eq!(visited, [3, 0]);
+        let SolutionOutcome::Accepted(block) = outcome else {
+            panic!("offered fallback")
+        };
+        assert_eq!(block.header.timestamp, 3);
+    }
+
+    #[test]
     fn verify_solution_preferring_withdrawn_template_accepts_offered_fallback() {
         let h = MiningHandle::mainnet([0x02u8; 33]);
         let parent = [0u8; 32];
@@ -1860,9 +1927,18 @@ mod tests {
             nonce: [0; 8],
             pk: None,
         };
+        let mut visited = Vec::new();
         let outcome = h
-            .verify_solution_preferring(&solution, &state, |block| Ok(block.header.timestamp == 1))
+            .verify_solution_preferring(&solution, &state, |block| {
+                visited.push(block.header.timestamp);
+                Ok(block.header.timestamp == 1)
+            })
             .unwrap();
+        assert_eq!(
+            visited,
+            [2],
+            "only the offered template reaches the predicate"
+        );
         let SolutionOutcome::Accepted(block) = outcome else {
             panic!("offered fallback")
         };
