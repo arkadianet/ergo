@@ -4,30 +4,37 @@
 state, P2P, sync, mempool, mining, indexer, API, wallet cryptography, and
 `ergo-wallet-service` into one supervised tokio process. It owns process
 lifecycle, the single-writer chain action loop, and the embedded wallet writer
-that adapts the service core to the API and chain runtime.
+that adapts the service's wallet engine to the API and chain runtime.
 
 The node is not being replaced by the service: it remains the embedded host
-and API adapter. The service owns wallet persistence/runtime-core behavior,
-while the node still owns secret storage, the command loop, the state hook,
-and the in-process chain client. Full runtime relocation is transitional.
+and API adapter. All wallet orchestration — command logic, transaction build,
+signing, sweep, multi-sig, key derivation, rescan orchestration, the
+chain-apply hook and the rescan fences — lives in
+`ergo_wallet_service::engine::WalletEngine`. The node keeps a thin adapter:
+configuration, the command channel and writer task, the in-process chain
+seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
+`WalletAdmin` impl, and the wallet session/task lifecycle.
 
 **Depends on (workspace):** `ergo-primitives`, `ergo-ser`, `ergo-chain-spec`,
 `ergo-crypto`, `ergo-validation`, `ergo-wallet`, `ergo-wallet-service`,
 `ergo-state`, `ergo-p2p`, `ergo-sync`, `ergo-mempool`, `ergo-mining`,
 `ergo-indexer`, `ergo-api`, `ergo-rest-json`, `ergo-sigma`
 **Depended on by:** (see codemap index — top of the stack)
-**Approx LOC:** ~53K (`src/**/*.rs`)
+**Approx LOC:** ~44K (`src/**/*.rs`)
 
 ## Start here
 - `src/node/boot/` — production bring-up and `RunHandle` lifecycle.
 - `src/node/boot/api_wiring.rs` — constructs the shared wallet store, the
   in-process `ChainClient`, `ergo_wallet_service::runtime::WalletService`, the
-  embedded wallet writer, and the API adapters.
+  wallet's `RescanCoordinator`, the embedded wallet writer (which owns the
+  `WalletEngine`), the chain-apply `WalletStateHook`, and the API adapters.
 - `src/node/action_loop.rs` — the chain-state single-writer event loop.
 - `src/node/state.rs` — `NodeState`, the runtime god-struct mutated by loop
   handlers.
-- `src/node/wallet_bridge.rs` — wallet command loop, `NodeWalletAdmin`,
-  `WalletStateHook`, and the embedded/API adaptation around the service.
+- `src/node/wallet_bridge.rs` — the wallet adapter: `WalletCommand`,
+  `NodeWalletAdmin`, the writer loop that dispatches each command to the
+  `WalletEngine`, and the node-side seam implementations
+  (`ChainStateAccessorImpl`, `NodeSubmitAdapter`, `MempoolViewOverlay`).
 - `src/node/wallet_bridge/chain_client.rs` — `InProcessChainClient`, adapting
   committed `ChainStoreReader` and node submission into the service's
   `ChainClient` port.
@@ -45,12 +52,16 @@ and the in-process chain client. Full runtime relocation is transitional.
   state, shutdown, transaction admission, and peer command plumbing.
 - `src/node/sync_tick.rs`, `src/node/boot/sync_setup.rs` — applied-tip advancement and
   snapshot/NiPoPoW bootstrap state machines.
-- `src/node/wallet_bridge.rs` (+ `commands/`, `support/`) — the embedded wallet
-  command loop and API/admin adaptation.
+- `src/node/wallet_bridge.rs` — the embedded wallet adapter: command channel,
+  rescan fences and control policy, engine dispatch, rescan-job spawning, the
+  `/scan/addBox` box-JSON decode, and the seam implementations over
+  `ergo-state` / `NodeSubmit` / the API mempool view.
 - `src/node/wallet_bridge/chain_client.rs` — the node's concrete
   `ChainClient` implementation over committed state and `NodeSubmit`.
-- `src/wallet_boot.rs` — unlock/hydration, rescan lifecycle flags, task
-  tracking, and shutdown. This remains node-owned during runtime relocation.
+- `src/node/wallet_bridge/chain_snapshot.rs` — `ChainSnapshot`, the committed
+  `SigningView` over an `ergo-state` `CommittedSnapshot`.
+- `src/wallet_boot.rs` — wallet session ids, per-session task tracking, and
+  routing a node shutdown to the session's `RescanCoordinator`.
 - `src/api_bridge.rs` (+ siblings) — API trait implementations backed by the
   node snapshot and submission channels.
 - `src/mining_bridge.rs`, `src/node/mining_dispatch.rs`,
@@ -72,15 +83,20 @@ and the in-process chain client. Full runtime relocation is transitional.
 - `NodeState`, `action_loop` — chain runtime ownership and serialized mutation.
 - `NodeSnapshot`, `SnapshotPublisher`, `SnapshotHandle` — per-tick API read
   projection.
-- `NodeWalletAdmin` — API-to-wallet-command adapter.
-- `WalletStateHook` — node implementation of the service's `WalletApplyHook`.
+- `NodeWalletAdmin` — API-to-wallet-command adapter (with the pre-enqueue
+  rescan fence).
+- `ChainStateAccessorImpl`, `ChainSnapshot` — the node's `WalletChainAccess` /
+  `SigningView` over committed `ergo-state`.
+- `NodeSubmitAdapter`, `MempoolViewOverlay` — the engine's `TxSubmitter` and
+  `MempoolOverlay` over `NodeSubmit` and the API mempool view.
+- `WalletStateHook` — the service's `WalletApplyHook`, re-exported and wired
+  into block apply / rollback (its `wiring()` supplies the rollback guard).
 - `InProcessChainClient` / `NodeChainClient` — committed-state and submission
   adapter for the service `ChainClient`.
-- `WalletService` — service-owned runtime core embedded at boot; the node
-  passes it into selected read paths while retaining fallback/compatibility
-  paths during relocation.
-- `WalletCommand`, `run_wallet_writer_with_service`, `WriterContext` — the
-  transitional embedded wallet runtime.
+- `WalletService` — service-owned runtime core embedded at boot and handed
+  to the engine, which uses it for selected reads and for rescans.
+- `WalletCommand`, `run_wallet_writer_with_service` — the embedded wallet
+  writer: one engine per writer task, commands executed in arrival order.
 - `PeerEvent`, `MempoolNotifier`, `DiffSource` — peer ingestion and mempool
   reconciliation contracts.
 - `NodeConfig`, `StateType`, `NodeMode` — resolved configuration and operating
@@ -93,15 +109,17 @@ and the in-process chain client. Full runtime relocation is transitional.
   the action-loop task. Service-owned wallet persistence is invoked through a
   wallet apply payload in the same state redb transaction on both synchronous
   and background-persist paths.
-- **Two current wallet layers, one service core.** The service owns
-  persistence and runtime-core behavior. The node still owns the embedded
-  `SecretStorage`, `WalletState` lock, command dispatch, signing/admin
-  adaptation, rescan task flags, and API trait implementation. Do not describe
-  full runtime relocation as complete.
-- **Derived-key recovery.** Key derivation checks that history can be read
-  before changing the tracked keys, then starts a supervised full rescan.
-  Wallet operations remain fenced until the rebuild succeeds; unsupported
-  or pruned backends reject derivation before persisting a new key.
+- **Thin wallet adapter.** The wallet's behavior lives in the service's
+  `WalletEngine`; the node moves commands and replies, enforces the rescan
+  fences (before enqueue in `NodeWalletAdmin`, at execution in the writer),
+  runs a rescan's `RescanJob` with `spawn_blocking` tracked by the wallet
+  session, and implements the chain / submit / mempool seams. One
+  `RescanCoordinator` per wallet session is shared by the engine, the admin
+  fence and the chain-apply hook; there are no process-global rescan flags.
+- **Derived keys track forward.** Deriving a key persists it (tracked key,
+  visible addresses and — for `deriveNextKey` — the derivation head in one
+  write) and tracks it from the next applied block; it does not rescan
+  history.
 - **In-process chain adapter.** `InProcessChainClient` returns owned,
   identity-checked block data from the committed state reader and routes
   submission through `NodeSubmit`; the service itself has no node/API
@@ -129,4 +147,6 @@ and the in-process chain client. Full runtime relocation is transitional.
   blocks the chain writer on ordinary reads.
 - **Task ownership is explicit.** Shutdown signals and aborts every task
   registered by `RunHandle`; wallet writer/rescan tasks are tracked by
-  `wallet_boot` so they cannot outlive the embedded wallet session silently.
+  `wallet_boot` so they cannot outlive the embedded wallet session silently,
+  and shutdown cancels a running rescan through the session's
+  `RescanCoordinator`.

@@ -90,7 +90,8 @@ relay/reorg policy, not transaction-acceptance rules.
 - `ErgoValidator` (struct, impl `Validator`) — production adapter onto
   `ergo_validation::validate_transaction_parsed` — `src/validator.rs:52`
 - `MAINNET_FEE_PROPOSITION_BYTES` (const) — canonical miner-fee ErgoTree;
-  outputs matching it ARE the fee under ERG conservation — `src/validator.rs:38`
+  outputs matching it ARE the fee under ERG conservation. Defined once in
+  `ergo_validation::fee` and re-exported from `src/validator.rs`.
 - `admission::check` (fn) — steps 0–14, decision-only, no pool mutation — `src/admission.rs:523`
 - `admission::commit` (fn) — steps 15+17, applies the cleared candidate — `src/admission.rs:912`
 - `AdmissionCtx` / `TipContext` (structs) — borrow bundles threaded through
@@ -189,6 +190,7 @@ relay/reorg policy, not transaction-acceptance rules.
 - **`peek_fee`/`validate` consistency.** For the same bytes both must return
   identical `(tx_id, fee)`; divergence is a validator bug, caught by
   `debug_assert` in `check` (`src/admission.rs:779`).
-- **Fee-proposition drift guard.** `MAINNET_FEE_PROPOSITION_BYTES` is pinned
-  against the Scala-derived fixture `test-vectors/mainnet/fee_proposition.hex`
-  (`src/validator.rs:38`, drift test at `:290`).
+- **Fee-proposition drift guard.** `MAINNET_FEE_PROPOSITION_BYTES` (defined in
+  `ergo-validation/src/fee.rs`) is pinned against the Scala-derived fixture
+  `test-vectors/mainnet/fee_proposition.hex` by the drift test in
+  `src/validator.rs`.

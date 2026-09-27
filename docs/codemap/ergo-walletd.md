@@ -26,8 +26,8 @@ real `ergo-api` router with its real `api_key` gate — and drive the real daemo
 client and sync loop over real HTTP against it, instead of a hand-rolled stub.
 `ergo-validation` and `parking_lot` exist only for `tests/it/shadow.rs`, which
 has to build a real `CheckedBlock` for the production `StateStore::apply_block`
-and a real `ergo-node` `WalletStateHook` (see "The embedded-vs-daemon shadow
-harness"). They never enter the released binary's dependency graph;
+and the real `WalletStateHook` the node wires (see "The embedded-vs-daemon
+shadow harness"). They never enter the released binary's dependency graph;
 `Cargo.toml` carries the same note per dependency.
 **Depended on by:** nothing in the workspace (it is a leaf binary)
 **Approx LOC:** ~4.8K (`src/**/*.rs`) plus ~6.2K of integration tests
@@ -281,10 +281,11 @@ with full metadata, visible keys, derivation head, change address, the
 order at capture, so a diff can only mean "a value differs".
 
 **Both paths are real.** The embedded side uses the production
-`StateStore::apply_block` with the production `ergo-node` `WalletStateHook`
-(hydrated from the store's own `WALLET_TRACKED_PUBKEYS`), so the wallet apply
-is the atomic in-txn one, and `StateStore::rollback_to` with the real
-`ProdRescanGuard` for the reorg. The daemon side uses the real
+`StateStore::apply_block` with the production `WalletStateHook` (the wallet
+service's hook, as `ergo-node` wires it; hydrated from the store's own
+`WALLET_TRACKED_PUBKEYS`), so the wallet apply is the atomic in-txn one, and
+`StateStore::rollback_to` with the hook's real `WalletRescanGuard` for the
+reorg. The daemon side uses the real
 `StandaloneSyncer` over the real `HttpChainClient` against the real `ergo-api`
 router with its real `ApiSecurity` gate and real `Governor`, backed by that
 same `StateStore` through ergo-node's real `InProcessChainClient` +
