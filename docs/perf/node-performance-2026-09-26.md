@@ -92,9 +92,10 @@ shared node runtime, without creating a second runtime. Tokio is now a test-only
 dependency of the indexer crate. Within this workspace, `IndexerTask::run` becomes
 blocking and node boot uses `IndexerTask::spawn` instead of `tokio::spawn(run(...))`.
 This follows [Tokio's guidance for long-lived blocking workloads](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html#when-to-use-spawn_blocking-vs-dedicated-threads).
-It retains the single writer, per-block transaction boundaries, retry and reorg
-semantics. It does not parallelize block application or promise higher indexing
-throughput.
+It retains the single writer, per-block undo and metadata, and the retry and
+reorg semantics. Forward catch-up commits bounded multi-block batches; see
+[indexer-batches-2026-09-26.md](indexer-batches-2026-09-26.md). The worker does
+not parallelize block application or promise higher indexing throughput.
 
 Idle/retry waits check cancellation at most every 50 ms, including when a long
 idle interval is configured. Explicit node shutdown joins the worker after its
@@ -131,8 +132,6 @@ a 60-second idle interval, checking the public status API and immediate DB reope
 - Measure a fixed historical block interval before claiming end-to-end gains.
   Record blocks/transactions/boxes per second, phase time, write traffic and
   peak/retained memory.
-- Evaluate bounded apply batching only after identifying remaining commit
-  overhead. Preserve durable checkpoints, reorg handling and prompt shutdown.
 - Keep cache budgets separate: the existing `store.cache_bytes` controls the
   AVL arena, not redb's per-database caches or mining's retained prover graph.
 - Attribute retained mining memory and record cold-cache fallback reasons
