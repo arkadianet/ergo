@@ -1448,6 +1448,7 @@ fn decode_scan_box(box_json: &serde_json::Value) -> Result<ErgoBox, WalletAdminE
 #[cfg(test)]
 mod command_fencing_tests {
     use super::*;
+    use ergo_wallet_service::wallet::{RedbWalletStore, WalletStore};
 
     #[tokio::test]
     async fn normal_commands_are_fenced_but_rescan_is_allowed() {
@@ -1476,8 +1477,21 @@ mod command_fencing_tests {
 
     #[tokio::test]
     async fn normal_commands_are_fenced_during_rescan() {
+        // A real partial rescan claim (cursor 0, tip 1): `in_progress` is set
+        // without the fail-closed or scan-rebuild fences, so the admin's
+        // fence has only `in_progress` to trip on.
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("wallet.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
         let coordinator = Arc::new(RescanCoordinator::new());
-        coordinator.set_in_progress_for_test(true);
+        coordinator.begin_rescan(1, &store, 1).unwrap();
+        assert!(coordinator.in_progress());
+        assert!(!coordinator.fail_closed());
+        assert!(!coordinator.scan_rebuild_in_progress());
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let result = admin.balances().await;

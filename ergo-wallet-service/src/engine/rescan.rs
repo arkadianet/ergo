@@ -254,15 +254,10 @@ impl RescanCoordinator {
         self.finish_task_locked();
     }
 
-    /// Test support: force the rescan fence flag alone.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_in_progress_for_test(&self, value: bool) {
-        self.in_progress.store(value, Ordering::SeqCst);
-    }
-
-    /// Test support: force the scan-rebuild quiesce flag alone.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_scan_rebuild_for_test(&self, value: bool) {
+    /// This crate's tests only: force the scan-rebuild quiesce flag alone,
+    /// bypassing the transition lock.
+    #[cfg(test)]
+    pub(crate) fn set_scan_rebuild_for_test(&self, value: bool) {
         self.scan_rebuild.store(value, Ordering::SeqCst);
     }
 }

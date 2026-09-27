@@ -32,11 +32,6 @@ parking_lot          = { workspace = true }
 k256                 = { workspace = true, features = ["arithmetic"] }
 zeroize              = { workspace = true }
 
-[features]
-# Exposes `RescanCoordinator` flag setters to other crates' tests (the node's
-# command-fence tests). Production code never sets this.
-test-support = []
-
 [dev-dependencies]
 tempfile = { workspace = true }
 # TEST-ONLY: the `/scan/addBox` tests decode their Scala box JSON with the same
