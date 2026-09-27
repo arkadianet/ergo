@@ -1044,46 +1044,19 @@ impl WalletWrite for RedbWalletWrite<'_> {
         }
         let height = start_height.saturating_sub(1);
         let header_id = if height == 0 {
-            if let Some(cursor) = read_wallet_cursor(self.txn())? {
-                if cursor.height != 0 || cursor.header_id.is_some() {
-                    return Err(WalletStoreError::Decode(
-                        "rescan boundary cursor 0 is not the genesis sentinel".to_string(),
-                    ));
-                }
-            }
             None
         } else {
-            let cursor = read_wallet_cursor(self.txn())?.ok_or_else(|| {
-                WalletStoreError::Decode(format!("rescan boundary cursor {height} is missing"))
-            })?;
-            if cursor.height != height {
-                return Err(WalletStoreError::Decode(format!(
-                    "rescan boundary cursor height {} does not match {height}",
-                    cursor.height
-                )));
-            }
-            let cursor_id = cursor.header_id.ok_or_else(|| {
-                WalletStoreError::Decode(format!(
-                    "rescan boundary cursor {height} has no header identity"
-                ))
-            })?;
-            let table = self.txn().open_table(crate::wallet::tables::CHAIN_INDEX)?;
-            let bytes = table.get(height as u64)?.ok_or_else(|| {
+            let indexed_id = read_chain_index_header(self.txn(), height)?.ok_or_else(|| {
                 WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
             })?;
-            if bytes.value().len() != 32 {
-                return Err(WalletStoreError::Decode(format!(
-                    "chain index row at {height} is not 32 bytes"
-                )));
+            if let Some(cursor) = read_wallet_cursor(self.txn())? {
+                if cursor.height == height && cursor.header_id != Some(indexed_id) {
+                    return Err(WalletStoreError::Decode(format!(
+                        "rescan boundary cursor identity changed at {height}"
+                    )));
+                }
             }
-            let mut indexed_id = [0; 32];
-            indexed_id.copy_from_slice(bytes.value());
-            if indexed_id != cursor_id {
-                return Err(WalletStoreError::Decode(format!(
-                    "rescan boundary cursor identity changed at {height}"
-                )));
-            }
-            Some(cursor_id)
+            Some(indexed_id)
         };
         set_scan_cursor(self.txn(), height, header_id.as_ref())?;
         Ok(())

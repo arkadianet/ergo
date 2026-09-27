@@ -607,10 +607,16 @@ impl WalletService {
             WalletServiceError::InvalidRequest("wallet scan cursor is missing".to_string())
         })?;
         if cursor.height != height {
-            return Err(WalletServiceError::InvalidRequest(format!(
-                "wallet cursor height {} does not match requested boundary {height}",
-                cursor.height
-            )));
+            let header_id = self
+                .store
+                .read()?
+                .chain_index_header(height)?
+                .ok_or_else(|| {
+                    WalletServiceError::InvalidRequest(format!(
+                        "rescan boundary {height} is missing"
+                    ))
+                })?;
+            return Ok(ChainCursor { height, header_id });
         }
         let header_id = cursor.header_id.ok_or_else(|| {
             WalletServiceError::InvalidRequest("wallet cursor has no header identity".to_string())
@@ -1633,6 +1639,51 @@ mod tests {
             store.read().unwrap().rescan_state().unwrap(),
             RescanState::Idle
         );
+    }
+
+    #[test]
+    fn service_partial_rescan_rewinds_and_replays_three_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::create(dir.path().join("wallet.redb")).unwrap());
+        // Embedded mode shares the node's retained canonical chain index.
+        let txn = db.begin_write().unwrap();
+        for height in 1..=5u64 {
+            txn.open_table(crate::wallet::tables::CHAIN_INDEX)
+                .unwrap()
+                .insert(height, [height as u8; 32].as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        let store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(db));
+        let cursors = Arc::new(Mutex::new(Vec::new()));
+        let chain = Arc::new(RecordingChain {
+            inner: FakeChain {
+                tip: CommittedTip::new(5, [5; 32]),
+                blocks: (1..=5)
+                    .map(|height| ChainBlock {
+                        height,
+                        block_id: [height as u8; 32],
+                        parent_id: [(height - 1) as u8; 32],
+                        transactions: vec![],
+                    })
+                    .collect(),
+            },
+            cursors: cursors.clone(),
+        });
+        let service = WalletService::new(store.clone(), chain);
+        service.rescan_full().unwrap();
+        cursors.lock().unwrap().clear();
+        let report = service.rescan_to_tip(3).unwrap();
+        assert_eq!(report.blocks_processed, 3);
+        assert!(report.completed);
+        assert_eq!(
+            cursors.lock().unwrap().as_slice(),
+            &[ChainCursor {
+                height: 2,
+                header_id: [2; 32]
+            }]
+        );
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
     }
 
     #[test]
