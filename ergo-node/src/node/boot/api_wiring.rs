@@ -262,12 +262,13 @@ pub(super) async fn bind(
         Arc<dyn ergo_api::wallet::WalletAdmin>,
         Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
     ) = if let Some(wallet_store) = wallet_store {
-        // One rescan coordinator per wallet session, shared by the writer
-        // task's engine, the admin fence, and the chain-apply hook + rollback
-        // guard; the session registry keeps it so shutdown can cancel a
-        // running rescan.
+        // The wallet's rescan coordinator. Boot recovery and a failed
+        // hydration act on it before the engine takes it; `EmbeddedWallet`
+        // then shares the engine's coordinator with the admin fence, the
+        // writer task and the chain-apply hook + rollback guard, and registers
+        // it with the new wallet session so shutdown can cancel a running
+        // rescan.
         let rescan = Arc::new(ergo_wallet_service::engine::RescanCoordinator::new());
-        wallet_session_id = crate::wallet_boot::begin_wallet_session(rescan.clone());
         if let Err(error) =
             ergo_wallet_service::engine::recover_interrupted_rescan(wallet_store.as_ref(), &rescan)
         {
@@ -317,9 +318,6 @@ pub(super) async fn bind(
             }
             Arc::new(parking_lot::RwLock::new(state))
         };
-        let wallet_state_for_hook = Arc::clone(&wallet_state);
-        let (wallet_tx, wallet_rx) =
-            mpsc::channel::<super::super::wallet_bridge::WalletCommand>(64);
         let writer_cfg = ergo_wallet_service::engine::WalletEngineConfig {
             network: network_prefix,
             expose_private_keys: config.wallet_expose_private_keys,
@@ -330,20 +328,23 @@ pub(super) async fn bind(
         let submit_handle: Arc<dyn ergo_wallet_service::engine::TxSubmitter> = Arc::new(
             super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
         );
-        let writer_handle =
-            tokio::spawn(super::super::wallet_bridge::run_wallet_writer_with_service(
-                wallet_rx,
-                wallet_storage,
-                wallet_state,
-                wallet_store.clone(),
-                chain_accessor,
-                writer_cfg,
-                submit_handle,
-                mempool_view.clone(),
-                rescan.clone(),
-                wallet_session_id,
-                wallet_service,
-            ));
+        let wallet = super::super::wallet_bridge::EmbeddedWallet::new(
+            ergo_wallet_service::engine::WalletEngineParts {
+                storage: wallet_storage,
+                state: wallet_state,
+                store: wallet_store,
+                chain: chain_accessor,
+                config: writer_cfg,
+                submitter: submit_handle,
+                mempool: Arc::new(super::super::wallet_bridge::MempoolViewOverlay::new(
+                    mempool_view.clone(),
+                )),
+                service: Some(wallet_service),
+                rescan,
+            },
+        );
+        wallet_session_id = wallet.session_id;
+        let writer_handle = tokio::spawn(wallet.writer.run());
         if let Err(error) =
             crate::wallet_boot::track_wallet_task(wallet_session_id, writer_handle).await
         {
@@ -351,15 +352,8 @@ pub(super) async fn bind(
                 "wallet writer task registration failed: {error}"
             )));
         }
-        let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(
-            super::super::wallet_bridge::NodeWalletAdmin::with_session(wallet_tx, rescan.clone()),
-        );
-        let hook = Arc::new(super::super::wallet_bridge::WalletStateHook::new(
-            wallet_state_for_hook,
-            wallet_store,
-            rescan,
-        ));
-        (wallet_admin, Some(hook))
+        let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(wallet.admin);
+        (wallet_admin, Some(Arc::new(wallet.hook)))
     } else {
         (Arc::new(ergo_api::wallet::NoopWalletAdmin), None)
     };

@@ -1,6 +1,11 @@
 //! The chain-apply hook: [`WalletStateHook`] feeds the wallet's tracked keys
 //! and registered scans into block apply / rollback, and quiesces live
 //! wallet apply while its [`RescanCoordinator`] reports a full rebuild.
+//!
+//! A hook for a wallet an engine runs comes only from
+//! [`WalletEngine::state_hook`], which hands it the engine's own state, store
+//! and rescan coordinator; [`WalletStateHook::standalone`] is the explicitly
+//! engine-less path for test harnesses.
 
 use std::sync::Arc;
 
@@ -9,7 +14,7 @@ use parking_lot::RwLock;
 use crate::state::WalletState;
 use crate::wallet::WalletApplyHook;
 
-use super::{RescanCoordinator, WalletRescanGuard};
+use super::{RescanCoordinator, WalletEngine, WalletRescanGuard};
 
 /// The production [`WalletApplyHook`] backed by the shared `Arc<RwLock<WalletState>>`
 /// (synchronous `parking_lot::RwLock`).
@@ -34,7 +39,10 @@ pub struct WalletStateHook {
 }
 
 impl WalletStateHook {
-    pub fn new(
+    /// Crate-internal: a hook must share its wallet's rescan coordinator,
+    /// which only [`WalletEngine::state_hook`] (and this crate's tests) can
+    /// guarantee.
+    pub(crate) fn new(
         wallet: Arc<RwLock<WalletState>>,
         store: Arc<dyn crate::wallet::WalletStore>,
         rescan: Arc<RescanCoordinator>,
@@ -44,6 +52,19 @@ impl WalletStateHook {
             store,
             rescan_guard: WalletRescanGuard::new(rescan),
         }
+    }
+
+    /// A hook with a rescan coordinator of its own, for driving chain apply
+    /// and rollback where no [`WalletEngine`] runs (test harnesses such as the
+    /// embedded-vs-daemon shadow comparison). No engine shares its
+    /// coordinator, so its quiesce gates and rollback guard never see an
+    /// engine's rescan: a wallet an engine runs must use
+    /// [`WalletEngine::state_hook`].
+    pub fn standalone(
+        wallet: Arc<RwLock<WalletState>>,
+        store: Arc<dyn crate::wallet::WalletStore>,
+    ) -> Self {
+        Self::new(wallet, store, Arc::new(RescanCoordinator::new()))
     }
 
     /// The chain-rollback guard sharing this hook's rescan coordinator.
@@ -61,6 +82,16 @@ impl WalletStateHook {
 
     fn rescan(&self) -> &RescanCoordinator {
         self.rescan_guard.coordinator()
+    }
+}
+
+impl WalletEngine {
+    /// The chain-apply hook for this engine's wallet: it reads the engine's
+    /// in-memory state and wallet store and shares the engine's rescan
+    /// coordinator, so its full-rebuild quiesce and its rollback guard act on
+    /// the rescans this engine runs.
+    pub fn state_hook(&self) -> WalletStateHook {
+        WalletStateHook::new(self.state.clone(), self.store.clone(), self.rescan.clone())
     }
 }
 

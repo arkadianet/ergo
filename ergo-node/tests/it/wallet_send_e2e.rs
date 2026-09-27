@@ -11,7 +11,7 @@
 //! `ergo-wallet::proving::*`, `ergo-node::*`, and `ergo-sigma::*` are all
 //! in scope.
 //!
-//! The full writer-task path (NodeWalletAdmin + run_wallet_writer) requires
+//! The full writer-task path (NodeWalletAdmin + WalletWriter) requires
 //! an AVL-tree-backed UTXO set for `lookup_utxo`, which is expensive to seed
 //! in an integration test. Instead we drive `Prover::sign` +
 //! `verify_spending_proof_with_context_and_cost` directly — this is exactly

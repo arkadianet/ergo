@@ -1,13 +1,16 @@
 //! The node's thin adapter over the wallet engine
 //! ([`ergo_wallet_service::engine::WalletEngine`]).
 //!
-//! Single-writer pattern: one wallet writer task owns the engine (and through
-//! it the wallet storage + state behind a `RwLock`). The axum API task sends
-//! [`WalletCommand`]s through [`NodeWalletAdmin`] (the `ergo_api`
-//! `WalletAdmin` impl); the writer processes them serially, calls the engine
-//! method for each, and sends the response back via the per-command oneshot
-//! channel. Everything wallet-specific lives in the engine; this module owns
-//! only the transport and runtime concerns:
+//! Single-writer pattern: [`EmbeddedWallet::new`] builds the engine and
+//! begins a wallet session for it, returning the three pieces that share the
+//! engine's rescan coordinator — the [`NodeWalletAdmin`] (the `ergo_api`
+//! `WalletAdmin` impl), the [`WalletWriter`] task that owns the engine (and
+//! through it the wallet storage + state behind a `RwLock`), and the
+//! chain-apply [`WalletStateHook`]. The axum API task sends
+//! [`WalletCommand`]s through the admin; the writer processes them serially,
+//! calls the engine method for each, and sends the response back via the
+//! per-command oneshot channel. Everything wallet-specific lives in the
+//! engine; this module owns only the transport and runtime concerns:
 //!
 //! - the command channel, the pre-enqueue and execution rescan fences, and
 //!   the rescan-control policy;
@@ -25,13 +28,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
 use ergo_api::wallet::WalletAdmin;
 use ergo_primitives::digest::Digest32;
 use ergo_ser::ergo_box::ErgoBox;
-use ergo_wallet::storage::SecretStorage;
 use ergo_wallet_protocol::scala::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_wallet_protocol::scala::sending::PaymentRequestDto;
 use ergo_wallet_protocol::scala::sending::{
@@ -48,9 +49,8 @@ use ergo_wallet_protocol::WalletAdminError;
 use ergo_wallet_service::chain::CommittedTip;
 use ergo_wallet_service::engine::{
     ChainAccessError, MempoolOverlay, RescanCoordinator, SigningView, TxSubmitError, TxSubmitter,
-    WalletChainAccess, WalletEngine, WalletEngineConfig, WalletEngineParts,
+    WalletChainAccess, WalletEngine, WalletEngineParts,
 };
-use ergo_wallet_service::state::WalletState;
 use ergo_wallet_service::wallet::scan::{RescanBlock, RescanReadError};
 
 pub mod chain_client;
@@ -457,8 +457,8 @@ impl WalletCommand {
     }
 }
 
-/// `WalletAdmin` impl backed by a command channel. Constructed by
-/// `Node::run` and handed to `ergo-api`'s router builder.
+/// `WalletAdmin` impl backed by a command channel. Built by
+/// [`EmbeddedWallet::new`] and handed to `ergo-api`'s router builder.
 pub struct NodeWalletAdmin {
     tx: mpsc::Sender<WalletCommand>,
     /// The wallet's rescan coordinator: the pre-enqueue fence reads it.
@@ -466,17 +466,10 @@ pub struct NodeWalletAdmin {
 }
 
 impl NodeWalletAdmin {
-    /// Begin a new wallet session owned by `rescan` and wrap the command
-    /// channel of the writer task that shares the same coordinator.
-    pub fn new(tx: mpsc::Sender<WalletCommand>, rescan: Arc<RescanCoordinator>) -> Self {
-        crate::wallet_boot::begin_wallet_session(rescan.clone());
-        Self { tx, rescan }
-    }
-
-    pub(super) fn with_session(
-        tx: mpsc::Sender<WalletCommand>,
-        rescan: Arc<RescanCoordinator>,
-    ) -> Self {
+    /// Wrap the command channel of the writer whose engine owns `rescan`.
+    /// Private: only [`EmbeddedWallet::new`] (and this module's tests) pair
+    /// an admin with its writer's coordinator.
+    fn new(tx: mpsc::Sender<WalletCommand>, rescan: Arc<RescanCoordinator>) -> Self {
         Self { tx, rescan }
     }
 
@@ -1136,129 +1129,80 @@ impl WalletChainAccess for ChainStateAccessorImpl {
     }
 }
 
-/// Writer-task loop. Runs in a dedicated tokio task; receives commands and
-/// dispatches against owned `storage` + `state` + wallet store + `chain`
-/// accessor. Each command's reply is sent back via its oneshot. `rescan` is
-/// the wallet's rescan coordinator, shared with the [`NodeWalletAdmin`] fence
-/// and the chain-apply [`WalletStateHook`].
-#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into the engine
-pub async fn run_wallet_writer(
-    rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-    chain: Arc<dyn WalletChainAccess>,
-    cfg: WalletEngineConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<RescanCoordinator>,
-) {
-    let session_id = crate::wallet_boot::wallet_session_id();
-    run_wallet_writer_with_session(
-        rx,
-        storage,
-        state,
-        store,
-        chain,
-        cfg,
-        submit_handle,
-        mempool,
-        rescan,
-        session_id,
-    )
-    .await
+/// Capacity of the command channel between the API and the wallet writer.
+const WALLET_COMMAND_QUEUE: usize = 64;
+
+/// The embedded wallet of one node wallet session, wired around a single
+/// [`WalletEngine`]: the API-side [`NodeWalletAdmin`], the [`WalletWriter`]
+/// task that owns the engine, and the chain-apply [`WalletStateHook`].
+///
+/// All three take the engine's rescan coordinator, so the admin's
+/// pre-enqueue fence, the writer's execution fence and rescans, and the
+/// hook's full-rebuild quiesce and rollback guard always act on the same
+/// wallet; the session registry holds it too, so a shutdown of this session
+/// cancels this wallet's rescan. None of them can be handed a coordinator of
+/// its own.
+pub struct EmbeddedWallet {
+    /// The `WalletAdmin` the API serves the wallet routes through.
+    pub admin: NodeWalletAdmin,
+    /// The single writer; spawn [`WalletWriter::run`] on the runtime.
+    pub writer: WalletWriter,
+    /// The chain-apply hook (and its rollback guard) for block apply and
+    /// rollback.
+    pub hook: WalletStateHook,
+    /// This wallet session's id: the writer's rescan tasks are tracked under
+    /// it, and a node shutdown is routed by it.
+    pub(crate) session_id: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_wallet_writer_with_session(
-    rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-    chain: Arc<dyn WalletChainAccess>,
-    cfg: WalletEngineConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<RescanCoordinator>,
-    wallet_session_id: u64,
-) {
-    run_wallet_writer_inner(
-        rx,
-        storage,
-        state,
-        store,
-        chain,
-        cfg,
-        submit_handle,
-        mempool,
-        rescan,
-        wallet_session_id,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_wallet_writer_with_service(
-    rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-    chain: Arc<dyn WalletChainAccess>,
-    cfg: WalletEngineConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<RescanCoordinator>,
-    wallet_session_id: u64,
-    service: Arc<ergo_wallet_service::runtime::WalletService>,
-) {
-    run_wallet_writer_inner(
-        rx,
-        storage,
-        state,
-        store,
-        chain,
-        cfg,
-        submit_handle,
-        mempool,
-        rescan,
-        wallet_session_id,
-        Some(service),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_wallet_writer_inner(
-    mut rx: mpsc::Receiver<WalletCommand>,
-    storage: Arc<RwLock<SecretStorage>>,
-    state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-    chain: Arc<dyn WalletChainAccess>,
-    cfg: WalletEngineConfig,
-    submit_handle: Arc<dyn TxSubmitter>,
-    mempool: Arc<dyn ergo_api::MempoolView>,
-    rescan: Arc<RescanCoordinator>,
-    wallet_session_id: u64,
-    service: Option<Arc<ergo_wallet_service::runtime::WalletService>>,
-) {
-    let mut engine = WalletEngine::new(WalletEngineParts {
-        storage,
-        state,
-        store,
-        chain,
-        config: cfg,
-        submitter: submit_handle,
-        mempool: Arc::new(MempoolViewOverlay::new(mempool)),
-        service,
-        rescan,
-    });
-    while let Some(cmd) = rx.recv().await {
-        if !cmd.is_rescan_control() && engine.rescan_coordinator().operations_fenced() {
-            cmd.reject_during_rescan();
-            continue;
+impl EmbeddedWallet {
+    /// Build the engine from `parts` and begin a new node wallet session for
+    /// it, registering the engine's rescan coordinator for shutdown routing.
+    pub fn new(parts: WalletEngineParts) -> Self {
+        let engine = WalletEngine::new(parts);
+        let rescan = engine.rescan_coordinator().clone();
+        let session_id = crate::wallet_boot::begin_wallet_session(rescan.clone());
+        let (tx, rx) = mpsc::channel(WALLET_COMMAND_QUEUE);
+        Self {
+            admin: NodeWalletAdmin::new(tx, rescan),
+            hook: engine.state_hook(),
+            writer: WalletWriter {
+                rx,
+                engine,
+                session_id,
+            },
+            session_id,
         }
-        dispatch(&mut engine, wallet_session_id, cmd).await;
+    }
+}
+
+/// The wallet's single writer: owns the [`WalletEngine`] and serves the
+/// [`NodeWalletAdmin`]'s commands one at a time, in arrival order, until
+/// every admin handle is dropped. Built by [`EmbeddedWallet::new`].
+pub struct WalletWriter {
+    rx: mpsc::Receiver<WalletCommand>,
+    engine: WalletEngine,
+    session_id: u64,
+}
+
+impl WalletWriter {
+    /// The writer-task loop: receive each command, reject it at execution
+    /// time while the rescan fence is up (unless it is rescan control), and
+    /// otherwise dispatch it to the engine; each reply goes back via the
+    /// command's oneshot.
+    pub async fn run(self) {
+        let Self {
+            mut rx,
+            mut engine,
+            session_id,
+        } = self;
+        while let Some(cmd) = rx.recv().await {
+            if !cmd.is_rescan_control() && engine.rescan_coordinator().operations_fenced() {
+                cmd.reject_during_rescan();
+                continue;
+            }
+            dispatch(&mut engine, session_id, cmd).await;
+        }
     }
 }
 

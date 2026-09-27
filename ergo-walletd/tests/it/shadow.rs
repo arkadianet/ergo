@@ -1560,7 +1560,8 @@ impl EmbeddedSide {
 
 /// Build the real production hook, hydrated from the store's own tracked keys —
 /// the same boot-time hydration the node performs before handing the hook to
-/// the chain-apply seam.
+/// the chain-apply seam. No wallet engine runs here, so it is the standalone
+/// hook, with a rescan coordinator of its own.
 fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::WalletStateHook {
     let read = store.read().expect("hook hydration read");
     let hydration = ergo_wallet_service::wallet::hydration::HydrationSnapshot::load(read.as_ref())
@@ -1569,10 +1570,9 @@ fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::W
     state
         .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
         .expect("hook hydration from the tracked-pubkey table");
-    ergo_node::node::wallet_bridge::WalletStateHook::new(
+    ergo_node::node::wallet_bridge::WalletStateHook::standalone(
         Arc::new(parking_lot::RwLock::new(state)),
         Arc::new(store.as_ref().clone()),
-        Arc::new(ergo_wallet_service::engine::RescanCoordinator::new()),
     )
 }
 

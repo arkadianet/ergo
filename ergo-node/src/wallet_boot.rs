@@ -61,10 +61,6 @@ pub(crate) fn begin_wallet_session(rescan: Arc<RescanCoordinator>) -> u64 {
     session_id
 }
 
-pub(crate) fn wallet_session_id() -> u64 {
-    WALLET_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 fn task_session_index(state: &WalletTaskState, session_id: u64) -> Option<usize> {
     state.sessions.iter().position(|(id, _)| *id == session_id)
 }

@@ -295,7 +295,9 @@ order at capture, so a diff can only mean "a value differs".
 **Both paths are real.** The embedded side uses the production
 `StateStore::apply_block` with the production `WalletStateHook` (the wallet
 service's hook, as `ergo-node` wires it; hydrated from the store's own
-`WALLET_TRACKED_PUBKEYS`), so the wallet apply is the atomic in-txn one, and
+`WALLET_TRACKED_PUBKEYS`, and built with `WalletStateHook::standalone`, since
+no wallet engine runs in the harness), so the wallet apply is the atomic
+in-txn one, and
 `StateStore::rollback_to` with the hook's real `WalletRescanGuard` for the
 reorg. The daemon side uses the real
 `StandaloneSyncer` over the real `HttpChainClient` against the real `ergo-api`

@@ -282,13 +282,17 @@ impl RescanCoordinator {
 /// The flags are process-local, not persisted; the invalidation row is
 /// durable once the caller commits, and an operator-driven rescan completing
 /// successfully is the only path that clears it.
+///
+/// Obtained from its [`WalletStateHook`](super::WalletStateHook)
+/// (`rescan_guard()` / `wiring()`), so it always shares the hook's — and so
+/// the engine's — coordinator.
 #[derive(Debug, Clone)]
 pub struct WalletRescanGuard {
     coordinator: Arc<RescanCoordinator>,
 }
 
 impl WalletRescanGuard {
-    pub fn new(coordinator: Arc<RescanCoordinator>) -> Self {
+    pub(crate) fn new(coordinator: Arc<RescanCoordinator>) -> Self {
         Self { coordinator }
     }
 

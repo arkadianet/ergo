@@ -126,7 +126,8 @@ and implements the seams over `ergo-state` (`WalletChainAccess` /
 view (`MempoolOverlay`). One
 `RescanCoordinator` per wallet session replaces any process-global rescan
 state and is shared by the engine, the admin fence and the chain-apply
-`WalletStateHook`. During block apply, a service-owned `WalletApplyPayload`
+`WalletStateHook` by construction: `EmbeddedWallet::new` builds the admin,
+the writer and the hook from the one engine. During block apply, a service-owned `WalletApplyPayload`
 runs in the same redb write transaction as the chain mutation; the embedded
 `WalletService`/`WalletRuntime` (over an in-process `ChainClient`) serves
 selected reads and rescans.

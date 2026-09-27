@@ -106,8 +106,9 @@ transitional `ergo-state -> ergo-wallet-service` integration
   seams.
 - `RescanCoordinator`, `WalletRescanGuard`, `RescanJob`,
   `recover_interrupted_rescan` — per-wallet rescan fences and orchestration.
-- `WalletStateHook`, `WalletBootService` — chain-apply hook and the unlock
-  path.
+- `WalletStateHook`, `WalletBootService` — chain-apply hook (from
+  `WalletEngine::state_hook`; `WalletStateHook::standalone` for engine-less
+  harnesses) and the unlock path.
 - `WalletService` / `WalletRuntime` — service-owned runtime facade.
 - `WalletStatus`, `RescanRequest`, `RescanReport` — status and bounded
   synchronization results.
@@ -146,6 +147,12 @@ transitional `ergo-state -> ergo-wallet-service` integration
   per wallet, shared by `Arc` between the engine, the `WalletStateHook` and
   its `WalletRescanGuard`. The crate has no `static` atomics or mutexes for
   wallet or rescan state.
+- **A hook shares its engine's coordinator by construction.** The hook for a
+  wallet an engine runs comes only from `WalletEngine::state_hook`, and the
+  rollback guard only from that hook; neither can be handed another
+  coordinator (their constructors are crate-private).
+  `WalletStateHook::standalone`, with a coordinator of its own, is the
+  explicitly engine-less path for test harnesses.
 - **Rescan runs off the command path.** `WalletEngine::prepare_rescan`
   performs every check and transition that can refuse a rescan and returns a
   `RescanJob`; the embedder runs `RescanJob::run` on a blocking thread. The

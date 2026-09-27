@@ -26,14 +26,15 @@ seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
 - `src/node/boot/` — production bring-up and `RunHandle` lifecycle.
 - `src/node/boot/api_wiring.rs` — constructs the shared wallet store, the
   in-process `ChainClient`, `ergo_wallet_service::runtime::WalletService`, the
-  wallet's `RescanCoordinator`, the embedded wallet writer (which owns the
-  `WalletEngine`), the chain-apply `WalletStateHook`, and the API adapters.
+  wallet's `RescanCoordinator` (boot recovery runs on it), the
+  `EmbeddedWallet` (admin, writer task owning the `WalletEngine`, chain-apply
+  `WalletStateHook`), and the API adapters.
 - `src/node/action_loop.rs` — the chain-state single-writer event loop.
 - `src/node/state.rs` — `NodeState`, the runtime god-struct mutated by loop
   handlers.
-- `src/node/wallet_bridge.rs` — the wallet adapter: `WalletCommand`,
-  `NodeWalletAdmin`, the writer loop that dispatches each command to the
-  `WalletEngine`, and the node-side seam implementations
+- `src/node/wallet_bridge.rs` — the wallet adapter: `EmbeddedWallet`,
+  `WalletCommand`, `NodeWalletAdmin`, the `WalletWriter` loop that dispatches
+  each command to the `WalletEngine`, and the node-side seam implementations
   (`ChainStateAccessorImpl`, `NodeSubmitAdapter`, `MempoolViewOverlay`).
 - `src/node/wallet_bridge/chain_client.rs` — `InProcessChainClient`, adapting
   committed `ChainStoreReader` and node submission into the service's
@@ -90,14 +91,18 @@ seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
   `SigningView` over committed `ergo-state`.
 - `NodeSubmitAdapter`, `MempoolViewOverlay` — the engine's `TxSubmitter` and
   `MempoolOverlay` over `NodeSubmit` and the API mempool view.
-- `WalletStateHook` — the service's `WalletApplyHook`, re-exported and wired
-  into block apply / rollback (its `wiring()` supplies the rollback guard).
+- `WalletStateHook` — the service's `WalletApplyHook`, re-exported; built from
+  the engine by `EmbeddedWallet` and wired into block apply / rollback (its
+  `wiring()` supplies the rollback guard).
 - `InProcessChainClient` / `NodeChainClient` — committed-state and submission
   adapter for the service `ChainClient`.
 - `WalletService` — service-owned runtime core embedded at boot and handed
   to the engine, which uses it for selected reads and for rescans.
-- `WalletCommand`, `run_wallet_writer_with_service` — the embedded wallet
-  writer: one engine per writer task, commands executed in arrival order.
+- `EmbeddedWallet`, `WalletWriter`, `WalletCommand` — the embedded wallet.
+  `EmbeddedWallet::new(parts)` builds the engine, begins the wallet session and
+  returns the admin, the writer task (one engine per writer, commands executed
+  in arrival order) and the chain-apply hook, all on the engine's
+  `RescanCoordinator`.
 - `PeerEvent`, `MempoolNotifier`, `DiffSource` — peer ingestion and mempool
   reconciliation contracts.
 - `NodeConfig`, `StateType`, `NodeMode` — resolved configuration and operating
@@ -116,7 +121,9 @@ seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
   runs a rescan's `RescanJob` with `spawn_blocking` tracked by the wallet
   session, and implements the chain / submit / mempool seams. One
   `RescanCoordinator` per wallet session is shared by the engine, the admin
-  fence and the chain-apply hook; there are no process-global rescan flags.
+  fence and the chain-apply hook by construction — `EmbeddedWallet::new`
+  derives all three from the one engine, and none takes a coordinator of its
+  own; there are no process-global rescan flags.
 - **Derived keys track forward.** Deriving a key persists it (tracked key,
   visible addresses and — for `deriveNextKey` — the derivation head in one
   write) and tracks it from the next applied block; it does not rescan
