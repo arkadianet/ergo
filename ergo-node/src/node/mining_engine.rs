@@ -570,7 +570,9 @@ pub(super) async fn run_mining_engine(
                         // Re-borrows the latest intent; the ring now holds this
                         // parent's minimal template, so the probe yields Full
                         // (no infinite Minimal loop — this task is the only
-                        // publisher and set_best_tip never evicts).
+                        // publisher and set_best_tip never evicts; only a failed
+                        // mined block withdraws a parent's templates, which costs
+                        // one more Minimal build per failure).
                         continue;
                     }
                     break;

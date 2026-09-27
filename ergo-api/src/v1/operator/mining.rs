@@ -35,7 +35,8 @@ fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
         ),
         MiningApiError::StaleParent => v1_error(
             Reason::StaleCandidate,
-            "the cached candidate's parent flipped (best-full advanced)",
+            "the solved candidate is no longer current (best-full advanced, or \
+             the candidate was withdrawn after a block mined from it failed to apply)",
             "re-fetch GET /api/v1/mining/candidate and resubmit",
         ),
         MiningApiError::Unavailable(detail) => v1_error(

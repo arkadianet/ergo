@@ -49,6 +49,15 @@ pub enum BuildReason {
     /// force a same-tip rebuild so the new header votes take effect on the next
     /// mined block instead of waiting for the next tip / mempool change.
     VotesChanged,
+    /// A locally mined block that became the best header failed to apply, so
+    /// every template on its parent was withdrawn
+    /// ([`crate::handle::MiningHandle::withdraw_templates_for_parent`]);
+    /// rebuild on the same tip now. Scala's
+    /// `CandidateGenerator.onSolvedBlockFailed` drops its cached candidates
+    /// the same way (v6.0.6 23aabead8 `CandidateGenerator.scala:94-104`) and
+    /// builds again on the next candidate request; the eager rebuild is this
+    /// node's choice, so a miner polling for work is not left without it.
+    SolvedBlockFailed,
 }
 
 /// How far the header tip may lead the applied full-block tip while mining
@@ -129,8 +138,10 @@ pub struct TemplateIdentity {
     pub chain_seq: u64,
     /// Monotonic publish counter; bumps on every newly published template.
     pub template_seq: u64,
-    /// True iff `chain_seq` advanced versus the previously published template
-    /// (the parent changed). True for the first template ever published.
+    /// True iff `chain_seq` advanced versus the newest offered template (the
+    /// parent changed). True when no template is offered: the first template
+    /// ever published, and the rebuild after
+    /// [`crate::handle::MiningHandle::withdraw_templates_for_parent`].
     pub clean_jobs: bool,
     /// Wall-clock at publish, passed in by the caller (the cache never reads the
     /// clock itself, so publish is deterministic under test).

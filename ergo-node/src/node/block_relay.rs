@@ -108,11 +108,12 @@ pub(super) fn remote_announcements(
 /// a mined block that became the best header and then failed to apply.
 /// Scala's `onSolvedBlockFailed` (CandidateGenerator.scala:94-104 at v6.0.6
 /// 23aabead8) drops the cached candidates, so its next solution on that
-/// parent comes from a fresh candidate and is announced before apply. Here
-/// the failed block's template stays cached, and every further solution on
-/// it would advertise another block this node rejects, so blocks on that
-/// parent are announced only after they apply (`finish_local_apply`) until a
-/// block applies.
+/// parent comes from a fresh candidate and is announced before apply. The
+/// mining handler withdraws that parent's templates too, but a deterministic
+/// builder/validator mismatch reproduces on the fresh template, and every
+/// solution on it would advertise another block this node rejects, so blocks
+/// on that parent are announced only after they apply (`finish_local_apply`)
+/// until a block applies.
 pub(super) fn announce_mined_block_before_apply(
     state: &mut NodeState,
     header_id: [u8; 32],

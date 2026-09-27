@@ -42,6 +42,18 @@ infrastructure.
   its body, and resubmitting the same solution stores the sections and applies
   the block; a mined block stored as a fork is reported as such rather than as
   a validation failure.
+- When a locally mined block that became the best header fails to apply, the
+  node now withdraws every candidate template on its parent, as Scala's
+  `onSolvedBlockFailed` drops its cached candidates, instead of accepting more
+  solutions for the template that produced it. It then rebuilds at once;
+  Scala rebuilds on the next candidate request. A solution to a withdrawn
+  template is refused before anything is stored with 400 `stale_candidate`
+  (counted as stale, not as invalid PoW), unless the nonce also solves the
+  rebuilt template. `GET /mining/candidate` answers 503 until the rebuild
+  publishes, a longpoll on a withdrawn template wakes, and the rebuilt
+  template carries `clean_jobs`. A section write that fails after the mined
+  header is stored is not an apply failure: the template stays offered, so
+  resubmitting the same solution is not refused as stale.
 
 
 ## [0.9.0] - 2026-09-25

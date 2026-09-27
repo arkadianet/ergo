@@ -71,9 +71,10 @@ pub enum MiningApiError {
     /// Posted nonce doesn't satisfy the cached candidate's target.
     #[error("invalid pow")]
     InvalidPow,
-    /// Cached candidate's parent_id no longer equals the live best-full
-    /// block id. 400 "stale candidate (best-full flipped)".
-    #[error("stale candidate (best-full flipped)")]
+    /// The solved candidate is no longer current: its parent_id no longer
+    /// equals the live best-full block id, or the node withdrew it after a
+    /// block mined on its parent failed to apply. 400 `stale_candidate`.
+    #[error("stale candidate (best-full flipped or candidate withdrawn)")]
     StaleParent,
     /// Mining subsystem disabled or node not synced. 503.
     #[error("mining not available: {0}")]

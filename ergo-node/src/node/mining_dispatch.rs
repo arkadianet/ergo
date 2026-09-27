@@ -97,14 +97,19 @@ pub(super) fn mempool_refresh_due(
 
 /// The action-loop producer's tracked state between iterations, as the
 /// signal decision consumes it: the tip the last signal reflected, the pool
-/// revision it built against, and the timestamps that throttle the recovery
-/// retry and the same-parent mempool refresh.
+/// revision it built against, the timestamps that throttle the recovery
+/// retry and the same-parent mempool refresh, and whether a mining request
+/// asked for a rebuild since the last signal.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MiningProducerState {
     pub(super) last_tip: MiningTipSnapshot,
     pub(super) last_revision: u64,
     pub(super) last_recovery: Option<Instant>,
     pub(super) last_mempool_signal: Option<Instant>,
+    /// A mined block that became the best header failed to apply, and the
+    /// handler withdrew the templates on its parent (see
+    /// [`handle_mining_request`]), so the engine must rebuild on the tip now.
+    pub(super) rebuild_requested: bool,
 }
 
 /// The two tuning windows [`decide_mining_signal`] throttles with: how often a
@@ -117,8 +122,9 @@ pub(super) struct MiningSignalIntervals {
 }
 
 /// What the action-loop producer should signal this iteration, given the
-/// current observations. Pure decision (no I/O) so the tip/recovery/refresh
-/// precedence is unit-testable. `None` = signal nothing this iteration.
+/// current observations. Pure decision (no I/O) so the
+/// tip/rebuild/recovery/refresh precedence is unit-testable. `None` = signal
+/// nothing this iteration.
 ///
 /// `mining_started` is the loop's latched gate (see [`mining_started_latch`]);
 /// it is passed in rather than recomputed from `tip_now` because the latch is
@@ -137,7 +143,14 @@ pub(super) fn decide_mining_signal(
     if tip_now != prev.last_tip {
         return Some(BuildReason::Tip);
     }
-    // 2. Started but nothing served yet (wallet just-ready / post-race) →
+    // 2. A mined block on this tip failed to apply and its templates were
+    //    withdrawn (Scala `onSolvedBlockFailed`) → rebuild now. A durable
+    //    verdict re-anchors best_header to the parent, so the tip snapshot is
+    //    unchanged, and the recovery retry below may still be throttled.
+    if mining_started && prev.rebuild_requested {
+        return Some(BuildReason::SolvedBlockFailed);
+    }
+    // 3. Started but nothing served yet (wallet just-ready / post-race) →
     //    throttled recovery retry.
     if mining_started
         && !has_cached_candidate
@@ -147,7 +160,7 @@ pub(super) fn decide_mining_signal(
     {
         return Some(BuildReason::WalletReady);
     }
-    // 3. Same tip, mempool advanced, debounce elapsed → same-parent refresh.
+    // 4. Same tip, mempool advanced, debounce elapsed → same-parent refresh.
     if mining_started
         && revision_now != prev.last_revision
         && mempool_refresh_due(prev.last_mempool_signal, now, intervals.refresh_debounce)
@@ -451,12 +464,17 @@ pub(super) fn signal_mining_engine(
 /// is `None` — defensive guard for the case where the channel sender
 /// leaks past the configured-disabled gate (the bridge isn't built
 /// when disabled, so no sender exists in practice).
+///
+/// Returns true when a submitted block became the best header and then failed
+/// to apply: the templates on its parent were withdrawn, and the action loop
+/// must signal a rebuild on the tip ([`BuildReason::SolvedBlockFailed`]).
+#[must_use = "a true result asks the action loop to rebuild the candidate now"]
 pub(super) fn handle_mining_request(
     state: &mut NodeState,
     mining_handle: Option<&ergo_mining::handle::MiningHandle>,
     offline_generation: bool,
     req: crate::mining_bridge::MiningRequest,
-) {
+) -> bool {
     let handle = match mining_handle {
         Some(h) => h,
         None => {
@@ -480,7 +498,7 @@ pub(super) fn handle_mining_request(
                     )));
                 }
             }
-            return;
+            return false;
         }
     };
 
@@ -514,7 +532,7 @@ pub(super) fn handle_mining_request(
             )),
         };
         let _ = reply.send(payload);
-        return;
+        return false;
     }
 
     // Mining-started gate — the SAME latch the producer maintains, read from
@@ -536,7 +554,7 @@ pub(super) fn handle_mining_request(
                 unreachable!("GetRewardKey is handled before the mining-started gate")
             }
         }
-        return;
+        return false;
     }
 
     match req {
@@ -584,6 +602,7 @@ pub(super) fn handle_mining_request(
                     }
                 };
             let _ = reply.send(payload);
+            false
         }
         crate::mining_bridge::MiningRequest::SubmitSolution { solution, reply } => {
             // 0. Decode the posted hex fields to typed form. ergo-mining is
@@ -598,7 +617,7 @@ pub(super) fn handle_mining_request(
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                         "solution decode: {e:?}"
                     ))));
-                    return;
+                    return false;
                 }
             };
             // 1. Verify against cached candidate (current then previous).
@@ -614,7 +633,7 @@ pub(super) fn handle_mining_request(
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                         "verify: {e:?}"
                     ))));
-                    return;
+                    return false;
                 }
             };
             // Verdict line for the operator timeline (logging contract:
@@ -635,12 +654,12 @@ pub(super) fn handle_mining_request(
                 ergo_mining::solution::SolutionOutcome::InvalidPow => {
                     crate::metrics_counters::incr_invalid_pow();
                     let _ = reply.send(Err(ergo_api::MiningApiError::InvalidPow));
-                    return;
+                    return false;
                 }
                 ergo_mining::solution::SolutionOutcome::StaleParent { .. } => {
                     crate::metrics_counters::incr_stale_parent();
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
-                    return;
+                    return false;
                 }
             };
             let parent_id = block.parent_id;
@@ -661,14 +680,14 @@ pub(super) fn handle_mining_request(
                     // two arms never double-count one solution.
                     crate::metrics_counters::incr_stale_parent();
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
-                    return;
+                    return false;
                 }
                 Err(e) => {
                     warn!(error = %e, "mining: block serialization failed");
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                         "persist: {e}"
                     ))));
-                    return;
+                    return false;
                 }
             };
             let header_id = mined.header_id;
@@ -698,7 +717,11 @@ pub(super) fn handle_mining_request(
             //    header is then announced and applied like a first
             //    submission. With every section stored it stops here with the
             //    known-header error. (`POST /blocks` re-runs apply for any
-            //    known header.)
+            //    known header.) A resubmission of a best-header block that
+            //    failed to apply never reaches this check: step 4 withdrew
+            //    its template, so step 1 answers it stale_candidate before
+            //    anything is stored. Apply failures keep the sections, so
+            //    this check would stop it too.
             let is_new_best = match ergo_sync::header_proc::process_header_cfg_with_genesis(
                 state
                     .store
@@ -732,14 +755,14 @@ pub(super) fn handle_mining_request(
                             let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                                 "process_header: {e}"
                             ))));
-                            return;
+                            return false;
                         }
                         Err(read) => {
                             warn!(error = %read, "mining: cannot read a known mined header's sections");
                             let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                                 "process_header: {e}; section read: {read}"
                             ))));
-                            return;
+                            return false;
                         }
                     }
                 }
@@ -748,7 +771,7 @@ pub(super) fn handle_mining_request(
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                         "process_header: {e}"
                     ))));
-                    return;
+                    return false;
                 }
             };
             // 3a. Persist BT/Extension/ADProofs now that the header is
@@ -793,7 +816,15 @@ pub(super) fn handle_mining_request(
             //      succeeds, applies the block (step 3). The miner has no block
             //      bytes to post to `POST /blocks` instead, and after a
             //      restart the cached template it would resubmit against is
-            //      gone.
+            //      gone. A failed write is not a failed apply, so its
+            //      template is not withdrawn and no rebuild is requested
+            //      (step 4 does both only after apply), and step 1 still
+            //      accepts the resubmission for it. The new best header does
+            //      start a tip build, which publishes a newer template on the
+            //      same parent, and step 1 tries that one first: a nonce that
+            //      meets it too (one in the difficulty; every nonce at the
+            //      devnet's difficulty one) makes a different block on it,
+            //      which ties this header and is stored as a fork.
             if let Err(e) = ergo_mining::submit::store_mined_sections(
                 state
                     .store
@@ -824,7 +855,7 @@ pub(super) fn handle_mining_request(
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                     "persist: {e}"
                 ))));
-                return;
+                return false;
             }
             // 3b. Announce before apply, as Scala's `NewBlockMined` does
             //    (CandidateGenerator.scala:77, ErgoNodeViewSynchronizer.scala
@@ -847,13 +878,15 @@ pub(super) fn handle_mining_request(
             //    freshness and tip-window gates.
             //
             //    Deliberate deviation: after a best-header mined block fails
-            //    to apply, Scala drops its cached candidates
-            //    (`onSolvedBlockFailed`), so its next solution comes from a
-            //    fresh candidate and is announced before apply. Here the
-            //    failed template stays cached, and every new nonce on it would
-            //    advertise another block that fails, so a block on the same
-            //    parent is announced only once it applies
-            //    (`block_relay::finish_local_apply`), until a block applies.
+            //    to apply, both nodes stop taking solutions for the templates
+            //    on its parent and build a fresh one (Scala
+            //    `onSolvedBlockFailed`, CandidateGenerator.scala:94-104; here
+            //    after step 4), and Scala announces the next solution before
+            //    apply. Here a block on the same parent is announced only once
+            //    it applies (`block_relay::finish_local_apply`), until a block
+            //    applies: a deterministic builder/validator mismatch
+            //    reproduces on the fresh template, and each solution on it
+            //    would advertise another block that fails.
             //    The blocks announced are therefore those that apply plus at
             //    most one failing block per parent while the full tip stays on
             //    it; the guard is held in memory, so after a restart one more
@@ -926,6 +959,7 @@ pub(super) fn handle_mining_request(
             ) {
                 info!(id = %hex::encode(header_id), apply_ms, "mined block applied");
                 let _ = reply.send(Ok(()));
+                false
             } else {
                 let observed = hex::encode(state.store.chain_state_meta().best_full_block_id);
                 let failure = match submitted {
@@ -981,9 +1015,33 @@ pub(super) fn handle_mining_request(
                         }
                     }
                 };
+                // Scala's `onSolvedBlockFailed` (CandidateGenerator.scala
+                // :94-104, reached at 194-198 at v6.0.6 23aabead8) drops the
+                // candidates the failed block could have come from. Withdraw
+                // them, so no further solution on them makes another block
+                // that fails (it is answered stale_candidate), and rebuild at
+                // once rather than on the next candidate request as Scala
+                // does. A fork block was never applied, so nothing failed and
+                // its template stays offered. A section write that failed in
+                // step 3a returned before apply and withdrew nothing: the
+                // resubmission that recovers it needs this template.
+                let rebuild = matches!(
+                    submitted,
+                    super::block_relay::MinedSubmission::NewBest { .. }
+                );
+                if rebuild {
+                    let withdrawn = handle.withdraw_templates_for_parent(&parent_id);
+                    warn!(
+                        id = %hex::encode(header_id),
+                        parent = %hex::encode(parent_id),
+                        withdrawn,
+                        "mining: withdrew the failed block's parent templates; rebuilding",
+                    );
+                }
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                     "block apply failed ({failure})"
                 ))));
+                rebuild
             }
         }
         // GetRewardKey is answered before the mining-started gate (above).
@@ -1390,6 +1448,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(now), // recovery already fired (would gate WalletReady)
             last_mempool_signal: Some(now), // refresh just fired (would gate MempoolRefresh)
+            rebuild_requested: false,
         };
         let tip_now = synced_tip(2, 11);
         let got = decide_mining_signal(
@@ -1408,6 +1467,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: None,
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1430,6 +1490,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: None,
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1452,6 +1513,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1474,6 +1536,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1496,6 +1559,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1520,6 +1584,7 @@ mod tests {
             last_revision: 5,
             last_recovery: None,
             last_mempool_signal: None,
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1545,6 +1610,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1568,6 +1634,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1592,6 +1659,7 @@ mod tests {
             last_revision: 5,
             last_recovery: Some(base),
             last_mempool_signal: Some(base),
+            rebuild_requested: false,
         };
         let got = decide_mining_signal(
             &prev,
@@ -1603,5 +1671,90 @@ mod tests {
             INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::WalletReady));
+    }
+
+    /// The producer state right after a mined block on `tip` failed to apply
+    /// and its templates were withdrawn: the tip is unchanged, and the
+    /// recovery and refresh windows are still closed.
+    fn after_failed_mined_block(tip: MiningTipSnapshot, at: Instant) -> MiningProducerState {
+        MiningProducerState {
+            last_tip: tip,
+            last_revision: 5,
+            last_recovery: Some(at),
+            last_mempool_signal: Some(at),
+            rebuild_requested: true,
+        }
+    }
+
+    #[test]
+    fn decide_rebuild_requested_same_tip_returns_solved_block_failed() {
+        // A durable verdict re-anchors best_header to the parent, so the tip
+        // is unchanged and nothing is served; without the request only the
+        // throttled recovery retry would rebuild.
+        let base = Instant::now();
+        let tip = synced_tip(1, 10);
+        let got = decide_mining_signal(
+            &after_failed_mined_block(tip, base),
+            tip,
+            /* mining_started */ true,
+            /* has_cached */ false,
+            5,
+            base,
+            INTERVALS,
+        );
+        assert_eq!(got, Some(BuildReason::SolvedBlockFailed));
+    }
+
+    #[test]
+    fn decide_rebuild_requested_preempts_recovery_and_refresh() {
+        // Recovery and refresh are both due too; the requested rebuild names
+        // why this build runs.
+        let base = Instant::now();
+        let tip = synced_tip(1, 10);
+        let got = decide_mining_signal(
+            &after_failed_mined_block(tip, base),
+            tip,
+            /* mining_started */ true,
+            /* has_cached */ false,
+            6,
+            base + DEBOUNCE,
+            INTERVALS,
+        );
+        assert_eq!(got, Some(BuildReason::SolvedBlockFailed));
+    }
+
+    #[test]
+    fn decide_tip_change_preempts_rebuild_request() {
+        // A failure without a verdict leaves the failed block as the best
+        // header, so the tip snapshot moved: the tip signal already rebuilds
+        // on the applied parent.
+        let base = Instant::now();
+        let got = decide_mining_signal(
+            &after_failed_mined_block(synced_tip(1, 10), base),
+            MiningTipSnapshot::for_test([1; 32], 10, [2; 32], 11),
+            /* mining_started */ true,
+            /* has_cached */ false,
+            5,
+            base,
+            INTERVALS,
+        );
+        assert_eq!(got, Some(BuildReason::Tip));
+    }
+
+    #[test]
+    fn decide_rebuild_requested_before_mining_started_returns_none() {
+        // Never build before the latch closes, whatever asks for it.
+        let base = Instant::now();
+        let tip = synced_tip(1, 10);
+        let got = decide_mining_signal(
+            &after_failed_mined_block(tip, base),
+            tip,
+            /* mining_started */ false,
+            /* has_cached */ false,
+            5,
+            base,
+            INTERVALS,
+        );
+        assert_eq!(got, None);
     }
 }
