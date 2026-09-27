@@ -86,6 +86,10 @@ pub struct WalletChainHeader {
     pub header_id: String,
     pub parent_id: String,
     pub timestamp_unix_ms: u64,
+    /// The canonical serialized header, PoW solution included, as lowercase
+    /// hex. `blake2b256(headerBytes)` is `headerId`, and the decoded header
+    /// carries `height`, `parentId` and `timestampUnixMs`.
+    pub header_bytes: String,
 }
 
 #[derive(Debug, ToSchema)]
@@ -154,6 +158,11 @@ pub struct WalletChainBlock {
     pub block_id: String,
     pub height: u32,
     pub parent_id: String,
+    /// The canonical serialized header, PoW solution included, as lowercase
+    /// hex. `blake2b256(headerBytes)` is `blockId`, and the decoded header
+    /// carries `height` and `parentId`. Transactions are wallet-relevant parts
+    /// and are not bound to the header's transactions root.
+    pub header_bytes: String,
     pub transactions: Vec<WalletChainTransaction>,
 }
 

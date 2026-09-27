@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use ergo_primitives::digest::blake2b256;
+use ergo_primitives::reader::VlqReader;
+use ergo_ser::header::{read_header, Header};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -50,6 +53,30 @@ pub struct ChainHeader {
     pub header_id: HeaderId,
     pub parent_id: HeaderId,
     pub timestamp_unix_ms: u64,
+    /// The raw serialized header, PoW solution included. Every other field
+    /// is derivable from it; see [`ChainHeader::authenticate`].
+    pub header_bytes: Vec<u8>,
+}
+
+impl ChainHeader {
+    /// Check that `header_bytes` is the header this record claims:
+    /// it hashes to `header_id` and carries the claimed height, parent and
+    /// timestamp.
+    pub fn authenticate(&self) -> Result<Header, HeaderAuthError> {
+        let header = authenticate_header(
+            &self.header_bytes,
+            &self.header_id,
+            self.height,
+            &self.parent_id,
+        )?;
+        if header.timestamp != self.timestamp_unix_ms {
+            return Err(HeaderAuthError::TimestampMismatch {
+                claimed: self.timestamp_unix_ms,
+                actual: header.timestamp,
+            });
+        }
+        Ok(header)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +123,92 @@ pub struct ChainBlock {
     pub block_id: BlockId,
     pub height: u32,
     pub parent_id: BlockId,
+    /// The raw serialized header, PoW solution included. `block_id`,
+    /// `height` and `parent_id` are derivable from it; see
+    /// [`ChainBlock::authenticate_header`].
+    pub header_bytes: Vec<u8>,
     pub transactions: Vec<ChainTransaction>,
+}
+
+impl ChainBlock {
+    /// Check that `header_bytes` is the header this block claims: it hashes
+    /// to `block_id` and carries the claimed height and parent.
+    ///
+    /// This authenticates the block's identity and chain position only. The
+    /// transactions are not bound to the header's transactions root, because
+    /// the wallet protocol carries wallet-relevant transaction parts rather
+    /// than full transaction bytes.
+    pub fn authenticate_header(&self) -> Result<Header, HeaderAuthError> {
+        authenticate_header(
+            &self.header_bytes,
+            &self.block_id,
+            self.height,
+            &self.parent_id,
+        )
+    }
+}
+
+/// Why a header record failed authentication against its raw bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum HeaderAuthError {
+    #[error("header bytes are empty")]
+    Empty,
+    #[error("header bytes do not decode: {0}")]
+    Decode(String),
+    #[error("header bytes carry {0} trailing byte(s)")]
+    TrailingBytes(usize),
+    #[error("header bytes hash to {actual}, not the claimed id {claimed}")]
+    IdMismatch { claimed: String, actual: String },
+    #[error("header height {actual} does not match the claimed height {claimed}")]
+    HeightMismatch { claimed: u32, actual: u32 },
+    #[error("header parent {actual} does not match the claimed parent {claimed}")]
+    ParentMismatch { claimed: String, actual: String },
+    #[error("header timestamp {actual} does not match the claimed timestamp {claimed}")]
+    TimestampMismatch { claimed: u64, actual: u64 },
+}
+
+/// Decode `bytes` as one complete Ergo header and check it against a claimed
+/// identity: `blake2b256(bytes)` must equal `id`, and the decoded height and
+/// parent must equal `height` and `parent_id`.
+///
+/// The id is computed over the bytes as received, never over a re-encoding:
+/// the decoder drops the unparsed section of v2-v4 headers, so re-encoding a
+/// decoded header does not always reproduce the bytes its id was taken over.
+pub fn authenticate_header(
+    bytes: &[u8],
+    id: &HeaderId,
+    height: u32,
+    parent_id: &HeaderId,
+) -> Result<Header, HeaderAuthError> {
+    if bytes.is_empty() {
+        return Err(HeaderAuthError::Empty);
+    }
+    let mut reader = VlqReader::new(bytes);
+    let header =
+        read_header(&mut reader).map_err(|error| HeaderAuthError::Decode(format!("{error:?}")))?;
+    if !reader.is_empty() {
+        return Err(HeaderAuthError::TrailingBytes(reader.remaining()));
+    }
+    let actual_id = *blake2b256(bytes).as_bytes();
+    if actual_id != *id {
+        return Err(HeaderAuthError::IdMismatch {
+            claimed: hex::encode(id),
+            actual: hex::encode(actual_id),
+        });
+    }
+    if header.height != height {
+        return Err(HeaderAuthError::HeightMismatch {
+            claimed: height,
+            actual: header.height,
+        });
+    }
+    if header.parent_id.as_bytes() != parent_id {
+        return Err(HeaderAuthError::ParentMismatch {
+            claimed: hex::encode(parent_id),
+            actual: hex::encode(header.parent_id.as_bytes()),
+        });
+    }
+    Ok(header)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +581,7 @@ mod tests {
             block_id: [5; 32],
             height: 9,
             parent_id: [4; 32],
+            header_bytes: Vec::new(),
             transactions: Vec::new(),
         };
         let responses = [
@@ -501,6 +614,7 @@ mod tests {
                 header_id: [8; 32],
                 parent_id: [7; 32],
                 timestamp_unix_ms: 123,
+                header_bytes: Vec::new(),
             }],
             active_parameters: serde_json::json!({"hardFork": 1}),
             reemission_inputs: vec![ReemissionInput {
@@ -629,5 +743,151 @@ mod tests {
             client.submit_bytes(vec![7]),
             Ok(SubmitResponse::Accepted { .. })
         ));
+    }
+
+    mod header_auth {
+        use super::super::*;
+        use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        use ergo_ser::header::{serialize_header, serialize_header_without_pow};
+
+        fn header(version: u8, height: u32, parent: [u8; 32], unparsed: Vec<u8>) -> Header {
+            Header {
+                version,
+                parent_id: ModifierId::from_bytes(parent),
+                ad_proofs_root: Digest32::from_bytes([1; 32]),
+                transactions_root: Digest32::from_bytes([2; 32]),
+                state_root: ADDigest::from_bytes([3; 33]),
+                timestamp: 1_700_000_000_000 + u64::from(height),
+                extension_root: Digest32::from_bytes([4; 32]),
+                n_bits: 16842752,
+                height,
+                votes: [0; 3],
+                unparsed_bytes: unparsed,
+                solution: AutolykosSolution::V2 {
+                    pk: GroupElement::from([2; 33]),
+                    nonce: [5; 8],
+                },
+            }
+        }
+
+        fn block(height: u32, parent: [u8; 32]) -> ChainBlock {
+            let (header_bytes, id) =
+                serialize_header(&header(2, height, parent, Vec::new())).unwrap();
+            ChainBlock {
+                block_id: *id.as_bytes(),
+                height,
+                parent_id: parent,
+                header_bytes,
+                transactions: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn genuine_block_header_authenticates() {
+            let block = block(7, [9; 32]);
+            let decoded = block.authenticate_header().unwrap();
+            assert_eq!(decoded.height, 7);
+            assert_eq!(decoded.parent_id.as_bytes(), &[9; 32]);
+        }
+
+        #[test]
+        fn a_block_served_under_another_id_is_rejected() {
+            let mut block = block(7, [9; 32]);
+            block.block_id = [0xAA; 32];
+            assert!(matches!(
+                block.authenticate_header(),
+                Err(HeaderAuthError::IdMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn claimed_height_and_parent_must_match_the_header() {
+            let mut wrong_height = block(7, [9; 32]);
+            wrong_height.height = 8;
+            assert_eq!(
+                wrong_height.authenticate_header(),
+                Err(HeaderAuthError::HeightMismatch {
+                    claimed: 8,
+                    actual: 7
+                })
+            );
+            let mut wrong_parent = block(7, [9; 32]);
+            wrong_parent.parent_id = [8; 32];
+            assert!(matches!(
+                wrong_parent.authenticate_header(),
+                Err(HeaderAuthError::ParentMismatch { .. })
+            ));
+        }
+
+        #[test]
+        fn empty_truncated_and_padded_header_bytes_are_rejected() {
+            let genuine = block(7, [9; 32]);
+            let mut empty = genuine.clone();
+            empty.header_bytes.clear();
+            assert_eq!(empty.authenticate_header(), Err(HeaderAuthError::Empty));
+
+            let mut truncated = genuine.clone();
+            truncated.header_bytes.truncate(40);
+            assert!(matches!(
+                truncated.authenticate_header(),
+                Err(HeaderAuthError::Decode(_))
+            ));
+
+            // Padding is caught before hashing, so a node cannot smuggle bytes
+            // past the decoder even with a matching id.
+            let mut padded = genuine;
+            padded.header_bytes.push(0);
+            padded.block_id = *blake2b256(&padded.header_bytes).as_bytes();
+            assert_eq!(
+                padded.authenticate_header(),
+                Err(HeaderAuthError::TrailingBytes(1))
+            );
+        }
+
+        #[test]
+        fn id_is_taken_over_received_bytes_not_a_re_encoding() {
+            // A v2 header may carry an unparsed section on the wire, which the
+            // decoder drops (the encoder refuses to write one), so re-encoding
+            // the decoded header yields different bytes and a different id.
+            // Authentication must hash what was received. Splice a 3-byte
+            // section in where the encoder writes its empty length byte: the
+            // last byte of the PoW-less encoding.
+            let plain = header(2, 7, [9; 32], Vec::new());
+            let (plain_bytes, _) = serialize_header(&plain).unwrap();
+            let length_at = serialize_header_without_pow(&plain).unwrap().len() - 1;
+            assert_eq!(plain_bytes[length_at], 0);
+            let mut bytes = plain_bytes[..length_at].to_vec();
+            bytes.extend_from_slice(&[3, 1, 2, 3]);
+            bytes.extend_from_slice(&plain_bytes[length_at + 1..]);
+            let id = *blake2b256(&bytes).as_bytes();
+
+            let decoded = authenticate_header(&bytes, &id, 7, &[9; 32]).unwrap();
+            assert!(decoded.unparsed_bytes.is_empty());
+            let (reencoded, reencoded_id) = serialize_header(&decoded).unwrap();
+            assert_eq!(reencoded, plain_bytes);
+            assert_ne!(reencoded, bytes);
+            assert_ne!(*reencoded_id.as_bytes(), id);
+        }
+
+        #[test]
+        fn snapshot_header_timestamp_must_match() {
+            let block = block(7, [9; 32]);
+            let decoded = block.authenticate_header().unwrap();
+            let mut record = ChainHeader {
+                height: 7,
+                header_id: block.block_id,
+                parent_id: [9; 32],
+                timestamp_unix_ms: decoded.timestamp,
+                header_bytes: block.header_bytes.clone(),
+            };
+            assert!(record.authenticate().is_ok());
+            record.timestamp_unix_ms += 1;
+            assert!(matches!(
+                record.authenticate(),
+                Err(HeaderAuthError::TimestampMismatch { .. })
+            ));
+        }
     }
 }

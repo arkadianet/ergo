@@ -149,6 +149,7 @@ impl FakeChain {
                 header_id: "a".repeat(64),
                 parent_id: "b".repeat(64),
                 timestamp_unix_ms: 123,
+                header_bytes: "0a0b".to_string(),
             }],
             active_parameters: json!({"hardFork": 1}),
             reemission_inputs: vec![
@@ -172,6 +173,7 @@ impl FakeChain {
             block_id: "b".repeat(64),
             height: 11,
             parent_id: "a".repeat(64),
+            header_bytes: "0c0d".to_string(),
             transactions: vec![wire::ChainTransaction {
                 tx_id: "e".repeat(64),
                 inputs: vec![wire::ChainInput {
@@ -414,6 +416,7 @@ async fn all_wallet_chain_routes_return_protocol_shapes() {
     let (status, body) = get(app.clone(), "/api/v1/chain/snapshot", Some(key)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["snapshotId"], "a".repeat(64));
+    assert_eq!(body["headers"][0]["headerBytes"], "0a0b");
     assert_eq!(body["reemissionInputs"][0]["amount"], "9007199254740993");
     assert_eq!(body["reemissionInputs"][0]["boxIds"][0], "d".repeat(64));
     assert!(body["reemissionInputs"][1].get("boxIds").is_none());
@@ -430,6 +433,7 @@ async fn all_wallet_chain_routes_return_protocol_shapes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["type"], "forward");
     assert_eq!(body["blocks"][0]["blockId"], "b".repeat(64));
+    assert_eq!(body["blocks"][0]["headerBytes"], "0c0d");
 
     let (status, body) = get(
         app.clone(),

@@ -373,6 +373,7 @@ mod review_tests {
                     height,
                     block_id: [height as u8; 32],
                     parent_id: request.cursor.header_id,
+                    header_bytes: Vec::new(),
                     transactions: vec![],
                 }],
             }))

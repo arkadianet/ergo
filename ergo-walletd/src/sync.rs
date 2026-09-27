@@ -919,6 +919,7 @@ mod tests {
             block_id: [height as u8; 32],
             height,
             parent_id: [parent; 32],
+            header_bytes: Vec::new(),
             transactions: Vec::new(),
         }
     }
@@ -1101,12 +1102,14 @@ mod tests {
                                 block_id: [21; 32],
                                 height: 2,
                                 parent_id: [1; 32],
+                                header_bytes: Vec::new(),
                                 transactions: Vec::new(),
                             },
                             ChainBlock {
                                 block_id: [30; 32],
                                 height: 3,
                                 parent_id: [21; 32],
+                                header_bytes: Vec::new(),
                                 transactions: Vec::new(),
                             },
                         ],

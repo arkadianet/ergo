@@ -1192,6 +1192,7 @@ mod tests {
                         block_id: [height as u8; 32],
                         height,
                         parent_id: [height as u8 - 1; 32],
+                        header_bytes: Vec::new(),
                         transactions: Vec::new(),
                     })
                     .collect(),
@@ -1509,6 +1510,7 @@ mod tests {
                 block_id: [1; 32],
                 height: 1,
                 parent_id: [0; 32],
+                header_bytes: Vec::new(),
                 transactions: vec![ChainTransaction {
                     tx_id: [7; 32],
                     inputs: Vec::new(),
@@ -1542,6 +1544,7 @@ mod tests {
                 block_id: [1; 32],
                 height: 1,
                 parent_id: [0; 32],
+                header_bytes: Vec::new(),
                 transactions: Vec::new(),
             }],
         });
@@ -1594,6 +1597,7 @@ mod tests {
                     block_id: [1; 32],
                     height: 1,
                     parent_id: [0; 32],
+                    header_bytes: Vec::new(),
                     transactions: Vec::new(),
                 }],
             },
@@ -1616,6 +1620,7 @@ mod tests {
                 block_id: old_tip.header_id,
                 height: 1,
                 parent_id: [0; 32],
+                header_bytes: Vec::new(),
                 transactions: Vec::new(),
             }],
             tip: Arc::new(Mutex::new(old_tip.clone())),
@@ -1651,6 +1656,7 @@ mod tests {
                 block_id: [1; 32],
                 height: 1,
                 parent_id: [0; 32],
+                header_bytes: Vec::new(),
                 transactions: Vec::new(),
             }],
         });
@@ -1676,12 +1682,14 @@ mod tests {
                     block_id: [1; 32],
                     height: 1,
                     parent_id: [9; 32],
+                    header_bytes: Vec::new(),
                     transactions: Vec::new(),
                 },
                 ChainBlock {
                     block_id: [2; 32],
                     height: 2,
                     parent_id: [1; 32],
+                    header_bytes: Vec::new(),
                     transactions: Vec::new(),
                 },
             ],
@@ -1724,6 +1732,7 @@ mod tests {
                         height,
                         block_id: [height as u8; 32],
                         parent_id: [(height - 1) as u8; 32],
+                        header_bytes: Vec::new(),
                         transactions: vec![],
                     })
                     .collect(),
@@ -1759,6 +1768,7 @@ mod tests {
                 block_id,
                 height,
                 parent_id: parent,
+                header_bytes: Vec::new(),
                 transactions: Vec::new(),
             });
             parent = block_id;
@@ -1821,6 +1831,7 @@ mod tests {
                 block_id: [1; 32],
                 height: 1,
                 parent_id: [0; 32],
+                header_bytes: Vec::new(),
                 transactions: Vec::new(),
             }],
         });

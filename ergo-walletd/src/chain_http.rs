@@ -1,20 +1,20 @@
 //! HTTP chain adapter for the standalone daemon.
 //!
-//! # What the wire can and cannot prove
+//! # What the wire proves
 //!
-//! The node's current chain protocol carries structured block, transaction,
-//! and box fields but no raw header or transaction bytes. Header validation is
-//! therefore limited to the identity/height/parent fields on the wire;
-//! transaction ids can be cross-checked against the ids embedded in their
-//! output boxes, but cannot be recomputed from raw transaction bytes. ErgoBox
-//! bytes are parsed canonically and all recomputable box fields are checked.
+//! Every block and every snapshot header arrives with its raw serialized
+//! header. This adapter recomputes each id as `blake2b256(header_bytes)` and
+//! reads the height and parent (and, for snapshot headers, the timestamp) out
+//! of the decoded header, so a node cannot serve a block under an id its header
+//! does not hash to, or place a genuine header at a height or parent it does
+//! not carry. ErgoBox bytes are parsed canonically and every recomputable box
+//! field is checked.
 //!
-//! **Known deviation:** a block's protocol id is therefore *not* recomputed
-//! from raw header bytes here. It is taken from the node and checked for
-//! internal consistency (parent linkage, tip agreement, uniqueness) rather
-//! than recomputed, so a node that reports a wrong `blockId` for a header this
-//! build never sees the bytes of is not caught at this layer. Closing that gap
-//! needs raw header bytes on the chain protocol, not a client change.
+//! What is still taken from the authenticated node on trust: the protocol
+//! carries the wallet-relevant parts of each transaction, not full transaction
+//! bytes. Transaction ids are therefore cross-checked against the ids embedded
+//! in their output boxes but not recomputed, and a block's transactions are not
+//! bound to its header's transactions root.
 //!
 //! # Bounded pages
 //!
@@ -597,7 +597,15 @@ fn neutral_snapshot(snapshot: wire::ChainSnapshot) -> Result<ChainSnapshot, Chai
             header_id,
             parent_id,
             timestamp_unix_ms: header.timestamp_unix_ms,
+            header_bytes: decode_hex(&header.header_bytes, "header_bytes")?,
         };
+        value.authenticate().map_err(|error| {
+            ChainClientError::Protocol(format!(
+                "snapshot header {} at height {}: {error}",
+                hex::encode(header_id),
+                header.height
+            ))
+        })?;
         previous = Some(value.clone());
         headers.push(value);
     }
@@ -714,6 +722,15 @@ fn neutral_block(block: wire::ChainBlock) -> Result<ChainBlock, ChainClientError
         ));
     }
     let parent_id = decode_id(&block.parent_id, "parent_id")?;
+    let header_bytes = decode_hex(&block.header_bytes, "header_bytes")?;
+    ergo_wallet_service::authenticate_header(&header_bytes, &block_id, block.height, &parent_id)
+        .map_err(|error| {
+            ChainClientError::Protocol(format!(
+                "block {} at height {}: {error}",
+                hex::encode(block_id),
+                block.height
+            ))
+        })?;
     let mut tx_ids = std::collections::BTreeSet::new();
     let mut block_box_ids = std::collections::BTreeSet::new();
     let mut transactions = Vec::with_capacity(block.transactions.len());
@@ -780,6 +797,7 @@ fn neutral_block(block: wire::ChainBlock) -> Result<ChainBlock, ChainClientError
         block_id,
         height: block.height,
         parent_id,
+        header_bytes,
         transactions,
     })
 }
@@ -921,6 +939,74 @@ mod tests {
         format!("{byte:02x}").repeat(32)
     }
 
+    /// A real serialized header at `height` under `parent`, with its id and
+    /// timestamp. `nonce` varies the PoW solution, so two calls that differ
+    /// only in `nonce` give two genuine headers with different ids.
+    fn header(height: u32, parent: [u8; 32], nonce: u8) -> (Vec<u8>, [u8; 32], u64) {
+        use ergo_primitives::digest::{ADDigest, Digest32};
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        let timestamp = 1_700_000_000_000 + u64::from(height);
+        let header = ergo_ser::header::Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes(parent),
+            ad_proofs_root: Digest32::from_bytes([1; 32]),
+            transactions_root: Digest32::from_bytes([2; 32]),
+            state_root: ADDigest::from_bytes([3; 33]),
+            timestamp,
+            extension_root: Digest32::from_bytes([4; 32]),
+            n_bits: 16842752,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from([2; 33]),
+                nonce: [nonce; 8],
+            },
+        };
+        let (bytes, header_id) = ergo_ser::header::serialize_header(&header).unwrap();
+        (bytes, *header_id.as_bytes(), timestamp)
+    }
+
+    fn blocks_since_body(tip: (u32, [u8; 32]), block: (u32, [u8; 32], [u8; 32], &[u8])) -> String {
+        let (tip_height, tip_id) = tip;
+        let (height, block_id, parent_id, header_bytes) = block;
+        serde_json::json!({
+            "type": "forward",
+            "tip": { "height": tip_height, "headerId": hex::encode(tip_id) },
+            "blocks": [{
+                "blockId": hex::encode(block_id),
+                "height": height,
+                "parentId": hex::encode(parent_id),
+                "headerBytes": hex::encode(header_bytes),
+                "transactions": []
+            }]
+        })
+        .to_string()
+    }
+
+    fn blocks_since_from(
+        body: String,
+    ) -> Result<ergo_wallet_service::BlocksSinceResponse, ChainClientError> {
+        let (url, handle) = serve_once(move |path, _| {
+            assert!(path.starts_with("/api/v1/chain/blocks-since"));
+            body
+        });
+        let client = HttpChainClient::with_timeouts(
+            Url::parse(&url).unwrap(),
+            ApiKey::from_test(b"secret".to_vec()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let response = client.blocks_since(ergo_wallet_service::BlocksSinceRequest {
+            cursor: ergo_wallet_service::ChainCursor::genesis(),
+            limit: 1,
+        });
+        handle.join().unwrap();
+        response
+    }
+
     fn sample_box(tx_id: [u8; 32], index: u16) -> (Vec<u8>, [u8; 32]) {
         let tree = ErgoTree {
             version: 0,
@@ -1034,77 +1120,117 @@ mod tests {
 
     #[test]
     fn parses_blocks_since_and_rejects_invalid_continuity() {
-        let (url, handle) = serve_once(|path, _| {
-            assert!(path.starts_with("/api/v1/chain/blocks-since"));
-            format!(
-                r#"{{"type":"forward","tip":{{"height":1,"headerId":"{}"}},"blocks":[{{"blockId":"{}","height":1,"parentId":"{}","transactions":[]}}]}}"#,
-                id(1),
-                id(1),
-                id(0)
-            )
-        });
-        let client = HttpChainClient::with_timeouts(
-            Url::parse(&url).unwrap(),
-            ApiKey::from_test(b"secret".to_vec()),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        )
+        let (bytes, block_id, _) = header(1, [0; 32], 1);
+        let response = blocks_since_from(blocks_since_body(
+            (1, block_id),
+            (1, block_id, [0; 32], &bytes),
+        ))
         .unwrap();
-        let response = client
-            .blocks_since(ergo_wallet_service::BlocksSinceRequest {
-                cursor: ergo_wallet_service::ChainCursor::genesis(),
-                limit: 1,
-            })
-            .unwrap();
-        assert!(matches!(
-            response,
-            ergo_wallet_service::BlocksSinceResponse::Forward(_)
-        ));
-        handle.join().unwrap();
+        match response {
+            ergo_wallet_service::BlocksSinceResponse::Forward(forward) => {
+                assert_eq!(forward.blocks[0].header_bytes, bytes);
+            }
+            other => panic!("expected a forward page, got {other:?}"),
+        }
 
-        let (url, handle) = serve_once(|_, _| {
-            format!(
-                r#"{{"type":"forward","tip":{{"height":2,"headerId":"{}"}},"blocks":[{{"blockId":"{}","height":2,"parentId":"{}","transactions":[]}}]}}"#,
-                id(2),
-                id(2),
-                id(1)
-            )
-        });
-        let client = HttpChainClient::with_timeouts(
-            Url::parse(&url).unwrap(),
-            ApiKey::from_test(b"secret".to_vec()),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        // A genuine height-2 header does not continue a genesis cursor.
+        let (bytes, block_id, _) = header(2, [1; 32], 1);
         assert!(matches!(
-            client.blocks_since(ergo_wallet_service::BlocksSinceRequest {
-                cursor: ergo_wallet_service::ChainCursor::genesis(),
-                limit: 1,
-            }),
+            blocks_since_from(blocks_since_body(
+                (2, block_id),
+                (2, block_id, [1; 32], &bytes),
+            )),
             Err(ChainClientError::Protocol(_))
         ));
-        handle.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_blocks_whose_header_bytes_do_not_authenticate() {
+        let (bytes, block_id, _) = header(1, [0; 32], 1);
+        let (other_bytes, _, _) = header(1, [0; 32], 2);
+        let cases: [(&str, String); 4] = [
+            // A different genuine header served under this block's id.
+            (
+                "hash to",
+                blocks_since_body((1, block_id), (1, block_id, [0; 32], &other_bytes)),
+            ),
+            (
+                "empty",
+                blocks_since_body((1, block_id), (1, block_id, [0; 32], &[])),
+            ),
+            (
+                "decode",
+                blocks_since_body((1, block_id), (1, block_id, [0; 32], &bytes[..40])),
+            ),
+            (
+                "trailing",
+                blocks_since_body(
+                    (1, block_id),
+                    (1, block_id, [0; 32], &[bytes.as_slice(), &[0]].concat()),
+                ),
+            ),
+        ];
+        for (expected, body) in cases {
+            match blocks_since_from(body) {
+                Err(ChainClientError::Protocol(message)) => {
+                    assert!(message.contains(expected), "{expected}: {message}");
+                }
+                other => panic!("{expected}: expected a protocol error, got {other:?}"),
+            }
+        }
+
+        // The wire field is required: a node that omits it is refused.
+        let mut missing: serde_json::Value = serde_json::from_str(&blocks_since_body(
+            (1, block_id),
+            (1, block_id, [0; 32], &bytes),
+        ))
+        .unwrap();
+        missing["blocks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("headerBytes");
+        assert!(blocks_since_from(missing.to_string()).is_err());
     }
 
     #[test]
     fn snapshot_checks_descending_height_parent_and_tip_identity() {
+        let (bytes2, id2, time2) = header(2, [1; 32], 1);
+        let (bytes3, id3, time3) = header(3, id2, 1);
+        let (other3, _, _) = header(3, id2, 2);
         let valid = serde_json::json!({
-            "tip": { "height": 3, "headerId": id(3) },
+            "tip": { "height": 3, "headerId": hex::encode(id3) },
             "headers": [
-                { "height": 3, "headerId": id(3), "parentId": id(2), "timestampUnixMs": 3 },
-                { "height": 2, "headerId": id(2), "parentId": id(1), "timestampUnixMs": 2 }
+                {
+                    "height": 3,
+                    "headerId": hex::encode(id3),
+                    "parentId": hex::encode(id2),
+                    "timestampUnixMs": time3,
+                    "headerBytes": hex::encode(&bytes3)
+                },
+                {
+                    "height": 2,
+                    "headerId": hex::encode(id2),
+                    "parentId": id(1),
+                    "timestampUnixMs": time2,
+                    "headerBytes": hex::encode(&bytes2)
+                }
             ],
             "activeParameters": {},
             "reemissionInputs": [],
             "snapshotId": id(9)
         });
-        assert!(neutral_snapshot(serde_json::from_value(valid.clone()).unwrap()).is_ok());
+        let parsed = neutral_snapshot(serde_json::from_value(valid.clone()).unwrap()).unwrap();
+        assert_eq!(parsed.headers[0].header_bytes, bytes3);
         for (field, replacement) in [
             ("/headers/1/height", serde_json::json!(1)),
             ("/headers/0/parentId", serde_json::json!(id(8))),
             ("/tip/headerId", serde_json::json!(id(8))),
             ("/tip/height", serde_json::json!(4)),
+            (
+                "/headers/0/headerBytes",
+                serde_json::json!(hex::encode(&other3)),
+            ),
+            ("/headers/0/timestampUnixMs", serde_json::json!(time3 + 1)),
         ] {
             let mut invalid = valid.clone();
             *invalid.pointer_mut(field).unwrap() = replacement;

@@ -90,6 +90,7 @@ pub fn block(height: u32) -> ChainBlock {
         block_id: [height as u8; 32],
         height,
         parent_id: [height.saturating_sub(1) as u8; 32],
+        header_bytes: Vec::new(),
         transactions: Vec::new(),
     }
 }
