@@ -258,4 +258,85 @@ mod tests {
         join_wallet_handles(vec![task], &mut first_error).await;
         assert!(first_error.is_some());
     }
+
+    /// A wallet store whose scan cursor lets a partial rescan from height 1
+    /// start (tip 1).
+    fn partial_rescan_store() -> (tempfile::TempDir, RedbWalletStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("wallet.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        (dir, store)
+    }
+
+    /// Two wallet sessions begun in order, each running a partial rescan on
+    /// its own coordinator: `(older id, older, newer id, newer)`.
+    fn two_sessions_with_running_rescans() -> (
+        tempfile::TempDir,
+        u64,
+        Arc<RescanCoordinator>,
+        u64,
+        Arc<RescanCoordinator>,
+    ) {
+        let (dir, store) = partial_rescan_store();
+        let older = Arc::new(RescanCoordinator::new());
+        let newer = Arc::new(RescanCoordinator::new());
+        let older_id = begin_wallet_session(older.clone());
+        let newer_id = begin_wallet_session(newer.clone());
+        assert_ne!(older_id, newer_id);
+        older.begin_rescan(1, &store, 1).unwrap();
+        newer.begin_rescan(1, &store, 1).unwrap();
+        (dir, older_id, older, newer_id, newer)
+    }
+
+    fn assert_shut_down(rescan: &RescanCoordinator) {
+        assert!(rescan.shutdown_requested());
+        assert!(rescan.cancel_requested());
+        assert!(rescan.rescan_cancelled());
+        assert!(rescan.fail_closed());
+    }
+
+    fn assert_untouched(rescan: &RescanCoordinator) {
+        assert!(!rescan.shutdown_requested());
+        assert!(!rescan.cancel_requested());
+        assert!(!rescan.rescan_cancelled());
+        assert!(!rescan.fail_closed());
+        assert!(rescan.task_active());
+    }
+
+    #[test]
+    fn shutdown_of_the_older_session_cancels_only_its_own_rescan() {
+        let (_dir, older_id, older, _newer_id, newer) = two_sessions_with_running_rescans();
+        request_rescan_shutdown_for(older_id);
+        assert_shut_down(&older);
+        assert_untouched(&newer);
+    }
+
+    #[test]
+    fn shutdown_of_the_newer_session_cancels_only_its_own_rescan() {
+        let (_dir, _older_id, older, newer_id, newer) = two_sessions_with_running_rescans();
+        request_rescan_shutdown_for(newer_id);
+        assert_shut_down(&newer);
+        assert_untouched(&older);
+    }
+
+    #[test]
+    fn beginning_a_session_clears_shutdown_and_cancel_requests() {
+        let (_dir, store) = partial_rescan_store();
+        let rescan = Arc::new(RescanCoordinator::new());
+        let first = begin_wallet_session(rescan.clone());
+        request_rescan_shutdown_for(first);
+        assert!(rescan.shutdown_requested());
+        assert!(rescan.cancel_requested());
+        assert!(rescan.begin_rescan(0, &store, 0).is_err());
+
+        let second = begin_wallet_session(rescan.clone());
+        assert_ne!(first, second);
+        assert!(!rescan.shutdown_requested());
+        assert!(!rescan.cancel_requested());
+        rescan.begin_rescan(0, &store, 0).unwrap();
+    }
 }

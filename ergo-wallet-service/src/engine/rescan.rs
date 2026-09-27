@@ -871,6 +871,25 @@ mod tests {
     }
 
     #[test]
+    fn begin_session_clears_shutdown_and_cancel_requests() {
+        let rescan = RescanCoordinator::new();
+        let (_dir, store) = store_with_cursor_zero();
+        rescan.request_shutdown();
+        assert!(rescan.shutdown_requested());
+        assert!(rescan.cancel_requested());
+        assert!(matches!(
+            rescan.begin_rescan(0, &store, 0),
+            Err(BeginRescanError::Shutdown)
+        ));
+
+        rescan.begin_session();
+        assert!(!rescan.shutdown_requested());
+        assert!(!rescan.cancel_requested());
+        rescan.begin_rescan(0, &store, 0).unwrap();
+        assert!(rescan.task_active());
+    }
+
+    #[test]
     fn rollback_requests_cancellation_for_active_rescan() {
         let rescan = Arc::new(RescanCoordinator::new());
         let (_cursor_dir, cursor_store) = store_with_cursor_zero();
