@@ -20,6 +20,14 @@ thiserror            = { workspace = true }
 redb                 = { workspace = true }
 bincode              = { workspace = true }
 tracing              = { workspace = true }
+# Runtime-agnostic `async fn` in the engine's `TxSubmitter` seam (a proc
+# macro; it pulls in no executor).
+async-trait          = { workspace = true }
+
+[features]
+# Exposes `RescanCoordinator` flag setters to other crates' tests (the node's
+# command-fence tests). Production code never sets this.
+test-support = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

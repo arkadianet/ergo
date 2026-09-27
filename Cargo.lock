@@ -1114,6 +1114,7 @@ dependencies = [
 name = "ergo-wallet-service"
 version = "0.8.0"
 dependencies = [
+ "async-trait",
  "bincode",
  "ergo-primitives",
  "ergo-ser",
