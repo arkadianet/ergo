@@ -378,6 +378,43 @@ def next_finding_path():
     return FINDINGS / f'{day}-{n}.json'
 
 
+def _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty, final_empty):
+    """This sweep's fetch candidates, in priority order (`Run.
+    _collect_input_block_txids` applies its own budget on top).
+
+    `have_nonempty`: ids with a real answer already cached — never
+    refetched. `final_empty`: ids `_input_block_empty_is_final` has
+    already confirmed permanently empty — never refetched either.
+    Everything else is a candidate, but an id NEVER fetched at all goes
+    ahead of one that came back empty on an earlier sweep and is merely
+    still pending (`attempted_empty`): an empty answer is not yet known
+    to be final, so it keeps being retried, and under a burst-pulled
+    chain — more ids than one sweep's budget — that retry starved every
+    id behind it forever. `chain_ids` is newest-first (the API's own
+    order); this only reorders WITHIN it by fetch state, never inverts
+    it, so two ids in the same state keep their relative order.
+    """
+    never_fetched, pending = [], []
+    for bid in chain_ids:
+        if bid in have_nonempty or bid in final_empty:
+            continue
+        (pending if bid in attempted_empty else never_fetched).append(bid)
+    return never_fetched + pending
+
+
+def _input_block_empty_is_final(first_empty_tip, current_tip):
+    """An id fetched empty becomes permanently cacheable once the tip it
+    was FIRST seen empty under is no longer current: at least one more
+    full (ordering) block has sealed since, so nothing more can arrive
+    for it — Rust attaches an input block's transaction ids no later
+    than the ordering block that reconstructs from it. Neither tip being
+    known yet (a cold sampler, or a sweep whose bracket never held)
+    withholds the verdict rather than guessing one.
+    """
+    return (first_empty_tip is not None and current_tip is not None
+            and first_empty_tip != current_tip)
+
+
 class Run:
     """The whole observation: samples, accumulated counters, failures.
 
@@ -466,6 +503,17 @@ class Run:
         self.input_block_txids = {}
         self.input_block_seen_under = {}
         self._fetched_this_sweep = 0
+        # rm-A-steady-armB-1: an id fetched empty is not yet KNOWN to be
+        # final (the tx-id announcement can lag the header by a sweep or
+        # two), so `_input_block_fetch_order` keeps offering it a lower
+        # priority than an id never fetched at all, rather than treating
+        # them alike. `_input_block_empty_since[bid]` is the tip it was
+        # FIRST seen empty under; once the current tip differs, one more
+        # ordering block has sealed since, nothing more can arrive for
+        # it, and it moves to `_input_block_final_empty` — cached empty
+        # for good, freeing its slot in the fetch budget permanently.
+        self._input_block_empty_since = {}
+        self._input_block_final_empty = set()
 
     # ----- the sampler thread -----
 
@@ -974,19 +1022,24 @@ class Run:
         Bounded per sweep. A cold chain can list dozens of blocks at
         once and a sweep that stopped to fetch all of them would stall
         the monitoring it exists to do; the rest are picked up by the
-        sweeps that follow, a third of a second apart.
+        sweeps that follow, a third of a second apart. Which ones go
+        first is `_input_block_fetch_order` (rm-A-steady-armB-1: with no
+        priority at all, a burst-pulled chain's own newest-first order
+        let seven ids that would NEVER get a body starve the budget
+        every sweep, and the payment's own input block — at index 8 —
+        never got a single fetch in 52 samples).
         """
         self._fetched_this_sweep = 0
         staged = {}
         tip = reading['rust']['info'].get('bestFullHeaderId')
-        for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
+        chain_ids = reading['rust']['chain'].get('bestInputBlocks') or []
+        have_nonempty = {bid for bid, ids in self.input_block_txids.items() if ids}
+        order = _input_block_fetch_order(
+            chain_ids, have_nonempty, set(self._input_block_empty_since),
+            self._input_block_final_empty)
+        for bid in order:
             if self._fetched_this_sweep >= INPUT_BLOCK_ID_FETCHES_PER_SWEEP:
                 break
-            # Only a NON-EMPTY answer is cached. An input block shows up
-            # in the chain before its bodies are attached, so caching the
-            # first empty answer would permanently hide its transactions.
-            if self.input_block_txids.get(bid):
-                continue
             ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
             self._fetched_this_sweep += 1
             staged[bid] = ids
@@ -1002,12 +1055,27 @@ class Run:
         under iteration could raise outright. Staging and committing
         once makes a sweep all-or-nothing, and the consumer reads the
         immutable copy hung on the reading rather than the live cache.
+
+        An id fetched empty is provisional until `_input_block_empty_is_final`
+        says otherwise (`_input_block_empty_since` records the tip it was
+        FIRST seen empty under); only then does it join
+        `_input_block_final_empty` and stop being fetched at all — Rust
+        reports it applied by then, in the sense that matters here: the
+        ordering block that would have carried its reconstruction has
+        already sealed, so nothing more can arrive for it.
         """
         if reading['rust'].get('pool_tip_stable'):
             for bid, ids in staged.items():
                 self.input_block_txids[bid] = ids
                 if ids:
                     self.input_block_seen_under[bid] = tip
+                    self._input_block_empty_since.pop(bid, None)
+                else:
+                    first_tip = self._input_block_empty_since.get(bid)
+                    if first_tip is None:
+                        self._input_block_empty_since[bid] = tip
+                    elif _input_block_empty_is_final(first_tip, tip):
+                        self._input_block_final_empty.add(bid)
         # Published snapshot: what a consumer of THIS reading may use.
         # An unstable sweep publishes the standing set, never its own
         # unvalidated observations.
@@ -1359,6 +1427,30 @@ def restart_recovery(samples, since, node, window_s=30.0):
     return out
 
 
+def _no_tip_gaps(kept, tip_key):
+    """Durations (seconds) of each CONTIGUOUS run of no-tip samples,
+    bounded by the last known-good sample before it and the first known-
+    good one after — the relay-gap LENGTH, not merely how many samples
+    it spanned (rm-A-steady-armB-2's lag of 44 was one sample catching
+    Rust mid-pull after a single 28.5 s gap, not a sustained lag; `max`/
+    `p95` over lag alone cannot tell the two apart). A run open at
+    either end of the series (no known-good sample bounding it there)
+    contributes nothing: an unmeasured edge is not a measured gap.
+    """
+    gaps, last_good_at, gap_start_at, in_gap = [], None, None, False
+    for _, s in kept:
+        at = s.get('at')
+        if s.get(tip_key):
+            if in_gap and gap_start_at is not None and at is not None:
+                gaps.append(round(at - gap_start_at, 3))
+            in_gap = False
+            last_good_at = at
+        elif not in_gap:
+            gap_start_at = last_good_at
+            in_gap = True
+    return gaps
+
+
 def lag_distribution(samples, tip_key, chain_key='scala_chain',
                      ordering_key=None):
     """How far ONE follower's input tip trails the miner's chain.
@@ -1404,6 +1496,9 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain',
         'excluded_samples': excluded,
         'lag_samples': len(lags),
         'no_tip': no_tip,
+        'no_tip_gap_seconds': (gaps := _no_tip_gaps(kept, tip_key)),
+        'no_tip_gap_max_seconds': max(gaps) if gaps else None,
+        'no_tip_gap_p95_seconds': percentile(gaps, 95) if gaps else None,
         'not_on_miner_chain': off_chain,
         # The share of qualifying samples in which this follower held an
         # input chain at all (had a tip), beside the lag it had when it did.
@@ -2471,6 +2566,137 @@ def _self_test():
     assert no_grace['prefix_violation_count'] == 1, no_grace
     assert no_grace['not_measured_tail_count'] == 0, no_grace
 
+    # ----- round 6: input-block fetch-order priority (rm-A-steady-armB-1) -
+
+    # A burst-pulled chain, newest-first: 12 ids, the payment's own block
+    # ('b8') at index 8 — one past a budget of 8. Every OTHER id is
+    # genuinely empty forever (a plain input block with no transactions);
+    # only 'b8' will ever answer non-empty, once it is finally asked.
+    chain_ids = [f'b{i}' for i in range(12)]
+    budget = 8
+
+    def sweep_fetch(order, already_fetched_this_sweep=0):
+        """Apply the budget the way `_collect_input_block_txids` does,
+        and answer each fetched id: empty for everything but 'b8'."""
+        fetched = order[:budget - already_fetched_this_sweep]
+        return {bid: (['payment-tx'] if bid == 'b8' else []) for bid in fetched}
+
+    have_nonempty, attempted_empty, final_empty, empty_since = set(), set(), set(), {}
+    tip = 't0'
+    # Sweep 1: nothing has been fetched yet, so every id is "never
+    # fetched" and ties are broken by the chain's own (newest-first)
+    # order — ids 0-7 are asked, exactly filling the budget.
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert order == chain_ids, order  # nothing cached yet: no reordering
+    answers = sweep_fetch(order)
+    assert set(answers) == {f'b{i}' for i in range(8)}, answers
+    assert 'b8' not in answers, 'the OLD code never got past index 7 either'
+    for bid, ids in answers.items():
+        if ids:
+            have_nonempty.add(bid)
+        else:
+            empty_since.setdefault(bid, tip)
+            attempted_empty.add(bid)
+
+    # Sweep 2, same tip: ids 0-7 are now ATTEMPTED (empty, not yet
+    # final), so ids 8-11 — never fetched — go first. 'b8' is reached
+    # this time, well within the round's budget. This is the fix: no
+    # tip change was even needed, only the priority order.
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert order[:4] == ['b8', 'b9', 'b10', 'b11'], order
+    answers = sweep_fetch(order)
+    assert answers.get('b8') == ['payment-tx'], \
+        f"the payment's input block must be fetchable by sweep 2, got {answers}"
+    have_nonempty.add('b8')
+
+    # Once found, 'b8' is never re-fetched (it has a real answer), and
+    # never demoted back behind the ids still stuck at [].
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert 'b8' not in order, order
+
+    # `_input_block_empty_is_final`: an id is cacheable-empty for good
+    # once the tip it was first seen empty under has moved on — one more
+    # full block sealed since, so nothing more can arrive for it. Same
+    # tip is still provisional; no recorded tip at all is never final.
+    assert _input_block_empty_is_final('t0', 't1') is True
+    assert _input_block_empty_is_final('t0', 't0') is False
+    assert _input_block_empty_is_final(None, 't0') is False
+    assert _input_block_empty_is_final('t0', None) is False
+
+    # A final-empty id drops out of the fetch order entirely, freeing its
+    # slot in the budget for good — the other half of the fix, for a
+    # chain that stays wider than the budget for many ordering blocks
+    # running (not just the one extra sweep round 6's own case needed).
+    final_empty.add('b0')
+    order = _input_block_fetch_order(chain_ids, have_nonempty,
+                                     attempted_empty - {'b8'}, final_empty)
+    assert 'b0' not in order, order
+
+    # ----- round 6: the stock miner's #2504 elimination (rm-A-steady-armB-2) -
+
+    # 'child' spends 'parentBox', an output of 'parent'. 'parent' sealed
+    # into input block 'ibP'; 'child' never reached any block, but a
+    # follower still holds it. That is exactly the shape #2504 fixes:
+    # the stock miner's collectTxs only checks the ordering block's own
+    # UTXO set plus its own call, not an earlier input block in the same
+    # window, and silently drops a pool tx whose parent sits there.
+    produced_by = _produced_by({'parent': ['parentBox'], 'other': ['otherBox']})
+    assert produced_by == {'parentBox': 'parent', 'otherBox': 'other'}, produced_by
+    tx_inputs_mb = {'child': ['parentBox'], 'unrelated': ['otherBox']}
+    sealed = {'parent'}
+
+    assert _miner_eliminated_payment(
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=True) is True
+
+    # Any one of the four conditions failing must NOT classify it as an
+    # elimination — it stays a real, unresolved failure.
+    assert _miner_eliminated_payment(  # parent never sealed
+        'child', tx_inputs_mb, produced_by, set(),
+        absent_from_miner=True, held_elsewhere=True) is False
+    assert _miner_eliminated_payment(  # still in the miner's own pool
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=False, held_elsewhere=True) is False
+    assert _miner_eliminated_payment(  # gone everywhere, not just eliminated
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=False) is False
+    assert _miner_eliminated_payment(  # spends a box no submitted tx produced
+        'unrelated', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=True) is False
+
+    # ----- round 6: no-tip gap durations (rm-A-steady-armB-2) -----
+
+    def tipped(at, has_tip):
+        return {'ordering': 'O', 'scala_chain': ['c', 'b', 'a'],
+               'rust_tip': 'a' if has_tip else None, 'at': at}
+
+    kept_gap = list(enumerate([
+        tipped(0.0, True), tipped(1.0, True),
+        tipped(2.0, False), tipped(3.0, False), tipped(4.0, False),
+        tipped(5.0, True),
+    ]))
+    # From the last good sample (at=1.0) to the next (at=5.0): the full
+    # span the follower's state is uncertain over, not merely the 3.0 s
+    # between the two no-tip readings themselves.
+    assert _no_tip_gaps(kept_gap, 'rust_tip') == [4.0], _no_tip_gaps(kept_gap, 'rust_tip')
+
+    # A gap open at either end of the series is not a MEASURED gap — its
+    # true length is unknown, so it contributes nothing rather than an
+    # understatement dressed up as a real number.
+    open_at_start = list(enumerate([tipped(0.0, False), tipped(1.0, False),
+                                    tipped(2.0, True)]))
+    assert _no_tip_gaps(open_at_start, 'rust_tip') == []
+    open_at_end = list(enumerate([tipped(0.0, True), tipped(1.0, False)]))
+    assert _no_tip_gaps(open_at_end, 'rust_tip') == []
+
+    # A run with no gap at all reports none, and every tip present
+    # reports the empty list, not a null placeholder.
+    assert _no_tip_gaps(list(enumerate([tipped(0.0, True), tipped(1.0, True)])),
+                        'rust_tip') == []
+
     # ----- fix round 1: the REAL sampler, not a copy of its conditional -
 
     def sampler_over(sweeps, interval=0.0):
@@ -2803,6 +3029,8 @@ def _self_test():
         r = Run.__new__(Run)
         r.input_block_txids = {}
         r.input_block_seen_under = {}
+        r._input_block_empty_since = {}
+        r._input_block_final_empty = set()
         return r
 
     # Codex's mocked sweep: the bracket did NOT hold, so nothing of that
@@ -3499,6 +3727,44 @@ def conflicting_submissions(tx_inputs):
                   for t in group)
 
 
+def _produced_by(tx_outputs):
+    """`{boxId: txid}` over the submitted payments' own outputs. A box
+    produced by more than one submitted tx cannot happen (box ids are
+    unique), so the last writer winning is never exercised in practice;
+    pure, so `--self-test` drives it directly."""
+    return {box: txid for txid, boxes in tx_outputs.items() for box in boxes or ()}
+
+
+def _miner_eliminated_payment(txid, tx_inputs, produced_by, sealed_txids,
+                              absent_from_miner, held_elsewhere):
+    """rm-A-steady-armB-2 / upstream #2504 (open, a-shannon): the stock
+    Scala miner's `CandidateGenerator.collectTxs` checks a pool tx's
+    inputs against the ORDERING block's own UTXO set plus THIS CALL's
+    own included transactions — not against transactions this SAME
+    ordering window already sealed into an earlier input block. A pool
+    tx whose parent sits there fails `inputsNotSpent` and is silently
+    eliminated from the miner's pool (logged only at DEBUG), even though
+    the parent is genuinely confirmed and the followers still hold the
+    child as valid.
+
+    True exactly when ALL of: the payment spends an output one of the
+    OTHER submitted payments produced (`produced_by`); that producer was
+    itself sealed into an input block this run saw (`sealed_txids` —
+    `dict(run.input_block_txids)`'s own txid union); the miner's own
+    pool no longer holds it (`absent_from_miner`); and at least one
+    follower still does (`held_elsewhere`) — a payment nobody holds any
+    more is genuinely gone, not merely eliminated from one pool. Pure
+    over its inputs; the caller does the polling.
+    """
+    if not absent_from_miner or not held_elsewhere:
+        return False
+    for box in tx_inputs.get(txid) or ():
+        producer = produced_by.get(box)
+        if producer is not None and producer in sealed_txids:
+            return True
+    return False
+
+
 class PaymentOutcomeTracker:
     """Assertion 6, as amended by the controller in round 2.
 
@@ -3881,6 +4147,11 @@ def assertion_6_mempool(run, evidence, count):
     # transaction to land in the pool is what makes the workload
     # spendable, and `tx_inputs` below is what proves it was.
     tx_inputs = {}
+    # Each payment's OWN output box ids — not used for eviction (that is
+    # `tx_inputs`), but for `_miner_eliminated_payment` below: whether an
+    # UNRESOLVED payment spends a box another submitted payment produced,
+    # and that producer already sealed into an earlier input block.
+    tx_outputs = {}
     settle_budget = time.monotonic() + MEMPOOL_SETTLE_TOTAL_SECONDS
     for i in range(count):
         try:
@@ -3904,6 +4175,8 @@ def assertion_6_mempool(run, evidence, count):
             if entry is not None:
                 tx_inputs[txid] = [b.get('boxId') for b in entry.get('inputs')
                                    or () if b.get('boxId')]
+                tx_outputs[txid] = [b.get('boxId') for b in entry.get('outputs')
+                                    or () if b.get('boxId')]
                 break
             run.idle(0.2)
         else:
@@ -3911,6 +4184,7 @@ def assertion_6_mempool(run, evidence, count):
             # unknown, which the conflict check reads as "no evidence",
             # never as "disjoint".
             tx_inputs.setdefault(txid, [])
+            tx_outputs.setdefault(txid, [])
     submitted = set(result['submitted'])
     if len(submitted) != count:
         run.fail('6_mempool',
@@ -4095,14 +4369,56 @@ def assertion_6_mempool(run, evidence, count):
                   'scala_input_chain_txids_seen': len(scala_input_chain_txids),
                   'rust_log': rust_log_lines('input_blocks')})
 
-    # An observation that did not happen is not a pass.
+    # An observation that did not happen is not a pass — UNLESS it is the
+    # stock miner's own #2504 elimination (rm-A-steady-armB-2): polled
+    # live, because `unresolved` only means "not seen by the tracker
+    # inside the window", and both "still absent" and "still held
+    # elsewhere" are facts about right now.
     if unresolved:
-        run.fail('6_mempool',
-                 f'{len(unresolved)} payments reached neither a Rust input block nor '
-                 f'an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
-                 {'unresolved': unresolved,
-                  'input_blocks_seen': len(dict(run.input_block_txids)),
-                  'rust_log': rust_log_lines('input_blocks')})
+        produced_by = _produced_by(tx_outputs)
+        sealed_txids = {t for ids in dict(run.input_block_txids).values() for t in ids}
+        eliminated, still_unresolved = [], []
+        for txid in unresolved:
+            try:
+                miner_pool = {t.get('id') for t in
+                              api('scala', '/transactions/unconfirmed') or []}
+                absent_from_miner = txid not in miner_pool
+            except Unavailable:
+                absent_from_miner = False
+            held_elsewhere = False
+            for follower in ('scala2', 'scala3'):
+                try:
+                    pool = {t.get('id') for t in
+                           api(follower, '/transactions/unconfirmed') or []}
+                except Unavailable:
+                    continue
+                if txid in pool:
+                    held_elsewhere = True
+                    break
+            if _miner_eliminated_payment(txid, tx_inputs, produced_by, sealed_txids,
+                                         absent_from_miner, held_elsewhere):
+                eliminated.append(txid)
+            else:
+                still_unresolved.append(txid)
+        if eliminated:
+            evidence.setdefault('not_measured', []).append({
+                'scenario': '6_mempool',
+                'message': f'{len(eliminated)} payment(s) spend an output of another '
+                          "submitted payment already sealed into an earlier input "
+                          "block, and the stock miner's own collectTxs checks only "
+                          "the ordering block's UTXO set plus its own call — not "
+                          "earlier input blocks in the same window — so it silently "
+                          'eliminated them from its pool (upstream #2504, open, '
+                          'fixes this); the followers still hold them as valid',
+                'evidence': {'eliminated': sorted(eliminated),
+                            'sealed_producer_txids': sorted(sealed_txids)}})
+        if still_unresolved:
+            run.fail('6_mempool',
+                     f'{len(still_unresolved)} payments reached neither a Rust input '
+                     f'block nor an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
+                     {'unresolved': still_unresolved,
+                      'input_blocks_seen': len(dict(run.input_block_txids)),
+                      'rust_log': rust_log_lines('input_blocks')})
 
     # The strict path has to be EXERCISED. A run in which the miner
     # sealed nothing proves nothing about input-block eviction, so it is
