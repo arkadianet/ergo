@@ -388,14 +388,91 @@ def held_coverage(result, plan):
             and result['finished_ms'] >= result['hold_end_ms'])
 
 
-def ttl_deadline_epoch_ms(result, coverage):
-    """When the flood's last wave's entries reach the store's TTL:
-    `last_send + ttlMs`, in the adversary's own epoch-ms report frame.
-    `None` when `coverage` is falsy — an incomplete/unconfirmed run's
-    timing fields cannot be trusted for this. Pure."""
-    if not coverage:
-        return None
-    return result['started_unix_ms'] + result['last_send_ms'] + ROOT_FLOOD_CAPS['ttlMs']
+# A tip-quiet gap long enough that the store's TTL path could actually
+# fire (rm-A-flood-armA-held-patched-2, main): held-mode announcements
+# sit at tip+2 with a random parent, and #2563's take() (running on
+# EVERY applied block) drops each of them as StaleParent the moment the
+# tip advances by one — well before ttlMs on this continuously-mining
+# devnet (~30-85s/block). TTL is the backstop for a STALLED chain: it
+# is reached only by the synchronizer's 5-minute CleanupLocalInputBlock
+# Chunks tick, since take() runs only on new blocks. A quiet gap has to
+# be long enough for BOTH an entry to age past ttlMs AND, in the worst
+# case (the tick just fired as the gap began), for the NEXT tick to
+# land — hence ttlMs + one full sweep interval.
+QUIET_GAP_REQUIRED_MS = ROOT_FLOOD_CAPS['ttlMs'] + 300_000
+
+
+def quiet_gap_ms(samples, target, window_start_ms, window_end_ms):
+    """The longest span with NO tip change for `target`, within
+    `[window_start_ms, window_end_ms)` — the window's own edges act as
+    implicit boundaries, so a quiet stretch can run from the window's
+    start to the first change, or from the last change to its end (or
+    span the whole window, if `target`'s height never changed in it at
+    all). `(gap_ms, gap_start_ms, gap_end_ms)`; `gap_ms` is the FULL
+    window width, with `gap_start_ms`/`gap_end_ms` `None`, if no sample
+    in range carries both `request_started_ms` and `{target}_height` —
+    absence of evidence is not evidence of a tip change either, but the
+    caller can tell the two shapes apart by the `None` bounds. Pure, so
+    `--self-test` drives it directly.
+    """
+    ordered = sorted(
+        (s for s in samples if s.get('request_started_ms') is not None
+         and window_start_ms <= s['request_started_ms'] < window_end_ms
+         and s.get(f'{target}_height') is not None),
+        key=lambda s: s['request_started_ms'])
+    if not ordered:
+        return window_end_ms - window_start_ms, None, None
+    boundaries = [window_start_ms]
+    prev_height = None
+    for s in ordered:
+        height = s[f'{target}_height']
+        if prev_height is not None and height > prev_height:
+            boundaries.append(s['request_started_ms'])
+        prev_height = height
+    boundaries.append(window_end_ms)
+    best_gap, best_start = 0, boundaries[0]
+    for a, b in zip(boundaries, boundaries[1:]):
+        if b - a > best_gap:
+            best_gap, best_start = b - a, a
+    return best_gap, best_start, best_start + best_gap
+
+
+def no_leak_after_final_wave(samples, target, last_send_ms):
+    """After the tip changes again following the flood's LAST wave, did
+    `target`'s store size actually go back DOWN — proof the flood's own
+    entries do not accumulate forever, regardless of which mechanism
+    (stale-parent, capacity or TTL) clears them?
+
+    Compared against its own PEAK just before that tip change, not a
+    fixed count: the store's overall cap (`maxEntries`) already bounds
+    the absolute size elsewhere, so a fixed threshold near that cap
+    would pass even a store that never drains. A size already at 0
+    passes trivially — there was nothing left to leak.
+
+    `(ok, changed_at_ms)`. `ok` is `None` — inconclusive, not a failure
+    — when no qualifying tip change is found, or no store reading
+    exists on both sides of it. Pure.
+    """
+    changed_at = tip_change_epoch_ms(samples, target, last_send_ms)
+    if changed_at is None:
+        return None, None
+    before_sizes = [s['pending'].get('size') for s in samples
+                    if s.get('request_started_ms') is not None
+                    and s['request_started_ms'] < changed_at
+                    and isinstance(s.get('pending'), dict)
+                    and _number(s['pending'].get('size'))]
+    after = sorted(
+        (s for s in samples if s.get('request_started_ms') is not None
+         and s['request_started_ms'] >= changed_at
+         and isinstance(s.get('pending'), dict)),
+        key=lambda s: s['request_started_ms'])
+    if not before_sizes or not after:
+        return None, changed_at
+    size_after = after[0]['pending'].get('size')
+    if not _number(size_after):
+        return None, changed_at
+    peak_before = max(before_sizes)
+    return (size_after == 0 or size_after < peak_before), changed_at
 
 
 def tip_change_epoch_ms(samples, target, deadline_ms):
@@ -433,13 +510,14 @@ def tip_change_epoch_ms(samples, target, deadline_ms):
     return None
 
 
-def evaluate_store_window(samples, baseline, patched, plan, result, tip_change_at=None):
+def evaluate_store_window(samples, baseline, patched, plan, result, target=None):
     """Pure verdict; an unavailable measurement is incomplete, never zero.
 
-    `tip_change_at` (round 6, rm-A-flood-armA-held-patched-1): the epoch
-    ms `tip_change_epoch_ms` found for the target, restricted to samples
-    taken during the flood/drain window — needed to judge whether
-    `drops.expired` growth was even POSSIBLE to observe (see below).
+    `target` (round 6, rm-A-flood-armA-held-patched-1 and -2): the node
+    name to read `{target}_height` under, needed to judge whether
+    `drops.expired` growth was even POSSIBLE to observe, and for the
+    no-leak check after the final wave (see below). `None` skips both —
+    the caller decides whether the run even has a named target.
     """
     errors = []
     not_measured = []
@@ -487,21 +565,24 @@ def evaluate_store_window(samples, baseline, patched, plan, result, tip_change_a
         deltas = [counters_between(baseline, s.get('pending')) for s in live]
         report['live_samples'] = len(live)
         report['live_counter_deltas'] = deltas[-1] if deltas else {}
-        # `drops.expired` needs more than sockets held past ttlMs: expire()
-        # only runs from an ordering block applying (replaying
-        # announcements) or the synchronizer's 5-minute cleanup tick
-        # (rm-A-flood-armA-held-patched-1). Neither is guaranteed just
-        # because the hold is long enough — it is measurable only once
-        # the target's OWN height has actually moved at or after
-        # last_send + ttlMs, while its sockets were still open.
-        ttl_deadline = ttl_deadline_epoch_ms(result, coverage)
+        # `drops.expired` needs a QUIET tip, not merely a long hold: held
+        # announcements sit at tip+2 and #2563's take() clears each one
+        # as StaleParent the moment the tip advances by one, well before
+        # ttlMs on a continuously-mining chain — TTL is the backstop for
+        # a STALLED one, reached only by the 5-minute cleanup tick
+        # (rm-A-flood-armA-held-patched-2). Measurable only once the
+        # target's tip has been quiet, inside the sockets-open window,
+        # for at least `QUIET_GAP_REQUIRED_MS`.
+        gap_ms = gap_start = gap_end = None
+        if target and coverage:
+            gap_ms, gap_start, gap_end = quiet_gap_ms(samples, target, opened, ended)
         expiry_measurable = (
             plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs']
-            and ttl_deadline is not None and tip_change_at is not None
-            and opened <= tip_change_at < ended
-            and tip_change_at >= ttl_deadline)
-        report['ttl_deadline_ms'] = ttl_deadline
-        report['tip_change_at_ms'] = tip_change_at
+            and gap_ms is not None and gap_start is not None
+            and gap_ms >= QUIET_GAP_REQUIRED_MS)
+        report['quiet_gap_ms'] = gap_ms
+        report['quiet_gap_start_ms'] = gap_start
+        report['quiet_gap_end_ms'] = gap_end
         report['expiry_measurable'] = expiry_measurable
         for key, exercised in (
                 ('drops.hostLimit', plan['per_host'] > ROOT_FLOOD_CAPS['perPeer']),):
@@ -509,15 +590,29 @@ def evaluate_store_window(samples, baseline, patched, plan, result, tip_change_a
                 errors.append(f'{key} growth not observed while sockets were open')
         if plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs']:
             if expiry_measurable:
-                if not any(d.get('drops.expired', 0) > 0 for d in deltas):
+                gap_deltas = [counters_between(baseline, s.get('pending')) for s in live
+                             if gap_start <= s.get('request_started_ms', -1) < gap_end]
+                if not any(d.get('drops.expired', 0) > 0 for d in gap_deltas):
                     errors.append(
-                        'drops.expired growth not observed while sockets were open')
+                        'drops.expired growth not observed during the quiet gap')
             else:
+                stale = report['store_counters_in_window'].get('drops.staleParent')
                 not_measured.append(
-                    'drops.expired: no ordering block advanced the target\'s '
-                    'height at or after last_send+ttlMs while its sockets were '
-                    'still open (and no evidence of the 5-minute cleanup tick '
-                    'either), so expiry could not be observed either way')
+                    f'drops.expired: held entries were cleared as stale-parent at '
+                    f'each tip change (staleParent={stale}); no '
+                    f'{QUIET_GAP_REQUIRED_MS // 1000}s-long quiet period (ttlMs + '
+                    'the 5-minute cleanup tick) was observed while sockets were open')
+        # No-leak: whichever mechanism cleared the final wave's entries,
+        # the store must not still be carrying them indefinitely.
+        if target and coverage:
+            leak_ok, leak_at = no_leak_after_final_wave(
+                samples, target, result['started_unix_ms'] + result['last_send_ms'])
+            report['no_leak_after_final_wave'] = leak_ok
+            report['no_leak_checked_at_ms'] = leak_at
+            if leak_ok is False:
+                errors.append(
+                    'the store still held more than one wave\'s worth of entries '
+                    'after the tip changed following the final wave')
     return report
 
 
@@ -540,17 +635,12 @@ def self_test_held_evaluation():
                                for k in adversary_octets(plan)])
     sample = dict(pending=pending, request_started_ms=340000,
                   request_finished_ms=340100)
-    # ttl_deadline = started_unix_ms + last_send_ms + ttlMs = 341000; the
-    # window (`opened`..`ended`) runs 1010..351000. A tip change has to
-    # land inside both to make `drops.expired` measurable at all.
-    TIP_AFTER_TTL = 345000
 
-    def verdict(samples=None, base=None, outcome=None, patched=True,
-               tip=TIP_AFTER_TTL):
+    def verdict(samples=None, base=None, outcome=None, patched=True, target=None):
         return evaluate_store_window([sample] if samples is None else samples,
                                      baseline if base is None else base,
                                      patched, plan, result if outcome is None else outcome,
-                                     tip)
+                                     target)
 
     assert not verdict()['errors'], verdict()
     assert verdict()['telemetry'] == 'fixed telemetry', verdict()
@@ -586,10 +676,11 @@ def self_test_held_evaluation():
     assert verdict(samples=[sample, missing])['errors']
     assert not evaluate_root_flood([], [{'lines': 0, 'size': 1}],
                                    ROOT_FLOOD_CAPS, ())['caps_held']
-    for key in ('hostLimit', 'expired'):
-        unchanged = deepcopy(sample)
-        unchanged['pending']['drops'][key] = baseline['drops'][key]
-        assert any(f'drops.{key}' in e for e in verdict(samples=[unchanged])['errors'])
+    # hostLimit is unconditional (no target needed).
+    unchanged_hostlimit = deepcopy(sample)
+    unchanged_hostlimit['pending']['drops']['hostLimit'] = baseline['drops']['hostLimit']
+    assert any('drops.hostLimit' in e
+              for e in verdict(samples=[unchanged_hostlimit])['errors'])
     # Large baseline counts do not count as growth, even if a sampler started
     # before those counts were accumulated during the honest baseline blocks.
     assert verdict(base=deepcopy(pending))['errors']
@@ -625,22 +716,12 @@ def self_test_held_evaluation():
     over['pending']['bytes'] = ROOT_FLOOD_CAPS['maxBytes'] + 1
     assert verdict(samples=[over, sample])['errors']
 
-    # ----- round 6: drops.expired needs a tip change, not just a long hold -
-
-    # ttl_deadline_epoch_ms: pure, straight arithmetic in the adversary's
-    # own report frame, withheld entirely without confirmed coverage.
-    assert ttl_deadline_epoch_ms(result, True) == \
-        result['started_unix_ms'] + result['last_send_ms'] + ROOT_FLOOD_CAPS['ttlMs']
-    assert ttl_deadline_epoch_ms(result, False) is None
+    # ----- round 6: drops.expired needs a QUIET tip, not just a long hold -
 
     # tip_change_epoch_ms: a TRANSITION (height higher than the sample
     # immediately before it, in chronological order — not "higher than a
     # single fixed baseline"), restricted to one landing at/after the
-    # deadline. A rise entirely before the deadline must NOT stand in
-    # for one after it, even though the height is higher than it was at
-    # the very start (this is the exact bug armA-held-patched-2 exposed
-    # in the first cut, which compared against a fixed pre-flood height
-    # instead).
+    # deadline. Still used by no_leak_after_final_wave below.
     height_samples = [
         {'request_started_ms': 100, 'scala3_height': 10},
         {'request_started_ms': 200, 'scala3_height': 11},   # rise BEFORE deadline
@@ -649,54 +730,99 @@ def self_test_held_evaluation():
         {'request_started_ms': 500, 'scala3_height': 12},   # the qualifying rise
     ]
     assert tip_change_epoch_ms(height_samples, 'scala3', 250) == 500
-    # Out of order in the input, same answer: sorted by time internally.
     import random
     shuffled = height_samples[:]
     random.Random(0).shuffle(shuffled)
-    assert tip_change_epoch_ms(shuffled, 'scala3', 250) == 500
-    # A deadline early enough that the FIRST rise already qualifies.
+    assert tip_change_epoch_ms(shuffled, 'scala3', 250) == 500  # order-independent
     assert tip_change_epoch_ms(height_samples, 'scala3', 150) == 200
-    # A deadline past every rise in the series: none qualifies.
     assert tip_change_epoch_ms(height_samples, 'scala3', 600) is None
     assert tip_change_epoch_ms([], 'scala3', 250) is None
     assert tip_change_epoch_ms(height_samples, 'scala3', None) is None
 
-    # A sample with NEITHER counter grown, independent of the leftover
-    # loop variable above (which only reset one key at a time).
-    no_growth = deepcopy(sample)
-    no_growth['pending']['drops'].update(hostLimit=baseline['drops']['hostLimit'],
-                                         expired=baseline['drops']['expired'])
+    # quiet_gap_ms: the longest span with NO height change, within
+    # given window bounds. A single sample (nothing to compare against)
+    # or no samples at all reads as the WHOLE window quiet, but with
+    # bounds of `None` — no evidence either way is not evidence of quiet.
+    assert quiet_gap_ms([], 'scala3', 0, 1000) == (1000, None, None)
+    # One sample IS evidence (just not of a change): real bounds, not None.
+    assert quiet_gap_ms([{'request_started_ms': 500, 'scala3_height': 1}],
+                        'scala3', 0, 1000) == (1000, 0, 1000)
+    two_rises = [
+        {'request_started_ms': 0, 'scala3_height': 1},
+        {'request_started_ms': 300, 'scala3_height': 2},    # rise: ends a 300ms gap
+        {'request_started_ms': 900, 'scala3_height': 3},    # rise: ends a 600ms gap
+    ]
+    # Longest gap is 900..1000 (window end), 100ms — bigger than the
+    # 300 and 600ms gaps between the rises themselves.
+    assert quiet_gap_ms(two_rises, 'scala3', 0, 1000) == (600, 300, 900)
+    never_rises = [{'request_started_ms': t, 'scala3_height': 5} for t in (0, 500, 999)]
+    assert quiet_gap_ms(never_rises, 'scala3', 0, 1000) == (1000, 0, 1000)
 
-    # No tip change at all while sockets were open: drops.expired is
-    # NOT MEASURED, never a failure — armA-held-patched-1's own shape,
-    # where the store had already evicted everything by capacity long
-    # before any block gave expiry a chance to run.
-    never_measured = verdict(samples=[no_growth], tip=None)
-    assert 'drops.expired' not in ' '.join(never_measured['errors']), never_measured
-    assert any('drops.expired' in n for n in never_measured['not_measured']), \
-        never_measured
-    assert never_measured['expiry_measurable'] is False, never_measured
-    # hostLimit is unconditional — still a real, named failure alongside it.
-    assert any('drops.hostLimit' in e for e in never_measured['errors']), \
-        never_measured
+    # A sample with NEITHER counter grown, for the fixed-counter fixtures
+    # below (all sharing this run's own `plan`/`result`/`opened`=1010,
+    # `ended`=671000; QUIET_GAP_REQUIRED_MS = 120000 + 300000 = 420000).
+    no_growth_pending = deepcopy(pending)
+    no_growth_pending['drops'].update(hostLimit=baseline['drops']['hostLimit'],
+                                      expired=baseline['drops']['expired'])
 
-    # A tip change BEFORE ttl_deadline (341000) does not make it
-    # measurable either — the window it needs to fall in starts there.
-    too_early = verdict(samples=[no_growth], tip=340000)
-    assert too_early['expiry_measurable'] is False, too_early
-    assert any('drops.expired' in n for n in too_early['not_measured']), too_early
+    def held_sample(t_ms, height, expired=None):
+        p = deepcopy(no_growth_pending)
+        if expired is not None:
+            p['drops']['expired'] = expired
+        return {'pending': p, 'request_started_ms': t_ms, 'request_finished_ms': t_ms + 100,
+               'scala3_height': height}
 
-    # A tip change at/after ttl_deadline, but AFTER the sockets already
-    # closed (>= ended = 671000), is the same as none.
-    too_late_tip = verdict(samples=[no_growth], tip=671000)
-    assert too_late_tip['expiry_measurable'] is False, too_late_tip
+    # A QUIET tip for the whole window (gap = ended-opened = 669990 >=
+    # 420000): measurable, and no growth is a real, named failure.
+    quiet = [held_sample(1010, 10), held_sample(300000, 10), held_sample(670000, 10)]
+    quiet_verdict = verdict(samples=quiet, target='scala3')
+    assert quiet_verdict['expiry_measurable'] is True, quiet_verdict
+    assert any('drops.expired' in e for e in quiet_verdict['errors']), quiet_verdict
+    # hostLimit was reset too but is unconditional either way.
+    assert any('drops.hostLimit' in e for e in quiet_verdict['errors']), quiet_verdict
 
-    # A tip change that DOES qualify (already the default, TIP_AFTER_TTL)
-    # restores the original bar: no growth is a real, named failure.
-    qualifying = verdict(samples=[no_growth])
-    assert qualifying['expiry_measurable'] is True, qualifying
-    assert any('drops.expired' in e for e in qualifying['errors']), qualifying
-    assert any('drops.hostLimit' in e for e in qualifying['errors']), qualifying
+    # The SAME quiet tip, but growth DID happen: passes cleanly.
+    quiet_grew = [held_sample(1010, 10), held_sample(300000, 10),
+                 held_sample(670000, 10, expired=45)]
+    quiet_pass = verdict(samples=quiet_grew, target='scala3')
+    assert quiet_pass['expiry_measurable'] is True, quiet_pass
+    assert not any('drops.expired' in e for e in quiet_pass['errors']), quiet_pass
+
+    # A BUSY tip — height rises every ~50s, the shape armA-flood-armA-
+    # held-patched-2 actually measured (held entries cleared as
+    # stale-parent at each tip change): every gap is well under
+    # QUIET_GAP_REQUIRED_MS. NOT MEASURED, never a failure, and the
+    # reason names the stale-parent count.
+    busy = [held_sample(1010 + i * 50000, 10 + i) for i in range(13)]
+    busy_verdict = verdict(samples=busy, target='scala3')
+    assert busy_verdict['expiry_measurable'] is False, busy_verdict
+    assert 'drops.expired' not in ' '.join(busy_verdict['errors']), busy_verdict
+    assert any('drops.expired' in n and 'staleParent' in n
+              for n in busy_verdict['not_measured']), busy_verdict
+    # hostLimit is unaffected by any of this — still checked unconditionally.
+    assert any('drops.hostLimit' in e for e in busy_verdict['errors']), busy_verdict
+
+    # No target named at all (the caller decided the run has none): the
+    # same as never being able to measure it, regardless of the samples.
+    assert verdict(samples=quiet)['expiry_measurable'] is False
+
+    # no_leak_after_final_wave: the store's size after the first tip
+    # change following `last_send_ms` must drop from its own peak
+    # before that point (or already be 0) — proof against a permanent
+    # leak, whichever mechanism does the clearing.
+    def sized(t_ms, height, size):
+        return {'pending': dict(deepcopy(no_growth_pending), size=size),
+               'request_started_ms': t_ms, 'scala3_height': height}
+
+    drained = [sized(200000, 10, 256), sized(230000, 10, 256), sized(240000, 11, 5)]
+    ok, at = no_leak_after_final_wave(drained, 'scala3', 221000)
+    assert ok is True and at == 240000, (ok, at)
+    leaking = [sized(200000, 10, 256), sized(230000, 10, 256), sized(240000, 11, 256)]
+    ok2, _ = no_leak_after_final_wave(leaking, 'scala3', 221000)
+    assert ok2 is False, ok2
+    no_change = [sized(200000, 10, 256), sized(300000, 10, 256)]
+    ok3, at3 = no_leak_after_final_wave(no_change, 'scala3', 221000)
+    assert ok3 is None and at3 is None, (ok3, at3)
 
 
 def _percentiles(values):
@@ -878,12 +1004,8 @@ def _run_against_scala_follower(ctx, target):
     # Only an explicitly stock role receives the missing-store exemption.
     spec = campaign.lifecycle_roles().get(role)
     patched = spec is None or spec.patched
-    held = plan.get('hold_ms') is not None
-    coverage_now = held_coverage(result, plan) if held else None
-    ttl_deadline = ttl_deadline_epoch_ms(result, coverage_now) if held else None
-    tip_change_at = tip_change_epoch_ms(flood_samples, target, ttl_deadline)
     store_verdict = evaluate_store_window(
-        flood_samples, baseline, patched, plan, result, tip_change_at)
+        flood_samples, baseline, patched, plan, result, target)
     verdict.update(store_verdict)
     store_present = verdict['store_present']
     verdict['log_window'] = {'from_line': log_from, 'to_line': log_to}
