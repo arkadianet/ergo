@@ -197,7 +197,7 @@ impl StateStore {
         // Pre-build the wallet payload on the main thread BEFORE chain
         // apply. The payload bundles owned data only, so it can later
         // cross the pipeline-worker thread boundary (M5 follow-up).
-        let payload: Option<crate::store::WalletApplyPayload> = if let Some(hook) = wallet_hook {
+        let payload: Option<crate::wallet::WalletApplyPayload> = if let Some(hook) = wallet_hook {
             let (trees, pubkeys) = hook.wallet_state_snapshot();
             let allow_non_contiguous_wallet = hook.allow_non_contiguous_wallet_apply();
             let scan_count = hook.registered_scan_count();
@@ -213,7 +213,7 @@ impl StateStore {
                 } else {
                     Vec::new()
                 };
-                Some(crate::store::WalletApplyPayload {
+                Some(crate::wallet::WalletApplyPayload {
                     tracked_p2pk_trees: trees,
                     cached_pubkeys: pubkeys,
                     block_txs_owned: owned,
@@ -262,7 +262,7 @@ impl StateStore {
         expected_state_root: &ADDigest,
         checked: &[CheckedTransaction],
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_payload: Option<&crate::store::WalletApplyPayload>,
+        wallet_payload: Option<&crate::wallet::WalletApplyPayload>,
     ) -> Result<(), StateError> {
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
@@ -384,7 +384,7 @@ impl StateStore {
         )?;
         let wallet_payload = wallet_hook.map(|hook| {
             let (trees, pubkeys) = hook.wallet_state_snapshot();
-            crate::store::WalletApplyPayload {
+            crate::wallet::WalletApplyPayload {
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,
                 block_txs_owned: Vec::new(),
@@ -610,7 +610,7 @@ impl StateStore {
             super::emission::EmissionTransition,
         ),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
-        wallet_payload: Option<&crate::store::WalletApplyPayload>,
+        wallet_payload: Option<&crate::wallet::WalletApplyPayload>,
     ) -> Result<(), StateError> {
         let (to_remove, to_insert, emission) = changes;
         let digest_before = self.tree.root_digest();

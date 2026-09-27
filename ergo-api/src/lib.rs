@@ -35,6 +35,7 @@ pub mod wallet;
 mod web;
 
 pub use compat::{NodeChainQuery, Parameters, ScalaInfo};
+pub use ergo_wallet_protocol::chain;
 pub use mining::{mining_router, MiningApiError, NodeMining, NoopNodeMining};
 pub use server::{
     bind, realtime_handle, router_with_wallet, serve, serve_on, serve_on_with_mempool,

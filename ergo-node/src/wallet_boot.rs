@@ -4,8 +4,8 @@
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::TrackedPubkeyMeta;
 use ergo_wallet::error::WalletError;
-use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::{LockState, SecretStorage};
+use ergo_wallet_service::state::WalletState;
 use redb::WriteTransaction;
 use std::sync::{Mutex, MutexGuard};
 use tokio::task::{JoinError, JoinHandle};
@@ -682,7 +682,7 @@ mod tests {
             .apply_block(
                 501,
                 &[6; 32],
-                &ergo_state::store::WalletApplyPayload {
+                &ergo_state::wallet::WalletApplyPayload {
                     tracked_p2pk_trees: state.tracked_p2pk_trees().clone(),
                     cached_pubkeys: state.cached_pubkeys().clone(),
                     block_txs_owned: vec![],
@@ -739,7 +739,7 @@ mod tests {
         storage
             .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "pw", "")
             .expect("init");
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
         let result = WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state,
@@ -819,7 +819,7 @@ mod tests {
         storage
             .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "pw", "")
             .expect("init");
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
 
         // Arm the fault-injection.
         FAULT_INJECT.store(true, Ordering::SeqCst);
@@ -870,7 +870,7 @@ mod tests {
             .expect("init");
 
         // First unlock: persists tracked keys + a default change address.
-        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let mut state = ergo_wallet_service::state::WalletState::empty(false);
         WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state,
@@ -901,7 +901,7 @@ mod tests {
         // Re-unlock with fresh in-memory state (mirrors a node restart): the
         // hydrated state has no change address, and Step 5.5 must backfill it.
         storage.lock();
-        let mut state2 = ergo_wallet::state::WalletState::empty(false);
+        let mut state2 = ergo_wallet_service::state::WalletState::empty(false);
         WalletBootService::unlock_and_sync(
             &mut storage,
             &mut state2,

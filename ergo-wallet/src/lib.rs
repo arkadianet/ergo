@@ -2,24 +2,20 @@
 //!
 //! Covers BIP-39 mnemonics and EIP-3 key derivation (post- and
 //! pre-1627), AES-GCM / PBKDF2 encrypted secret storage, sigma
-//! proving (single- and multi-sig with hint-bag inputs),
-//! transaction building, and box selection. Convenience re-exports
-//! (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,
+//! proving (single- and multi-sig with hint-bag inputs), and secret storage.
+//! Orchestration modules live in `ergo-wallet-service`. Convenience
+//! re-exports (`Mnemonic`, `ExtendedSecretKey`, `DerivationPath`, `SecretKey`,
 //! `WalletError`) live at the crate root.
 
 pub mod address;
-pub mod box_selector;
 pub mod derivation;
 pub mod encryption;
 pub mod error;
 pub mod extended_key;
 pub mod mnemonic;
 pub mod proving;
-pub mod scan;
 pub mod secret;
-pub mod state;
 pub mod storage;
-pub mod tx_builder;
 pub mod tx_context;
 
 pub use derivation::DerivationPath;
@@ -27,7 +23,6 @@ pub use error::WalletError;
 pub use extended_key::{ExtendedPublicKey, ExtendedSecretKey};
 pub use mnemonic::Mnemonic;
 pub use secret::SecretKey;
-pub use state::WalletState;
 pub use storage::{
     EncryptedSecret, LockState as WalletLockState, SecretStorage, UnlockedMaster, UnlockedSecret,
 };

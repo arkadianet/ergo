@@ -8,7 +8,7 @@ use ergo_state::wallet::apply::{
 };
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
-use ergo_wallet::state::WalletState;
+use ergo_wallet_service::state::WalletState;
 use redb::{Database, ReadableTableMetadata};
 
 fn tracked_pk() -> [u8; 33] {

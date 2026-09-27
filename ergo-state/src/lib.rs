@@ -218,7 +218,7 @@ pub mod test_helpers {
         ) -> Result<(), StateError> {
             let (trees, pubkeys) = wallet_hook.wallet_state_snapshot();
             let owned = crate::store::build_wallet_block_txs_checked(checked, height)?;
-            let payload = crate::store::WalletApplyPayload {
+            let payload = crate::wallet::WalletApplyPayload {
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,
                 block_txs_owned: owned,

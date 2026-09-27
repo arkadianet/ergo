@@ -30,8 +30,8 @@ GROUPS = {
         # node shards, which had the headroom.
         ("ergo-node --lib", "ergo-node --bin ergo-node", "ergo-api"),
         (
-            "ergo-node --test it", "ergo-wallet", "ergo-difftest", "ergo-rest-json",
-            "ergo-indexer", "ergo-sync",
+            "ergo-node --test it", "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
+            "ergo-difftest", "ergo-rest-json", "ergo-indexer", "ergo-sync",
         ),
         (
             "ergo-state", "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
@@ -45,7 +45,7 @@ GROUPS = {
             "ergo-node --lib", "ergo-node --bin ergo-node", "ergo-state",
             "ergo-chain-spec", "ergo-primitives", "ergo-indexer-types",
             "ergo-mining", "ergo-p2p", "ergo-sigma", "ergo-compiler",
-            "ergo-wallet",
+            "ergo-wallet", "ergo-wallet-service", "ergo-wallet-protocol",
         ),
         (
             "ergo-node --test it", "ergo-indexer", "ergo-api", "ergo-sync", "ergo-validation",

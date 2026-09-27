@@ -5,7 +5,7 @@
 //! - ReplaceCompactCollectBoxSelector: compaction-aware (currently delegates
 //!   to DefaultBoxSelector; full compaction optimization not yet implemented)
 
-use crate::error::WalletError;
+use ergo_wallet::error::WalletError;
 use std::collections::BTreeMap;
 
 /// What the selector must cover.

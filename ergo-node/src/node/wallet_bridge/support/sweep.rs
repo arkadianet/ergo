@@ -195,7 +195,7 @@ pub(crate) async fn retrieve_rewards_impl(
     box_ids_override: Option<&[String]>,
     dry_run: bool,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,

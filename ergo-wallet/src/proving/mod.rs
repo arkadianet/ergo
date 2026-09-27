@@ -18,9 +18,12 @@ pub mod dht;
 pub mod external;
 pub mod extract;
 pub mod hints;
+pub mod miner_reward;
 pub mod node_position;
 pub mod prover;
 pub mod randomness;
 pub mod schnorr;
 pub mod secrets;
 pub mod sigma;
+
+pub use miner_reward::extract_miner_reward_pubkey;

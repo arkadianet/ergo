@@ -15,7 +15,7 @@ Repository: <https://github.com/arkadianet/ergo>
   single-writer runtime model, data-flow paths, and the consensus / persistence
   / reorg contracts.
 - [`docs/codemap.md`](./docs/codemap.md) — per-crate **codebase map**: a layered
-  index, the dependency graph, and a landmark page for each of the 19 crates
+  index, the dependency graph, and a landmark page for each of the 21 crates
   (purpose, modules, key types, invariants, "start here").
 - [`docs/overview.md`](./docs/overview.md) — the handbook: repository layout and
   the full build / test / run / configure surface.

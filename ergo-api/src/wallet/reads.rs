@@ -1,35 +1,14 @@
-//! Read endpoints for `/wallet/*` — unconditionally mounted, unlike routes
-//! gated on node configuration.
-//!
-//! Routes: balances, addresses, boxes, boxes/unspent, transactions,
-//! transactionById, transactionsByScanId/{id}.
-
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
+pub use ergo_wallet_protocol::scala::query::{PageQuery, TxIdQuery};
+
 use super::lifecycle::map_err;
 use super::types;
 use super::WalletAdmin;
-
-#[derive(serde::Deserialize, Default)]
-pub struct PageQuery {
-    #[serde(default)]
-    pub offset: u32,
-    #[serde(default = "default_limit")]
-    pub limit: u32,
-}
-
-fn default_limit() -> u32 {
-    50
-}
-
-#[derive(serde::Deserialize)]
-pub struct TxIdQuery {
-    pub id: String,
-}
 
 pub(crate) async fn balances(
     State(admin): State<Arc<dyn WalletAdmin>>,
@@ -38,9 +17,6 @@ pub(crate) async fn balances(
     Ok(Json(b))
 }
 
-/// `GET /wallet/balances/withUnconfirmed` — confirmed balance with the
-/// mempool overlay folded in (same wire shape as `balances`). Mirrors
-/// Scala `WalletApiRoute` `balancesWithUnconfirmed`.
 pub(crate) async fn balances_with_unconfirmed(
     State(admin): State<Arc<dyn WalletAdmin>>,
 ) -> Result<Json<types::WalletBalances>, (StatusCode, Json<serde_json::Value>)> {
@@ -103,7 +79,7 @@ pub(crate) async fn transaction_by_id(
 ) -> Result<Json<types::WalletTransactionEntry>, (StatusCode, Json<serde_json::Value>)> {
     let entry = admin.transaction_by_id(q.id).await.map_err(map_err)?;
     match entry {
-        Some(t) => Ok(Json(t)),
+        Some(e) => Ok(Json(e)),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "reason": "tx_not_found" })),
@@ -111,11 +87,6 @@ pub(crate) async fn transaction_by_id(
     }
 }
 
-/// `GET /wallet/transactionsByScanId/{scanId}` — transactions associated with
-/// a scan. Scan 10 (payments) is the wallet's own listing; user scans serve
-/// the rows tagged at block apply. Unknown / deregistered scans return an
-/// empty page (Scala's filter-by-membership likewise yields `[]`, despite the
-/// 404 its swagger declares).
 pub(crate) async fn transactions_by_scan_id(
     State(admin): State<Arc<dyn WalletAdmin>>,
     Path(scan_id): Path<u32>,

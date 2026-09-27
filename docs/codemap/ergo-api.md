@@ -1,8 +1,9 @@
 # ergo-api
 
-**Purpose:** Operator-facing read-mostly HTTP/JSON server for the node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/blockchain/*`, `/mining/*`) and the RUST API under `/api/v1/*`, plus the `/wallet/*` API and the embedded browser UIs. Its contract with the rest of the workspace is a small set of `Arc<dyn …>` traits — the node implements them against a runtime snapshot and hands the trait objects to `serve`; `ergo-api` never reaches into node internals.
+**Purpose:** Operator-facing read-mostly HTTP/JSON server for the node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/blockchain/*`, `/mining/*`) and the RUST API under `/api/v1/*`, plus the `/wallet/*` API and the embedded browser UIs. Its contract with the rest of the workspace is a small set of `Arc<dyn …>` traits — the node implements them against a runtime snapshot and hands the trait objects to `serve`; `ergo-api` never reaches into node internals. Transport-neutral wallet wire DTOs come from `ergo-wallet-protocol`; the service and node remain behind the API traits.
 
-**Depends on (workspace):** ergo-indexer-types, ergo-ser, ergo-primitives, ergo-rest-json (plus dev-only: ergo-indexer)
+**Depends on (workspace):** ergo-wallet-protocol, ergo-indexer-types, ergo-ser, ergo-primitives, ergo-rest-json, ergo-sigma, ergo-compiler (plus dev-only: ergo-indexer)
+**Normal workspace boundary:** the API may use the transport-neutral protocol DTOs and the listed node-facing read/compiler surfaces, but it must not depend on `ergo-state`, `ergo-wallet-service`, or `ergo-node`; `ergo-indexer` remains dev-only.
 **Depended on by:** (see codemap index)
 **Approx LOC:** ~12,300
 

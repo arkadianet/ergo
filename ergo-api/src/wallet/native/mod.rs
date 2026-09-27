@@ -15,6 +15,7 @@ use error::NativeErr;
 
 pub mod dto;
 pub mod error;
+pub(crate) mod schema;
 
 /// Unwrap a `Query<T>` extraction, mapping Axum's rejection (unknown query key
 /// via `deny_unknown_fields`, malformed value) to the native `{reason, detail?}`
@@ -138,11 +139,11 @@ pub(crate) struct BalanceQuery {
          description = "Include the labeled single-hop mempool delta")
     ),
     responses(
-        (status = 200, description = "Wallet balance breakdown", body = dto::WalletBalanceDto),
-        (status = 400, description = "Bad query", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 409, description = "Wallet uninitialized", body = error::NativeWalletError),
-        (status = 500, description = "Internal error", body = error::NativeWalletError),
+        (status = 200, description = "Wallet balance breakdown", body = schema::WalletBalanceDto),
+        (status = 400, description = "Bad query", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet uninitialized", body = schema::NativeWalletError),
+        (status = 500, description = "Internal error", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -162,8 +163,8 @@ pub(crate) async fn balance(
 #[utoipa::path(
     get, path = "/api/v1/wallet/status", tag = "wallet",
     responses(
-        (status = 200, description = "Wallet status", body = dto::WalletStatusDto),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 200, description = "Wallet status", body = schema::WalletStatusDto),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -181,8 +182,8 @@ pub(crate) async fn status(
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 16384)"),
     ),
     responses(
-        (status = 200, description = "Paged tracked addresses", body = dto::AddressPage),
-        (status = 400, description = "Bad page window", body = error::NativeWalletError),
+        (status = 200, description = "Paged tracked addresses", body = schema::AddressPage),
+        (status = 400, description = "Bad page window", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -207,8 +208,8 @@ pub(crate) async fn addresses(
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 16384)"),
     ),
     responses(
-        (status = 200, description = "Paged wallet boxes", body = dto::BoxPage),
-        (status = 400, description = "Bad page window", body = error::NativeWalletError),
+        (status = 200, description = "Paged wallet boxes", body = schema::BoxPage),
+        (status = 400, description = "Bad page window", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -230,9 +231,9 @@ pub(crate) async fn boxes(
     get, path = "/api/v1/wallet/boxes/{boxId}", tag = "wallet",
     params(("boxId" = String, Path, description = "32-byte box id (hex)")),
     responses(
-        (status = 200, description = "Wallet box summary", body = dto::WalletBoxSummary),
-        (status = 400, description = "Malformed box id", body = error::NativeWalletError),
-        (status = 404, description = "Box not tracked", body = error::NativeWalletError),
+        (status = 200, description = "Wallet box summary", body = schema::WalletBoxSummary),
+        (status = 400, description = "Malformed box id", body = schema::NativeWalletError),
+        (status = 404, description = "Box not tracked", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -259,8 +260,8 @@ pub(crate) async fn box_by_id(
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 16384)"),
     ),
     responses(
-        (status = 200, description = "Paged wallet transactions", body = dto::TxPage),
-        (status = 400, description = "Bad page window", body = error::NativeWalletError),
+        (status = 200, description = "Paged wallet transactions", body = schema::TxPage),
+        (status = 400, description = "Bad page window", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -282,9 +283,9 @@ pub(crate) async fn transactions(
     get, path = "/api/v1/wallet/transactions/{txId}", tag = "wallet",
     params(("txId" = String, Path, description = "32-byte transaction id (hex)")),
     responses(
-        (status = 200, description = "Wallet transaction summary", body = dto::WalletTransactionSummary),
-        (status = 400, description = "Malformed transaction id", body = error::NativeWalletError),
-        (status = 404, description = "Transaction not found", body = error::NativeWalletError),
+        (status = 200, description = "Wallet transaction summary", body = schema::WalletTransactionSummary),
+        (status = 400, description = "Malformed transaction id", body = schema::NativeWalletError),
+        (status = 404, description = "Transaction not found", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -327,12 +328,12 @@ fn no_store<T>(body: T) -> NoStoreJson<T> {
 /// `POST /api/v1/wallet/unlock` — load the in-memory master key.
 #[utoipa::path(
     post, path = "/api/v1/wallet/unlock", tag = "wallet",
-    request_body = dto::UnlockRequest,
+    request_body = schema::UnlockRequest,
     responses(
         (status = 200, description = "Unlocked"),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 401, description = "Wrong password", body = error::NativeWalletError),
-        (status = 409, description = "Wallet uninitialized", body = error::NativeWalletError),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 401, description = "Wrong password", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet uninitialized", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -349,7 +350,7 @@ pub(crate) async fn unlock(
     post, path = "/api/v1/wallet/lock", tag = "wallet",
     responses(
         (status = 200, description = "Locked"),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -364,11 +365,11 @@ pub(crate) async fn lock(
 /// the persisted seed. `matched=false` is a factual answer, not an error.
 #[utoipa::path(
     post, path = "/api/v1/wallet/mnemonic/verify", tag = "wallet",
-    request_body = dto::MnemonicVerifyRequest,
+    request_body = schema::MnemonicVerifyRequest,
     responses(
-        (status = 200, description = "Verification result", body = dto::MnemonicVerifyResult),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 409, description = "Wallet uninitialized", body = error::NativeWalletError),
+        (status = 200, description = "Verification result", body = schema::MnemonicVerifyResult),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet uninitialized", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -401,11 +402,11 @@ pub(crate) async fn mnemonic_verify(
 /// generated mnemonic ONCE (no-store).
 #[utoipa::path(
     post, path = "/api/v1/wallet/init", tag = "wallet",
-    request_body = dto::InitRequest,
+    request_body = schema::InitRequest,
     responses(
-        (status = 200, description = "Wallet created; mnemonic returned once", body = dto::InitResponse),
-        (status = 400, description = "Malformed body / invalid strength", body = error::NativeWalletError),
-        (status = 409, description = "Wallet already exists", body = error::NativeWalletError),
+        (status = 200, description = "Wallet created; mnemonic returned once", body = schema::InitResponse),
+        (status = 400, description = "Malformed body / invalid strength", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet already exists", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -436,11 +437,11 @@ pub(crate) async fn init(
 /// explicit derivation mode.
 #[utoipa::path(
     post, path = "/api/v1/wallet/restore", tag = "wallet",
-    request_body = dto::RestoreRequest,
+    request_body = schema::RestoreRequest,
     responses(
         (status = 200, description = "Wallet restored"),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 409, description = "Wallet exists / restore unsupported on a pruned node", body = error::NativeWalletError),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet exists / restore unsupported on a pruned node", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -473,11 +474,11 @@ fn index_from_path(path: &str) -> Option<u32> {
 /// explicit path) and register it as a tracked address. Needs unlock.
 #[utoipa::path(
     post, path = "/api/v1/wallet/addresses", tag = "wallet",
-    request_body = dto::DeriveKeyRequest,
+    request_body = schema::DeriveKeyRequest,
     responses(
-        (status = 200, description = "Derived address", body = dto::DerivedAddress),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked", body = error::NativeWalletError),
+        (status = 200, description = "Derived address", body = schema::DerivedAddress),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet locked", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -533,8 +534,8 @@ pub(crate) async fn derive_address(
 #[utoipa::path(
     get, path = "/api/v1/wallet/change-address", tag = "wallet",
     responses(
-        (status = 200, description = "Change address (or null)", body = dto::ChangeAddressDto),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
+        (status = 200, description = "Change address (or null)", body = schema::ChangeAddressDto),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -552,12 +553,12 @@ pub(crate) async fn change_address_get(
 /// path for the address; the address must be a tracked P2PK for this network.
 #[utoipa::path(
     put, path = "/api/v1/wallet/change-address", tag = "wallet",
-    request_body = dto::SetChangeAddressRequest,
+    request_body = schema::SetChangeAddressRequest,
     responses(
         (status = 200, description = "Change address set"),
-        (status = 409, description = "wallet_locked", body = error::NativeWalletError),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 422, description = "Address is not a tracked P2PK", body = error::NativeWalletError),
+        (status = 409, description = "wallet_locked", body = schema::NativeWalletError),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 422, description = "Address is not a tracked P2PK", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -578,11 +579,11 @@ pub(crate) async fn change_address_put(
     post, path = "/api/v1/wallet/rescan", tag = "wallet",
     // Optional body: the strict extractor treats an empty body as `{}` (a bodyless
     // POST does a full rebuild), so the OpenAPI contract must not mark it required.
-    request_body = Option<dto::RescanRequest>,
+    request_body = Option<schema::RescanRequest>,
     responses(
         (status = 200, description = "Rescan started"),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 409, description = "Rescan unavailable / already in progress", body = error::NativeWalletError),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 409, description = "Rescan unavailable / already in progress", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -602,14 +603,14 @@ pub(crate) async fn rescan(
 /// burn. Requires an unlocked wallet.
 #[utoipa::path(
     post, path = "/api/v1/wallet/boxes/select", tag = "wallet",
-    request_body = dto::BoxSelectRequest,
+    request_body = schema::BoxSelectRequest,
     responses(
-        (status = 200, description = "Selection plan", body = dto::BoxSelectResponse),
-        (status = 400, description = "Malformed body", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 404, description = "A requested box id is not a wallet box", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked/uninitialized", body = error::NativeWalletError),
-        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = error::NativeWalletError),
+        (status = 200, description = "Selection plan", body = schema::BoxSelectResponse),
+        (status = 400, description = "Malformed body", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 404, description = "A requested box id is not a wallet box", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet locked/uninitialized", body = schema::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -626,13 +627,13 @@ pub(crate) async fn select_boxes(
 /// fee, and re-emission burn. Requires an unlocked wallet.
 #[utoipa::path(
     post, path = "/api/v1/wallet/transactions/build", tag = "wallet",
-    request_body = dto::TxIntent,
+    request_body = schema::TxIntent,
     responses(
-        (status = 200, description = "Built unsigned transaction + plan", body = dto::BuildTxResponse),
-        (status = 400, description = "Malformed body / no outputs", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked/uninitialized", body = error::NativeWalletError),
-        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = error::NativeWalletError),
+        (status = 200, description = "Built unsigned transaction + plan", body = schema::BuildTxResponse),
+        (status = 400, description = "Malformed body / no outputs", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet locked/uninitialized", body = schema::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_spend_not_allowed / change_address_untracked / unsupported_intent", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -650,12 +651,12 @@ pub(crate) async fn build_transaction(
 /// `Cache-Control: no-store` (it carries signed material).
 #[utoipa::path(
     post, path = "/api/v1/wallet/transactions/sign", tag = "wallet",
-    request_body = dto::SignTxRequest,
+    request_body = schema::SignTxRequest,
     responses(
-        (status = 200, description = "Signed transaction + txId", body = dto::SignTxResponse),
-        (status = 400, description = "Malformed body / tx bytes", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 422, description = "missing_secret / reemission_obligation_unmet / unsupported_script", body = error::NativeWalletError),
+        (status = 200, description = "Signed transaction + txId", body = schema::SignTxResponse),
+        (status = 400, description = "Malformed body / tx bytes", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 422, description = "missing_secret / reemission_obligation_unmet / unsupported_script", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -673,13 +674,13 @@ pub(crate) async fn sign_transaction(
 /// and a duplicate submit is an idempotent accept. `Cache-Control: no-store`.
 #[utoipa::path(
     post, path = "/api/v1/wallet/transactions/send", tag = "wallet",
-    request_body = dto::SendTxRequest,
+    request_body = schema::SendTxRequest,
     responses(
-        (status = 200, description = "Accepted (fresh or idempotent)", body = dto::SendTxResponse),
-        (status = 400, description = "Malformed body / submit rejected", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked (intent send)", body = error::NativeWalletError),
-        (status = 422, description = "insufficient_funds / reemission_* / missing_secret / unsupported_intent", body = error::NativeWalletError),
+        (status = 200, description = "Accepted (fresh or idempotent)", body = schema::SendTxResponse),
+        (status = 400, description = "Malformed body / submit rejected", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet locked (intent send)", body = schema::NativeWalletError),
+        (status = 422, description = "insufficient_funds / reemission_* / missing_secret / unsupported_intent", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]
@@ -698,13 +699,13 @@ pub(crate) async fn send_transaction(
 /// breakdown without signing/submitting. `Cache-Control: no-store`.
 #[utoipa::path(
     post, path = "/api/v1/wallet/rewards/retrieve", tag = "wallet",
-    request_body = dto::RetrieveRewardsRequest,
+    request_body = schema::RetrieveRewardsRequest,
     responses(
-        (status = 200, description = "Preview (dryRun) or submitted sweep", body = dto::RetrieveRewardsResultDto),
-        (status = 400, description = "Malformed body / no matured rewards / too many token types", body = error::NativeWalletError),
-        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = error::NativeWalletError),
-        (status = 409, description = "Wallet locked (execute) / wallet uninitialized", body = error::NativeWalletError),
-        (status = 422, description = "insufficient_funds / change_address_untracked", body = error::NativeWalletError),
+        (status = 200, description = "Preview (dryRun) or submitted sweep", body = schema::RetrieveRewardsResultDto),
+        (status = 400, description = "Malformed body / no matured rewards / too many token types", body = schema::NativeWalletError),
+        (status = 403, description = "Missing/invalid api key (route-layer gate)", body = schema::NativeWalletError),
+        (status = 409, description = "Wallet locked (execute) / wallet uninitialized", body = schema::NativeWalletError),
+        (status = 422, description = "insufficient_funds / change_address_untracked", body = schema::NativeWalletError),
     ),
     security(("ApiKeyAuth" = [])),
 )]

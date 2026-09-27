@@ -7,7 +7,7 @@ use ergo_state::wallet::apply::{
 use ergo_state::wallet::maturity::{promote_matured_boxes, unpromote_matured_boxes};
 use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
-use ergo_wallet::state::WalletState;
+use ergo_wallet_service::state::WalletState;
 use redb::Database;
 
 struct NoopRescanGuard;

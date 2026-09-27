@@ -49,7 +49,7 @@ pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdmi
 pub(crate) async fn sign_transaction_native_impl(
     req: &ergo_api::wallet::native::dto::SignTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
@@ -111,7 +111,7 @@ pub(crate) fn map_submit_error(e: ergo_api::types::SubmitError) -> WalletAdminEr
 pub(crate) async fn send_transaction_native_impl(
     req: &ergo_api::wallet::native::dto::SendTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet::state::WalletState>,
+    state: &RwLock<ergo_wallet_service::state::WalletState>,
     store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,

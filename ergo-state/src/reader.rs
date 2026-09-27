@@ -124,17 +124,67 @@ impl ChainStoreReader {
         committed_tip_in(&read_txn)
     }
 
+    pub fn committed_block_id_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<[u8; 32]>, StateError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(crate::store::CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(value) = table.get(height as u64)? else {
+            return Ok(None);
+        };
+        let bytes = value.value();
+        if bytes.len() != 32 {
+            return Err(StateError::DbCorruption {
+                table: "chain_index",
+                key: height.to_string(),
+                reason: format!("row has len {} (expected 32)", bytes.len()),
+            });
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(bytes);
+        Ok(Some(id))
+    }
+
+    pub fn minimal_full_block_height(&self) -> Result<u32, StateError> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(STATE_META) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(1),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(value) = table.get("minimal_full_block_height_v1")? else {
+            return Ok(1);
+        };
+        let bytes = value.value();
+        if bytes.len() != 4 {
+            return Err(StateError::DbCorruption {
+                table: "state_meta",
+                key: "minimal_full_block_height_v1".to_string(),
+                reason: format!("row has len {} (expected 4)", bytes.len()),
+            });
+        }
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
     /// Reads the wallet rescan block at `height` from one committed snapshot.
     #[allow(clippy::type_complexity)]
     pub fn wallet_block_txs_at_height(
         &self,
         height: u32,
     ) -> Result<
-        Option<([u8; 32], Vec<crate::store::OwnedBlockTxData>)>,
+        Option<([u8; 32], Vec<crate::wallet::OwnedBlockTxData>)>,
         crate::wallet::scan::RescanReadError,
     > {
         let read_txn = self.db.begin_read().map_err(|error| {
-            crate::wallet::scan::RescanReadError::from_state(height, error.into())
+            crate::wallet::scan::RescanReadError::storage(
+                height,
+                crate::wallet::WalletStoreError::from(error),
+            )
         })?;
         crate::store::block_txs_for_wallet_at_height_in_read_txn(&read_txn, height)
     }

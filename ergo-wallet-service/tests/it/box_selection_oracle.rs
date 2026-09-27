@@ -5,11 +5,11 @@
 //! missing-token errors, and ReplaceCompactCollectBoxSelector delegation.
 //! One #[ignore]'d scaffold for Scala-oracle fixtures (extraction pending).
 
-use ergo_wallet::box_selector::{
+use ergo_wallet::error::WalletError;
+use ergo_wallet_service::box_selector::{
     default::DefaultBoxSelector, replace_compact::ReplaceCompactCollectBoxSelector, BoxSelector,
     BoxSummary, SelectionTarget,
 };
-use ergo_wallet::error::WalletError;
 use std::collections::BTreeMap;
 
 // ----- helpers -----

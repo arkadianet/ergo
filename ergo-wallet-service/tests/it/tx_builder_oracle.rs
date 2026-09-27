@@ -8,9 +8,9 @@
 //! This is the simplest valid script and avoids pulling in sigma-rust or
 //! Scala-oracle extraction for builder-level tests.
 
-use ergo_wallet::box_selector::{default::DefaultBoxSelector, BoxSummary};
 use ergo_wallet::error::WalletError;
-use ergo_wallet::tx_builder::{PaymentRequest, UnsignedTxBuilder};
+use ergo_wallet_service::box_selector::{default::DefaultBoxSelector, BoxSummary};
+use ergo_wallet_service::tx_builder::{PaymentRequest, UnsignedTxBuilder};
 use std::collections::BTreeMap;
 
 // ----- helpers -----

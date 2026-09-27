@@ -16,7 +16,7 @@ use ergo_state::wallet::scan::{
 };
 use ergo_state::wallet::tables::{WALLET_BOXES, WALLET_SCAN_HEADER_ID, WALLET_SCAN_HEIGHT};
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
-use ergo_wallet::state::WalletState;
+use ergo_wallet_service::state::WalletState;
 use redb::{Database, TableDefinition};
 
 const CHAIN_INDEX: TableDefinition<u64, &[u8]> = TableDefinition::new("chain_index");

@@ -6,7 +6,7 @@
 //! change reaches zero (exact) or >= min_change_value (acceptable change box).
 
 use super::{BoxSelector, BoxSummary, SelectionResult, SelectionTarget};
-use crate::error::WalletError;
+use ergo_wallet::error::WalletError;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
