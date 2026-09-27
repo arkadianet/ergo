@@ -199,7 +199,7 @@ fn ad_proofs_section_bytes(header_id: [u8; 32], proof_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Store one header's three full-block sections under their computed ids.
-fn store_sections(store: &DigestStateStore, header: &Header, row: &CorpusRow) {
+fn store_sections(store: &DigestStateStore, header: &Header, row: &CorpusRow, include_proof: bool) {
     let header_id = row.header_id;
     let tx_id = compute_section_id(
         TYPE_BLOCK_TRANSACTIONS,
@@ -215,6 +215,9 @@ fn store_sections(store: &DigestStateStore, header: &Header, row: &CorpusRow) {
     store
         .store_block_section_typed(&ext_id, &row.extension_bytes, TYPE_EXTENSION)
         .expect("store extension section");
+    if !include_proof {
+        return;
+    }
     store
         .store_block_section_typed(
             &ad_id,
@@ -229,6 +232,13 @@ fn store_sections(store: &DigestStateStore, header: &Header, row: &CorpusRow) {
 /// digest path needs to apply `APPLY_LO ..= APPLY_HI`. Returns the store
 /// and the per-height corpus rows.
 fn build_seeded_store(dir: &std::path::Path) -> (DigestStateStore, BTreeMap<u32, CorpusRow>) {
+    build_seeded_store_with_proof(dir, true)
+}
+
+fn build_seeded_store_with_proof(
+    dir: &std::path::Path,
+    include_first_proof: bool,
+) -> (DigestStateStore, BTreeMap<u32, CorpusRow>) {
     let prior = load_prior_fixture();
 
     // Voting cadence: mainnet epoch length (1024) so the boundary lands at
@@ -283,7 +293,7 @@ fn build_seeded_store(dir: &std::path::Path) -> (DigestStateStore, BTreeMap<u32,
         store
             .seed_header_chain_index_for_test(h, &row.header_id)
             .expect("seed corpus chain index");
-        store_sections(&store, &header, row);
+        store_sections(&store, &header, row, h != APPLY_LO || include_first_proof);
     }
 
     // Seed the committed tip at APPLY_LO - 1. root_digest is the parent
@@ -622,3 +632,6 @@ fn mode5_executor_replay_rejects_mutated_parent_interlinks() {
         "expected an interlink structure-mismatch rejection (rule 402), got: {msg}"
     );
 }
+
+#[path = "mode5_failed_tx_tests.rs"]
+mod failed_tx_tests;

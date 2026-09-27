@@ -58,6 +58,17 @@ pub(super) fn report_block_process_failure(
 }
 
 impl SyncExecutor {
+    /// Drain transaction IDs named by block validation, for local and remote blocks.
+    pub fn take_failed_transactions(&mut self) -> Vec<[u8; 32]> {
+        std::mem::take(&mut self.failed_transactions)
+    }
+
+    pub(super) fn record_failed_transaction(&mut self, error: &BlockProcessError) {
+        if let BlockProcessError::TransactionValidation { tx_id, .. } = error {
+            self.failed_transactions.push(*tx_id);
+        }
+    }
+
     #[tracing::instrument(skip_all, fields(block = %hex::encode(header_id)))]
     pub(super) fn handle_assemble_block(
         &mut self,
@@ -175,6 +186,7 @@ impl SyncExecutor {
             Err(e) => {
                 guard.failure();
                 report_block_process_failure(store, header_id, &e);
+                self.record_failed_transaction(&e);
                 self.record_block_apply_error(*header_id, meta.height, e.to_string());
                 // Same classifier as try_apply_next_blocks: a definitive
                 // validation verdict durably invalidates the block + its

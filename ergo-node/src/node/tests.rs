@@ -4864,7 +4864,9 @@ mod block_relay {
         let intent = BuildIntent {
             expected_parent: parent,
             expected_height: height,
-            mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
+            mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(
+                &state.mempool,
+            )),
             miner_pk: MINER_PK,
             reason: BuildReason::Tip,
         };
@@ -4929,6 +4931,89 @@ mod block_relay {
         assert!(handle
             .publish_if_current(candidate, work, &parent, wall_clock_ms, BuildReason::Tip)
             .is_some());
+    }
+
+    /// Model an admission/block-validation disagreement by seeding the pool directly.
+    /// The unrelated entry is the valid emission transaction from the same template.
+    fn seed_failed_tx_pool(
+        state: &mut NodeState,
+        unrelated: &ergo_ser::transaction::Transaction,
+    ) -> (ergo_mempool::TxId, ergo_mempool::TxId) {
+        let bad = ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        };
+        let mut ids = Vec::new();
+        for tx in [&bad, unrelated] {
+            let tx_id = ergo_mempool::TxId::from_bytes(
+                *ergo_ser::transaction::transaction_id(tx)
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let mut writer = VlqWriter::new();
+            ergo_ser::transaction::write_transaction(&mut writer, tx).unwrap();
+            let bytes = writer.result();
+            let size = bytes.len() as u32;
+            state
+                .mempool
+                .pool_mut()
+                .insert(ergo_mempool::Entry::new(
+                    tx_id,
+                    bytes.into(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    1,
+                    1,
+                    size,
+                    1,
+                    ergo_mempool::TxSource::Api,
+                ))
+                .unwrap();
+            ids.push(tx_id);
+        }
+        (ids[0], ids[1])
+    }
+
+    fn publish_failed_tx_candidate(state: &NodeState, handle: &MiningHandle) -> Candidate {
+        let mut saved = None;
+        publish_tampered_candidate(state, handle, |candidate| {
+            candidate
+                .transactions
+                .push(ergo_ser::transaction::Transaction {
+                    inputs: vec![],
+                    data_inputs: vec![],
+                    output_candidates: vec![],
+                });
+            let ids: Vec<_> = candidate
+                .transactions
+                .iter()
+                .map(|tx| ergo_ser::transaction::transaction_id(tx).unwrap())
+                .collect();
+            let witnesses: Vec<_> = candidate
+                .transactions
+                .iter()
+                .map(|tx| {
+                    let proofs: Vec<_> = tx
+                        .inputs
+                        .iter()
+                        .flat_map(|i| i.spending_proof.proof.iter().copied())
+                        .collect();
+                    ergo_crypto::autolykos::common::blake2b256(&proofs)[1..].to_vec()
+                })
+                .collect();
+            candidate.header.transactions_root = ergo_primitives::digest::Digest32::from_bytes(
+                ergo_crypto::merkle::transactions_root(
+                    &ids.iter()
+                        .map(|id| id.as_bytes().as_slice())
+                        .collect::<Vec<_>>(),
+                    Some(&witnesses.iter().map(Vec::as_slice).collect::<Vec<_>>()),
+                ),
+            );
+            saved = Some(candidate.clone());
+        });
+        saved.unwrap()
     }
 
     /// A solution to the newest published template.
@@ -6673,6 +6758,153 @@ mod block_relay {
             recovered.after_apply
         );
         assert_announced_ids_served(&mut state, &recovered.before_apply);
+    }
+
+    #[test]
+    fn block_failed_tx_local_evicts_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        let candidate = publish_failed_tx_candidate(&state, &handle);
+        let (bad, unrelated) = seed_failed_tx_pool(&mut state, &candidate.transactions[0]);
+        let queue = register_shared_peer(&mut state);
+        let mined = solve(&state, &handle, 0);
+        let failed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(apply_failed(&failed.result), "{:?}", failed.result);
+        assert!(
+            state
+                .executor
+                .last_block_apply_error()
+                .unwrap()
+                .reason
+                .contains("transaction 1"),
+            "{:?}",
+            state.executor.last_block_apply_error()
+        );
+        assert!(
+            !state.mempool.contains(&bad),
+            "block-named transaction remains pooled"
+        );
+        assert!(state.mempool.contains(&unrelated));
+        publish_candidate(&state, &handle);
+        let next = solve(&state, &handle, 0);
+        let solution =
+            ergo_mining::work_message::MinerSolution::from_hex(&hex::encode(next.nonce), None)
+                .unwrap();
+        let ergo_mining::solution::SolutionOutcome::Accepted(block) = handle
+            .verify_solution(&solution, state.store.as_utxo().unwrap())
+            .unwrap()
+        else {
+            panic!("rebuilt template rejected")
+        };
+        assert!(block
+            .transactions
+            .iter()
+            .all(|tx| ergo_ser::transaction::transaction_id(tx)
+                .unwrap()
+                .as_bytes()
+                != bad.as_bytes()));
+    }
+
+    #[test]
+    fn block_failed_tx_remote_evicts_only_named_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        let candidate = publish_failed_tx_candidate(&state, &handle);
+        let (bad, unrelated) = seed_failed_tx_pool(&mut state, &candidate.transactions[0]);
+        let mined = solve(&state, &handle, 0);
+        process_header(&mut state, &serialize_header(&mined.header).unwrap().0);
+        let expected = ExpectedSections::from_header(
+            &mined.id,
+            mined.header.transactions_root.as_bytes(),
+            mined.header.extension_root.as_bytes(),
+            mined.header.ad_proofs_root.as_bytes(),
+        );
+        let mut writer = VlqWriter::new();
+        ergo_ser::block_transactions::write_block_transactions_with_version(
+            &mut writer,
+            &ergo_ser::block_transactions::BlockTransactions {
+                header_id: ModifierId::from_bytes(mined.id),
+                transactions: candidate.transactions,
+            },
+            mined.header.version,
+        )
+        .unwrap();
+        state
+            .store
+            .store_block_section_typed(&expected.transactions_id, &writer.result(), 102)
+            .unwrap();
+        let mut writer = VlqWriter::new();
+        ergo_ser::extension::write_extension(
+            &mut writer,
+            &ergo_ser::extension::Extension {
+                header_id: ModifierId::from_bytes(mined.id),
+                fields: candidate
+                    .extension_fields
+                    .into_iter()
+                    .map(|(key, value)| ergo_ser::extension::ExtensionField {
+                        key: key.try_into().unwrap(),
+                        value,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+        state
+            .store
+            .store_block_section_typed(&expected.extension_id, &writer.result(), 108)
+            .unwrap();
+        state.executor.try_apply_next_blocks(
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(
+            state
+                .executor
+                .last_block_apply_error()
+                .unwrap()
+                .reason
+                .contains("transaction 1"),
+            "{:?}",
+            state.executor.last_block_apply_error()
+        );
+        assert!(
+            !state.mempool.contains(&bad),
+            "block-named transaction remains pooled"
+        );
+        assert!(state.mempool.contains(&unrelated));
+    }
+
+    #[test]
+    fn block_failed_tx_ad_proofs_failure_keeps_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        let mut transaction = None;
+        publish_tampered_candidate(&state, &handle, |candidate| {
+            replace_ad_proofs(candidate);
+            transaction = Some(candidate.transactions[0].clone());
+        });
+        let (bad, unrelated) = seed_failed_tx_pool(&mut state, &transaction.unwrap());
+        let mined = solve(&state, &handle, 0);
+        assert!(apply_failed(&submit_solution(
+            &mut state,
+            &handle,
+            mined.nonce
+        )));
+        assert!(state
+            .executor
+            .last_block_apply_error()
+            .unwrap()
+            .reason
+            .contains("ADProofs hash mismatch"));
+        assert!(state.mempool.contains(&bad));
+        assert!(state.mempool.contains(&unrelated));
+        assert_eq!(state.mempool.size(), 2);
     }
 
     #[test]

@@ -571,7 +571,8 @@ pub(super) fn process_block_digest(
         &extension,
         &ctx,
         &tx_group_elements,
-    )?;
+    )
+    .map_err(|error| BlockProcessError::with_transactions(error, &block_txs.transactions))?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
 

@@ -74,11 +74,13 @@ fn report_sync_storage_failure(
 /// apply — versus a transient/IO/consistency failure that must NOT poison
 /// the branch (it might be our bug, a stale local root, or missing data).
 ///
-/// Only the consensus-rule verdicts qualify: `Validation`, `HeaderMeta`,
-/// `EpochExtension`, and `AdProofsHashMismatch` (the regenerated proof
+/// Only the consensus-rule verdicts qualify: `Validation`,
+/// `TransactionValidation`, `HeaderMeta`, `EpochExtension`, and
+/// `AdProofsHashMismatch` (the regenerated proof
 /// hash contradicting the header's declared `adProofsRoot` is exactly
 /// Scala's "Regenerated proofHash is not equal to the declared one"
-/// reject). `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
+/// reject). `TransactionValidation` has the same durable-invalidation semantics
+/// as `Validation`. `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
 /// are data/IO/consistency paths (a stored section that won't parse could
 /// be disk corruption, not a bad block); `DigestApply` is session-scoped by
 /// its own contract. When in doubt we do NOT invalidate — the conservative
@@ -95,6 +97,7 @@ fn is_validation_verdict(e: &BlockProcessError) -> bool {
     matches!(
         e,
         BlockProcessError::Validation(_)
+            | BlockProcessError::TransactionValidation { .. }
             | BlockProcessError::HeaderMeta(_)
             | BlockProcessError::EpochExtension(_)
             | BlockProcessError::AdProofsHashMismatch { .. }
@@ -213,6 +216,8 @@ pub struct SyncExecutor {
     /// fork-from-network is visible, not just a `warn!` line. Session-scoped
     /// (cleared on restart, like `block_perf`).
     last_block_apply_error: Option<LastBlockApplyError>,
+    /// Transaction verdicts awaiting the node's mempool action drain.
+    failed_transactions: Vec<[u8; 32]>,
     /// Monotonic count of block-apply rejections since start. Backs the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.
     block_apply_error_count: u64,
@@ -263,6 +268,7 @@ impl SyncExecutor {
             header_perf: HeaderPerfCounters::default(),
             block_perf: BlockPerfCounters::default(),
             last_block_apply_error: None,
+            failed_transactions: Vec::new(),
             block_apply_error_count: 0,
             apply_phase: std::sync::Arc::new(crate::ApplyPhaseMetrics::default()),
             deep_fork_wedge: None,
@@ -581,3 +587,6 @@ impl SyncExecutor {
 
 #[cfg(test)]
 mod relay_tests;
+
+#[cfg(test)]
+mod failed_tx_tests;

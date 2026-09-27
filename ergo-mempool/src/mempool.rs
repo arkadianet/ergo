@@ -211,6 +211,53 @@ impl Mempool {
         self.invalidation.contains(tx_id)
     }
 
+    /// Invalidate a transaction named by block validation using the same bounded
+    /// descendant removal and revocation semantics as a failed pool recheck.
+    pub fn invalidate(&mut self, id: TxId, now: std::time::Instant) -> Vec<MempoolAction> {
+        if !self.contains(&id) {
+            return Vec::new();
+        }
+        let bounds = FamilyBounds::new(
+            self.config.max_family_depth,
+            self.config.max_family_ops,
+            self.config.max_family_update_ms,
+        );
+        let removed = self.remove_invalid_family(&id, self.config.max_family_depth, bounds);
+        self.invalidation.insert(
+            id,
+            crate::invalidation::InvalidationReason::ValidationFailed,
+            now,
+        );
+        let tx_ids: Vec<_> = removed.into_iter().map(|e| e.tx_id).collect();
+        let actions = vec![
+            MempoolAction::RevokeBroadcast {
+                tx_ids: tx_ids.clone(),
+            },
+            MempoolAction::Observe {
+                event: ObservedEvent::Evicted {
+                    tx_ids,
+                    reason: EvictionReason::TipInvalid,
+                },
+            },
+        ];
+        emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
+        actions
+    }
+
+    fn remove_invalid_family(
+        &mut self,
+        id: &TxId,
+        max_depth: usize,
+        bounds: FamilyBounds,
+    ) -> Vec<Entry> {
+        let (removed, frontier) = self
+            .pool
+            .remove_with_descendants_debiting_frontier(id, max_depth, bounds);
+        // Descendants beyond the family bound are swept by the recheck drain.
+        self.pending_orphan_eviction.extend(frontier);
+        removed
+    }
+
     pub fn tip(&self) -> Option<&TipPointer> {
         self.tip.as_ref()
     }
@@ -1604,16 +1651,7 @@ impl Mempool {
                 self.pool.touch_rechecked(&id, now);
             }
             Err(err) => {
-                let (removed, frontier) = self.pool.remove_with_descendants_debiting_frontier(
-                    &id,
-                    max_family_depth,
-                    bounds,
-                );
-                // Descendants past the depth cap are orphaned by this eviction;
-                // queue them for bounded dependency-eviction (drained under the
-                // per-pass budget) rather than leaving them to linger as
-                // retained UnresolvedInput.
-                self.pending_orphan_eviction.extend(frontier);
+                let removed = self.remove_invalid_family(&id, max_family_depth, bounds);
                 for e in &removed {
                     for out in &e.outputs {
                         pool_outputs.remove(out);
@@ -1903,3 +1941,6 @@ impl Mempool {
 mod recheck_tests;
 #[cfg(test)]
 mod staging_tests;
+
+#[cfg(test)]
+mod invalidate_tests;

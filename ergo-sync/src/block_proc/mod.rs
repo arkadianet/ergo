@@ -47,6 +47,13 @@ pub enum BlockProcessError {
     Deserialize(String),
     #[error("block validation: {0}")]
     Validation(#[from] BlockValidationError),
+    /// A transaction-level verdict, resolved against the already decoded block.
+    #[error("block validation: {source}")]
+    TransactionValidation {
+        tx_id: [u8; 32],
+        #[source]
+        source: BlockValidationError,
+    },
     #[error("state application: {0}")]
     State(#[from] ergo_state::store::StateError),
     #[error("header metadata inconsistency: {0}")]
@@ -108,6 +115,26 @@ pub enum BlockProcessError {
     /// layer). The executor marks the header session-invalid.
     #[error("digest proof verification rejected the block: {0}")]
     DigestApply(#[from] ergo_state::DigestApplyError),
+}
+
+impl BlockProcessError {
+    fn with_transactions(
+        error: BlockValidationError,
+        transactions: &[ergo_ser::transaction::Transaction],
+    ) -> Self {
+        if let BlockValidationError::Transaction { index, .. } = &error {
+            if let Some(tx_id) = transactions
+                .get(*index)
+                .and_then(|tx| ergo_ser::transaction::transaction_id(tx).ok())
+            {
+                return Self::TransactionValidation {
+                    tx_id: *tx_id.as_bytes(),
+                    source: error,
+                };
+            }
+        }
+        Self::Validation(error)
+    }
 }
 
 /// Result of successfully processing a block.
@@ -175,3 +202,6 @@ pub fn process_block(
         ),
     }
 }
+
+#[cfg(test)]
+mod failed_tx_tests;

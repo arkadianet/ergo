@@ -482,7 +482,8 @@ pub(super) fn process_block_utxo(
         &extension,
         &ctx,
         &tx_group_elements,
-    )?;
+    )
+    .map_err(|error| BlockProcessError::with_transactions(error, &block_txs.transactions))?;
     let t_validate = t0.elapsed();
     let tx_count = checked_block.transactions().len();
 
@@ -835,9 +836,9 @@ mod tests {
         // ErgoTransaction.scala:93-94 and ValidationRules.scala:31-35:
         // rules 100/101 are fatal validation verdicts, not parse failures.
         assert!(
-            matches!(&err, BlockProcessError::Validation(BlockValidationError::Transaction {
+            matches!(&err, BlockProcessError::TransactionValidation { source: BlockValidationError::Transaction {
             index: 0, error,
-        }) if matches!((no_inputs, error),
+        }, .. } if matches!((no_inputs, error),
             (true, ValidationError::NoInputs) | (false, ValidationError::NoOutputs))),
             "{err:?}"
         );
