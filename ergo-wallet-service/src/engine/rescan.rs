@@ -60,8 +60,6 @@ pub enum BeginRescanError {
 ///   boot or fail-closed fence sets `in_progress` without setting it.
 /// - `fail_closed`: latch for a rescan whose invalidation or outcome could
 ///   not be persisted. Distinct from normal full-rescan activity.
-/// - `from_height`: start height of the in-flight rescan, set alongside
-///   `in_progress`; only meaningful while `in_progress` is true.
 /// - `scan_rebuild`: set for a full rebuild (`fromHeight == 0`) that rebuilds
 ///   the registered `/scan/*` tables, and forced on when a rescan fails
 ///   closed. The hook's scan path no-ops while it is set, quiescing live scan
@@ -81,7 +79,6 @@ pub struct RescanCoordinator {
     cancel_requested: AtomicBool,
     task_active: AtomicBool,
     fail_closed: AtomicBool,
-    from_height: AtomicU32,
     scan_rebuild: AtomicBool,
     shutdown_requested: AtomicBool,
 }
@@ -132,12 +129,6 @@ impl RescanCoordinator {
     /// The wallet is failed closed until a full rescan succeeds.
     pub fn fail_closed(&self) -> bool {
         self.fail_closed.load(Ordering::SeqCst)
-    }
-
-    /// Start height of the in-flight rescan (meaningful only while
-    /// [`Self::in_progress`] is true).
-    pub fn from_height(&self) -> u32 {
-        self.from_height.load(Ordering::SeqCst)
     }
 
     /// A full rebuild (or a fail-closed latch) is quiescing live scan apply.
@@ -218,7 +209,6 @@ impl RescanCoordinator {
         }
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.in_progress.store(true, Ordering::SeqCst);
-        self.from_height.store(start_h, Ordering::SeqCst);
         self.scan_rebuild.store(full_rebuild, Ordering::SeqCst);
         Ok(())
     }
