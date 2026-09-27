@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ergo_wallet_service::{
@@ -11,6 +12,9 @@ pub struct FakeChain {
     pub tip: CommittedTip,
     pub responses: Arc<Mutex<VecDeque<BlocksSinceResponse>>>,
     pub requests: Arc<Mutex<Vec<(u32, u32)>>>,
+    /// While set, the node is unreachable: every call fails with a transport
+    /// error, as a refused connection does while a node restarts.
+    pub down: AtomicBool,
 }
 
 impl FakeChain {
@@ -19,6 +23,7 @@ impl FakeChain {
             tip,
             responses: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
+            down: AtomicBool::new(false),
         })
     }
 
@@ -30,16 +35,31 @@ impl FakeChain {
             tip,
             responses: Arc::new(Mutex::new(responses.into_iter().collect())),
             requests: Arc::new(Mutex::new(Vec::new())),
+            down: AtomicBool::new(false),
         })
     }
 
     pub fn requests(&self) -> Vec<(u32, u32)> {
         self.requests.lock().expect("requests lock").clone()
     }
+
+    pub fn set_down(&self, down: bool) {
+        self.down.store(down, Ordering::SeqCst);
+    }
+
+    fn reachable(&self) -> Result<(), ChainClientError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(ChainClientError::Transport(
+                "connection refused".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ChainClient for FakeChain {
     fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+        self.reachable()?;
         Ok(self.tip.clone())
     }
 
@@ -51,6 +71,7 @@ impl ChainClient for FakeChain {
         &self,
         request: BlocksSinceRequest,
     ) -> Result<BlocksSinceResponse, ChainClientError> {
+        self.reachable()?;
         self.requests
             .lock()
             .expect("requests lock")
