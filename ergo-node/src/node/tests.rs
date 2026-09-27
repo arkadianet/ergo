@@ -200,6 +200,7 @@ fn make_state_with_backend(
         snapshot_anchor_refusal_warned: false,
         wallet_hook: None,
         mining_enabled: false,
+        mined_apply_failed_parent: None,
         api_publicly_bound: false,
         api_weight_function: ergo_api::types::ApiWeightFunction::Cost,
         recent_blocks_cache: None,
@@ -4454,7 +4455,10 @@ mod post_header_sync {
 mod block_relay {
     use super::super::block_relay::Announcement;
     use super::*;
-    use ergo_primitives::digest::ModifierId;
+    use ergo_mining::candidate::Candidate;
+    use ergo_mining::engine::{BestTip, BuildReason};
+    use ergo_mining::handle::MiningHandle;
+    use ergo_primitives::digest::{ADDigest, ModifierId};
     use ergo_primitives::reader::VlqReader;
     use ergo_primitives::writer::VlqWriter;
     use ergo_ser::header::{read_header, serialize_header};
@@ -4462,6 +4466,667 @@ mod block_relay {
     use ergo_state::ChainStateRead;
 
     // ----- helpers -----
+
+    /// Inventories in queue order, each as (modifier type, ids).
+    type Inventory = Vec<(u8, Vec<[u8; 32]>)>;
+
+    /// Alters a candidate after the production builder made it.
+    type Tamper = fn(&mut Candidate);
+
+    /// Compressed secp256k1 point the mined fixtures pay and sign with.
+    const MINER_PK: [u8; 33] = [0x02; 33];
+
+    /// Difficulty one: the target is the group order, so the first nonce
+    /// essentially always solves. It is the testnet genesis difficulty, which
+    /// the synthetic height-one fixtures ([`solved_block`]) run under.
+    const DIFFICULTY_ONE: u32 = 0x0101_0000;
+
+    /// A block solved against a cached candidate, as a miner would submit it.
+    struct SolvedBlock {
+        candidate: Candidate,
+        nonce: [u8; 8],
+        id: [u8; 32],
+        header_bytes: Vec<u8>,
+        sections: ExpectedSections,
+    }
+
+    /// Solve a one-transaction block on `parent` whose header passes the real
+    /// header pipeline under the testnet difficulty schedule. Its roots commit
+    /// to its sections; `state_root` decides whether height one applies.
+    fn solved_block(
+        parent: [u8; 32],
+        height: u32,
+        timestamp: u64,
+        state_root: ADDigest,
+    ) -> SolvedBlock {
+        use ergo_crypto::autolykos::common::{blake2b256, calc_n};
+        use ergo_primitives::digest::Digest32;
+        use ergo_primitives::group_element::GroupElement;
+        use ergo_ser::autolykos::AutolykosSolution;
+        use ergo_ser::header::{serialize_header_without_pow, Header};
+        use ergo_validation::pre_header::{
+            build_last_block_utxo_root, CandidatePreHeader, CandidateValidationContext,
+        };
+
+        let transactions = vec![ergo_ser::transaction::Transaction {
+            inputs: vec![],
+            data_inputs: vec![],
+            output_candidates: vec![],
+        }];
+        let tx_id = *ergo_ser::transaction::transaction_id(&transactions[0])
+            .unwrap()
+            .as_bytes();
+        let witness_id = blake2b256(&[])[1..].to_vec();
+        let ad_proof_bytes = vec![1, 2, 3];
+        let mut header = Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes(parent),
+            ad_proofs_root: Digest32::from_bytes(blake2b256(&ad_proof_bytes)),
+            transactions_root: Digest32::from_bytes(ergo_crypto::merkle::transactions_root(
+                &[&tx_id],
+                Some(&[&witness_id]),
+            )),
+            state_root,
+            timestamp,
+            extension_root: Digest32::from_bytes(ergo_crypto::merkle::extension_root(&[])),
+            n_bits: DIFFICULTY_ONE,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: Vec::new(),
+            solution: AutolykosSolution::V2 {
+                pk: GroupElement::from(MINER_PK),
+                nonce: [0; 8],
+            },
+        };
+        let candidate_header = header.clone();
+        let msg = blake2b256(&serialize_header_without_pow(&header).unwrap());
+        let target = ergo_crypto::difficulty::get_target(DIFFICULTY_ONE);
+        let n = calc_n(header.version, height);
+        let nonce = (0u64..)
+            .map(u64::to_be_bytes)
+            .find(|nonce| ergo_crypto::autolykos::v2::hit_for_v2(&msg, nonce, height, n) < target)
+            .unwrap();
+        header.solution = AutolykosSolution::V2 {
+            pk: GroupElement::from(MINER_PK),
+            nonce,
+        };
+        let (header_bytes, id) = serialize_header(&header).unwrap();
+        let id = *id.as_bytes();
+        let sections = ExpectedSections::from_header(
+            &id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        let candidate = Candidate {
+            header: candidate_header,
+            validation_ctx: CandidateValidationContext {
+                pre_header: CandidatePreHeader {
+                    version: 2,
+                    parent_id: parent,
+                    height,
+                    timestamp,
+                    n_bits: DIFFICULTY_ONE,
+                    votes: [0; 3],
+                    miner_pubkey: MINER_PK,
+                },
+                activated_script_version: 2,
+                last_headers: Vec::new(),
+                last_block_utxo_root: build_last_block_utxo_root(state_root),
+            },
+            transactions,
+            ad_proof_bytes,
+            extension_fields: Vec::new(),
+            msg,
+            target,
+            parent_id: parent,
+        };
+        SolvedBlock {
+            candidate,
+            nonce,
+            id,
+            header_bytes,
+            sections,
+        }
+    }
+
+    /// A synced mining handle on the testnet schedule serving `block`'s
+    /// candidate. [`genesis_state`] puts the executor on the same schedule.
+    fn mining_handle(block: &SolvedBlock) -> MiningHandle {
+        let spec = ergo_chain_spec::ChainSpec::testnet();
+        let handle = MiningHandle::new(MINER_PK, spec.monetary, None, spec.difficulty, spec.voting)
+            .with_network(spec.network);
+        let parent = block.candidate.parent_id;
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let work = ergo_mining::work_message::WorkMessage {
+            msg: block.candidate.msg,
+            target: block.candidate.target.clone(),
+            height: block.candidate.header.height,
+            pk: MINER_PK,
+        };
+        assert!(handle
+            .publish_if_current(
+                block.candidate.clone(),
+                work,
+                &parent,
+                || 0,
+                BuildReason::Tip
+            )
+            .is_some());
+        handle
+    }
+
+    /// Submit `nonce` through the real `POST /mining/solution` handler.
+    fn submit_solution(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+        nonce: [u8; 8],
+    ) -> Result<(), ergo_api::MiningApiError> {
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        super::super::mining_dispatch::handle_mining_request(
+            state,
+            Some(handle),
+            crate::mining_bridge::MiningRequest::SubmitSolution {
+                solution: ergo_rest_json::mining::AutolykosSolutionJson {
+                    pk: None,
+                    w: None,
+                    n: hex::encode(nonce),
+                    d: None,
+                },
+                reply,
+            },
+        );
+        rx.try_recv()
+            .expect("the mining handler replies before returning")
+    }
+
+    /// Submit `block` through the real `POST /blocks` loop handler; true when
+    /// the node answers 200.
+    fn post_block(state: &mut NodeState, block: &SolvedBlock) -> bool {
+        let header_id = ModifierId::from_bytes(block.id);
+        let mut bt = VlqWriter::new();
+        ergo_ser::block_transactions::write_block_transactions_with_version(
+            &mut bt,
+            &ergo_ser::block_transactions::BlockTransactions {
+                header_id,
+                transactions: block.candidate.transactions.clone(),
+            },
+            block.candidate.header.version,
+        )
+        .unwrap();
+        let mut ext = VlqWriter::new();
+        ergo_ser::extension::write_extension(
+            &mut ext,
+            &ergo_ser::extension::Extension {
+                header_id,
+                fields: vec![],
+            },
+        )
+        .unwrap();
+        let mut proofs = VlqWriter::new();
+        ergo_ser::ad_proofs::write_ad_proofs(
+            &mut proofs,
+            &ergo_ser::ad_proofs::ADProofs {
+                header_id,
+                proof_bytes: block.candidate.ad_proof_bytes.clone(),
+            },
+        );
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        super::super::events::handle_event_batch(
+            state,
+            vec![PeerEvent::LocalFullBlock {
+                header_bytes: block.header_bytes.clone(),
+                bt_bytes: bt.result(),
+                ext_bytes: ext.result(),
+                ad_proofs_bytes: Some(proofs.result()),
+                reply,
+            }],
+        );
+        rx.try_recv()
+            .expect("the POST /blocks handler replies before returning")
+            .is_ok()
+    }
+
+    /// A fresh UTXO state at the empty genesis, returning its state root. The
+    /// executor runs the testnet difficulty schedule, as [`mining_handle`]
+    /// does.
+    fn genesis_state(dir: &Path) -> (NodeState, ADDigest) {
+        let mut state = make_state(&dir.join("state.redb"));
+        state.executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            ergo_chain_spec::ChainSpec::testnet().difficulty,
+        );
+        let store = state.store.as_utxo_mut().unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let root = store.root_digest();
+        (state, root)
+    }
+
+    /// [`section_inventory`] for a synthetic solved block.
+    fn full_inventory(block: &SolvedBlock) -> Inventory {
+        section_inventory(block.id, &block.sections)
+    }
+
+    /// The Inv set a block announces when every section is servable: header
+    /// first, then ADProofs, transactions and extension.
+    fn section_inventory(id: [u8; 32], sections: &ExpectedSections) -> Inventory {
+        vec![
+            (101, vec![id]),
+            (104, vec![sections.ad_proofs_id]),
+            (102, vec![sections.transactions_id]),
+            (108, vec![sections.extension_id]),
+        ]
+    }
+
+    /// [`section_inventory`] for a header already in the store.
+    fn stored_inventory(state: &NodeState, id: [u8; 32]) -> Inventory {
+        let bytes = state.store.get_header(&id).unwrap().unwrap();
+        let header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+        section_inventory(
+            id,
+            &ExpectedSections::from_header(
+                &id,
+                header.transactions_root.as_bytes(),
+                header.extension_root.as_bytes(),
+                header.ad_proofs_root.as_bytes(),
+            ),
+        )
+    }
+
+    /// Every announced id is served by the RequestModifier handler, and the
+    /// served bytes pass the check a receiving peer runs before accepting
+    /// them: the header hashes to its id, and each section re-hashes to the
+    /// id its header's root commits to.
+    fn assert_announced_ids_served(state: &mut NodeState, announced: &[(u8, Vec<[u8; 32]>)]) {
+        for (kind, ids) in announced {
+            let request = message::serialize_inv(&InvData {
+                type_id: *kind,
+                ids: ids.clone(),
+            })
+            .unwrap();
+            let actions = handle_message(
+                state,
+                test_peer(),
+                message::CODE_REQUEST_MODIFIER,
+                &request,
+                Instant::now(),
+            );
+            let [Action::SendToPeer { code, payload, .. }] = actions.as_slice() else {
+                panic!("announced type {kind} id is not served: {actions:?}")
+            };
+            assert_eq!(*code, message::CODE_MODIFIER, "kind={kind}");
+            let served = message::deserialize_modifiers(payload).unwrap();
+            assert_eq!(served.type_id, *kind);
+            let served_ids: Vec<_> = served.modifiers.iter().map(|(id, _)| *id).collect();
+            assert_eq!(&served_ids, ids, "kind={kind}");
+            for (id, bytes) in &served.modifiers {
+                if *kind == 101 {
+                    assert_eq!(
+                        ergo_crypto::autolykos::common::blake2b256(bytes),
+                        *id,
+                        "served header bytes hash to the announced id"
+                    );
+                } else {
+                    ergo_sync::coordinator::verify_section_modifier_id(*kind, id, bytes)
+                        .unwrap_or_else(|e| panic!("served type {kind} fails the peer check: {e}"));
+                }
+            }
+        }
+    }
+
+    /// A devnet UTXO node at the shared testnet genesis state, with the
+    /// store, executor and mining handle on the devnet chain spec, as boot
+    /// wires them.
+    fn devnet_node(dir: &Path) -> (NodeState, MiningHandle) {
+        let spec = ergo_chain_spec::ChainSpec::devnet();
+        let mut store = StateStore::open_with_cache_launch_voting(
+            &dir.join("state.redb"),
+            StateStore::DEFAULT_CACHE_BYTES,
+            ergo_validation::scala_launch_for_network(spec.network),
+            spec.voting,
+        )
+        .unwrap();
+        store.set_difficulty_params(spec.difficulty.clone());
+        store
+            .initialize_genesis(&crate::genesis::genesis_boxes_for(spec.network))
+            .unwrap();
+        let mut state = make_state_with_store(store);
+        state.executor =
+            SyncExecutor::new(ProtocolParams::mainnet_default(), spec.difficulty.clone());
+        let handle = MiningHandle::new(
+            MINER_PK,
+            spec.monetary,
+            spec.reemission,
+            spec.difficulty,
+            spec.voting,
+        )
+        .with_network(spec.network);
+        (state, handle)
+    }
+
+    /// Point the handle at the applied tip as the action loop does once the
+    /// mining latch is closed.
+    fn sync_handle_to_tip(state: &NodeState, handle: &MiningHandle) -> ([u8; 32], u32) {
+        let chain = state.store.chain_state_meta();
+        handle.set_best_tip(BestTip {
+            parent_id: chain.best_full_block_id,
+            chain_seq: u64::from(chain.best_full_block_height) + 1,
+            synced: true,
+        });
+        (chain.best_full_block_id, chain.best_full_block_height)
+    }
+
+    /// Build and publish the next candidate on the applied tip with the
+    /// production engine, as the off-loop build worker does.
+    fn publish_candidate(state: &NodeState, handle: &MiningHandle) {
+        use ergo_mining::engine::{build_and_publish, BuildIntent, BuildOutcome};
+        let (parent, height) = sync_handle_to_tip(state, handle);
+        let intent = BuildIntent {
+            expected_parent: parent,
+            expected_height: height,
+            mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
+            miner_pk: MINER_PK,
+            reason: BuildReason::Tip,
+        };
+        let outcome = build_and_publish(
+            &state.store.as_utxo().unwrap().reader_handle(),
+            handle,
+            &intent,
+            ergo_mining::candidate::BuildMode::Full,
+            None,
+            wall_clock_ms,
+            |_, _| Vec::new(),
+            &mut None,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, BuildOutcome::Published { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    /// Build the next candidate with the production candidate builder, let
+    /// `tamper` alter it, recommit its PoW message to the altered header,
+    /// and publish it. Every header check still passes.
+    fn publish_tampered_candidate(
+        state: &NodeState,
+        handle: &MiningHandle,
+        tamper: impl FnOnce(&mut Candidate),
+    ) {
+        let spec = ergo_chain_spec::ChainSpec::devnet();
+        let (mut candidate, mut work, _) = ergo_mining::candidate::generate_candidate(
+            state.store.as_utxo().unwrap(),
+            spec.network,
+            ergo_mining::candidate::BuildMode::Full,
+            ergo_mempool::MempoolReadSnapshot::empty(),
+            &MINER_PK,
+            &spec.monetary,
+            spec.reemission.as_ref(),
+            None,
+            &spec.difficulty,
+            &[],
+            &std::collections::BTreeMap::new(),
+            &spec.voting,
+            &[],
+            &mut Vec::new(),
+        )
+        .unwrap()
+        .unwrap();
+        tamper(&mut candidate);
+        candidate.msg = ergo_crypto::autolykos::common::blake2b256(
+            &ergo_ser::header::serialize_header_without_pow(&candidate.header).unwrap(),
+        );
+        work.msg = candidate.msg;
+        let (parent, _) = sync_handle_to_tip(state, handle);
+        assert!(handle
+            .publish_if_current(candidate, work, &parent, wall_clock_ms, BuildReason::Tip)
+            .is_some());
+    }
+
+    /// A solution to the newest published template.
+    struct MinedSolution {
+        nonce: [u8; 8],
+        id: [u8; 32],
+        header: ergo_ser::header::Header,
+    }
+
+    /// The `skip`-th nonce that solves the newest published template at the
+    /// devnet's difficulty one, with the header it produces.
+    fn solve(state: &NodeState, handle: &MiningHandle, skip: usize) -> MinedSolution {
+        use ergo_crypto::autolykos::common::calc_n;
+        let work = handle.cached_work_if_synced().unwrap();
+        // Autolykos v2's N depends only on height for every version >= 2.
+        let n = calc_n(2, work.height);
+        let nonce = (0u64..)
+            .map(u64::to_be_bytes)
+            .filter(|nonce| {
+                ergo_crypto::autolykos::v2::hit_for_v2(&work.msg, nonce, work.height, n)
+                    < work.target
+            })
+            .nth(skip)
+            .unwrap();
+        let solution =
+            ergo_mining::work_message::MinerSolution::from_hex(&hex::encode(nonce), None).unwrap();
+        let ergo_mining::solution::SolutionOutcome::Accepted(block) = handle
+            .verify_solution(&solution, state.store.as_utxo().unwrap())
+            .unwrap()
+        else {
+            panic!("the newest template accepts its own solution")
+        };
+        let (_, id) = serialize_header(&block.header).unwrap();
+        MinedSolution {
+            nonce,
+            id: *id.as_bytes(),
+            header: block.header,
+        }
+    }
+
+    /// Mine the next block with the production engine and apply it through
+    /// the real mining handler; returns its id.
+    fn mine_and_apply(state: &mut NodeState, handle: &MiningHandle) -> [u8; 32] {
+        publish_candidate(state, handle);
+        let mined = solve(state, handle, 0);
+        let result = submit_solution(state, handle, mined.nonce);
+        assert!(
+            result.is_ok(),
+            "{result:?}: {:?}",
+            state.executor.last_block_apply_error()
+        );
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, mined.id);
+        mined.id
+    }
+
+    /// While armed on a thread, drains the peer's queued frames when the
+    /// executor starts applying a block there (the `handle_assemble_block`
+    /// span is created), so a test can tell inventories queued before apply
+    /// from those queued after it.
+    ///
+    /// It is this test binary's process-wide default subscriber, installed
+    /// once, not a scoped one: tracing caches a callsite's interest when the
+    /// first thread reaches it, and while a scoped probe is the only live
+    /// dispatcher, a thread without it caches `never` for every thread. The
+    /// global dispatcher takes part in every interest computation, so the
+    /// span is always created.
+    struct ApplyEntryProbe;
+
+    /// The probe armed on one thread: the queue it drains, and what it
+    /// drained when apply started.
+    struct ArmedProbe {
+        queue: SharedQueue,
+        before_apply: Option<Inventory>,
+    }
+
+    thread_local! {
+        static ARMED_PROBE: std::cell::RefCell<Option<ArmedProbe>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn is_apply_entry(metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_span() && metadata.name() == "handle_assemble_block"
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ApplyEntryProbe {
+        fn register_callsite(
+            &self,
+            metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            if is_apply_entry(metadata) {
+                tracing::subscriber::Interest::always()
+            } else {
+                tracing::subscriber::Interest::never()
+            }
+        }
+
+        fn enabled(
+            &self,
+            metadata: &tracing::Metadata<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) -> bool {
+            is_apply_entry(metadata)
+        }
+
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if !is_apply_entry(attrs.metadata()) {
+                return;
+            }
+            ARMED_PROBE.with(|armed| {
+                if let Some(probe) = armed.borrow_mut().as_mut() {
+                    if probe.before_apply.is_none() {
+                        probe.before_apply = Some(drain(&probe.queue));
+                    }
+                }
+            });
+        }
+    }
+
+    /// Make [`ApplyEntryProbe`] the process-wide default subscriber.
+    fn install_apply_entry_probe() {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(ApplyEntryProbe),
+            )
+            .expect("no other ergo-node lib test installs a global subscriber");
+        });
+        // A thread that registered the span's callsite while the probe was
+        // being installed can have cached a stale interest; recompute it.
+        tracing::callsite::rebuild_interest_cache();
+    }
+
+    /// A handshaked peer whose outbound queue the test and an
+    /// [`ApplyEntryProbe`] share.
+    type SharedQueue = std::sync::Arc<std::sync::Mutex<crate::peer_loop::outbound::Receiver>>;
+
+    fn register_shared_peer(state: &mut NodeState) -> SharedQueue {
+        std::sync::Arc::new(std::sync::Mutex::new(register_connected_peer(
+            state,
+            test_peer(),
+        )))
+    }
+
+    fn drain(queue: &SharedQueue) -> Inventory {
+        inventories(&mut queue.lock().unwrap())
+    }
+
+    /// What one probed submission queued for the peer.
+    struct ProbedSubmission {
+        result: Result<(), ergo_api::MiningApiError>,
+        before_apply: Inventory,
+        after_apply: Inventory,
+    }
+
+    /// Submit `nonce` through the real mining handler with an
+    /// [`ApplyEntryProbe`] armed on the peer queue.
+    fn submit_probing_apply(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+        nonce: [u8; 8],
+        queue: &SharedQueue,
+    ) -> ProbedSubmission {
+        install_apply_entry_probe();
+        ARMED_PROBE.with(|armed| {
+            *armed.borrow_mut() = Some(ArmedProbe {
+                queue: queue.clone(),
+                before_apply: None,
+            })
+        });
+        let result = submit_solution(state, handle, nonce);
+        let probe = ARMED_PROBE
+            .with(|armed| armed.borrow_mut().take())
+            .expect("the probe stays armed until the submission returns");
+        let Some(before_apply) = probe.before_apply else {
+            panic!(
+                "the handler never started apply: {result:?}: {:?}",
+                state.executor.last_block_apply_error()
+            )
+        };
+        ProbedSubmission {
+            result,
+            before_apply,
+            after_apply: drain(queue),
+        }
+    }
+
+    /// A solved header on `parent`, one height up, at difficulty one.
+    fn solved_child(parent: &ergo_ser::header::Header, parent_id: [u8; 32]) -> Vec<u8> {
+        use ergo_crypto::autolykos::common::{blake2b256, calc_n};
+        let mut child = parent.clone();
+        child.parent_id = ModifierId::from_bytes(parent_id);
+        child.height = parent.height + 1;
+        child.timestamp = parent.timestamp + 1;
+        let msg = blake2b256(&ergo_ser::header::serialize_header_without_pow(&child).unwrap());
+        let target = ergo_crypto::difficulty::get_target(child.n_bits);
+        let n = calc_n(child.version, child.height);
+        let nonce = (0u64..)
+            .map(u64::to_be_bytes)
+            .find(|nonce| {
+                ergo_crypto::autolykos::v2::hit_for_v2(&msg, nonce, child.height, n) < target
+            })
+            .unwrap();
+        child.solution = ergo_ser::autolykos::AutolykosSolution::V2 {
+            pk: ergo_primitives::group_element::GroupElement::from(MINER_PK),
+            nonce,
+        };
+        serialize_header(&child).unwrap().0
+    }
+
+    /// Store `header_bytes` through the executor's local header pipeline.
+    fn process_header(state: &mut NodeState, header_bytes: &[u8]) {
+        let (_, actions) = state
+            .executor
+            .process_local_header(
+                &mut state.store,
+                &mut state.coordinator,
+                header_bytes,
+                Instant::now(),
+            )
+            .unwrap();
+        flush_actions(state, actions);
+    }
+
+    /// Replace the candidate's ADProofs with bytes that hash to its header
+    /// root but are not the proof apply regenerates: a durable validation
+    /// verdict (`AdProofsHashMismatch`) that passes every header check.
+    fn replace_ad_proofs(candidate: &mut Candidate) {
+        candidate.ad_proof_bytes = vec![1, 2, 3];
+        candidate.header.ad_proofs_root = ergo_primitives::digest::Digest32::from_bytes(
+            ergo_crypto::autolykos::common::blake2b256(&candidate.ad_proof_bytes),
+        );
+    }
+
+    fn apply_failed(result: &Result<(), ergo_api::MiningApiError>) -> bool {
+        matches!(result, Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("block apply failed"))
+    }
 
     fn wall_clock_ms() -> u64 {
         std::time::SystemTime::now()
@@ -4538,7 +5203,7 @@ mod block_relay {
         actions
     }
 
-    fn inventories(rx: &mut crate::peer_loop::outbound::Receiver) -> Vec<(u8, Vec<[u8; 32]>)> {
+    fn inventories(rx: &mut crate::peer_loop::outbound::Receiver) -> Inventory {
         let mut result = Vec::new();
         while let Ok(frame) = rx.try_recv() {
             assert_eq!(frame.code, message::CODE_INV);
@@ -4756,47 +5421,194 @@ mod block_relay {
     }
 
     #[test]
-    fn locally_mined_block_applied_announces_only_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut state = make_state(&dir.path().join("state.redb"));
-        let (id, sections) = prepare_block(&mut state, wall_clock_ms());
-        state
-            .store
-            .store_block_section_typed(&sections.ad_proofs_id, &[1, 2, 3], 104)
-            .unwrap();
-        let mut rx = register_connected_peer(&mut state, test_peer());
-        let actions = apply(&mut state, id);
-        assert!(super::super::block_relay::relay_local_apply(
-            &mut state, id, actions
-        ));
-        assert_eq!(
-            inventories(&mut rx),
-            vec![
-                (101, vec![id]),
-                (104, vec![sections.ad_proofs_id]),
-                (102, vec![sections.transactions_id]),
-                (108, vec![sections.extension_id]),
-            ]
-        );
-        flush_actions(&mut state, vec![]);
-        assert!(inventories(&mut rx).is_empty());
-    }
-
-    #[test]
-    fn locally_mined_block_rejected_sends_no_inventory() {
+    fn mined_apply_failure_guard_any_applied_block_clears_it() {
+        // The guard keys on the failed block's parent, so it matters again
+        // only if the full tip returns to that parent; it is cleared once any
+        // block applies, with no peer connected too.
         let dir = tempfile::tempdir().unwrap();
         let mut state = make_state(&dir.path().join("state.redb"));
         let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        state.mined_apply_failed_parent = Some([9; 32]);
+        flush_actions(&mut state, vec![]);
+        assert_eq!(
+            state.mined_apply_failed_parent,
+            Some([9; 32]),
+            "no block applied yet"
+        );
+        let actions = apply(&mut state, id);
+        flush_actions(&mut state, actions);
+        assert_eq!(state.mined_apply_failed_parent, None, "the full tip moved");
+    }
+
+    #[test]
+    fn locally_mined_first_block_applied_announces_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, root) = genesis_state(dir.path());
+        let block = solved_block([0; 32], 1, wall_clock_ms(), root);
+        let handle = mining_handle(&block);
         let mut rx = register_connected_peer(&mut state, test_peer());
-        assert!(!super::super::block_relay::relay_local_apply(
-            &mut state,
-            id,
-            vec![]
-        ));
+        let result = submit_solution(&mut state, &handle, block.nonce);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, block.id);
+        // One Inv set: announcing again from the applied-block drain would
+        // repeat it here, before the handler returns.
+        assert_eq!(inventories(&mut rx), full_inventory(&block));
+        flush_actions(&mut state, vec![]);
         assert!(
             inventories(&mut rx).is_empty(),
-            "stored but unapplied local block must not announce"
+            "nothing is left for a later flush"
         );
+    }
+
+    #[test]
+    fn locally_mined_block_non_genesis_apply_announces_once_before_apply() {
+        // Height two runs the full non-genesis apply (height one goes through
+        // the genesis apply): ADProofs regenerated and checked against the
+        // header root, transaction and script validation, and the
+        // regenerated proof re-stored. Both blocks come from the production
+        // candidate engine over the devnet genesis state.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        assert!(matches!(
+            state.store.as_utxo().unwrap().ad_proofs_apply_policy(),
+            ergo_state::store::AdProofsApplyPolicy::Regenerate
+        ));
+        let queue = register_shared_peer(&mut state);
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        let probed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(
+            probed.result.is_ok(),
+            "{:?}: {:?}",
+            probed.result,
+            state.executor.last_block_apply_error()
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_full_block_id, chain.best_full_block_height),
+            (mined.id, 2)
+        );
+        assert_eq!(
+            probed.before_apply,
+            stored_inventory(&state, mined.id),
+            "the whole Inv set is queued before apply starts"
+        );
+        assert!(
+            probed.after_apply.is_empty(),
+            "apply must not announce it again: {:?}",
+            probed.after_apply
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(
+            drain(&queue).is_empty(),
+            "nothing is left for a later flush"
+        );
+        // An archive UTXO node serves every section; the ADProofs served now
+        // is the proof apply regenerated and re-stored.
+        assert_announced_ids_served(&mut state, &probed.before_apply);
+    }
+
+    #[test]
+    fn locally_mined_block_after_failed_sibling_announces_once_after_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        let queue = register_shared_peer(&mut state);
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
+        let failed = solve(&state, &handle, 0);
+        let result = submit_solution(&mut state, &handle, failed.nonce);
+        assert!(apply_failed(&result), "{result:?}");
+        assert_eq!(drain(&queue), stored_inventory(&state, failed.id));
+        // A sound template on the same parent: its block applies and is
+        // announced only then, exactly once.
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        assert_eq!(mined.header.parent_id.as_bytes(), &parent);
+        let probed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(probed.result.is_ok(), "{:?}", probed.result);
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, mined.id);
+        assert!(
+            probed.before_apply.is_empty(),
+            "not announced before apply on a parent whose announced child failed: {:?}",
+            probed.before_apply
+        );
+        assert_eq!(probed.after_apply, stored_inventory(&state, mined.id));
+        flush_actions(&mut state, vec![]);
+        assert!(
+            drain(&queue).is_empty(),
+            "nothing is left for a later flush"
+        );
+        assert_announced_ids_served(&mut state, &probed.after_apply);
+        // Pre-apply announcement resumes for the next block, on the new tip.
+        // Its parent is never the guarded one, so this does not pin that the
+        // guard clears; mined_apply_failure_guard_any_applied_block_clears_it
+        // does.
+        publish_candidate(&state, &handle);
+        let next = solve(&state, &handle, 0);
+        let probed = submit_probing_apply(&mut state, &handle, next.nonce, &queue);
+        assert!(probed.result.is_ok(), "{:?}", probed.result);
+        assert_eq!(probed.before_apply, stored_inventory(&state, next.id));
+        assert!(probed.after_apply.is_empty(), "{:?}", probed.after_apply);
+    }
+
+    #[test]
+    fn locally_mined_fork_block_joining_best_chain_later_announced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let ours = solve(&state, &handle, 0);
+        // An equal-score rival on the same parent reaches this node first.
+        let rival = solve(&state, &handle, 1);
+        process_header(&mut state, &serialize_header(&rival.header).unwrap().0);
+        assert_eq!(state.store.chain_state_meta().best_header_id, rival.id);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let result = submit_solution(&mut state, &handle, ours.nonce);
+        // Only the best header is applied, so the handler reports the fork
+        // as not applied.
+        assert!(apply_failed(&result), "{result:?}");
+        assert!(
+            state.store.get_header(&ours.id).unwrap().is_some(),
+            "the mined header is stored as a fork"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "a non-best mined block is not announced before apply"
+        );
+        // A child of ours makes our fork the best chain, and ours applies.
+        process_header(&mut state, &solved_child(&ours.header, ours.id));
+        state.executor.try_apply_next_blocks(
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, ours.id);
+        flush_actions(&mut state, vec![]);
+        let announced = inventories(&mut rx);
+        assert_eq!(
+            announced,
+            stored_inventory(&state, ours.id),
+            "the applied-block relay announces it once it applies"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut rx).is_empty());
+        assert_announced_ids_served(&mut state, &announced);
+    }
+
+    #[test]
+    fn posted_block_applied_announces_after_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, root) = genesis_state(dir.path());
+        let block = solved_block([0; 32], 1, wall_clock_ms(), root);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        assert!(post_block(&mut state, &block));
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, block.id);
+        assert_eq!(inventories(&mut rx), full_inventory(&block));
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut rx).is_empty());
     }
 
     #[test]
@@ -5161,6 +5973,237 @@ mod block_relay {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn locally_mined_block_pruned_utxo_node_fails_at_section_persist() {
+        // Mining needs a UTXO backend (config rejects digest mining and the
+        // handler requires the UTXO store), so besides archive UTXO the only
+        // storage mode left is a serving window above height one: pruned, or
+        // bootstrapped from a UTXO snapshot or NiPoPoW proof. This pins a
+        // known step-2 ordering bug there, not servability: the mined
+        // sections are persisted before their header creates the
+        // SECTION_HEIGHT_INDEX rows, so the pruning guard refuses them and
+        // the submission fails before anything is stored or announced.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        let store = state.store.as_utxo_mut().unwrap();
+        store.set_blocks_to_keep(1000);
+        store.write_minimal_full_block_height(2).unwrap();
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        let result = submit_solution(&mut state, &handle, mined.nonce);
+        assert!(
+            matches!(
+                &result,
+                Err(ergo_api::MiningApiError::Internal(reason))
+                    if reason.starts_with("persist:") && reason.contains("PrunedSection")
+            ),
+            "{result:?}"
+        );
+        assert!(state.store.get_header(&mined.id).unwrap().is_none());
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn locally_mined_block_apply_failure_already_announced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = genesis_state(dir.path());
+        // Every header check passes; apply then rejects the state root.
+        let block = solved_block([0; 32], 1, wall_clock_ms(), ADDigest::from_bytes([7; 33]));
+        let handle = mining_handle(&block);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let result = submit_solution(&mut state, &handle, block.nonce);
+        assert!(
+            apply_failed(&result),
+            "apply failure is still reported to the miner: {result:?}"
+        );
+        assert_ne!(state.store.chain_state_meta().best_full_block_id, block.id);
+        let announced = inventories(&mut rx);
+        assert_eq!(
+            announced,
+            full_inventory(&block),
+            "announced after header validation, before apply"
+        );
+        assert_announced_ids_served(&mut state, &announced);
+        flush_actions(&mut state, vec![]);
+        // The miner resubmitting the same solution stops at the known-header
+        // check.
+        let resubmitted = submit_solution(&mut state, &handle, block.nonce);
+        assert!(
+            matches!(
+                &resubmitted,
+                Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("process_header:")
+            ),
+            "{resubmitted:?}"
+        );
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn locally_mined_block_durable_apply_failure_stops_pre_apply_announcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
+        let first = solve(&state, &handle, 0);
+        let result = submit_solution(&mut state, &handle, first.nonce);
+        assert!(apply_failed(&result), "{result:?}");
+        assert!(
+            state.executor.last_block_apply_error().is_some_and(
+                |e| e.header_id == first.id && e.reason.starts_with("ADProofs hash mismatch")
+            ),
+            "{:?}",
+            state.executor.last_block_apply_error()
+        );
+        let announced = inventories(&mut rx);
+        assert_eq!(
+            announced,
+            stored_inventory(&state, first.id),
+            "announced once, before apply"
+        );
+        assert_eq!(
+            state
+                .store
+                .get_header_meta(&first.id)
+                .unwrap()
+                .unwrap()
+                .pow_validity,
+            3,
+            "durably invalid"
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_id),
+            (parent, parent),
+            "best header re-anchored to the parent"
+        );
+        // Serving the invalidated block is deliberate. Scala refuses Invalid
+        // ids (ErgoHistoryReader.modifierTypeAndBytesById, v6.0.6 23aabead8
+        // :80-85); this node keeps serving what it announced, so peers can
+        // judge the block themselves and no request for it ends in a
+        // non-delivery timeout.
+        assert_announced_ids_served(&mut state, &announced);
+        // The template stays cached, so another nonce on it passes every
+        // header check as a new best header and fails apply the same way.
+        let second = solve(&state, &handle, 1);
+        assert_ne!(second.id, first.id);
+        let result = submit_solution(&mut state, &handle, second.nonce);
+        assert!(apply_failed(&result), "{result:?}");
+        assert_eq!(
+            state
+                .store
+                .get_header_meta(&second.id)
+                .unwrap()
+                .unwrap()
+                .pow_validity,
+            3
+        );
+        assert_eq!(state.store.chain_state_meta().best_header_id, parent);
+        flush_actions(&mut state, vec![]);
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "no pre-apply announcement on a parent whose announced child failed"
+        );
+    }
+
+    #[test]
+    fn failed_apply_invalidity_each_mark_reports_its_kind() {
+        // The error log for an announced mined block that did not apply names
+        // how apply left it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_state(&dir.path().join("state.redb"));
+        let (id, _) = prepare_block(&mut state, wall_clock_ms());
+        let invalidity = |state: &NodeState| {
+            super::super::mining_dispatch::failed_apply_invalidity(state, &id).0
+        };
+        assert_eq!(invalidity(&state), "none");
+        state.store.mark_session_invalid(id);
+        assert_eq!(invalidity(&state), "session");
+        state.store.invalidate_validation_branch(id).unwrap();
+        assert_eq!(invalidity(&state), "durable");
+    }
+
+    #[test]
+    fn locally_mined_block_section_root_mismatch_sends_no_inventory() {
+        // A header root the stored section bytes do not hash to. A receiving
+        // peer recomputes the section id from the bytes, rejects a mismatch
+        // and penalizes the sender, so nothing is announced; apply rejects
+        // the block too. The last case roots the transactions over their ids
+        // alone, the version-one formula, while the bytes carry the header's
+        // later version marker: this node's section check accepts either
+        // formula, but Scala derives the id from the marker.
+        let tampers: [(&str, Tamper); 4] = [
+            ("transactions", |c| {
+                c.header.transactions_root =
+                    ergo_primitives::digest::Digest32::from_bytes([0x55; 32])
+            }),
+            ("extension", |c| {
+                c.header.extension_root = ergo_primitives::digest::Digest32::from_bytes([0x55; 32])
+            }),
+            ("ad_proofs", |c| {
+                c.header.ad_proofs_root = ergo_primitives::digest::Digest32::from_bytes([0x55; 32])
+            }),
+            ("transactions_version_one_formula", |c| {
+                assert!(c.header.version > 1, "{}", c.header.version);
+                let tx_ids: Vec<_> = c
+                    .transactions
+                    .iter()
+                    .map(|tx| {
+                        *ergo_ser::transaction::transaction_id(tx)
+                            .unwrap()
+                            .as_bytes()
+                    })
+                    .collect();
+                let tx_refs: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
+                c.header.transactions_root = ergo_primitives::digest::Digest32::from_bytes(
+                    ergo_crypto::merkle::transactions_root(&tx_refs, None),
+                );
+            }),
+        ];
+        for (root, tamper) in tampers {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut state, handle) = devnet_node(dir.path());
+            mine_and_apply(&mut state, &handle);
+            let mut rx = register_connected_peer(&mut state, test_peer());
+            publish_tampered_candidate(&state, &handle, tamper);
+            let mined = solve(&state, &handle, 0);
+            let result = submit_solution(&mut state, &handle, mined.nonce);
+            assert!(apply_failed(&result), "{root}: {result:?}");
+            assert_eq!(
+                state
+                    .store
+                    .get_header_meta(&mined.id)
+                    .unwrap()
+                    .unwrap()
+                    .pow_validity,
+                3,
+                "{root}: the header passed the pipeline and apply rejected the block"
+            );
+            flush_actions(&mut state, vec![]);
+            assert!(inventories(&mut rx).is_empty(), "{root}");
+        }
+    }
+
+    #[test]
+    fn posted_block_apply_failure_sends_no_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = genesis_state(dir.path());
+        let block = solved_block([0; 32], 1, wall_clock_ms(), ADDigest::from_bytes([7; 33]));
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        assert!(
+            post_block(&mut state, &block),
+            "the stored header answers 200"
+        );
+        assert_ne!(state.store.chain_state_meta().best_full_block_id, block.id);
+        flush_actions(&mut state, vec![]);
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "POST /blocks announces only after a successful apply"
+        );
+    }
 
     #[test]
     fn served_sections_oversized_proof_is_not_announced() {

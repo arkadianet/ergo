@@ -1004,6 +1004,7 @@ async fn run_inner_with_backend(
         // authoritative gate — it matches the expression that determined whether
         // to enter the `if config.mining_config.enabled` arm.
         mining_enabled: mining_subsystem.handle.is_some(),
+        mined_apply_failed_parent: None,
         // Non-loopback bind or a declared loopback reverse proxy means API
         // submissions are not trusted-local and must use the public budget.
         api_publicly_bound: api_publicly_bound(config.api_bind, config.api_local_reverse_proxy),

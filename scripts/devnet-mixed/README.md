@@ -65,9 +65,10 @@ removed mathematically: do not run this recipe to height 33,554,432.
 The Rust miner supports the seeded height-zero state and short header windows.
 It keeps an empty `CONTEXT.headers` at genesis and the actual available
 headers before height ten. Its height-zero carrier is never persisted or
-included in interlinks. Only devnet announces locally accepted mined headers
-immediately; this also lets an empty Scala peer request a Rust genesis block.
-Mainnet/Testnet retain their existing mining gates and consensus parameters.
+included in interlinks. Every network announces a locally mined block's header
+and servable sections, before apply when it becomes the best header; this also
+lets an empty Scala peer request a Rust genesis block. Mainnet/Testnet retain
+their existing mining gates and consensus parameters.
 
 Scala's candidate generator emits a **version-1 first header**, even with
 version-4 launch parameters. `--first scala` therefore uses the pinned JVM

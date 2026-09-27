@@ -42,8 +42,10 @@
 //!
 //! On `SubmitSolution`, walks the same persistence + header pipeline
 //! peer-received blocks go through (BT/Extension/ADProofs persist →
-//! `process_header_cfg` → executor `AssembleBlock`), then confirms the
-//! new tip matches the submitted header before replying `Ok`.
+//! `process_header_cfg` → executor `AssembleBlock`), announcing a new best
+//! header to peers before `AssembleBlock` (or, after a mined block on the
+//! same parent failed to apply, once it applies), then confirms the new tip
+//! matches the submitted header before replying `Ok`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -54,7 +56,7 @@ use ergo_state::wallet::RewardKeyResolution;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::Action;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::NodeState;
 
@@ -618,6 +620,7 @@ pub(super) fn handle_mining_request(
                     return;
                 }
             };
+            let parent_id = block.parent_id;
             // 2. Persist BT/Extension/ADProofs + recheck parent_id
             //    under the action-loop lock (the consensus-bearing
             //    TOCTOU close). Returns header bytes + id we feed
@@ -665,7 +668,7 @@ pub(super) fn handle_mining_request(
             //    `hdrCheckpoint` in `HeadersProcessor` regardless of where the
             //    header came from, so a locally mined header that lands on the
             //    checkpoint height with the wrong id is refused here too.
-            if let Err(e) = ergo_sync::header_proc::process_header_cfg_with_genesis(
+            let processed = match ergo_sync::header_proc::process_header_cfg_with_genesis(
                 state
                     .store
                     .as_utxo_mut()
@@ -675,12 +678,89 @@ pub(super) fn handle_mining_request(
                 state.executor.header_checkpoint(),
                 state.executor.genesis_id(),
             ) {
-                warn!(error = %e, "mining: header proc failed");
-                let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
-                    "process_header: {e}"
-                ))));
-                return;
-            }
+                Ok(processed) => processed,
+                Err(e) => {
+                    warn!(error = %e, "mining: header proc failed");
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
+                        "process_header: {e}"
+                    ))));
+                    return;
+                }
+            };
+            // 3b. Announce before apply, as Scala's `NewBlockMined` does
+            //    (CandidateGenerator.scala:77, ErgoNodeViewSynchronizer.scala
+            //    :1435-1443 at v6.0.6 23aabead8). The header has passed the
+            //    full header pipeline and step 2 stored every section, so each
+            //    advertised id is servable; Scala announces after only a PoW
+            //    check, before storing anything. The stored section bytes are
+            //    first re-hashed against the header roots, the check this node
+            //    runs on sections it receives, and nothing is announced on a
+            //    mismatch. Peer requests are served on this loop only after
+            //    step 4 returns, so this saves at most min(apply time, one peer
+            //    RTT) on the first hop, less any on-loop work that runs before
+            //    the queued request (e.g. the mempool tip-change recheck).
+            //
+            //    Deliberate deviation: Scala announces every mined block. Only
+            //    a new best header is announced here: a non-best mined block
+            //    is never validated (AssembleBlock no-ops for it), so it is
+            //    not advertised. If it later joins the best chain and applies,
+            //    the applied-block relay announces it, subject to the remote
+            //    freshness and tip-window gates.
+            //
+            //    Deliberate deviation: after a best-header mined block fails
+            //    to apply, Scala drops its cached candidates
+            //    (`onSolvedBlockFailed`), so its next solution comes from a
+            //    fresh candidate and is announced before apply. Here the
+            //    failed template stays cached, and every new nonce on it would
+            //    advertise another block that fails, so a block on the same
+            //    parent is announced only once it applies
+            //    (`block_relay::finish_local_apply`), until a block applies.
+            //    The blocks announced are therefore those that apply plus at
+            //    most one failing block per parent while the full tip stays on
+            //    it; the guard is held in memory, so after a restart one more
+            //    failing block on that parent can be announced. The mining
+            //    path announces an applied mined block once; a later re-apply
+            //    (after a restart, a reorg, or a retry following a non-verdict
+            //    failure, such as a POST /blocks resubmission) may announce it
+            //    again through the remote relay, which is harmless because
+            //    peers do not request ids they know.
+            //
+            //    Residual risk, since an Inv cannot be retracted:
+            //    - Apply rejects the block on a validation verdict (the
+            //      executor's `is_validation_verdict` classifies it). Peers
+            //      fetch sections whose bytes hash to the header roots and
+            //      reject the block when they apply it; that draws no penalty
+            //      on this node while the sections arrive before the peer
+            //      applies. A section that arrives after the peer invalidated
+            //      the block draws +10 Misbehavior, as would section bytes
+            //      that did not match the header roots (the check above).
+            //    - Apply fails without a verdict, so the block is only
+            //      session-marked, and the network adopts it. header_proc
+            //      refuses children only of durably invalid parents, so its
+            //      descendants are still accepted and draw no penalties, while
+            //      try_apply_next_blocks stops at the session-marked id. A
+            //      transient cause (e.g. a storage error) wedges apply there
+            //      until restart. A deterministic one (the UTXO state-root
+            //      `DigestMismatch`, `BoxNotFound`, `Deserialize`) wedges it
+            //      across restarts, because the re-applied block fails and is
+            //      session-marked again. That is general session-mark
+            //      behaviour, which announcing before apply makes reachable for
+            //      mined blocks.
+            //    - If our validator is the one in error on a verdict, the
+            //      network adopts a block this node invalidated: the node forks
+            //      itself off and penalizes honest peers relaying its
+            //      descendants (+10 each, the header pipeline's catch-all).
+            //      Scala, announcing after only a PoW check, before
+            //      header-chain or state validation, carries the same exposure.
+            let submitted = if processed.is_new_best {
+                super::block_relay::MinedSubmission::NewBest {
+                    announced: super::block_relay::announce_mined_block_before_apply(
+                        state, header_id, parent_id,
+                    ),
+                }
+            } else {
+                super::block_relay::MinedSubmission::Fork
+            };
             // 4. Drive validation + apply through the executor's
             //    AssembleBlock path. Route follow-up actions through the
             //    same outbound dispatch used by peer-received blocks.
@@ -693,23 +773,43 @@ pub(super) fn handle_mining_request(
                         hook: h as &dyn ergo_state::wallet::WalletApplyHook,
                         rescan_guard: &rescan_guard,
                     });
+            let apply_started = Instant::now();
             let follow_ups = state.executor.execute(
                 Action::AssembleBlock { header_id },
                 &mut state.store,
                 &mut state.coordinator,
-                Instant::now(),
+                apply_started,
                 wallet_wiring,
             );
-            // Relay only after successful apply, excluding local feedback from
-            // the remote drain before flushing any follow-up actions.
-            if super::block_relay::relay_local_apply(state, header_id, follow_ups) {
+            let apply_ms = apply_started.elapsed().as_millis() as u64;
+            if super::block_relay::finish_local_apply(
+                state, header_id, parent_id, submitted, follow_ups,
+            ) {
+                info!(id = %hex::encode(header_id), apply_ms, "mined block applied");
                 let _ = reply.send(Ok(()));
             } else {
-                warn!(
-                    expected = %hex::encode(header_id),
-                    observed = %hex::encode(state.store.chain_state_meta().best_full_block_id),
-                    "mining: block submission did not advance tip — likely validation rejection downstream",
-                );
+                let observed = hex::encode(state.store.chain_state_meta().best_full_block_id);
+                if matches!(
+                    submitted,
+                    super::block_relay::MinedSubmission::NewBest { announced: true }
+                ) {
+                    let (invalidity, note) = failed_apply_invalidity(state, &header_id);
+                    error!(
+                        expected = %hex::encode(header_id),
+                        observed = %observed,
+                        apply_ms,
+                        invalidity,
+                        note,
+                        "mining: announced block did not apply; peers may still fetch it. \
+                         Blocks on the same parent are announced only after they apply",
+                    );
+                } else {
+                    warn!(
+                        expected = %hex::encode(header_id),
+                        observed = %observed,
+                        "mining: block submission did not advance tip — likely validation rejection downstream",
+                    );
+                }
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(
                     "block apply failed (see node logs for the validation failure)".into(),
                 )));
@@ -719,6 +819,32 @@ pub(super) fn handle_mining_request(
         crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
             unreachable!("GetRewardKey is handled before the mining-started gate")
         }
+    }
+}
+
+/// How apply left an announced mined block that did not apply, with what that
+/// means for the operator.
+pub(super) fn failed_apply_invalidity(
+    state: &NodeState,
+    header_id: &[u8; 32],
+) -> (&'static str, &'static str) {
+    match (
+        state.store.is_durably_invalid(header_id),
+        state.store.is_invalid(header_id),
+    ) {
+        (Ok(true), _) => (
+            "durable",
+            "if peers keep building on it, this node's invalidation of it may need manual repair",
+        ),
+        (Ok(false), Ok(true)) => (
+            "session",
+            "apply stops at it until restart, and again after one if the failure is deterministic",
+        ),
+        (Ok(false), Ok(false)) => (
+            "none",
+            "it is not marked invalid, so a later apply pass may retry and announce it",
+        ),
+        _ => ("unknown", "its invalidity could not be read"),
     }
 }
 
