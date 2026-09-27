@@ -426,7 +426,7 @@ rejections than `ErgoMiningThread` error replies.
 
 ### SyncInfo refresh (#2597) before/after
 
-`steady` records `relay_refresh` (M1–M3) and prints the measurements in
+`steady` records `relay_refresh` (M1–M3 and per-miss classification) and prints the measurements in
 `result_line`. Keeping the existing steady scenario preserves its funded
 workload and follower seeding in every arm. `syncfix`, `2566`, and
 `syncfix+2566` are pinned in `builds.toml`, using the same sigma as `base`.
@@ -443,7 +443,7 @@ blackouts. Raw source lines, sample times, missing IDs and denominators are
 retained in JSON so totals can be recomputed.
 
 * M1 intersects the miner's `mined_input_blocks` IDs with each follower's
-  observed IDs. Scala's `Adding input block … to existing tree` and
+  admitted IDs (the JSON field remains `received` for compatibility). Scala's `Adding input block … to existing tree` and
   `Creating new tree for input block …` are mutually exclusive branches
   after the duplicate-record check in `InputBlocksProcessor.applyInputBlock`.
   They include disconnected blocks, and IDs are deduplicated across retries.
@@ -475,6 +475,72 @@ retained in JSON so totals can be recomputed.
   test that every SyncInfo is subject to the refresh timer's 250 ms floor.
   Rust's peer API has byte totals rather than per-code timestamps, and its
   operator event feed has no input-block receipt event.
+
+The `classification` object reports every follower separately and partitions
+exactly M1's never-admitted IDs into `a-stale-not-sent`, `a-not-sent-other`,
+`b-plus2-dropped`, `b-gap-dropped`, and `other`. The console uses **admitted**
+for M1; the existing M1 schema and counts are unchanged. “Never” is bounded
+by the archived receipt cutoff.
+
+A +2 drop has an explicit ID-bearing “downloading its parent” message from
+the miner socket. A gap drop is a chronological inference: exactly one
+miner→follower code-100 frame in [-5 ms, +100 ms) of mining, exactly one
+“gap > 2 blocks” ignore in the following 20 ms, and no competing mined ID
+for that frame. Both socket endpoints and receiver direction matter. These
+frames contain no payload IDs; this is not decoded-payload proof. Ambiguous
+matches stay `other`.
+
+A non-send requires no observed matching frame, no matching miner send in
+the same time range, and no mention of the ID in the follower log. Stale
+attribution additionally needs bracketing samples within two seconds of
+mining, an actual follower within two of the mined interval's full height,
+and a preceding tracked height outside two. The tracked value must persist
+in the following sample, or there must be no observed follower→miner
+SyncInfo between the preceding sample and mining. This handles a refresh
+that arrives just after the final withheld block. These are observations
+of logged traffic and sampled state, not proof of wire absence. The code-100
+classifier does not infer delivery from code-55 Inv frames on #2566 builds:
+ID mentions without a supported drop reason remain `other`; missing
+attributable code-100 traffic makes classification unavailable.
+
+`withheld_then_recovered` reports first admission more than **N = 0.5 s**
+after mining, with per-ID timestamps and nearest-rank p50/p90/p95/p99,
+minimum, maximum and mean delay, both overall and per mined interval. Half a second is about one A1 input-block
+cadence and well above the observed 0–4 ms prompt frame arrival and 1 ms
+log resolution. This is an operational latency threshold, not proof that
+every delayed block was withheld by the miner. The default is fixed across
+runs; `relay_rescore.py --delay-seconds N` allows sensitivity analysis.
+A1's patched H55 recovery has 70 delayed admissions (0.585–39.173 s).
+The whole-run delayed count includes additional catch-up episodes.
+
+`stale_episodes` lists first/last stale sample times (Unix UTC seconds),
+duration, sample count, and IDs/count of blocks mined within that inclusive
+span. Unknown or non-stale samples end an episode. It is sampled evidence,
+not continuous-time proof. The 37.443815 s A1 patched episode contains 67
+mined blocks; the wider H55 withheld chain contains 70 recovered blocks,
+including blocks outside the sampled span. Rust has M1 retained-record
+coverage but no archived admission timestamps or matching Scala drop logs;
+its cause/delay availability is false, missing IDs are `other`, and a zero
+delayed count must not be interpreted as zero latency.
+
+Re-score an immutable archived run without starting nodes or probing APIs:
+
+```bash
+python3 scripts/devnet-matrix/relay_rescore.py /path/to/A1 > /path/to/A1-rescore.json
+# Also accepts /path/to/A1/campaign
+RELAY_A1_EVIDENCE=/path/to/A1 TMPDIR="$PWD/.tmp" \
+  python3 scripts/devnet-matrix/verdict_self_test.py --self-test
+```
+
+The re-scorer uses `campaign/steady.json`'s embedded measurement source lines,
+which preserve the exact live poll boundaries, rather than the full logs'
+warm-up or post-measurement tail. It recomputes Scala M1, M2, M3 and causes;
+Rust M1 uses archived successful API IDs because offline re-probing is
+impossible. It writes JSON to stdout and leaves the archive unchanged.
+Cause `source_line` references are 1-based indices into the corresponding
+`relay_refresh.source_lines` array. The small verbatim A1 fixtures run in the
+normal self-test suite; the environment variable enables whole-A1 parity
+against Q3's published 13/68/13 and 0/86/35 table and 70 H55 recoveries.
 
 For steady runs, Python generates `relay-logback.xml` under `MATRIX_WORK`,
 adding UTC timestamps and enabling the history and peer-handler DEBUG

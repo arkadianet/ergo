@@ -25,3 +25,20 @@ retained mined IDs. Receiver SyncInfo counts are [0, 1, 1] from the miner at
 Scala2, [0, 1, 1] from Scala2 at the miner, and [0, 2, 2] from Scala3 at the
 miner. Their minimum gaps are 60.181 s, 60.181 s and 4.607 s respectively.
 The first interval has zero messages and remains in the mean denominator.
+
+
+`relay-a1.json` contains verbatim lines from archived run
+`/home/rkadias/coding/development/arkadianet/matrix-evidence/relay-refresh-2026-09-28/A1/campaign/steady-{scala,scala2,scala3}-1.log`.
+Each `{line, text}` entry preserves the original full-log line number and
+text, including newline and relay timestamp. The cases select the first
+stock stale non-send, +2 drop and gap drop in Q3's per-ID table; nearby
+traffic is included to test socket attribution. Preceding full-height
+lines establish mined intervals. `cases[].samples` and `recovery.samples`
+are verbatim `steady.json` / `relay_refresh.M2.*.raw_samples` values.
+`recovery` captures the 70 delayed H55 IDs plus the first prompt ID, their
+mining/admission lines and samples around the 37.443815-second episode.
+The fixture's case labels and restricted M1 sets are derived annotations,
+not node log fields. Negative tests explicitly perturb these captures to
+exercise classes absent from A1 (`a-not-sent-other`, `other`) and ambiguous
+or missing evidence. Tests do not need an A1 archive unless
+`RELAY_A1_EVIDENCE` is set for the full-run Q3 parity check.

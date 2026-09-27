@@ -127,8 +127,9 @@ def _observe_window(ctx, blocks, address):
     ctx.note('relay_refresh', measurement)
     for issue in measurement_issues(measurement):
         ctx.not_measured(issue)
+    from relay_classification import summary
     ctx.note('result_line', ' | '.join(
-        f'{node}: M1 received={m["received"]}/{m["mined"]} '
+        f'{node}: M1 admitted={m["received"]}/{m["mined"]} '
         f'missing={m["never_observed"]} zero-intervals={m["zero_receipt_intervals"]}; '
         f'M2 stale={measurement["M2"][node]["share"]} '
         f'longest={measurement["M2"][node]["longest_stretch_seconds"]}s'
@@ -136,7 +137,7 @@ def _observe_window(ctx, blocks, address):
         ' | M3 ' + '; '.join(
             f'{node}: mean={m.get("mean_per_block")} max={m.get("max_per_block")} '
             f'min-gap={m.get("min_gap_seconds")}s available={m.get("available", False)}'
-            for node, m in measurement['M3'].items()))
+            for node, m in measurement['M3'].items()) + ' | ' + summary(measurement['classification']))
     scanned = walker.scanned
     return start, scanned, observations, sent
 

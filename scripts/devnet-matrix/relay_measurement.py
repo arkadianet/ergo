@@ -236,7 +236,7 @@ class Measurement:
                 continue
             traffic_out[sender] = peer_traffic(self.lines[sender], self.lines[receiver], boundaries)
             traffic_out[sender]['receiver'] = receiver
-        return {'window': {'start': self.started, 'end': cutoff, 'receipt_cutoff': ended, 'boundaries': boundaries,
+        result = {'window': {'start': self.started, 'end': cutoff, 'receipt_cutoff': ended, 'boundaries': boundaries,
                             'initial_interval_partial': True, 'terminal_interval_excluded': True},
                 'M1': {n: coverage(intervals, ids) for n, ids in receipts.items()},
                 'M2': {n: dict(staleness([r for r in rows if r['at'] < cutoff]), raw_samples=rows) for n, rows in self.samples.items()},
@@ -246,3 +246,7 @@ class Measurement:
                 'limitations': ['M1 never_observed is bounded by the measurement cutoff; Rust API polling can miss evicted records.',
                                 'M3 counts at one named receiver per sender; socket pairs are matched across both logs.',
                                 'M2 stretch spans observed stale samples, not continuous-time proof; unknown samples break stretches.']}
+
+        from relay_classification import classify
+        result['classification'] = classify(result)
+        return result

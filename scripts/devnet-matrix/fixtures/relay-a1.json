@@ -1,0 +1,3032 @@
+{
+  "provenance": "A1/campaign/steady-*.log, verbatim lines; source line numbers below refer to full archived logs. Samples from steady.json relay_refresh.M2. Derived window/M1 restricted to these three IDs.",
+  "cases": [
+    {
+      "node": "scala2",
+      "id": "71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b",
+      "interval": 65,
+      "mined": {
+        "at": 1790536077.685,
+        "h": 65,
+        "line": 107050,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b w. nonce 53 | relay_ts=2026-09-27T19:07:57.685Z"
+      },
+      "classification": "a",
+      "frame": null,
+      "reason": null,
+      "samples": [
+        {
+          "at": 1790536077.0121367,
+          "end": 1790536077.0161297,
+          "miner": 64,
+          "actual": 64,
+          "tracked": 62,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 64
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 62
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 62
+            }
+          ]
+        },
+        {
+          "at": 1790536078.084012,
+          "end": 1790536078.0888186,
+          "miner": 65,
+          "actual": 65,
+          "tracked": 62,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 65
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 62
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 65
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "scala2",
+      "id": "4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea",
+      "interval": 36,
+      "mined": {
+        "at": 1790535164.322,
+        "h": 36,
+        "line": 58276,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea w. nonce 231 | relay_ts=2026-09-27T18:52:44.322Z"
+      },
+      "classification": "b:+2",
+      "frame": [
+        1790535164.323,
+        31712,
+        100,
+        true,
+        "127.0.0.1:19570",
+        "127.0.0.1:46670",
+        "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(100: SubBlock) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T18:52:44.323Z"
+      ],
+      "reason": [
+        1790535164.323,
+        31713,
+        "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - On processing 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea, downloading its parent and unknown ordering block f4384a97e3558be90f418c50594011babfe4d7501d7b515bbd909367919e0a45 from ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) , remote version: Some(6.5.0)) | relay_ts=2026-09-27T18:52:44.323Z"
+      ],
+      "samples": [
+        {
+          "at": 1790535163.5653486,
+          "end": 1790535163.568769,
+          "miner": 35,
+          "actual": 35,
+          "tracked": 35,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            }
+          ]
+        },
+        {
+          "at": 1790535164.570425,
+          "end": 1790535164.5734668,
+          "miner": 36,
+          "actual": 35,
+          "tracked": 35,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 35
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "scala2",
+      "id": "95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe",
+      "interval": 53,
+      "mined": {
+        "at": 1790535835.615,
+        "h": 53,
+        "line": 93173,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe w. nonce 230 | relay_ts=2026-09-27T19:03:55.615Z"
+      },
+      "classification": "b:gap>2",
+      "frame": [
+        1790535835.615,
+        49591,
+        100,
+        true,
+        "127.0.0.1:19570",
+        "127.0.0.1:46670",
+        "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(100: SubBlock) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T19:03:55.615Z"
+      ],
+      "reason": [
+        1790535835.616,
+        49592,
+        "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Ignoring input block at height 54, our full block height is 51 (gap > 2 blocks) | relay_ts=2026-09-27T19:03:55.616Z"
+      ],
+      "samples": [
+        {
+          "at": 1790535834.862663,
+          "end": 1790535834.866438,
+          "miner": 52,
+          "actual": 51,
+          "tracked": 52,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 52
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 52
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 51
+            }
+          ]
+        },
+        {
+          "at": 1790535835.8684638,
+          "end": 1790535835.8721232,
+          "miner": 53,
+          "actual": 52,
+          "tracked": 52,
+          "raw_statuses": [
+            {
+              "address": "/127.0.0.3:19573",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 52
+            },
+            {
+              "address": "/127.0.0.2:19571",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 52
+            },
+            {
+              "address": "N/A",
+              "version": "6.5.0",
+              "mode": {
+                "state": "utxo",
+                "verifyingTransactions": true,
+                "fullBlocksSuffix": -1
+              },
+              "status": "Equal",
+              "height": 51
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_lines": {
+    "scala": [
+      {
+        "line": 58253,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header f4384a97e3558be90f418c50594011babfe4d7501d7b515bbd909367919e0a45 and emission box Some(472de0651feb706ecf8eed5fece240e68c94778d3175cf715123470c13584caa) applied to UtxoState at height 36 | relay_ts=2026-09-27T18:52:43.804Z\n"
+      },
+      {
+        "line": 58274,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Found solution for input block, sending it for validation | relay_ts=2026-09-27T18:52:44.321Z\n"
+      },
+      {
+        "line": 58275,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Input-block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea mined @ height 37! | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58276,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea w. nonce 231 | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58277,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Got locally generated input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58278,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Processed solution org.ergoplatform.AutolykosSolution@1f598021 with the result Success(()) | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58279,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Creating new tree for input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea and ordering block f4384a97e3558be90f418c50594011babfe4d7501d7b515bbd909367919e0a45 | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58280,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Solution accepted | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58281,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Created new input block chain for 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58282,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully added input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea to tree for ordering block f4384a97e3558be90f418c50594011babfe4d7501d7b515bbd909367919e0a45 | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58283,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Applying 0 input block transactions for 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58284,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block transactions for 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea in tree with 1 forks | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58285,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea on best fork 0 | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58286,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully applied transactions for input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea, cost: 0 | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58287,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - No more input blocks to process in chain after 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58288,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea processed successfully, 1 blocks added to chain | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58289,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block transaction processing completed: 1 forward, 0 rollback | relay_ts=2026-09-27T18:52:44.322Z\n"
+      },
+      {
+        "line": 58290,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:52:44.323Z\n"
+      },
+      {
+        "line": 58291,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:52:44.323Z\n"
+      },
+      {
+        "line": 58292,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:54628, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:52:44.323Z\n"
+      },
+      {
+        "line": 93150,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 49001d4dc74216c9dbc976201a7f026f6eefee7d73a2c3e009908bac41ac72ad and emission box Some(6e98067382bf8b61f13976d381b811a321977818f690a1e6cca01a98fd6df854) applied to UtxoState at height 53 | relay_ts=2026-09-27T19:03:54.996Z\n"
+      },
+      {
+        "line": 93171,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Found solution for input block, sending it for validation | relay_ts=2026-09-27T19:03:55.614Z\n"
+      },
+      {
+        "line": 93172,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Input-block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe mined @ height 54! | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93173,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe w. nonce 230 | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93174,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Got locally generated input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93175,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Creating new tree for input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe and ordering block 49001d4dc74216c9dbc976201a7f026f6eefee7d73a2c3e009908bac41ac72ad | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93176,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Created new input block chain for 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93177,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully added input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe to tree for ordering block 49001d4dc74216c9dbc976201a7f026f6eefee7d73a2c3e009908bac41ac72ad | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93178,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Applying 0 input block transactions for 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93179,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block transactions for 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe in tree with 1 forks | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93180,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe on best fork 0 | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93181,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully applied transactions for input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe, cost: 0 | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93182,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - No more input blocks to process in chain after 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93183,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block 95b9df5b511326fe20493a28e88fa1fdbc3fc4e790685fa7e5b7e8483d2761fe processed successfully, 1 blocks added to chain | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93184,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block transaction processing completed: 1 forward, 0 rollback | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93185,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93186,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:54628, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93187,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93188,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Processed solution org.ergoplatform.AutolykosSolution@e88bbcee with the result Success(()) | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93189,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Solution accepted | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 93190,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(22: RequestModifier) from ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 93191,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(33: Modifier) to ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 107010,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 528008f06971018874928c863912ee0938d9c625c5a6be17404288d5c7dbea9f and emission box Some(2566daf882e5f270e3b006d83569d5bea5fc7a878b8760030a6d892080c55b1e) applied to UtxoState at height 65 | relay_ts=2026-09-27T19:07:57.358Z\n"
+      },
+      {
+        "line": 107048,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Found solution for input block, sending it for validation | relay_ts=2026-09-27T19:07:57.684Z\n"
+      },
+      {
+        "line": 107049,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Input-block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b mined @ height 66! | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107050,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b w. nonce 53 | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107051,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - Processed solution org.ergoplatform.AutolykosSolution@754ee1b7 with the result Success(()) | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107052,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Got locally generated input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107053,
+        "text": "INFO org.ergoplatform.mining.ErgoMiningThread - Solution accepted | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107054,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Creating new tree for input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b and ordering block 528008f06971018874928c863912ee0938d9c625c5a6be17404288d5c7dbea9f | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107055,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Created new input block chain for 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107056,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully added input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b to tree for ordering block 528008f06971018874928c863912ee0938d9c625c5a6be17404288d5c7dbea9f | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107057,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Applying 0 input block transactions for 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107058,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block transactions for 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b in tree with 1 forks | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107059,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Processing input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b on best fork 0 | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107060,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Successfully applied transactions for input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b, cost: 0 | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107061,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - No more input blocks to process in chain after 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107062,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block 71fc4e3f279b6271e32a4a7f38eba644e58850904a868a5a59f42097007b4b3b processed successfully, 1 blocks added to chain | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107063,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Input block transaction processing completed: 1 forward, 0 rollback | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107064,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:07:57.685Z\n"
+      },
+      {
+        "line": 107065,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(100: SubBlock) to ConnectionId(remote=/127.0.0.1:54628, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:07:57.685Z\n"
+      }
+    ],
+    "scala2": [
+      {
+        "line": 31712,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(100: SubBlock) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T18:52:44.323Z\n"
+      },
+      {
+        "line": 31713,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - On processing 4457249af22c9998d63952c3d74f76fa94f9ffd8f9f4a3b94898b6281d77f0ea, downloading its parent and unknown ordering block f4384a97e3558be90f418c50594011babfe4d7501d7b515bbd909367919e0a45 from ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) , remote version: Some(6.5.0)) | relay_ts=2026-09-27T18:52:44.323Z\n"
+      },
+      {
+        "line": 49591,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(100: SubBlock) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T19:03:55.615Z\n"
+      },
+      {
+        "line": 49592,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Ignoring input block at height 54, our full block height is 51 (gap > 2 blocks) | relay_ts=2026-09-27T19:03:55.616Z\n"
+      },
+      {
+        "line": 49593,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Peer ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) , remote version: Some(6.5.0)) has not delivered network object 104 : 3537a8f25d4ff8ee49ff5b5e9202207a9f097df9deb67548e5a4bd80851d8030 on time | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49594,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Rescheduling request for 3537a8f25d4ff8ee49ff5b5e9202207a9f097df9deb67548e5a4bd80851d8030 , new peer ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) , remote version: Some(6.5.0)) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49595,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Peer ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) , remote version: Some(6.5.0)) has not delivered network object 102 : abaab90e86e835ce3968b31b5ab366a250cea2f64289c0de88c521882d77432a on time | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49596,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(22: RequestModifier) to ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49597,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Rescheduling request for abaab90e86e835ce3968b31b5ab366a250cea2f64289c0de88c521882d77432a , new peer ConnectedPeer(connection: ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) , remote version: Some(6.5.0)) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49598,
+        "text": "INFO scorex.core.network.PeerConnectionHandler - Send message MessageSpec(22: RequestModifier) to ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49599,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(33: Modifier) from ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49600,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Got 1 modifiers of type 102 from remote connected peer: ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49601,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(33: Modifier) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T19:03:55.709Z\n"
+      },
+      {
+        "line": 49602,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Got 1 modifiers of type 104 from remote connected peer: ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T19:03:55.712Z\n"
+      },
+      {
+        "line": 49603,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Apply modifier abaab90e86e835ce3968b31b5ab366a250cea2f64289c0de88c521882d77432a of type 102 to nodeViewHolder | relay_ts=2026-09-27T19:03:55.712Z\n"
+      },
+      {
+        "line": 49604,
+        "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Trying to append modifier abaab90e86e835ce3968b31b5ab366a250cea2f64289c0de88c521882d77432a of type 102 to history | relay_ts=2026-09-27T19:03:55.712Z\n"
+      },
+      {
+        "line": 49605,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Full block 9888b27cc854572e4142d084f75d90de896cd0619a3215af65091ccf4aae74f0 appended, going to apply 1 modifiers. New best block is 9888b27cc854572e4142d084f75d90de896cd0619a3215af65091ccf4aae74f0 with height 52 updates block 22e737f50977d641ef12cbc23ab9abf4102263d43dd4cefaaa50609f1ab8d4c5 with height 51 | relay_ts=2026-09-27T19:03:55.712Z\n"
+      },
+      {
+        "line": 49606,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(22: RequestModifier) from ConnectionId(remote=/127.0.0.1:58260, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T19:03:55.714Z\n"
+      }
+    ]
+  },
+  "recovery": {
+    "source_lines": {
+      "scala": [
+        {
+          "line": 94007,
+          "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 and emission box Some(2790fad5895ba003146e64e3a74f06226b8baad82a806b5d1b5d9b5448cec368) applied to UtxoState at height 55 | relay_ts=2026-09-27T19:04:07.429Z\n"
+        },
+        {
+          "line": 94029,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 070fad7e9134bcb257a9e8c819948afebd1c34816c1e5db77bcdcadfe173183a w. nonce 15 | relay_ts=2026-09-27T19:04:07.911Z\n"
+        },
+        {
+          "line": 94108,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block b1382d70c2162aad72ed132b7dada14937967b7a51e0e72a3807eef32487e431 w. nonce 5 | relay_ts=2026-09-27T19:04:08.429Z\n"
+        },
+        {
+          "line": 94140,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 3dddf9c6f487f67ace701035c8137fb2645ad7d30d20d8a9dcab5b94f9f78bac w. nonce 379 | relay_ts=2026-09-27T19:04:09.187Z\n"
+        },
+        {
+          "line": 94166,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 3f02f06863e455da51e446e6d6149fb6bd6efc6e176ad1155eb4423701e70025 w. nonce 116 | relay_ts=2026-09-27T19:04:09.538Z\n"
+        },
+        {
+          "line": 94193,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 5bacdf9a85d91d887428ca89f592f7033d17ef2518ecccb68deb396a3cf9158f w. nonce 733 | relay_ts=2026-09-27T19:04:10.452Z\n"
+        },
+        {
+          "line": 94220,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 1bb83ce9ad3e71946023cf586555d17d14a770fe7c8fd084074f8bf62197cc82 w. nonce 1936 | relay_ts=2026-09-27T19:04:11.794Z\n"
+        },
+        {
+          "line": 94246,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block e16fd875d4957bb89be3ef97b5094f83b78f8670cc4fac03bbef851cdb29d3c9 w. nonce 204 | relay_ts=2026-09-27T19:04:12.194Z\n"
+        },
+        {
+          "line": 94272,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block a4289a221d41e865898bee12135d43641f0240e4baa1a5964b51d58340df04fb w. nonce 670 | relay_ts=2026-09-27T19:04:12.997Z\n"
+        },
+        {
+          "line": 94303,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 189e57cc2710fc04819fb0be223f9e7a09eda12f4b9b3c9c92a7e691fde518d8 w. nonce 1001 | relay_ts=2026-09-27T19:04:13.739Z\n"
+        },
+        {
+          "line": 94329,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block f5b50bbee122b459352d29c6759c75211cc85ff6c7b0fdd6947fd2a404886888 w. nonce 422 | relay_ts=2026-09-27T19:04:14.412Z\n"
+        },
+        {
+          "line": 94356,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block a1f231d2ea01ae6330d33f4b8587659fb8ffe169bb33d01094c636690b3f73ff w. nonce 252 | relay_ts=2026-09-27T19:04:14.822Z\n"
+        },
+        {
+          "line": 94384,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block ca7a358877118230e2a9505847afe92e05bfb06cd2d1e444e13db109571dc150 w. nonce 420 | relay_ts=2026-09-27T19:04:15.453Z\n"
+        },
+        {
+          "line": 94413,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block a4d7363bbca5c7dbdf2c226810e18be54da265a8fb5b33f2491b930358077922 w. nonce 1153 | relay_ts=2026-09-27T19:04:16.478Z\n"
+        },
+        {
+          "line": 94439,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 6cfaf8c880bfe3d6321ed74eb23febaa485f4f8d272b819a6b6f146959a2fede w. nonce 117 | relay_ts=2026-09-27T19:04:16.831Z\n"
+        },
+        {
+          "line": 94487,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block ad9a625889d801eab72bea2482a9077c0777799df6da84a09d08404738dd8b1a w. nonce 305 | relay_ts=2026-09-27T19:04:17.466Z\n"
+        },
+        {
+          "line": 94558,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 250b9912bf34c330d4d85b6083e650db5b9e345de77f188a3df65fb0b9862e98 w. nonce 84 | relay_ts=2026-09-27T19:04:17.840Z\n"
+        },
+        {
+          "line": 94584,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block bc30a0b790e6d472666b25388157900a949c377167546a7f6a550422f799a365 w. nonce 669 | relay_ts=2026-09-27T19:04:18.731Z\n"
+        },
+        {
+          "line": 94610,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block d8c2720677d448b4bf69ee301567b930f8c912b561e3a3cfd85bc0a6942b7b8a w. nonce 641 | relay_ts=2026-09-27T19:04:19.236Z\n"
+        },
+        {
+          "line": 94636,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 16e8668d5dbacf9124502e5117d5b45e3a38e6b53d1f25934b415c5108f0f832 w. nonce 416 | relay_ts=2026-09-27T19:04:19.614Z\n"
+        },
+        {
+          "line": 94662,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 8565073f728ca69508433742808f94a956aa9475967048ec25d858e67a5e63f4 w. nonce 102 | relay_ts=2026-09-27T19:04:19.930Z\n"
+        },
+        {
+          "line": 94689,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block e3096abf13fe99e3a09d4d541afca1c343b92e3b1ba64ca9d5c007589299b9f5 w. nonce 806 | relay_ts=2026-09-27T19:04:20.887Z\n"
+        },
+        {
+          "line": 94715,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 5e94b1b4fa369cd3b523e6d8b45f9c66462dd4340b9bf609b14e68a6e2da4c9c w. nonce 581 | relay_ts=2026-09-27T19:04:21.264Z\n"
+        },
+        {
+          "line": 94741,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 49df409ffef1f0af0df75babeb1aefadeeb173f9481b6d20d9737f14a0d36547 w. nonce 5 | relay_ts=2026-09-27T19:04:21.427Z\n"
+        },
+        {
+          "line": 94767,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block b37abcd065fc1f76a0a3b08e8abe34ade64740814ef4dc0c79a24b219189f106 w. nonce 183 | relay_ts=2026-09-27T19:04:22.075Z\n"
+        },
+        {
+          "line": 94793,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block cae2acd61d41b1d2e336b628a159af40e63a6eb8640caa37b7bc764065203c48 w. nonce 19 | relay_ts=2026-09-27T19:04:22.481Z\n"
+        },
+        {
+          "line": 94822,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 09493f76cf612254dfd13b0c4208045e4f427442e3c56e2990ac5e713cc9e0ab w. nonce 216 | relay_ts=2026-09-27T19:04:23.115Z\n"
+        },
+        {
+          "line": 94849,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 2b12fc5a8a2adfa669bf89d273ed6a7484ad296d415efdcc09a7dcd9de62146f w. nonce 206 | relay_ts=2026-09-27T19:04:23.637Z\n"
+        },
+        {
+          "line": 94875,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 44749c2fd584a70fc7afa48dc2a2853d729f6a174e7e67fbdb6069ff8076b42d w. nonce 313 | relay_ts=2026-09-27T19:04:24.229Z\n"
+        },
+        {
+          "line": 94901,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 37a84e1fcf616094115ece23cec6d1e9fa189f70d373481f0724b8f1fcbb31d8 w. nonce 37 | relay_ts=2026-09-27T19:04:24.566Z\n"
+        },
+        {
+          "line": 94927,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 04265d98606614e4453a11934adf11e46af3b905ed70440b1108a0d99b390eef w. nonce 392 | relay_ts=2026-09-27T19:04:25.317Z\n"
+        },
+        {
+          "line": 94953,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 947d74683aba6c515d5fa2beadaf97c0837b3c98655253e67aabe935ef9a6a83 w. nonce 194 | relay_ts=2026-09-27T19:04:25.707Z\n"
+        },
+        {
+          "line": 94979,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 2821cb04a12eb776861a243f88e3c0fd852b28897733da1d33fe33f130e34cf6 w. nonce 189 | relay_ts=2026-09-27T19:04:26.228Z\n"
+        },
+        {
+          "line": 95005,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block e5a3b912f523a3d394899856a9e4d05458d5f4aed9eb4a2c5ad1805906d140c2 w. nonce 27 | relay_ts=2026-09-27T19:04:26.646Z\n"
+        },
+        {
+          "line": 95031,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 27082e8dfd8e8aebf27301e982679ceab903b2a6048ef942562f519b05dacea4 w. nonce 104 | relay_ts=2026-09-27T19:04:27.212Z\n"
+        },
+        {
+          "line": 95057,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 0e7e8dc6f79dce48054ac745d5370f5e31fc383b4f13da48b5735b3e9f04ec73 w. nonce 155 | relay_ts=2026-09-27T19:04:27.781Z\n"
+        },
+        {
+          "line": 95083,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 1800aa17a76099099194e6303332130e35aa019a6276351b74144e971aa82ff6 w. nonce 504 | relay_ts=2026-09-27T19:04:28.525Z\n"
+        },
+        {
+          "line": 95109,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 60c83541c3025bc8be337b24a0ece0a14e47f5d658dab86ae73fc8e20419832f w. nonce 21 | relay_ts=2026-09-27T19:04:28.717Z\n"
+        },
+        {
+          "line": 95135,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 8cb0b70a35c8693143b55c7d4912a0774d63d43093e6339d624e2d59bade1577 w. nonce 215 | relay_ts=2026-09-27T19:04:29.360Z\n"
+        },
+        {
+          "line": 95161,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 3428a48053412a99d58b73fdc93f33273f5dbf186ba955de38ff1057a0b2de6d w. nonce 329 | relay_ts=2026-09-27T19:04:29.953Z\n"
+        },
+        {
+          "line": 95187,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block d75db52f78cb98e393567089d2f144a0a2191e60a100d92759554af978485f9b w. nonce 197 | relay_ts=2026-09-27T19:04:30.390Z\n"
+        },
+        {
+          "line": 95213,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block f3c39c5c949f946f7427fead9cb5df25707e317955bd3dc5e308bbccb97c7bb5 w. nonce 441 | relay_ts=2026-09-27T19:04:31.059Z\n"
+        },
+        {
+          "line": 95239,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 04a3fe2619d412973228808a9e95eb9a6b578b1c9e889ba805faef2659b71027 w. nonce 548 | relay_ts=2026-09-27T19:04:31.657Z\n"
+        },
+        {
+          "line": 95265,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 162165fc2efca6b45f29bc5e501a0dfb0d382db0a027cf5f250ecb23507752e0 w. nonce 66 | relay_ts=2026-09-27T19:04:31.866Z\n"
+        },
+        {
+          "line": 95291,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 44206af0ae32d41bf986a87a14d6780d0495c410618257e74c9e7330989fded2 w. nonce 590 | relay_ts=2026-09-27T19:04:32.716Z\n"
+        },
+        {
+          "line": 95317,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block d561a00798435ee0d372b544a1d5568151a9f4790ba0c5f04fc2275bd36e8235 w. nonce 224 | relay_ts=2026-09-27T19:04:33.009Z\n"
+        },
+        {
+          "line": 95343,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block cc1baf4f9d307928132f560d78f45f6edf764b9bb28cdd063cf447a00e5863ea w. nonce 38 | relay_ts=2026-09-27T19:04:33.412Z\n"
+        },
+        {
+          "line": 95369,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block b44fb223dce253bc5d7971f37c99db9e0b8669e8bd6ee71f0ad49568a6dad7ea w. nonce 186 | relay_ts=2026-09-27T19:04:34.040Z\n"
+        },
+        {
+          "line": 95395,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 570b68b193913d36b3d1ec4f35caf35760849ae769c71b6ebadaa61ede70eddd w. nonce 287 | relay_ts=2026-09-27T19:04:34.607Z\n"
+        },
+        {
+          "line": 95422,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 8839823d8684616d13f62e30ec1cf1e745928d3f77c9f7a2ac2e1515fc646250 w. nonce 1533 | relay_ts=2026-09-27T19:04:35.931Z\n"
+        },
+        {
+          "line": 95448,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 62179dbfbae7920d3c749ba298ff08e473918a9c508ec43439dd234ba2dce4af w. nonce 505 | relay_ts=2026-09-27T19:04:36.298Z\n"
+        },
+        {
+          "line": 95474,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 1375f9afbd78ff8f5f36dab81e9a81bba96e0f279c43a087f5de2fbeac8adb1e w. nonce 310 | relay_ts=2026-09-27T19:04:36.702Z\n"
+        },
+        {
+          "line": 95500,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block e36ec45169583d90ec1080e971c1d84a67fa1f862062230a52bb67220cd3ee61 w. nonce 468 | relay_ts=2026-09-27T19:04:37.318Z\n"
+        },
+        {
+          "line": 95529,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block cdbcf2c304dbd917b8070d29ea86231f49b5cd1ba21b41eb43553f44191a8d0c w. nonce 188 | relay_ts=2026-09-27T19:04:37.667Z\n"
+        },
+        {
+          "line": 95555,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block b282b11af0628035806dc4de5df938f7b72168c0686006b8218ca52ab4a32d39 w. nonce 353 | relay_ts=2026-09-27T19:04:38.287Z\n"
+        },
+        {
+          "line": 95581,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 0405573d693327cc1424d744088b014cad291143fbfdfcb100bf8abb424ae472 w. nonce 4 | relay_ts=2026-09-27T19:04:38.588Z\n"
+        },
+        {
+          "line": 95607,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block df09fcabfbd932c573c5c47b72e745924bb1a2b1ff3444dd5edf4389f115331d w. nonce 6 | relay_ts=2026-09-27T19:04:39.113Z\n"
+        },
+        {
+          "line": 95633,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 0143ed13987fb7cda86829d9cdc57cc9fa997661803c1fbdb41ce7f96cdd1d31 w. nonce 531 | relay_ts=2026-09-27T19:04:39.984Z\n"
+        },
+        {
+          "line": 95659,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block b09cc2cc833a8f53ae655e3bfee7902b4407f0b6c214ebb2615dab8552de27e1 w. nonce 435 | relay_ts=2026-09-27T19:04:40.424Z\n"
+        },
+        {
+          "line": 95685,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 96d5d4297d9d6a5b9ced6067041db9b5d3f9a351a5481d45a8b118b8dd96b37f w. nonce 281 | relay_ts=2026-09-27T19:04:40.845Z\n"
+        },
+        {
+          "line": 95711,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block a65cda9a58e0fc76d84ca69f33772180e187e19ecd76592a948cc7191e8a5361 w. nonce 206 | relay_ts=2026-09-27T19:04:41.318Z\n"
+        },
+        {
+          "line": 95737,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 2422626999521834768ff1e32f9cfed83c09f4ad74bf73fcc6440ceb7430e9ca w. nonce 417 | relay_ts=2026-09-27T19:04:41.974Z\n"
+        },
+        {
+          "line": 95763,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 1cdb08b1795551e778eefdc0674b3cd1b418e677abac5a11dd20103123130f5c w. nonce 135 | relay_ts=2026-09-27T19:04:42.312Z\n"
+        },
+        {
+          "line": 95789,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block e033a27626facc4d7e079b019dc209e6c8e781e5b4fe5e798f93729342cf2e76 w. nonce 49 | relay_ts=2026-09-27T19:04:42.778Z\n"
+        },
+        {
+          "line": 95816,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 5ecb15a44c74bd906783cb93de8fdffb72235c55a6228dfa3172f02ef339ee4c w. nonce 279 | relay_ts=2026-09-27T19:04:43.433Z\n"
+        },
+        {
+          "line": 95842,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 15a85c012adc13b79d0ed016ffdd4dfd01b79bd6000ebc21a86d0cc22e5256e1 w. nonce 86 | relay_ts=2026-09-27T19:04:43.857Z\n"
+        },
+        {
+          "line": 95868,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 43ce286ac3c0517cc78647428d0abfcf11847fc3c05fd67b2e9f608ddf6648b6 w. nonce 527 | relay_ts=2026-09-27T19:04:44.660Z\n"
+        },
+        {
+          "line": 95894,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 13c9be7bd8327369cb035219dbfc4fd9ed5975a7d073bf2530434e88309a8d36 w. nonce 229 | relay_ts=2026-09-27T19:04:44.994Z\n"
+        },
+        {
+          "line": 95920,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block c56081091309b41ae8b477238c04014a85bf4ef2b43c264580a2387930bde170 w. nonce 57 | relay_ts=2026-09-27T19:04:45.396Z\n"
+        },
+        {
+          "line": 95946,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block a959a10bcf1e6e42e96228c38ad1deb1501d074b1caa76e9320502051a2ca40f w. nonce 163 | relay_ts=2026-09-27T19:04:45.992Z\n"
+        },
+        {
+          "line": 95972,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 7137c5e71c3cb8365437b9324a4254bbb1de58426b8089aeb2b35716446501b1 w. nonce 7 | relay_ts=2026-09-27T19:04:46.382Z\n"
+        },
+        {
+          "line": 96001,
+          "text": "INFO org.ergoplatform.mining.CandidateGenerator - New input block 97b527386fe75ebfb61fbe0c76c7f236f8e24aebff016375ba229939c682777a w. nonce 80 | relay_ts=2026-09-27T19:04:46.962Z\n"
+        }
+      ],
+      "scala3": [
+        {
+          "line": 49313,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Creating new tree for input block 97b527386fe75ebfb61fbe0c76c7f236f8e24aebff016375ba229939c682777a and ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.965Z\n"
+        },
+        {
+          "line": 49324,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 7137c5e71c3cb8365437b9324a4254bbb1de58426b8089aeb2b35716446501b1 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.967Z\n"
+        },
+        {
+          "line": 49335,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block a959a10bcf1e6e42e96228c38ad1deb1501d074b1caa76e9320502051a2ca40f to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.968Z\n"
+        },
+        {
+          "line": 49346,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block c56081091309b41ae8b477238c04014a85bf4ef2b43c264580a2387930bde170 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.970Z\n"
+        },
+        {
+          "line": 49357,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 13c9be7bd8327369cb035219dbfc4fd9ed5975a7d073bf2530434e88309a8d36 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.972Z\n"
+        },
+        {
+          "line": 49368,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 43ce286ac3c0517cc78647428d0abfcf11847fc3c05fd67b2e9f608ddf6648b6 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.973Z\n"
+        },
+        {
+          "line": 49379,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 15a85c012adc13b79d0ed016ffdd4dfd01b79bd6000ebc21a86d0cc22e5256e1 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.975Z\n"
+        },
+        {
+          "line": 49390,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 5ecb15a44c74bd906783cb93de8fdffb72235c55a6228dfa3172f02ef339ee4c to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.976Z\n"
+        },
+        {
+          "line": 49401,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block e033a27626facc4d7e079b019dc209e6c8e781e5b4fe5e798f93729342cf2e76 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.978Z\n"
+        },
+        {
+          "line": 49412,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 1cdb08b1795551e778eefdc0674b3cd1b418e677abac5a11dd20103123130f5c to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.982Z\n"
+        },
+        {
+          "line": 49423,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 2422626999521834768ff1e32f9cfed83c09f4ad74bf73fcc6440ceb7430e9ca to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.989Z\n"
+        },
+        {
+          "line": 49434,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block a65cda9a58e0fc76d84ca69f33772180e187e19ecd76592a948cc7191e8a5361 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.991Z\n"
+        },
+        {
+          "line": 49445,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 96d5d4297d9d6a5b9ced6067041db9b5d3f9a351a5481d45a8b118b8dd96b37f to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.994Z\n"
+        },
+        {
+          "line": 49456,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block b09cc2cc833a8f53ae655e3bfee7902b4407f0b6c214ebb2615dab8552de27e1 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.996Z\n"
+        },
+        {
+          "line": 49467,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 0143ed13987fb7cda86829d9cdc57cc9fa997661803c1fbdb41ce7f96cdd1d31 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.998Z\n"
+        },
+        {
+          "line": 49478,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block df09fcabfbd932c573c5c47b72e745924bb1a2b1ff3444dd5edf4389f115331d to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:46.999Z\n"
+        },
+        {
+          "line": 49489,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 0405573d693327cc1424d744088b014cad291143fbfdfcb100bf8abb424ae472 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.000Z\n"
+        },
+        {
+          "line": 49500,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block b282b11af0628035806dc4de5df938f7b72168c0686006b8218ca52ab4a32d39 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.002Z\n"
+        },
+        {
+          "line": 49511,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block cdbcf2c304dbd917b8070d29ea86231f49b5cd1ba21b41eb43553f44191a8d0c to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.003Z\n"
+        },
+        {
+          "line": 49522,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block e36ec45169583d90ec1080e971c1d84a67fa1f862062230a52bb67220cd3ee61 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.005Z\n"
+        },
+        {
+          "line": 49533,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 1375f9afbd78ff8f5f36dab81e9a81bba96e0f279c43a087f5de2fbeac8adb1e to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.006Z\n"
+        },
+        {
+          "line": 49544,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 62179dbfbae7920d3c749ba298ff08e473918a9c508ec43439dd234ba2dce4af to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.009Z\n"
+        },
+        {
+          "line": 49555,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 8839823d8684616d13f62e30ec1cf1e745928d3f77c9f7a2ac2e1515fc646250 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.010Z\n"
+        },
+        {
+          "line": 49566,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 570b68b193913d36b3d1ec4f35caf35760849ae769c71b6ebadaa61ede70eddd to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.012Z\n"
+        },
+        {
+          "line": 49577,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block b44fb223dce253bc5d7971f37c99db9e0b8669e8bd6ee71f0ad49568a6dad7ea to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.013Z\n"
+        },
+        {
+          "line": 49588,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block cc1baf4f9d307928132f560d78f45f6edf764b9bb28cdd063cf447a00e5863ea to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.014Z\n"
+        },
+        {
+          "line": 49599,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block d561a00798435ee0d372b544a1d5568151a9f4790ba0c5f04fc2275bd36e8235 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.016Z\n"
+        },
+        {
+          "line": 49610,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 44206af0ae32d41bf986a87a14d6780d0495c410618257e74c9e7330989fded2 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.017Z\n"
+        },
+        {
+          "line": 49621,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 162165fc2efca6b45f29bc5e501a0dfb0d382db0a027cf5f250ecb23507752e0 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.018Z\n"
+        },
+        {
+          "line": 49632,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 04a3fe2619d412973228808a9e95eb9a6b578b1c9e889ba805faef2659b71027 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.020Z\n"
+        },
+        {
+          "line": 49643,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block f3c39c5c949f946f7427fead9cb5df25707e317955bd3dc5e308bbccb97c7bb5 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.021Z\n"
+        },
+        {
+          "line": 49654,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block d75db52f78cb98e393567089d2f144a0a2191e60a100d92759554af978485f9b to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.023Z\n"
+        },
+        {
+          "line": 49665,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 3428a48053412a99d58b73fdc93f33273f5dbf186ba955de38ff1057a0b2de6d to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.024Z\n"
+        },
+        {
+          "line": 49676,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 8cb0b70a35c8693143b55c7d4912a0774d63d43093e6339d624e2d59bade1577 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.025Z\n"
+        },
+        {
+          "line": 49687,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 60c83541c3025bc8be337b24a0ece0a14e47f5d658dab86ae73fc8e20419832f to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.027Z\n"
+        },
+        {
+          "line": 49698,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 1800aa17a76099099194e6303332130e35aa019a6276351b74144e971aa82ff6 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.029Z\n"
+        },
+        {
+          "line": 49709,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 0e7e8dc6f79dce48054ac745d5370f5e31fc383b4f13da48b5735b3e9f04ec73 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.030Z\n"
+        },
+        {
+          "line": 49720,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 27082e8dfd8e8aebf27301e982679ceab903b2a6048ef942562f519b05dacea4 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.032Z\n"
+        },
+        {
+          "line": 49731,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block e5a3b912f523a3d394899856a9e4d05458d5f4aed9eb4a2c5ad1805906d140c2 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.033Z\n"
+        },
+        {
+          "line": 49742,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 2821cb04a12eb776861a243f88e3c0fd852b28897733da1d33fe33f130e34cf6 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.034Z\n"
+        },
+        {
+          "line": 49753,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 947d74683aba6c515d5fa2beadaf97c0837b3c98655253e67aabe935ef9a6a83 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.036Z\n"
+        },
+        {
+          "line": 49764,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 04265d98606614e4453a11934adf11e46af3b905ed70440b1108a0d99b390eef to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.037Z\n"
+        },
+        {
+          "line": 49775,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 37a84e1fcf616094115ece23cec6d1e9fa189f70d373481f0724b8f1fcbb31d8 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.039Z\n"
+        },
+        {
+          "line": 49786,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 44749c2fd584a70fc7afa48dc2a2853d729f6a174e7e67fbdb6069ff8076b42d to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.040Z\n"
+        },
+        {
+          "line": 49797,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 2b12fc5a8a2adfa669bf89d273ed6a7484ad296d415efdcc09a7dcd9de62146f to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.042Z\n"
+        },
+        {
+          "line": 49808,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 09493f76cf612254dfd13b0c4208045e4f427442e3c56e2990ac5e713cc9e0ab to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.043Z\n"
+        },
+        {
+          "line": 49819,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block cae2acd61d41b1d2e336b628a159af40e63a6eb8640caa37b7bc764065203c48 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.045Z\n"
+        },
+        {
+          "line": 49830,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block b37abcd065fc1f76a0a3b08e8abe34ade64740814ef4dc0c79a24b219189f106 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.046Z\n"
+        },
+        {
+          "line": 49841,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 49df409ffef1f0af0df75babeb1aefadeeb173f9481b6d20d9737f14a0d36547 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.047Z\n"
+        },
+        {
+          "line": 49852,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 5e94b1b4fa369cd3b523e6d8b45f9c66462dd4340b9bf609b14e68a6e2da4c9c to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.049Z\n"
+        },
+        {
+          "line": 49863,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block e3096abf13fe99e3a09d4d541afca1c343b92e3b1ba64ca9d5c007589299b9f5 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.050Z\n"
+        },
+        {
+          "line": 49874,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 8565073f728ca69508433742808f94a956aa9475967048ec25d858e67a5e63f4 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.051Z\n"
+        },
+        {
+          "line": 49885,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 16e8668d5dbacf9124502e5117d5b45e3a38e6b53d1f25934b415c5108f0f832 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.053Z\n"
+        },
+        {
+          "line": 49896,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block d8c2720677d448b4bf69ee301567b930f8c912b561e3a3cfd85bc0a6942b7b8a to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.054Z\n"
+        },
+        {
+          "line": 49907,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block bc30a0b790e6d472666b25388157900a949c377167546a7f6a550422f799a365 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.056Z\n"
+        },
+        {
+          "line": 49918,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 250b9912bf34c330d4d85b6083e650db5b9e345de77f188a3df65fb0b9862e98 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.058Z\n"
+        },
+        {
+          "line": 49929,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block ad9a625889d801eab72bea2482a9077c0777799df6da84a09d08404738dd8b1a to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.059Z\n"
+        },
+        {
+          "line": 49940,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 6cfaf8c880bfe3d6321ed74eb23febaa485f4f8d272b819a6b6f146959a2fede to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.061Z\n"
+        },
+        {
+          "line": 49951,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block a4d7363bbca5c7dbdf2c226810e18be54da265a8fb5b33f2491b930358077922 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.063Z\n"
+        },
+        {
+          "line": 49962,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block ca7a358877118230e2a9505847afe92e05bfb06cd2d1e444e13db109571dc150 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.065Z\n"
+        },
+        {
+          "line": 49973,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block a1f231d2ea01ae6330d33f4b8587659fb8ffe169bb33d01094c636690b3f73ff to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.067Z\n"
+        },
+        {
+          "line": 49984,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block f5b50bbee122b459352d29c6759c75211cc85ff6c7b0fdd6947fd2a404886888 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.069Z\n"
+        },
+        {
+          "line": 49995,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 189e57cc2710fc04819fb0be223f9e7a09eda12f4b9b3c9c92a7e691fde518d8 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.070Z\n"
+        },
+        {
+          "line": 50006,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block a4289a221d41e865898bee12135d43641f0240e4baa1a5964b51d58340df04fb to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.073Z\n"
+        },
+        {
+          "line": 50017,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block e16fd875d4957bb89be3ef97b5094f83b78f8670cc4fac03bbef851cdb29d3c9 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.074Z\n"
+        },
+        {
+          "line": 50028,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 1bb83ce9ad3e71946023cf586555d17d14a770fe7c8fd084074f8bf62197cc82 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.076Z\n"
+        },
+        {
+          "line": 50039,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 5bacdf9a85d91d887428ca89f592f7033d17ef2518ecccb68deb396a3cf9158f to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.077Z\n"
+        },
+        {
+          "line": 50050,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 3f02f06863e455da51e446e6d6149fb6bd6efc6e176ad1155eb4423701e70025 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.078Z\n"
+        },
+        {
+          "line": 50061,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 3dddf9c6f487f67ace701035c8137fb2645ad7d30d20d8a9dcab5b94f9f78bac to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.080Z\n"
+        },
+        {
+          "line": 50073,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block b1382d70c2162aad72ed132b7dada14937967b7a51e0e72a3807eef32487e431 to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.081Z\n"
+        },
+        {
+          "line": 50086,
+          "text": "DEBUG org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - Adding input block 070fad7e9134bcb257a9e8c819948afebd1c34816c1e5db77bcdcadfe173183a to existing tree for ordering block 78b92854782d2fa890bd90a60a1600143540217074ea937c14bf2390de676264 | relay_ts=2026-09-27T19:04:47.084Z\n"
+        }
+      ]
+    },
+    "ids": [
+      "070fad7e9134bcb257a9e8c819948afebd1c34816c1e5db77bcdcadfe173183a",
+      "b1382d70c2162aad72ed132b7dada14937967b7a51e0e72a3807eef32487e431",
+      "3dddf9c6f487f67ace701035c8137fb2645ad7d30d20d8a9dcab5b94f9f78bac",
+      "3f02f06863e455da51e446e6d6149fb6bd6efc6e176ad1155eb4423701e70025",
+      "5bacdf9a85d91d887428ca89f592f7033d17ef2518ecccb68deb396a3cf9158f",
+      "1bb83ce9ad3e71946023cf586555d17d14a770fe7c8fd084074f8bf62197cc82",
+      "e16fd875d4957bb89be3ef97b5094f83b78f8670cc4fac03bbef851cdb29d3c9",
+      "a4289a221d41e865898bee12135d43641f0240e4baa1a5964b51d58340df04fb",
+      "189e57cc2710fc04819fb0be223f9e7a09eda12f4b9b3c9c92a7e691fde518d8",
+      "f5b50bbee122b459352d29c6759c75211cc85ff6c7b0fdd6947fd2a404886888",
+      "a1f231d2ea01ae6330d33f4b8587659fb8ffe169bb33d01094c636690b3f73ff",
+      "ca7a358877118230e2a9505847afe92e05bfb06cd2d1e444e13db109571dc150",
+      "a4d7363bbca5c7dbdf2c226810e18be54da265a8fb5b33f2491b930358077922",
+      "6cfaf8c880bfe3d6321ed74eb23febaa485f4f8d272b819a6b6f146959a2fede",
+      "ad9a625889d801eab72bea2482a9077c0777799df6da84a09d08404738dd8b1a",
+      "250b9912bf34c330d4d85b6083e650db5b9e345de77f188a3df65fb0b9862e98",
+      "bc30a0b790e6d472666b25388157900a949c377167546a7f6a550422f799a365",
+      "d8c2720677d448b4bf69ee301567b930f8c912b561e3a3cfd85bc0a6942b7b8a",
+      "16e8668d5dbacf9124502e5117d5b45e3a38e6b53d1f25934b415c5108f0f832",
+      "8565073f728ca69508433742808f94a956aa9475967048ec25d858e67a5e63f4",
+      "e3096abf13fe99e3a09d4d541afca1c343b92e3b1ba64ca9d5c007589299b9f5",
+      "5e94b1b4fa369cd3b523e6d8b45f9c66462dd4340b9bf609b14e68a6e2da4c9c",
+      "49df409ffef1f0af0df75babeb1aefadeeb173f9481b6d20d9737f14a0d36547",
+      "b37abcd065fc1f76a0a3b08e8abe34ade64740814ef4dc0c79a24b219189f106",
+      "cae2acd61d41b1d2e336b628a159af40e63a6eb8640caa37b7bc764065203c48",
+      "09493f76cf612254dfd13b0c4208045e4f427442e3c56e2990ac5e713cc9e0ab",
+      "2b12fc5a8a2adfa669bf89d273ed6a7484ad296d415efdcc09a7dcd9de62146f",
+      "44749c2fd584a70fc7afa48dc2a2853d729f6a174e7e67fbdb6069ff8076b42d",
+      "37a84e1fcf616094115ece23cec6d1e9fa189f70d373481f0724b8f1fcbb31d8",
+      "04265d98606614e4453a11934adf11e46af3b905ed70440b1108a0d99b390eef",
+      "947d74683aba6c515d5fa2beadaf97c0837b3c98655253e67aabe935ef9a6a83",
+      "2821cb04a12eb776861a243f88e3c0fd852b28897733da1d33fe33f130e34cf6",
+      "e5a3b912f523a3d394899856a9e4d05458d5f4aed9eb4a2c5ad1805906d140c2",
+      "27082e8dfd8e8aebf27301e982679ceab903b2a6048ef942562f519b05dacea4",
+      "0e7e8dc6f79dce48054ac745d5370f5e31fc383b4f13da48b5735b3e9f04ec73",
+      "1800aa17a76099099194e6303332130e35aa019a6276351b74144e971aa82ff6",
+      "60c83541c3025bc8be337b24a0ece0a14e47f5d658dab86ae73fc8e20419832f",
+      "8cb0b70a35c8693143b55c7d4912a0774d63d43093e6339d624e2d59bade1577",
+      "3428a48053412a99d58b73fdc93f33273f5dbf186ba955de38ff1057a0b2de6d",
+      "d75db52f78cb98e393567089d2f144a0a2191e60a100d92759554af978485f9b",
+      "f3c39c5c949f946f7427fead9cb5df25707e317955bd3dc5e308bbccb97c7bb5",
+      "04a3fe2619d412973228808a9e95eb9a6b578b1c9e889ba805faef2659b71027",
+      "162165fc2efca6b45f29bc5e501a0dfb0d382db0a027cf5f250ecb23507752e0",
+      "44206af0ae32d41bf986a87a14d6780d0495c410618257e74c9e7330989fded2",
+      "d561a00798435ee0d372b544a1d5568151a9f4790ba0c5f04fc2275bd36e8235",
+      "cc1baf4f9d307928132f560d78f45f6edf764b9bb28cdd063cf447a00e5863ea",
+      "b44fb223dce253bc5d7971f37c99db9e0b8669e8bd6ee71f0ad49568a6dad7ea",
+      "570b68b193913d36b3d1ec4f35caf35760849ae769c71b6ebadaa61ede70eddd",
+      "8839823d8684616d13f62e30ec1cf1e745928d3f77c9f7a2ac2e1515fc646250",
+      "62179dbfbae7920d3c749ba298ff08e473918a9c508ec43439dd234ba2dce4af",
+      "1375f9afbd78ff8f5f36dab81e9a81bba96e0f279c43a087f5de2fbeac8adb1e",
+      "e36ec45169583d90ec1080e971c1d84a67fa1f862062230a52bb67220cd3ee61",
+      "cdbcf2c304dbd917b8070d29ea86231f49b5cd1ba21b41eb43553f44191a8d0c",
+      "b282b11af0628035806dc4de5df938f7b72168c0686006b8218ca52ab4a32d39",
+      "0405573d693327cc1424d744088b014cad291143fbfdfcb100bf8abb424ae472",
+      "df09fcabfbd932c573c5c47b72e745924bb1a2b1ff3444dd5edf4389f115331d",
+      "0143ed13987fb7cda86829d9cdc57cc9fa997661803c1fbdb41ce7f96cdd1d31",
+      "b09cc2cc833a8f53ae655e3bfee7902b4407f0b6c214ebb2615dab8552de27e1",
+      "96d5d4297d9d6a5b9ced6067041db9b5d3f9a351a5481d45a8b118b8dd96b37f",
+      "a65cda9a58e0fc76d84ca69f33772180e187e19ecd76592a948cc7191e8a5361",
+      "2422626999521834768ff1e32f9cfed83c09f4ad74bf73fcc6440ceb7430e9ca",
+      "1cdb08b1795551e778eefdc0674b3cd1b418e677abac5a11dd20103123130f5c",
+      "e033a27626facc4d7e079b019dc209e6c8e781e5b4fe5e798f93729342cf2e76",
+      "5ecb15a44c74bd906783cb93de8fdffb72235c55a6228dfa3172f02ef339ee4c",
+      "15a85c012adc13b79d0ed016ffdd4dfd01b79bd6000ebc21a86d0cc22e5256e1",
+      "43ce286ac3c0517cc78647428d0abfcf11847fc3c05fd67b2e9f608ddf6648b6",
+      "13c9be7bd8327369cb035219dbfc4fd9ed5975a7d073bf2530434e88309a8d36",
+      "c56081091309b41ae8b477238c04014a85bf4ef2b43c264580a2387930bde170",
+      "a959a10bcf1e6e42e96228c38ad1deb1501d074b1caa76e9320502051a2ca40f",
+      "7137c5e71c3cb8365437b9324a4254bbb1de58426b8089aeb2b35716446501b1",
+      "97b527386fe75ebfb61fbe0c76c7f236f8e24aebff016375ba229939c682777a"
+    ],
+    "samples": [
+      {
+        "at": 1790535846.9715133,
+        "end": 1790535846.9750023,
+        "miner": 54,
+        "actual": 53,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 52
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535847.9793699,
+        "end": 1790535847.983201,
+        "miner": 55,
+        "actual": 53,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 52
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535849.0553608,
+        "end": 1790535849.0590615,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535850.061385,
+        "end": 1790535850.065319,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535851.067518,
+        "end": 1790535851.071433,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535852.0734973,
+        "end": 1790535852.0771153,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535853.0829391,
+        "end": 1790535853.0867817,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 54
+          }
+        ]
+      },
+      {
+        "at": 1790535854.0925064,
+        "end": 1790535854.0957313,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535855.0977502,
+        "end": 1790535855.10116,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535856.103075,
+        "end": 1790535856.1189537,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535857.1231496,
+        "end": 1790535857.1267908,
+        "miner": 55,
+        "actual": 54,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 53
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535858.128818,
+        "end": 1790535858.1318572,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535859.1338484,
+        "end": 1790535859.1373875,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535860.1396887,
+        "end": 1790535860.1431577,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535861.145441,
+        "end": 1790535861.1488433,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535862.1516232,
+        "end": 1790535862.1557686,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535863.1584046,
+        "end": 1790535863.1619008,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535864.1640944,
+        "end": 1790535864.1680186,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535865.1705928,
+        "end": 1790535865.1744318,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535866.176724,
+        "end": 1790535866.1803172,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535867.182649,
+        "end": 1790535867.1884234,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535868.1917021,
+        "end": 1790535868.1967814,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535869.2025323,
+        "end": 1790535869.205877,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535870.2079513,
+        "end": 1790535870.2111309,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535871.213497,
+        "end": 1790535871.216889,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535872.2191603,
+        "end": 1790535872.2230372,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535873.225425,
+        "end": 1790535873.229366,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535874.231465,
+        "end": 1790535874.2348745,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535875.2368238,
+        "end": 1790535875.24037,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535876.2425177,
+        "end": 1790535876.2463343,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535877.248537,
+        "end": 1790535877.2522125,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Younger",
+            "height": 54
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535878.2543497,
+        "end": 1790535878.2576745,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535879.2617738,
+        "end": 1790535879.2683592,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535880.2705848,
+        "end": 1790535880.274289,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535881.2767782,
+        "end": 1790535881.280501,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535882.3315115,
+        "end": 1790535882.3354743,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535883.4091315,
+        "end": 1790535883.412708,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535884.4149778,
+        "end": 1790535884.41918,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535885.4231846,
+        "end": 1790535885.4295363,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 52,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 52
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535886.4319646,
+        "end": 1790535886.4357197,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 55,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      },
+      {
+        "at": 1790535887.4388573,
+        "end": 1790535887.4424121,
+        "miner": 55,
+        "actual": 55,
+        "tracked": 55,
+        "raw_statuses": [
+          {
+            "address": "/127.0.0.3:19573",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "/127.0.0.2:19571",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          },
+          {
+            "address": "N/A",
+            "version": "6.5.0",
+            "mode": {
+              "state": "utxo",
+              "verifyingTransactions": true,
+              "fullBlocksSuffix": -1
+            },
+            "status": "Equal",
+            "height": 55
+          }
+        ]
+      }
+    ]
+  },
+  "refresh_line": {
+    "line": 107495,
+    "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T19:08:04.881Z\n"
+  }
+}
