@@ -49,6 +49,7 @@ so a patched follower can be read against a stock one. See
 """
 import argparse
 import datetime
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -909,12 +910,105 @@ def _holds_resources(pid):
     return state != 'Z' 
 
 
-def kill_hard(name):
+def _lock_files_under(data_root, names):
+    """Every `LOCK` file (Scorex/LevelDB: `peers/LOCK`, and one per
+    history/state store) and `*.redb` file (the Rust store's own lock is
+    on the database file itself, not a separate `LOCK`) under each
+    node's data directory. Sorted, so a probe's "still held" message
+    always names the same file first for the same fixture."""
+    found = []
+    for name in names:
+        root = data_root / name
+        if not root.is_dir():
+            continue
+        found += root.rglob('LOCK')
+        found += root.rglob('*.redb')
+    return sorted(set(found))
+
+
+def _pid_holding_lock(path):
+    """The PID `/proc/locks` says holds `path`'s inode, or `None` if it
+    cannot be determined (the file has no POSIX lock on it right now, or
+    `/proc/locks` cannot be read). Best-effort diagnostic only — never
+    part of the wait condition itself."""
+    try:
+        inode = path.stat().st_ino
+    except OSError:
+        return None
+    try:
+        lines = Path('/proc/locks').read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        fields = line.split()
+        # id: type mode kind pid major:minor:inode start end
+        if len(fields) < 6:
+            continue
+        try:
+            pid = int(fields[4])
+            line_inode = int(fields[5].split(':')[2])
+        except (IndexError, ValueError):
+            continue
+        if line_inode == inode:
+            return pid
+    return None
+
+
+def wait_for_lock_files_releasable(data_root, names, timeout=60.0):
+    """Poll until every LOCK/`*.redb` file under these nodes' data
+    directories can be taken with a non-blocking POSIX lock from THIS
+    process, releasing it again immediately — a probe, never held.
+
+    Scorex/LevelDB's LOCK files (and the Rust store's lock on its own
+    `.redb` file) are fcntl-based: the kernel releases one only once the
+    OLD process is FULLY gone, which can lag "gone from /proc" while a
+    SIGKILLed JVM is still unmapping memory or is a zombie awaiting reap
+    (rm-A-restart-armA-3: scala2's respawn hit `Failed to initialize
+    storage ... lock .../peers/LOCK: Resource temporarily unavailable`
+    despite the PID already being confirmed gone). Replaces a fixed
+    settle time, which either wastes time when the kernel was already
+    done or is not always enough under load.
+
+    Raises RuntimeError — a harness STALL, not a node divergence — naming
+    the still-held file and, if `/proc/locks` can identify it, the PID
+    still holding it, once `timeout` seconds have passed with no file
+    ever found blocked from the start.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        blocking = None
+        for lock_path in _lock_files_under(data_root, names):
+            try:
+                fd = os.open(str(lock_path), os.O_RDWR)
+            except OSError:
+                continue
+            try:
+                fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.lockf(fd, fcntl.LOCK_UN)
+            except OSError:
+                blocking = lock_path
+            finally:
+                os.close(fd)
+            if blocking:
+                break
+        if blocking is None:
+            return
+        if time.monotonic() >= deadline:
+            holder = _pid_holding_lock(blocking)
+            raise RuntimeError(
+                f'{blocking} is still locked {timeout:.0f}s after every '
+                'victim PID was confirmed gone' +
+                (f' (held by PID {holder})' if holder else
+                 ' (holding PID could not be determined)'))
+        time.sleep(0.2)
+
+
+def kill_hard(name, data_root=None):
     """SIGKILL one node this recipe started. See `kill_hard_many`."""
-    return kill_hard_many([name])[name]
+    return kill_hard_many([name], data_root=data_root)[name]
 
 
-def kill_hard_many(names):
+def kill_hard_many(names, data_root=None):
     """SIGKILL nodes this recipe started, by PID, at the SAME instant,
     after checking every process is still the one we launched.
 
@@ -923,9 +1017,13 @@ def kill_hard_many(names):
     together rather than one a teardown apart from the other.
 
     Returns `{name: pid}` only once every PID is GONE from the process
-    table, not merely unrecognizable: the data directory's lock is held
-    until then, and the replacement node refuses to open a database that
-    is still open.
+    table AND (when `data_root` is given) every LOCK/`*.redb` file under
+    it is confirmed releasable (`wait_for_lock_files_releasable`) — not
+    merely unrecognizable in `/proc`: the data directory's lock can
+    outlive that, and the replacement node refuses to open a database
+    that is still open. `data_root=None`, or a data root with no such
+    files (nothing to probe), falls back to the old fixed
+    `KILL_SETTLE_SECONDS` — the pre-probe behaviour, unchanged.
     """
     import lifecycle
     targets = {}
@@ -949,13 +1047,14 @@ def kill_hard_many(names):
                 f'{name} (PID {pid}) survived SIGKILL for 60s; refusing to '
                 'start a replacement over a data directory the old process '
                 'still holds')
-    # The PID being gone is necessary and, measurably, not sufficient:
-    # the replacement started 60 ms later still lost the race for the
-    # data directory's redb lock ("Database already open. Cannot acquire
-    # lock."). The kernel releases file locks as the process is torn
-    # down, and the teardown outlives the PID's visibility. A real
-    # operator restart has a gap too; this one is explicit and short.
-    time.sleep(KILL_SETTLE_SECONDS)
+    lock_files = _lock_files_under(data_root, names) if data_root else []
+    if lock_files:
+        wait_for_lock_files_releasable(data_root, names)
+    else:
+        # Nothing to probe (no data_root, or none of these nodes' stores
+        # use a file this probe recognizes) — the settle time this
+        # replaces for the probed case is still what protects this one.
+        time.sleep(KILL_SETTLE_SECONDS)
     for name, (pid, config) in targets.items():
         (WORK / (name + '.pid')).unlink(missing_ok=True)
         config.unlink(missing_ok=True)
@@ -3820,7 +3919,7 @@ def _self_test_remeasure():
     _src = inspect.getsource(restart._run_scala_victims)
     # One simultaneous kill, and the sampler told the victims are down on
     # purpose — so the miner and the Rust follower stay sampled.
-    assert 'kill_hard_many(victims)' in _src and 'expect_down(victims)' in _src
+    assert 'kill_hard_many(victims, data_root=' in _src and 'expect_down(victims)' in _src
     assert 'restart_recovery' in _src and 'scala_waitlist' in _src
     # ...and they come back together, not one JVM start apart.
     assert 'ThreadPoolExecutor' in _src, 'the victims respawn concurrently'
@@ -3858,6 +3957,76 @@ def _self_test_remeasure():
                 if _p.poll() is None:
                     _p.kill()
                     _p.wait(timeout=10)
+
+    # ----- wait_for_lock_files_releasable: a real fcntl lock, not a mock -
+
+    with tempfile.TemporaryDirectory() as _lock_tmp:
+        _lock_root = Path(_lock_tmp)
+        _lock_path = _lock_root / 'victim_a' / 'LOCK'
+        _lock_path.parent.mkdir()
+        _lock_path.touch()
+        _redb_path = _lock_root / 'victim_a' / 'state.redb'
+        _redb_path.touch()
+        assert _lock_files_under(_lock_root, ['victim_a']) == \
+            [_lock_path, _redb_path], _lock_files_under(_lock_root, ['victim_a'])
+        # No lock held at all: returns immediately regardless of timeout.
+        _t0 = time.monotonic()
+        wait_for_lock_files_releasable(_lock_root, ['victim_a'], timeout=10.0)
+        assert time.monotonic() - _t0 < 2.0, 'nothing was locked; must not wait'
+
+        _ready = _lock_root / 'ready'
+
+        def _holder_script(hold_s):
+            return (f'import fcntl, time\n'
+                    f'f = open({str(_lock_path)!r}, "r+")\n'
+                    f'fcntl.lockf(f, fcntl.LOCK_EX)\n'
+                    f'open({str(_ready)!r}, "w").close()\n'
+                    f'time.sleep({hold_s})\n')
+
+        # A real process holds a real fcntl lock on the SAME file this
+        # probe checks. The probe must not report it releasable before
+        # the holder actually exits (proving it is not a no-op), and
+        # must report it releasable once the holder is gone (proving it
+        # is not a permanent block either).
+        _ready.unlink(missing_ok=True)
+        _holder = subprocess.Popen(['python3', '-c', _holder_script(3.0)])
+        try:
+            _deadline = time.monotonic() + 5
+            while not _ready.exists() and time.monotonic() < _deadline:
+                time.sleep(0.05)
+            assert _ready.exists(), 'the lock holder never confirmed taking the lock'
+            _t0 = time.monotonic()
+            wait_for_lock_files_releasable(_lock_root, ['victim_a'], timeout=10.0)
+            _elapsed = time.monotonic() - _t0
+            assert _elapsed >= 2.0, (
+                f'the probe returned after {_elapsed:.1f}s while the lock was '
+                'still genuinely held — it is not really testing the lock')
+            assert _holder.wait(timeout=5) == 0
+        finally:
+            if _holder.poll() is None:
+                _holder.kill()
+                _holder.wait(timeout=5)
+            _ready.unlink(missing_ok=True)
+
+        # A holder that never lets go: the probe must give up as a named
+        # STALL within ITS OWN short timeout, not hang or silently pass.
+        _ready.unlink(missing_ok=True)
+        _holder = subprocess.Popen(['python3', '-c', _holder_script(30.0)])
+        try:
+            _deadline = time.monotonic() + 5
+            while not _ready.exists() and time.monotonic() < _deadline:
+                time.sleep(0.05)
+            assert _ready.exists(), 'the lock holder never confirmed taking the lock'
+            try:
+                wait_for_lock_files_releasable(_lock_root, ['victim_a'], timeout=1.0)
+            except RuntimeError as error:
+                assert str(_lock_path) in str(error), str(error)
+            else:
+                raise AssertionError('a lock genuinely held past the timeout must fail')
+        finally:
+            _holder.kill()
+            _holder.wait(timeout=5)
+            _ready.unlink(missing_ok=True)
 
     # ----- flood: the shipped caps and the two adversary shapes -----
     assert flood.ROOT_FLOOD_CAPS == {'maxEntries': 256, 'maxBytes': 4194304,

@@ -163,7 +163,7 @@ def run(ctx):
     events_before_restart = common.latest_event_seq(ctx)
 
     killed_at = time.time()
-    killed = campaign.kill_hard('rust')
+    killed = campaign.kill_hard('rust', data_root=ctx.data_root)
     ctx.note('killed', {'pid': killed, 'signal': 'SIGKILL',
                         'at_ordering_height': restart_height,
                         'at_epoch_s': killed_at})
@@ -333,7 +333,7 @@ def _run_scala_victims(ctx, campaign, lifecycle):
     # victims are down; they read as down, not as a failed sweep.
     ctx.run.expect_down(victims)
     killed_at = time.time()
-    killed = campaign.kill_hard_many(victims)
+    killed = campaign.kill_hard_many(victims, data_root=ctx.data_root)
     ctx.note('killed', {'pids': killed, 'signal': 'SIGKILL',
                         'at_ordering_height': restart_height,
                         'at_epoch_s': killed_at})

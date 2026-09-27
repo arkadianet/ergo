@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -388,13 +389,38 @@ def _state_root_pending(state_root):
     return state_root is None or state_root == ''
 
 
+# Log lines a node emits and then HANGS after, rather than exiting or
+# recovering (rm-A-restart-armA-3: a respawned Scala node whose data
+# directory lock lost the race logged this and then sat there, "Readers
+# are not initialized yet" forever, never serving /info) — waiting out
+# the full readiness deadline for one wastes it and reports a generic
+# timeout instead of the real cause.
+FATAL_STARTUP_LOG_PATTERNS = ('Failed to initialize storage',)
+
+
+def _fatal_startup_error(log_path, patterns=FATAL_STARTUP_LOG_PATTERNS):
+    """The first known-fatal line in a node's own log so far, or `None`.
+    Pure over the file's current contents, so `--self-test` drives it
+    directly against a real temp file."""
+    try:
+        text = log_path.read_text(errors='replace')
+    except OSError:
+        return None
+    for pattern in patterns:
+        if pattern in text:
+            return next((line.strip() for line in text.splitlines()
+                        if pattern in line), pattern)
+    return None
+
+
 def spawn(name):
     """Launch one node and wait for its REST `/info` to report a live state."""
     WORK.mkdir(exist_ok=True)
     (WORK / name).mkdir(exist_ok=True)
     env = dict(os.environ)
     env.setdefault('RUST_LOG', DEFAULT_RUST_LOG)
-    with (WORK / (name + '.log')).open('a') as log:
+    log_path = WORK / (name + '.log')
+    with log_path.open('a') as log:
         process = subprocess.Popen(_command(name), cwd=ROOT, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True,
                                    env=env)
@@ -430,6 +456,11 @@ def spawn(name):
             (WORK / (name + '.appVersion')).write_text(str(info.get('appVersion')))
             return info
         except (OSError, ValueError):
+            fatal = _fatal_startup_error(log_path)
+            if fatal:
+                raise RuntimeError(
+                    f'{name} logged a fatal startup error and will never become '
+                    f'ready: {fatal}')
             if time.monotonic() > deadline:
                 raise RuntimeError(f'{name} did not become ready; see .work/{name}.log')
             time.sleep(0.5)
@@ -546,6 +577,22 @@ def _self_test():
     assert _state_root_pending(GENESIS_STATE_ROOT) is False
     print('self-test OK: _state_root_pending treats None and "" as not '
           'ready yet, and any other string as a reportable root')
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _log = Path(_tmp) / 'scala2.log'
+        _log.write_text('INFO boot\nINFO still booting\n')
+        assert _fatal_startup_error(_log) is None, 'no fatal line yet'
+        _log.write_text(_log.read_text() +
+                        'ERROR scorex.db.StoreRegistry - Failed to initialize '
+                        'storage: lock .../peers/LOCK\n')
+        found = _fatal_startup_error(_log)
+        assert found is not None and 'Failed to initialize storage' in found, found
+        # A log that has not been written yet (or was already rotated
+        # away) is "no fatal line seen", never an error of its own — the
+        # readiness loop's own deadline still owns that case.
+        assert _fatal_startup_error(Path(_tmp) / 'missing.log') is None
+    print('self-test OK: _fatal_startup_error finds a known-fatal line once it '
+          "appears and reports none before it does or if the log can't be read")
     _self_test_stop_escalates_to_sigkill()
 
 
