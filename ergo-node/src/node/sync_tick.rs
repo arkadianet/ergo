@@ -1309,10 +1309,9 @@ fn refresh_api_identity(state: &mut NodeState) {
 ///
 /// Every counter here is a known memory lever or leak indicator (issue
 /// #257): delivery-tracker maps, orphan buffer, peer/ban/address-book
-/// containers, mempool depth. Static cadence anchor follows the
-/// `RESCAN_IN_PROGRESS` static precedent — the action loop is the single
-/// caller, so a process-wide millisecond anchor is sufficient and avoids
-/// growing `NodeState`'s constructor surface again.
+/// containers, mempool depth. Static cadence anchor: the action loop is the
+/// single caller, so a process-wide millisecond anchor is sufficient and
+/// avoids growing `NodeState`'s constructor surface again.
 fn maybe_emit_gauges(state: &mut NodeState, now: Instant) {
     static LAST_GAUGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();

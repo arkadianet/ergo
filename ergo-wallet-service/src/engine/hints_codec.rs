@@ -13,7 +13,7 @@
 use ergo_wallet_protocol::WalletAdminError;
 
 /// Serialize a `SigmaBoolean` to the `SigmaBooleanJson` wire shape.
-pub fn sigma_boolean_to_json(
+pub(crate) fn sigma_boolean_to_json(
     sb: &ergo_ser::sigma_value::SigmaBoolean,
 ) -> ergo_wallet_protocol::scala::sending::SigmaBooleanJson {
     use ergo_ser::sigma_value::SigmaBoolean;
@@ -52,7 +52,7 @@ pub fn sigma_boolean_to_json(
 
 /// Parse a `SigmaBooleanJson` back to a `SigmaBoolean`.
 /// Returns `Err` for unrecognised shapes.
-pub fn sigma_boolean_from_json(
+pub(crate) fn sigma_boolean_from_json(
     json: &ergo_wallet_protocol::scala::sending::SigmaBooleanJson,
 ) -> Result<ergo_ser::sigma_value::SigmaBoolean, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -97,7 +97,7 @@ pub fn sigma_boolean_from_json(
 }
 
 /// Serialize a `FirstProverMessage` to its `FirstProverMessageJson` wire shape.
-pub fn fpm_to_json(
+pub(crate) fn fpm_to_json(
     fpm: &ergo_wallet::proving::hints::FirstProverMessage,
 ) -> ergo_wallet_protocol::scala::sending::FirstProverMessageJson {
     use ergo_wallet::proving::hints::FirstProverMessage;
@@ -113,7 +113,7 @@ pub fn fpm_to_json(
 }
 
 /// Parse a `FirstProverMessageJson` back to `FirstProverMessage`.
-pub fn fpm_from_json(
+pub(crate) fn fpm_from_json(
     json: &ergo_wallet_protocol::scala::sending::FirstProverMessageJson,
 ) -> Result<ergo_wallet::proving::hints::FirstProverMessage, WalletAdminError> {
     use ergo_wallet::proving::hints::FirstProverMessage;
@@ -144,7 +144,7 @@ pub fn fpm_from_json(
 /// Partitions each per-input bag into (secret, public) using the same
 /// semantics as `HintsBag::partition`: `OwnCommitment` goes into
 /// `secret_hints`, everything else into `public_hints`.
-pub fn tx_hints_bag_to_dto(
+pub(crate) fn tx_hints_bag_to_dto(
     bag: &ergo_wallet::proving::hints::TransactionHintsBag,
 ) -> ergo_wallet_protocol::scala::sending::TxHintsBagDto {
     use ergo_wallet::proving::hints::Hint;
@@ -216,7 +216,7 @@ pub fn tx_hints_bag_to_dto(
 /// Called by `transaction_sign_impl` to thread operator-supplied hints into
 /// the prover. The `image` field is parsed so the prover can match hints
 /// by proposition at sign time.
-pub fn tx_hints_bag_from_dto(
+pub(crate) fn tx_hints_bag_from_dto(
     dto: &ergo_wallet_protocol::scala::sending::TxHintsBagDto,
 ) -> Result<ergo_wallet::proving::hints::TransactionHintsBag, WalletAdminError> {
     use ergo_wallet::proving::hints::{

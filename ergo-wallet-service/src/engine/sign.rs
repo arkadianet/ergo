@@ -13,7 +13,7 @@ use ergo_wallet_protocol::WalletAdminError;
 /// Convert a native [`ExternalSecret`](ergo_wallet_protocol::native::dto::ExternalSecret)
 /// to the compat `ExternalSecretDto` so the single existing prover decoder
 /// ([`decode_external_secret`]) is reused. (`secret` maps to the compat `dlog`/`x`.)
-pub fn native_external_to_compat(
+pub(crate) fn native_external_to_compat(
     s: &ergo_wallet_protocol::native::dto::ExternalSecret,
 ) -> ergo_wallet_protocol::scala::sending::ExternalSecretDto {
     use ergo_wallet_protocol::native::dto::ExternalSecret as N;
@@ -33,7 +33,7 @@ pub fn native_external_to_compat(
 }
 
 /// `(transaction, tx_id_hex)` from serialized signed-tx bytes.
-pub fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
+pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError> {
     let mut r = ergo_primitives::reader::VlqReader::new(signed_bytes);
     let tx = ergo_ser::transaction::read_transaction(&mut r)
         .map_err(|e| WalletAdminError::Internal(format!("signed tx decode: {e:?}")))?;
@@ -47,7 +47,7 @@ pub fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdminError>
 /// prover's missing-secret surfaces as `missing_secret(422)`. The EIP-27
 /// self-verify gate runs inside [`sign_unsigned_tx`], so an unsigned tx that
 /// violates the burn rule is caught here rather than network-rejected.
-pub fn sign_transaction_native_impl(
+pub(crate) fn sign_transaction_native_impl(
     req: &ergo_wallet_protocol::native::dto::SignTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<crate::state::WalletState>,
@@ -81,7 +81,7 @@ pub fn sign_transaction_native_impl(
 /// becomes `missing_secret` (NOT `internal`/500, NEVER `wallet_locked`); an
 /// input whose script the prover's gate rejects becomes `unsupported_script`. The
 /// unsupported-script message is the one the prover emits (`prover.rs`).
-pub fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     use ergo_wallet::error::WalletError as W;
     match e {
         W::MissingSecret(_) => WalletAdminError::MissingSecret,
@@ -98,7 +98,7 @@ pub fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
 /// `signed` submits caller-supplied bytes. A `duplicate` submit reason maps to an
 /// idempotent `accepted` (never a 5xx on a re-seen tx).
 #[allow(clippy::too_many_arguments)]
-pub async fn send_transaction_native_impl(
+pub(crate) async fn send_transaction_native_impl(
     req: &ergo_wallet_protocol::native::dto::SendTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<crate::state::WalletState>,
@@ -188,7 +188,7 @@ pub async fn send_transaction_native_impl(
     }
 }
 
-pub fn serialize_unsigned_tx(
+pub(crate) fn serialize_unsigned_tx(
     utx: &ergo_ser::transaction::UnsignedTransaction,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
@@ -197,7 +197,7 @@ pub fn serialize_unsigned_tx(
     Ok(w.result())
 }
 
-pub fn serialize_signed_tx(
+pub(crate) fn serialize_signed_tx(
     tx: &ergo_ser::transaction::Transaction,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let mut w = ergo_primitives::writer::VlqWriter::new();
@@ -207,7 +207,7 @@ pub fn serialize_signed_tx(
 }
 
 /// Decode an `ExternalSecretDto` hex payload into `ProverExternalSecret`.
-pub fn decode_external_secret(
+pub(crate) fn decode_external_secret(
     dto: &ergo_wallet_protocol::scala::sending::ExternalSecretDto,
 ) -> Result<ergo_wallet::proving::external::ProverExternalSecret, WalletAdminError> {
     use ergo_wallet::proving::external::ProverExternalSecret;
@@ -278,7 +278,7 @@ pub fn decode_external_secret(
 /// starts empty and relies on `externals` to cover all required propositions.
 /// A locked wallet with no externals will produce a registry that fails at
 /// proof time with `MissingSecret` — that is the correct failure mode.
-pub fn build_prover(
+pub(crate) fn build_prover(
     storage: &ergo_wallet::storage::SecretStorage,
     store: &dyn crate::wallet::WalletStore,
     params: &ergo_wallet::tx_context::BlockchainParameters,
@@ -324,7 +324,7 @@ pub fn build_prover(
 /// `hints` is threaded through to the prover so multi-sig callers can
 /// supply a populated `TransactionHintsBag`; single-sig callers pass
 /// `&TransactionHintsBag::empty()`.
-pub fn sign_unsigned_tx(
+pub(crate) fn sign_unsigned_tx(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     storage: &ergo_wallet::storage::SecretStorage,
     store: &dyn crate::wallet::WalletStore,
@@ -414,7 +414,7 @@ pub fn sign_unsigned_tx(
 /// The per-call `verify_spending_proof_with_context_and_cost` still fires
 /// its own cost check, so a single input that alone exceeds the limit is
 /// still caught immediately.
-pub fn self_verify_signed_tx(
+pub(crate) fn self_verify_signed_tx(
     tx: &ergo_ser::transaction::Transaction,
     boxes_to_spend: &[ergo_ser::ergo_box::ErgoBox],
     data_boxes: &[ergo_ser::ergo_box::ErgoBox],

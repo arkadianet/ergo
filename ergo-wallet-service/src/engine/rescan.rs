@@ -1,21 +1,34 @@
-//! Rescan coordination: the per-wallet replacement for the node's former
-//! process-global rescan flags.
+//! Rescan coordination and orchestration.
 //!
-//! One [`RescanCoordinator`] is shared (by `Arc`) between the wallet engine,
-//! the chain-apply hook and the chain-rollback [`WalletRescanGuard`]. It owns
-//! the rescan fence flags and the transition lock that serializes every
-//! multi-flag transition, so the engine, the hook and the guard always agree
-//! on whether a rescan is running, whether live wallet apply must be
+//! One [`RescanCoordinator`] per wallet (the replacement for the node's
+//! former process-global rescan flags) is shared by `Arc` between the wallet
+//! engine, the chain-apply hook and the chain-rollback [`WalletRescanGuard`].
+//! It owns the rescan fence flags and the transition lock that serializes
+//! every multi-flag transition, so the engine, the hook and the guard always
+//! agree on whether a rescan is running, whether live wallet apply must be
 //! quiesced, and whether the wallet is failed closed.
+//!
+//! [`WalletEngine::prepare_rescan`] validates and claims a `/wallet/rescan`
+//! and returns a [`RescanJob`] whose blocking [`RescanJob::run`] performs
+//! it; [`recover_interrupted_rescan`] is the boot-time recovery of a rescan
+//! (or cursor) a restart interrupted.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use ergo_wallet_protocol::WalletAdminError;
 use redb::WriteTransaction;
 
-use crate::wallet::scan::{RescanError, WalletScanService};
+use crate::runtime::WalletService;
+use crate::wallet::scan::{RescanError, RescanReadError, ScanRescanMatcher, WalletScanService};
 use crate::wallet::tables::WALLET_SCAN_INVALIDATED;
-use crate::wallet::{RescanGuard, WalletStore};
+use crate::wallet::{RescanGuard, RescanState, WalletStore, WalletStoreError};
+
+use super::scan::{
+    build_rescan_matcher_from_store, empty_rescan_matcher, RescanScanMatcher, ScanRegistryLoadError,
+};
+use super::{WalletChainAccess, WalletEngine};
 
 /// Why [`RescanCoordinator::begin_rescan`] refused to start a rescan.
 #[derive(Debug, Clone)]
@@ -313,6 +326,518 @@ impl RescanGuard for WalletRescanGuard {
     }
 }
 
+/// A prepared `/wallet/rescan`: validated, claimed on the coordinator and
+/// recorded as `Running`, ready to execute on a blocking thread.
+///
+/// [`WalletEngine::prepare_rescan`] does every check and state transition
+/// that can refuse the rescan; [`RescanJob::run`] performs the replay and
+/// persists its outcome. The embedding process decides where `run` executes
+/// (the node spawns it with `tokio::task::spawn_blocking` and tracks the task
+/// with its wallet session). Dropping a job without running it leaves the
+/// claim in place, exactly like a blocking task that never started.
+pub struct RescanJob {
+    kind: RescanJobKind,
+}
+
+enum RescanJobKind {
+    /// Full / partial rebuild straight from the chain accessor.
+    Rebuild(RebuildRescan),
+    /// Bounded replay through the service runtime's chain client.
+    Service(ServiceRescan),
+}
+
+struct RebuildRescan {
+    chain: Arc<dyn WalletChainAccess>,
+    store: Arc<dyn WalletStore>,
+    rescan: Arc<RescanCoordinator>,
+    trees: BTreeSet<Vec<u8>>,
+    pks: BTreeMap<u64, [u8; 33]>,
+    start_h: u32,
+    tip_h: u32,
+    scan_matcher: Option<RescanScanMatcher>,
+}
+
+struct ServiceRescan {
+    service: WalletService,
+    store: Arc<dyn WalletStore>,
+    rescan: Arc<RescanCoordinator>,
+    from_height: u32,
+}
+
+impl RescanJob {
+    /// True when the job replays through the service runtime (the embedded
+    /// node's configuration) rather than the chain accessor.
+    pub fn uses_service(&self) -> bool {
+        matches!(self.kind, RescanJobKind::Service(_))
+    }
+
+    /// Run the rescan to completion on the calling (blocking) thread and
+    /// persist its outcome. The coordinator's fences are released, or kept
+    /// failed closed, when this returns (or unwinds).
+    pub fn run(self) {
+        match self.kind {
+            RescanJobKind::Rebuild(job) => job.run(),
+            RescanJobKind::Service(job) => job.run(),
+        }
+    }
+}
+
+impl RebuildRescan {
+    fn run(self) {
+        let RebuildRescan {
+            chain,
+            store,
+            rescan,
+            trees,
+            pks,
+            start_h,
+            tip_h,
+            scan_matcher,
+        } = self;
+        let reached_height = Arc::new(AtomicU32::new(start_h));
+        let reached_for_block = reached_height.clone();
+        let reached_for_tip = reached_height.clone();
+        let mut flags = RescanFlagsGuard::new(rescan.clone());
+        let result = WalletScanService::rescan_full_rebuild_store(
+            store.as_ref(),
+            trees,
+            pks,
+            start_h,
+            tip_h,
+            |height| {
+                let result = chain.read_block_at(height);
+                if matches!(&result, Ok(Some(_))) {
+                    reached_for_block.store(height, Ordering::SeqCst);
+                }
+                result
+            },
+            || {
+                chain.tip_height().map_err(|e| RescanReadError::Storage {
+                    height: reached_for_tip.load(Ordering::SeqCst),
+                    source: WalletStoreError::decode(e.to_string()),
+                })
+            },
+            || rescan.rescan_cancelled(),
+            scan_matcher
+                .as_ref()
+                .map(|matcher| matcher as &dyn ScanRescanMatcher),
+        );
+        let state = match &result {
+            Ok(_) => RescanState::Idle,
+            Err(error) => rescan_failure_state(start_h, error),
+        };
+        let state_result = persist_rescan_state(store.as_ref(), &state);
+        let scan_invalidated = if state_result.is_ok() {
+            store
+                .read()
+                .and_then(|read| read.scan_invalidated())
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if rescan_should_stay_blocked(&result, state_result.is_ok(), scan_invalidated) {
+            flags.block();
+        }
+        if let Err(error) = state_result {
+            tracing::error!(%error, "failed to persist wallet rescan outcome");
+        }
+    }
+}
+
+impl ServiceRescan {
+    fn run(self) {
+        let ServiceRescan {
+            service,
+            store,
+            rescan,
+            from_height,
+        } = self;
+        let mut flags = RescanFlagsGuard::new(rescan.clone());
+        let result =
+            service.rescan_to_tip_with_cancellation(from_height, || rescan.rescan_cancelled());
+        if let Err(error) = &result {
+            let already_failed = store
+                .read()
+                .and_then(|read| read.rescan_state())
+                .map(|state| matches!(state, RescanState::Failed { .. }))
+                .unwrap_or(false);
+            if !already_failed {
+                let _ = persist_rescan_state(
+                    store.as_ref(),
+                    &RescanState::Failed {
+                        height: from_height,
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            flags.block();
+        } else if store
+            .read()
+            .and_then(|read| read.scan_invalidated())
+            .unwrap_or(true)
+        {
+            flags.block();
+        }
+    }
+}
+
+impl WalletEngine {
+    /// `/wallet/rescan`: validate and claim a rescan from `from_height`
+    /// (clamped to the tip) and record it as `Running`, returning the job
+    /// that performs the replay. Every refusal — unsupported or pruned
+    /// backend, scan-registry failure, a start the coordinator rejects, a
+    /// state row that cannot be persisted — is returned here, before any job
+    /// exists.
+    #[allow(clippy::result_large_err)]
+    pub fn prepare_rescan(&self, from_height: u32) -> Result<RescanJob, WalletAdminError> {
+        let tip_h = rescan_tip(self.chain.as_ref())?;
+        if let Some(service) = self.service.as_deref() {
+            return self.prepare_service_rescan(service, from_height.min(tip_h), tip_h);
+        }
+        let start_h = from_height.min(tip_h);
+        let mut registry_recovered = false;
+        let scan_matcher = if start_h == 0 {
+            match build_rescan_matcher_from_store(self.store.as_ref()) {
+                Ok(Some(matcher)) => Some(matcher),
+                Ok(None) => Some(empty_rescan_matcher()),
+                Err(ScanRegistryLoadError::Read(error)) => {
+                    tracing::error!(%error, "scan registry read failed; preserving registry");
+                    return Err(WalletAdminError::Internal(format!(
+                        "scan registry read failed: {error}"
+                    )));
+                }
+                Err(ScanRegistryLoadError::Corrupt(error)) => {
+                    tracing::error!(%error, "scan registry is corrupt; discarding scan registry and scan tracking for recovery");
+                    if let Err(recovery_error) = recover_corrupt_scan_registry(self.store.as_ref())
+                    {
+                        fail_closed_after_scan_recovery_error(self.store.as_ref(), &self.rescan);
+                        return Err(WalletAdminError::Internal(format!(
+                            "scan registry is corrupt and recovery failed: {recovery_error}"
+                        )));
+                    }
+                    registry_recovered = true;
+                    Some(empty_rescan_matcher())
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(error) = begin_rescan_process(&self.rescan, start_h, self.store.as_ref(), tip_h)
+        {
+            if registry_recovered {
+                fail_closed_after_scan_recovery_error(self.store.as_ref(), &self.rescan);
+            }
+            return Err(error);
+        }
+        if let Err(error) = persist_rescan_state(
+            self.store.as_ref(),
+            &RescanState::Running {
+                from_height: start_h,
+            },
+        ) {
+            fail_rescan_start_with_invalidation(self.store.as_ref(), &self.rescan);
+            return Err(WalletAdminError::Internal(error.to_string()));
+        }
+
+        let (trees, pks) = {
+            let state = self.state.read();
+            (
+                state.tracked_p2pk_trees().iter().cloned().collect(),
+                state.cached_pubkeys().clone(),
+            )
+        };
+        Ok(RescanJob {
+            kind: RescanJobKind::Rebuild(RebuildRescan {
+                chain: self.chain.clone(),
+                store: self.store.clone(),
+                rescan: self.rescan.clone(),
+                trees,
+                pks,
+                start_h,
+                tip_h,
+                scan_matcher,
+            }),
+        })
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn prepare_service_rescan(
+        &self,
+        service: &WalletService,
+        from_height: u32,
+        tip_h: u32,
+    ) -> Result<RescanJob, WalletAdminError> {
+        if from_height == 0 {
+            match build_rescan_matcher_from_store(self.store.as_ref()) {
+                Ok(_) => {}
+                Err(ScanRegistryLoadError::Read(error)) => {
+                    return Err(WalletAdminError::Internal(format!(
+                        "scan registry read failed: {error}"
+                    )));
+                }
+                Err(ScanRegistryLoadError::Corrupt(error)) => {
+                    tracing::error!(%error, "scan registry is corrupt; discarding registry before service rescan");
+                    if let Err(recovery_error) = recover_corrupt_scan_registry(self.store.as_ref())
+                    {
+                        fail_closed_after_scan_recovery_error(self.store.as_ref(), &self.rescan);
+                        return Err(WalletAdminError::Internal(format!(
+                            "scan registry is corrupt and recovery failed: {recovery_error}"
+                        )));
+                    }
+                }
+            }
+        }
+        begin_rescan_process(&self.rescan, from_height, self.store.as_ref(), tip_h)?;
+        if let Err(error) =
+            persist_rescan_state(self.store.as_ref(), &RescanState::Running { from_height })
+        {
+            fail_rescan_start_with_invalidation(self.store.as_ref(), &self.rescan);
+            return Err(WalletAdminError::Internal(error.to_string()));
+        }
+        if from_height == 0 {
+            if let Err(error) = self.store.as_ref().persist_scan_invalidation(true) {
+                fail_rescan_start_with_invalidation(self.store.as_ref(), &self.rescan);
+                return Err(WalletAdminError::Internal(error.to_string()));
+            }
+        }
+        Ok(RescanJob {
+            kind: RescanJobKind::Service(ServiceRescan {
+                service: service.clone(),
+                store: self.store.clone(),
+                rescan: self.rescan.clone(),
+                from_height,
+            }),
+        })
+    }
+}
+
+fn begin_rescan_process(
+    rescan: &RescanCoordinator,
+    start_h: u32,
+    store: &dyn WalletStore,
+    tip_height: u32,
+) -> Result<(), WalletAdminError> {
+    match rescan.begin_rescan(start_h, store, tip_height) {
+        Ok(rescan_start) => Ok(rescan_start),
+        Err(BeginRescanError::FullRescanRequired) => Err(WalletAdminError::RescanUnavailable(
+            "full rescan required to recover wallet state".to_string(),
+        )),
+        Err(BeginRescanError::AlreadyInProgress) => Err(WalletAdminError::RescanUnavailable(
+            "rescan already in progress".to_string(),
+        )),
+        Err(BeginRescanError::Shutdown) => Err(WalletAdminError::RescanUnavailable(
+            "wallet is shutting down".to_string(),
+        )),
+        Err(BeginRescanError::InvalidStart { requested, cursor }) => {
+            let cursor = cursor
+                .map(|height| height.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            Err(WalletAdminError::RescanUnavailable(format!(
+                "full rescan required: use fromHeight=0 (requested {requested}, cursor {cursor})"
+            )))
+        }
+        Err(BeginRescanError::Store(error)) => Err(WalletAdminError::Internal(error)),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn rescan_tip(chain: &dyn WalletChainAccess) -> Result<u32, WalletAdminError> {
+    if !chain
+        .read_block_at_supported()
+        .map_err(map_rescan_read_error)?
+    {
+        return Err(WalletAdminError::RescanUnavailable(
+            "chain block-read not available on this backend".to_string(),
+        ));
+    }
+    if chain.is_pruned() {
+        return Err(WalletAdminError::RestorePruningUnsupported);
+    }
+    chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))
+}
+
+fn recover_corrupt_scan_registry(store: &dyn WalletStore) -> Result<(), WalletStoreError> {
+    store.persist_scan_invalidation(true)?;
+    clear_scan_registry_for_recovery(store)
+}
+
+fn fail_rescan_start_with_invalidation(store: &dyn WalletStore, rescan: &RescanCoordinator) {
+    rescan.fail_rescan_start();
+    if let Err(error) = store.persist_scan_invalidation(true) {
+        tracing::error!(%error, "failed to persist invalidation after rescan start failure");
+    }
+}
+
+fn fail_closed_after_scan_recovery_error(store: &dyn WalletStore, rescan: &RescanCoordinator) {
+    rescan.latch_fail_closed();
+    if let Err(error) = store.persist_scan_invalidation(true) {
+        tracing::error!(%error, "failed to reassert scan invalidation after scan recovery failure");
+    }
+}
+
+fn clear_scan_registry_for_recovery(store: &dyn WalletStore) -> Result<(), WalletStoreError> {
+    let mut write = store.begin_write()?;
+    write.clear_scan_registry()?;
+    write.commit()
+}
+
+fn persist_rescan_state(
+    store: &dyn WalletStore,
+    state: &RescanState,
+) -> Result<(), WalletStoreError> {
+    let mut write = store.begin_write()?;
+    write.set_rescan_state(state)?;
+    write.commit()
+}
+
+fn rescan_failure_state(from_height: u32, error: &RescanError) -> RescanState {
+    let height = match error {
+        RescanError::Read(RescanReadError::Missing { height })
+        | RescanError::Read(RescanReadError::Corrupt { height, .. })
+        | RescanError::Read(RescanReadError::Storage { height, .. })
+        | RescanError::Read(RescanReadError::Chain { height, .. })
+        | RescanError::Cancelled { height }
+        | RescanError::Matcher { height, .. } => *height,
+        RescanError::TipChanged { expected, .. } => expected.height,
+        RescanError::Storage(_)
+        | RescanError::InvalidStart { .. }
+        | RescanError::Invalidation { .. } => from_height,
+    };
+    RescanState::Failed {
+        height,
+        reason: error.to_string(),
+    }
+}
+
+fn rescan_should_stay_blocked(
+    result: &Result<u32, RescanError>,
+    outcome_persisted: bool,
+    scan_invalidated: bool,
+) -> bool {
+    result.is_err() || !outcome_persisted || scan_invalidated
+}
+
+/// Releases (or keeps failed closed) the coordinator's fences when a rescan
+/// job ends, including by unwinding.
+struct RescanFlagsGuard {
+    rescan: Arc<RescanCoordinator>,
+    keep_blocked: bool,
+}
+
+impl RescanFlagsGuard {
+    fn new(rescan: Arc<RescanCoordinator>) -> Self {
+        Self {
+            rescan,
+            keep_blocked: false,
+        }
+    }
+
+    fn block(&mut self) {
+        self.keep_blocked = true;
+        self.rescan.latch_fail_closed();
+    }
+}
+
+impl Drop for RescanFlagsGuard {
+    fn drop(&mut self) {
+        self.rescan
+            .finish_rescan(self.keep_blocked, std::thread::panicking());
+    }
+}
+
+fn map_rescan_read_error(error: RescanReadError) -> WalletAdminError {
+    match error {
+        RescanReadError::Missing { height } => {
+            WalletAdminError::RescanUnavailable(format!("block missing at height {height}"))
+        }
+        other => WalletAdminError::Internal(other.to_string()),
+    }
+}
+
+/// Boot-time recovery for a wallet whose last run may have been interrupted.
+///
+/// A `Running` or `Failed` rescan state, a persisted scan invalidation, or a
+/// scan cursor that disagrees with the committed tip while wallet data exists
+/// leaves the wallet failed closed with a durable `Failed` rescan state (and
+/// scan invalidation) that tells the operator to rescan. A clean store clears
+/// any stale fences on `rescan`. Any read or write failure also leaves the
+/// wallet failed closed.
+pub fn recover_interrupted_rescan(
+    store: &dyn WalletStore,
+    rescan: &RescanCoordinator,
+) -> Result<(), WalletStoreError> {
+    let result = (|| {
+        let read = store.read()?;
+        let state = read.rescan_state()?;
+        let invalidated = read.scan_invalidated()?;
+        let cursor = read.scan_cursor()?;
+        let committed_tip = read.committed_tip()?.map(|(height, _)| height);
+        let tracked_count = read.tracked_pubkeys_with_paths()?.len();
+        let box_count = read.all_boxes()?.len();
+        let transaction_count = read.all_transactions()?.len();
+        let registered_scan_count = read.registered_scan_count()?;
+        let has_wallet_facts = tracked_count > 0
+            || box_count > 0
+            || transaction_count > 0
+            || registered_scan_count > 0;
+        let cursor_behind = has_wallet_facts
+            && cursor.is_some_and(|cursor| {
+                committed_tip.is_some_and(|tip_height| cursor.height < tip_height)
+            });
+        let cursor_ahead = has_wallet_facts
+            && cursor.is_some_and(|cursor| {
+                committed_tip.is_some_and(|tip_height| cursor.height > tip_height)
+            });
+        let cursor_missing_with_facts = has_wallet_facts
+            && cursor.is_none()
+            && committed_tip.is_some_and(|tip_height| tip_height > 0);
+        let unsafe_state = match &state {
+            RescanState::Running { .. } | RescanState::Failed { .. } => true,
+            RescanState::Idle => {
+                invalidated || cursor_behind || cursor_ahead || cursor_missing_with_facts
+            }
+        };
+        if !unsafe_state {
+            rescan.clear_guards();
+            return Ok(());
+        }
+
+        rescan.latch_fail_closed();
+        let failed = match state {
+            RescanState::Running { from_height } => RescanState::Failed {
+                height: from_height,
+                reason: "interrupted by restart".to_string(),
+            },
+            RescanState::Failed { height, reason } => RescanState::Failed { height, reason },
+            RescanState::Idle => {
+                let height = cursor.map(|cursor| cursor.height).unwrap_or(0);
+                let reason = if cursor_behind {
+                    "wallet cursor behind committed tip on boot".to_string()
+                } else if cursor_ahead {
+                    "wallet cursor ahead of committed tip on boot".to_string()
+                } else if cursor_missing_with_facts {
+                    "wallet cursor missing with existing wallet data on boot".to_string()
+                } else {
+                    "wallet scan invalidated on boot".to_string()
+                };
+                RescanState::Failed { height, reason }
+            }
+        };
+        let mut write = store.begin_write()?;
+        write.set_scan_invalidated(true)?;
+        write.set_rescan_state(&failed)?;
+        write.commit()?;
+        rescan.latch_fail_closed();
+        Ok(())
+    })();
+    if result.is_err() {
+        rescan.latch_fail_closed();
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +883,271 @@ mod tests {
         assert!(rescan.cancel_requested());
         assert!(rescan.task_active());
         assert!(rescan.in_progress());
+    }
+
+    #[test]
+    fn rescan_storage_failure_preserves_reached_height() {
+        let state = rescan_failure_state(
+            0,
+            &crate::wallet::scan::RescanError::Read(
+                crate::wallet::scan::RescanReadError::Storage {
+                    height: 42,
+                    source: crate::wallet::WalletStoreError::decode("boom".to_string()),
+                },
+            ),
+        );
+        assert!(matches!(
+            state,
+            crate::wallet::RescanState::Failed { height: 42, .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_rescan_clears_stale_fail_closed_guards() {
+        let rescan = RescanCoordinator::new();
+        rescan.latch_fail_closed();
+        let (_dir, store) = tempfile::tempdir()
+            .map(|dir| {
+                let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+                (dir, RedbWalletStore::new(db))
+            })
+            .unwrap();
+        assert!(begin_rescan_process(&rescan, 5, &store, 5).is_err());
+        begin_rescan_process(&rescan, 0, &store, 0).unwrap();
+        assert!(rescan.scan_rebuild_in_progress());
+        assert!(!rescan.fail_closed());
+        assert!(rescan.in_progress());
+        assert!(rescan.scan_rebuild_in_progress());
+    }
+
+    #[test]
+    fn invalidation_persistence_failure_keeps_rescan_blocked() {
+        let error = crate::wallet::scan::RescanError::Invalidation {
+            source: crate::wallet::WalletStoreError::Decode("injected".to_string()),
+        };
+        let state = rescan_failure_state(17, &error);
+        assert!(matches!(
+            state,
+            crate::wallet::RescanState::Failed { height: 17, .. }
+        ));
+        assert!(rescan_should_stay_blocked(&Err(error), true, false));
+        assert!(!rescan_should_stay_blocked(&Ok(0), true, false));
+        assert!(rescan_should_stay_blocked(&Ok(0), false, false));
+        assert!(rescan_should_stay_blocked(
+            &Err(crate::wallet::scan::RescanError::Cancelled { height: 1 }),
+            true,
+            false,
+        ));
+        assert!(rescan_should_stay_blocked(&Ok(0), true, true));
+    }
+}
+
+#[cfg(test)]
+mod scan_recovery_tests {
+    use super::super::scan::{build_rescan_matcher_from_store, ScanRegistryLoadError};
+    use super::{fail_rescan_start_with_invalidation, recover_corrupt_scan_registry};
+    use crate::wallet::{RedbWalletStore, WalletRead, WalletStore, WalletStoreError, WalletWrite};
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingStore {
+        inner: RedbWalletStore,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_invalidation: bool,
+    }
+
+    impl WalletStore for RecordingStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            self.inner.begin_read()
+        }
+
+        fn persist_scan_invalidation(&self, invalidated: bool) -> Result<(), WalletStoreError> {
+            self.events.lock().unwrap().push("persist_invalidation");
+            if self.fail_invalidation {
+                return Err(WalletStoreError::Decode("injected".to_string()));
+            }
+            self.inner.persist_scan_invalidation(invalidated)
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            self.events.lock().unwrap().push("begin_write");
+            self.inner.begin_write()
+        }
+    }
+
+    struct TransientReadStore {
+        inner: RedbWalletStore,
+    }
+
+    impl WalletStore for TransientReadStore {
+        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+            Err(WalletStoreError::Database(Box::new(redb::Error::Io(
+                std::io::Error::other("injected transient read failure"),
+            ))))
+        }
+
+        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+            self.inner.begin_write()
+        }
+    }
+
+    fn recording_store(fail_invalidation: bool) -> (tempfile::TempDir, RecordingStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = RecordingStore {
+            inner: RedbWalletStore::new(db),
+            events: events.clone(),
+            fail_invalidation,
+        };
+        (dir, store)
+    }
+
+    #[test]
+    fn rescan_start_failure_persists_invalidation() {
+        let rescan = crate::engine::RescanCoordinator::new();
+        let (_dir, store) = recording_store(false);
+        fail_rescan_start_with_invalidation(&store, &rescan);
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn transient_registry_read_error_preserves_valid_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
+        let inner = RedbWalletStore::new(db);
+        let mut write = inner.begin_write().unwrap();
+        write.put_scan(11, b"{\"scanId\":11}".to_vec(), 11).unwrap();
+        write.commit().unwrap();
+        let store = TransientReadStore { inner };
+        assert!(matches!(
+            build_rescan_matcher_from_store(&store),
+            Err(ScanRegistryLoadError::Read(_))
+        ));
+        assert_eq!(
+            store
+                .inner
+                .read()
+                .unwrap()
+                .scan_registry()
+                .unwrap()
+                .scans
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn corrupt_registry_recovery_persists_invalidation_before_cleanup() {
+        let (_dir, store) = recording_store(false);
+        recover_corrupt_scan_registry(&store).unwrap();
+        assert_eq!(
+            *store.events.lock().unwrap(),
+            vec!["persist_invalidation", "begin_write"]
+        );
+        assert!(store.read().unwrap().scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn corrupt_registry_recovery_does_not_clear_when_invalidation_fails() {
+        let (_dir, store) = recording_store(true);
+        assert!(recover_corrupt_scan_registry(&store).is_err());
+        assert_eq!(*store.events.lock().unwrap(), vec!["persist_invalidation"]);
+    }
+}
+
+#[cfg(test)]
+mod boot_recovery_tests {
+    use super::{recover_interrupted_rescan, RescanCoordinator};
+    use crate::wallet::{RedbWalletStore, RescanState, WalletStore};
+    use std::sync::Arc;
+
+    fn new_store() -> (tempfile::TempDir, RedbWalletStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        (dir, store)
+    }
+
+    #[test]
+    fn recover_interrupted_rescan_marks_failed_and_reasserts_invalidation() {
+        let rescan = RescanCoordinator::new();
+        rescan.clear_guards();
+        let (_dir, store) = new_store();
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Running { from_height: 7 })
+            .unwrap();
+        write.commit().unwrap();
+
+        recover_interrupted_rescan(&store, &rescan).unwrap();
+
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed {
+                height: 7,
+                reason: "interrupted by restart".to_string(),
+            }
+        );
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+        assert!(rescan.fail_closed());
+        assert!(rescan.in_progress());
+        assert!(rescan.scan_rebuild_in_progress());
+        rescan.clear_guards();
+    }
+
+    #[test]
+    fn recover_failed_or_invalidated_state_is_unsafe_on_boot() {
+        let rescan = RescanCoordinator::new();
+        rescan.clear_guards();
+        let (_dir, store) = new_store();
+        let mut write = store.begin_write().unwrap();
+        write
+            .set_rescan_state(&RescanState::Failed {
+                height: 9,
+                reason: "prior failure".to_string(),
+            })
+            .unwrap();
+        write.set_scan_invalidated(false).unwrap();
+        write.commit().unwrap();
+
+        recover_interrupted_rescan(&store, &rescan).unwrap();
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed {
+                height: 9,
+                reason: "prior failure".to_string(),
+            }
+        );
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+        rescan.clear_guards();
+
+        let (_dir, store) = new_store();
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_invalidated(true).unwrap();
+        write.commit().unwrap();
+        recover_interrupted_rescan(&store, &rescan).unwrap();
+        assert!(matches!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Failed { .. }
+        ));
+        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
+        rescan.clear_guards();
+    }
+
+    #[test]
+    fn clean_idle_store_clears_stale_process_guards() {
+        let rescan = RescanCoordinator::new();
+        let (_dir, store) = new_store();
+        rescan.latch_fail_closed();
+        recover_interrupted_rescan(&store, &rescan).unwrap();
+        assert_eq!(
+            store.begin_read().unwrap().rescan_state().unwrap(),
+            RescanState::Idle
+        );
+        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
+        assert!(!rescan.fail_closed());
+        assert!(!rescan.in_progress());
+        assert!(!rescan.scan_rebuild_in_progress());
     }
 }

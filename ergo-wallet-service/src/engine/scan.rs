@@ -1,40 +1,37 @@
-//! Scan handlers for `WalletCommand` — the full `/scan/*` surface:
-//! `register` / `deregister` / `listAll` (registry ops), `unspentBoxes` /
-//! `spentBoxes` (tracked-box reads), and `stopTracking` / `addBox` /
-//! `p2sRule` (box-level + address-rule writes).
+//! The `/scan/*` surface: `register` / `deregister` / `listAll` (registry
+//! ops), `unspentBoxes` / `spentBoxes` (tracked-box reads), and
+//! `stopTracking` / `addBox` / `p2sRule` (box-level + address-rule writes),
+//! plus the registry loader and the rescan scan matcher.
 //!
 //! The redb tables `WALLET_SCANS` + `WALLET_LAST_USED_SCAN_ID` are the durable
 //! registry store; `WALLET_SCAN_BOXES` + `WALLET_SCAN_BOX_INDEX` hold the
-//! tracked boxes. Each handler loads the tested [`ScanRegistry`] semantic
-//! core, applies the op, and write-throughs the change. The single-writer
-//! wallet task serializes these, so the read-then-write in each handler is
-//! race-free.
+//! tracked boxes. Each command loads the tested [`ScanRegistry`] semantic
+//! core, applies the op, and write-throughs the change. Callers serialize
+//! wallet commands (the node's single writer task does), so the
+//! read-then-write in each command is race-free.
 //!
-//! `ergo-api` can't depend on `ergo-wallet`, so the API carries the predicate
-//! opaquely as JSON ([`ScanRequestDto`] / [`ScanDto`]); the DTO <-> domain
-//! conversion (which also validates the `trackingRule` predicate) happens here.
-
-use tokio::sync::oneshot;
+//! The API carries the predicate opaquely as JSON ([`ScanRequestDto`] /
+//! [`ScanDto`]); the DTO <-> domain conversion (which also validates the
+//! `trackingRule` predicate) happens here.
 
 use ergo_wallet_protocol::scala::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
 use ergo_wallet_protocol::WalletAdminError;
-use ergo_wallet_service::engine::{MempoolOverlay, RescanCoordinator};
-use ergo_wallet_service::wallet::store::WalletStoreError;
-use ergo_wallet_service::wallet::types::ScanBoxStatus;
 use thiserror::Error;
 
-use ergo_wallet_service::scan::{
+use crate::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
     MAX_SCAN_NAME_LENGTH, MINING_SCAN_ID, PAYMENTS_SCAN_ID,
 };
+use crate::wallet::store::WalletStoreError;
 #[cfg(test)]
-use ergo_wallet_service::wallet::tables::*;
+use crate::wallet::tables::*;
+use crate::wallet::types::ScanBoxStatus;
 #[cfg(test)]
-use ergo_wallet_service::wallet::types::{ScanTrackedBox, ScanTxRecord};
+use crate::wallet::types::{ScanTrackedBox, ScanTxRecord};
 #[cfg(test)]
 use redb::ReadableTable;
 
-use super::WriterContext;
+use super::{MempoolOverlay, RescanCoordinator, WalletEngine};
 
 fn internal(e: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::Internal(e.to_string())
@@ -56,7 +53,83 @@ fn reject_during_scan_rebuild(rescan: &RescanCoordinator) -> Result<(), WalletAd
     Ok(())
 }
 
-/// Owns a registry snapshot for a `/wallet/rescan`, implementing ergo-state's
+impl WalletEngine {
+    pub fn register_scan(&self, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
+        reject_during_scan_rebuild(&self.rescan)?;
+        register_impl_with_store(self.store.as_ref(), request)
+    }
+
+    pub fn deregister_scan(&self, scan_id: u16) -> Result<(), WalletAdminError> {
+        reject_during_scan_rebuild(&self.rescan)?;
+        deregister_impl_with_store(self.store.as_ref(), scan_id)
+    }
+
+    pub fn list_scans(&self) -> Result<Vec<ScanDto>, WalletAdminError> {
+        list_impl(self.store.as_ref())
+    }
+
+    pub fn scan_unspent_boxes(
+        &self,
+        scan_id: u16,
+        filter: ScanBoxFilter,
+    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        // The chain accessor supplies the committed tip used for confirmations;
+        // the wallet store supplies the box snapshot. The live mempool view feeds
+        // the off-chain overlay (minConfirmations=-1).
+        read_scan_boxes(
+            self.store.as_ref(),
+            None,
+            scan_id,
+            false,
+            &filter,
+            Some(self.mempool.as_ref()),
+        )
+    }
+
+    pub fn scan_spent_boxes(
+        &self,
+        scan_id: u16,
+        filter: ScanBoxFilter,
+    ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
+        // spentBoxes has no off-chain component (Scala `getScanSpentBoxes`), but the
+        // view is threaded through uniformly; the overlay self-gates on want_spent.
+        read_scan_boxes(
+            self.store.as_ref(),
+            None,
+            scan_id,
+            true,
+            &filter,
+            Some(self.mempool.as_ref()),
+        )
+    }
+
+    pub fn scan_stop_tracking(&self, scan_id: u16, box_id: String) -> Result<(), WalletAdminError> {
+        reject_during_scan_rebuild(&self.rescan)?;
+        stop_tracking_impl(self.store.as_ref(), scan_id, &box_id)
+    }
+
+    /// `/scan/addBox`. `decode_box` decodes the request's `box` member (the
+    /// embedding transport owns its wire shape); it runs only after the scan
+    /// ids are validated, so an invalid id is reported before a malformed box.
+    pub fn scan_add_box<F>(
+        &self,
+        scan_ids: &[u16],
+        decode_box: F,
+    ) -> Result<String, WalletAdminError>
+    where
+        F: FnOnce() -> Result<ergo_ser::ergo_box::ErgoBox, WalletAdminError>,
+    {
+        reject_during_scan_rebuild(&self.rescan)?;
+        add_box_impl_with_store(self.store.as_ref(), scan_ids, decode_box)
+    }
+
+    pub fn scan_p2s_rule(&self, p2s: String) -> Result<u16, WalletAdminError> {
+        reject_during_scan_rebuild(&self.rescan)?;
+        p2s_rule_impl_with_store(self.store.as_ref(), self.config.network, &p2s)
+    }
+}
+
+/// Owns a registry snapshot for a `/wallet/rescan`, implementing the rescan's
 /// `ScanRescanMatcher`: it parses each serialized output box and matches it
 /// against the registered scan rules — the rescan analog of
 /// `WalletStateHook::match_boxes`, reusing the same
@@ -78,7 +151,7 @@ pub(crate) fn empty_rescan_matcher() -> RescanScanMatcher {
     RescanScanMatcher { registry: None }
 }
 
-impl ergo_wallet_service::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
+impl crate::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
     fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
         let Some(registry) = &self.registry else {
             return Ok(vec![Vec::new(); boxes.len()]);
@@ -100,14 +173,14 @@ impl ergo_wallet_service::wallet::scan::ScanRescanMatcher for RescanScanMatcher 
 /// can clear only a genuinely corrupt registry.
 #[cfg(test)]
 pub(crate) fn build_rescan_matcher(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
 ) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
     let registry = load_registry(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
 }
 
 pub(crate) fn build_rescan_matcher_from_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
 ) -> Result<Option<RescanScanMatcher>, ScanRegistryLoadError> {
     let registry = load_registry_from_store_classified(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
@@ -146,13 +219,13 @@ fn dto_from_scan(scan: &Scan) -> Result<ScanDto, WalletAdminError> {
 /// `pub(crate)` so the block-apply hook (`WalletStateHook`) can load the
 /// registry to match each block's boxes.
 pub(crate) fn load_registry(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
     load_registry_from_store(store)
 }
 
 pub(crate) fn load_registry_from_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
     load_registry_from_store_classified(store)
         .map_err(|error| WalletAdminError::Internal(error.to_string()))
@@ -166,7 +239,7 @@ fn classify_registry_store_error(error: WalletStoreError) -> ScanRegistryLoadErr
 }
 
 fn load_registry_from_store_classified(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
 ) -> Result<ScanRegistry, ScanRegistryLoadError> {
     let read = store
         .read()
@@ -208,20 +281,8 @@ fn load_registry_from_store_classified(
     ))
 }
 
-pub(crate) async fn register(
-    ctx: &WriterContext<'_>,
-    request: ScanRequestDto,
-    reply: oneshot::Sender<Result<u16, WalletAdminError>>,
-) {
-    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
-        let _ = reply.send(Err(e));
-        return;
-    }
-    let _ = reply.send(register_impl_with_store(ctx.store.as_ref(), request));
-}
-
 fn register_impl_with_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     request: ScanRequestDto,
 ) -> Result<u16, WalletAdminError> {
     let request = request_from_dto(request)?;
@@ -237,7 +298,7 @@ fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, Wa
 /// `/scan/register` (after DTO conversion) and `/scan/p2sRule` (which builds
 /// the request directly from an address).
 fn register_request(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     request: ScanRequest,
 ) -> Result<u16, WalletAdminError> {
     // Scala `ScanRequest.toScan` rejects an over-long scan name (> 255 UTF-8
@@ -278,7 +339,7 @@ fn register_request(
 /// is rejected (Scala registers the synthetic P2SH wrapper script — this
 /// build's address path refuses P2SH outright, same posture as the indexer).
 fn p2s_rule_impl_with_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     network: ergo_ser::address::NetworkPrefix,
     p2s: &str,
 ) -> Result<u16, WalletAdminError> {
@@ -320,20 +381,8 @@ fn p2s_rule_impl_with_store(
     register_request(store, request)
 }
 
-pub(crate) async fn deregister(
-    ctx: &WriterContext<'_>,
-    scan_id: u16,
-    reply: oneshot::Sender<Result<(), WalletAdminError>>,
-) {
-    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
-        let _ = reply.send(Err(e));
-        return;
-    }
-    let _ = reply.send(deregister_impl_with_store(ctx.store.as_ref(), scan_id));
-}
-
 fn deregister_impl_with_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     scan_id: u16,
 ) -> Result<(), WalletAdminError> {
     let mut registry = load_registry(store)?;
@@ -362,16 +411,7 @@ fn deregister_impl(db: &redb::Database, scan_id: u16) -> Result<(), WalletAdminE
     deregister_impl_with_store(db, scan_id)
 }
 
-pub(crate) async fn list(
-    ctx: &WriterContext<'_>,
-    reply: oneshot::Sender<Result<Vec<ScanDto>, WalletAdminError>>,
-) {
-    let _ = reply.send(list_impl(ctx.store.as_ref()));
-}
-
-fn list_impl(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
-) -> Result<Vec<ScanDto>, WalletAdminError> {
+fn list_impl(store: &dyn crate::wallet::WalletStore) -> Result<Vec<ScanDto>, WalletAdminError> {
     load_registry(store)?
         .list()
         .iter()
@@ -412,7 +452,7 @@ fn require_user_scan_id(scan_id: u16) -> Result<(), WalletAdminError> {
 /// "un-spends" for the scans that still track it, an upstream accident we
 /// don't replicate. Documented in the openapi header's scan note.
 fn stop_tracking_impl(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     scan_id: u16,
     box_id_hex: &str,
 ) -> Result<(), WalletAdminError> {
@@ -431,19 +471,6 @@ fn stop_tracking_impl(
     Ok(())
 }
 
-/// The `box` member of a `/scan/addBox` body: the standard
-/// `ErgoTransactionOutput` JSON shape plus `transactionId` + `index`, which
-/// Scala's SDK `ErgoBox` decoder requires (they fix the box id). Reuses the
-/// canonical output decoder for the candidate fields.
-#[derive(serde::Deserialize)]
-struct AddBoxJson {
-    #[serde(flatten)]
-    output: ergo_rest_json::types::ScalaOutputInput,
-    #[serde(rename = "transactionId")]
-    transaction_id: String,
-    index: u16,
-}
-
 fn bad_request(e: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::BadRequest(e.to_string())
 }
@@ -460,11 +487,14 @@ fn bad_request(e: impl std::fmt::Display) -> WalletAdminError {
 /// to an unregistered id would persist rows invisible to reads (hide-on-read)
 /// forever (ids never reused), and reserved ids (<= 10) address the wallet's
 /// own tables in this build, not the scan tables.
-fn add_box_impl_with_store(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+fn add_box_impl_with_store<F>(
+    store: &dyn crate::wallet::WalletStore,
     scan_ids: &[u16],
-    box_json: &serde_json::Value,
-) -> Result<String, WalletAdminError> {
+    decode_box: F,
+) -> Result<String, WalletAdminError>
+where
+    F: FnOnce() -> Result<ergo_ser::ergo_box::ErgoBox, WalletAdminError>,
+{
     // Set semantics (Scala `Set[ScanId]`): dedupe + order-stabilize.
     let mut new_ids: Vec<u16> = scan_ids.to_vec();
     new_ids.sort_unstable();
@@ -480,30 +510,11 @@ fn add_box_impl_with_store(
         }
     }
 
-    // Parse the box, then fix its identity. Preserve mode: this attaches a box
-    // that already exists on chain, so soft-fork trees must be accepted and
-    // tree/register wire bytes kept verbatim — Submit-mode re-serialization
-    // could shift the computed box id off its on-chain identity, and then
-    // block-apply spend-marking (keyed by the real id) would never find it.
-    let parsed: AddBoxJson =
-        serde_json::from_value(box_json.clone()).map_err(|e| bad_request(format!("box: {e}")))?;
-    let candidate = ergo_rest_json::decode::decode_output_with_mode(
-        &parsed.output,
-        ergo_rest_json::decode::DecodeMode::Preserve,
-    )
-    .map_err(|(_, d)| bad_request(d))?;
-    let tx_id: [u8; 32] = hex::decode(&parsed.transaction_id)
-        .map_err(|e| bad_request(format!("transactionId hex: {e}")))?
-        .try_into()
-        .map_err(|v: Vec<u8>| {
-            bad_request(format!("transactionId must be 32 bytes, got {}", v.len()))
-        })?;
-    let creation_height = candidate.creation_height;
-    let ergo_box = ergo_ser::ergo_box::ErgoBox {
-        candidate,
-        transaction_id: ergo_primitives::digest::ModifierId::from_bytes(tx_id),
-        index: parsed.index,
-    };
+    // Decode the box (the embedding transport owns its JSON wire shape; the
+    // node decodes it in Preserve mode so the computed box id keeps its
+    // on-chain identity), then fix its identity.
+    let ergo_box = decode_box()?;
+    let creation_height = ergo_box.candidate.creation_height;
     let box_id = *ergo_box
         .box_id()
         .map_err(|e| bad_request(format!("box id: {e}")))?
@@ -513,7 +524,7 @@ fn add_box_impl_with_store(
 
     let mut write = store.begin_write().map_err(internal)?;
     let replaced = write
-        .replace_scan_box(&new_ids, box_id, creation_height, parsed.index, box_bytes)
+        .replace_scan_box(&new_ids, box_id, creation_height, ergo_box.index, box_bytes)
         .map_err(internal)?;
     if !replaced {
         return Err(WalletAdminError::BadRequest(
@@ -530,53 +541,10 @@ fn add_box_impl(
     scan_ids: &[u16],
     box_json: &serde_json::Value,
 ) -> Result<String, WalletAdminError> {
-    add_box_impl_with_store(db, scan_ids, box_json)
-}
-
-pub(crate) async fn stop_tracking(
-    ctx: &WriterContext<'_>,
-    scan_id: u16,
-    box_id: String,
-    reply: oneshot::Sender<Result<(), WalletAdminError>>,
-) {
-    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
-        let _ = reply.send(Err(e));
-        return;
-    }
-    let _ = reply.send(stop_tracking_impl(ctx.store.as_ref(), scan_id, &box_id));
-}
-
-pub(crate) async fn add_box(
-    ctx: &WriterContext<'_>,
-    scan_ids: Vec<u16>,
-    box_json: serde_json::Value,
-    reply: oneshot::Sender<Result<String, WalletAdminError>>,
-) {
-    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
-        let _ = reply.send(Err(e));
-        return;
-    }
-    let _ = reply.send(add_box_impl_with_store(
-        ctx.store.as_ref(),
-        &scan_ids,
-        &box_json,
-    ));
-}
-
-pub(crate) async fn p2s_rule(
-    ctx: &WriterContext<'_>,
-    p2s: String,
-    reply: oneshot::Sender<Result<u16, WalletAdminError>>,
-) {
-    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
-        let _ = reply.send(Err(e));
-        return;
-    }
-    let _ = reply.send(p2s_rule_impl_with_store(
-        ctx.store.as_ref(),
-        ctx.cfg.network,
-        &p2s,
-    ));
+    add_box_impl_with_store(db, scan_ids, || {
+        ergo_rest_json::decode::decode_on_chain_ergo_box_json(box_json)
+            .map_err(WalletAdminError::BadRequest)
+    })
 }
 
 #[cfg(test)]
@@ -594,7 +562,7 @@ fn p2s_rule_impl(
 /// Unregistered / deregistered user scans read as empty (hide-on-read, parity
 /// with the box endpoints).
 pub(crate) fn scan_transactions_impl(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     scan_id: u16,
     page: ergo_wallet_protocol::scala::types::Page,
 ) -> Result<ergo_wallet_protocol::scala::types::WalletTransactionsPage, WalletAdminError> {
@@ -638,43 +606,6 @@ pub(crate) fn scan_transactions_impl(
     })
 }
 
-pub(crate) async fn unspent_boxes(
-    ctx: &WriterContext<'_>,
-    scan_id: u16,
-    filter: ScanBoxFilter,
-    reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
-) {
-    // The chain accessor supplies the committed tip used for confirmations;
-    // the wallet store supplies the box snapshot. The live mempool view feeds
-    // the off-chain overlay (minConfirmations=-1).
-    let _ = reply.send(read_scan_boxes(
-        ctx.store.as_ref(),
-        None,
-        scan_id,
-        false,
-        &filter,
-        Some(ctx.mempool.as_ref()),
-    ));
-}
-
-pub(crate) async fn spent_boxes(
-    ctx: &WriterContext<'_>,
-    scan_id: u16,
-    filter: ScanBoxFilter,
-    reply: oneshot::Sender<Result<Vec<ScanBoxEntry>, WalletAdminError>>,
-) {
-    // spentBoxes has no off-chain component (Scala `getScanSpentBoxes`), but the
-    // view is threaded through uniformly; the overlay self-gates on want_spent.
-    let _ = reply.send(read_scan_boxes(
-        ctx.store.as_ref(),
-        None,
-        scan_id,
-        true,
-        &filter,
-        Some(ctx.mempool.as_ref()),
-    ));
-}
-
 /// Read a scan's boxes (unspent if `want_spent` is false, spent if true),
 /// applying the confirmation/inclusion-height filters and pagination, rendering
 /// each to a [`ScanBoxEntry`].
@@ -687,7 +618,7 @@ pub(crate) async fn spent_boxes(
 /// `minConfirmations=0` would then hide). Tests pass `Some(height)` to drive
 /// confirmations deterministically without seeding chain-state meta.
 fn read_scan_boxes(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     tip_override: Option<u32>,
     scan_id: u16,
     want_spent: bool,
@@ -846,7 +777,7 @@ fn read_scan_boxes(
 /// `WalletBox.value` and `bytes` from the companion table (empty for boxes that
 /// predate it, until a `/wallet/rescan` backfills them).
 fn read_reserved_scan_boxes(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     tip_override: Option<u32>,
     mining: bool,
     want_spent: bool,
@@ -964,9 +895,9 @@ fn read_reserved_scan_boxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wallet::tables::wallet_tx_key;
+    use crate::wallet::RedbWalletStore;
     use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
-    use ergo_wallet_service::wallet::tables::wallet_tx_key;
-    use ergo_wallet_service::wallet::RedbWalletStore;
     use std::sync::Arc;
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
@@ -1224,7 +1155,7 @@ mod tests {
             std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
         spent: std::collections::HashSet<ergo_primitives::digest::Digest32>,
     }
-    impl ergo_wallet_service::engine::MempoolOverlay for FakePool {
+    impl MempoolOverlay for FakePool {
         fn is_spent_by_pool(&self, box_id: &ergo_primitives::digest::Digest32) -> bool {
             self.spent.contains(box_id)
         }
@@ -1959,7 +1890,8 @@ mod tests {
         assert_eq!(rule["value"], hex::encode(&expected));
 
         // Load-bearing property: a box paying to that address MATCHES the scan.
-        let parsed: AddBoxJson = serde_json::from_value(box_json(5, 100, 0x77, 0)).unwrap();
+        let parsed: ergo_rest_json::types::ScalaErgoBoxInput =
+            serde_json::from_value(box_json(5, 100, 0x77, 0)).unwrap();
         let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
         let b = ergo_ser::ergo_box::ErgoBox {
             candidate,
@@ -2039,7 +1971,8 @@ mod tests {
     /// Serialize an `ErgoTransactionOutput` JSON body to its on-chain box
     /// bytes — exactly what the rescan replay hands the matcher.
     fn serialize_box_json(j: &serde_json::Value) -> Vec<u8> {
-        let parsed: AddBoxJson = serde_json::from_value(j.clone()).unwrap();
+        let parsed: ergo_rest_json::types::ScalaErgoBoxInput =
+            serde_json::from_value(j.clone()).unwrap();
         let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
         let b = ergo_ser::ergo_box::ErgoBox {
             candidate,
@@ -2053,7 +1986,7 @@ mod tests {
 
     #[test]
     fn rescan_matcher_routes_serialized_boxes_through_the_registry() {
-        use ergo_wallet_service::wallet::scan::ScanRescanMatcher;
+        use crate::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap(); // scan 11: containsAsset [0x11;32]
 
@@ -2074,7 +2007,7 @@ mod tests {
 
     #[test]
     fn rescan_matcher_errors_on_unparseable_box() {
-        use ergo_wallet_service::wallet::scan::ScanRescanMatcher;
+        use crate::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap();
         let matcher = build_rescan_matcher(&db).unwrap().unwrap();
@@ -2199,13 +2132,14 @@ mod tests {
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
         // `registered_scan_count` (the load-bearing gate that skips
         // `apply_block_to_scans`) and `match_boxes` both honor the flag.
-        use ergo_wallet_service::wallet::WalletApplyHook;
+        use crate::wallet::WalletApplyHook;
 
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap(); // 1 registered scan, token 0x11
 
         // A box carrying token 0x11 matches scan 11.
-        let parsed: AddBoxJson = serde_json::from_value(box_json_with_asset(0x11)).unwrap();
+        let parsed: ergo_rest_json::types::ScalaErgoBoxInput =
+            serde_json::from_value(box_json_with_asset(0x11)).unwrap();
         let candidate = ergo_rest_json::decode::decode_output(&parsed.output).unwrap();
         let b = ergo_ser::ergo_box::ErgoBox {
             candidate,
@@ -2216,12 +2150,12 @@ mod tests {
         };
 
         let db = std::sync::Arc::new(db);
-        let store = std::sync::Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(db));
+        let store = std::sync::Arc::new(crate::wallet::RedbWalletStore::new(db));
         let coordinator = std::sync::Arc::new(RescanCoordinator::new());
-        let hook = crate::node::wallet_bridge::WalletStateHook::new(
-            std::sync::Arc::new(parking_lot::RwLock::new(
-                ergo_wallet_service::state::WalletState::empty(false),
-            )),
+        let hook = crate::engine::WalletStateHook::new(
+            std::sync::Arc::new(parking_lot::RwLock::new(crate::state::WalletState::empty(
+                false,
+            ))),
             store,
             coordinator.clone(),
         );
@@ -2448,8 +2382,8 @@ mod tests {
 #[cfg(test)]
 mod reserved_scan_read_tests {
     use super::*;
-    use ergo_wallet_service::wallet::tables::{WALLET_BOXES, WALLET_BOX_BYTES};
-    use ergo_wallet_service::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+    use crate::wallet::tables::{WALLET_BOXES, WALLET_BOX_BYTES};
+    use crate::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
         let dir = tempfile::tempdir().unwrap();
@@ -2584,7 +2518,7 @@ mod reserved_scan_read_tests {
         outputs:
             std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
     }
-    impl ergo_wallet_service::engine::MempoolOverlay for FakePool {
+    impl MempoolOverlay for FakePool {
         fn is_spent_by_pool(&self, _box_id: &ergo_primitives::digest::Digest32) -> bool {
             false
         }
@@ -2627,8 +2561,8 @@ mod reserved_scan_read_tests {
     }
 
     fn track_pubkey(db: &redb::Database, idx: u64, pk: [u8; 33]) {
-        use ergo_wallet_service::wallet::tables::{tracked_pubkey_key, WALLET_TRACKED_PUBKEYS};
-        use ergo_wallet_service::wallet::types::TrackedPubkeyMeta;
+        use crate::wallet::tables::{tracked_pubkey_key, WALLET_TRACKED_PUBKEYS};
+        use crate::wallet::types::TrackedPubkeyMeta;
         let meta = TrackedPubkeyMeta {
             derivation_path: Vec::new(),
             derivation_path_label: String::new(),

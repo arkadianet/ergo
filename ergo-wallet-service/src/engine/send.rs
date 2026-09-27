@@ -1,16 +1,23 @@
-//! `PaymentSend` + `TransactionGenerate*` + `TransactionSign` + `BoxesCollect`
-//! writer-task implementations.
+//! The send-side wallet commands — compat `PaymentSend` /
+//! `TransactionGenerate*` / `TransactionSign` / `TransactionSend` /
+//! `BoxesCollect`, the native `boxes/select` / `transactions/{build,sign,send}`,
+//! and the reward sweep — plus the shared build → sign → submit paths behind
+//! the compat routes.
 
 use parking_lot::RwLock;
 
+use ergo_wallet_protocol::native::dto as ndto;
 use ergo_wallet_protocol::scala::sending::{
-    BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto,
+    BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto, TransactionGenerateRequest,
+    TransactionGenerateResponse, TransactionGenerateUnsignedRequest,
+    TransactionGenerateUnsignedResponse, TransactionSendRequest, TransactionSignRequest,
+    TransactionSignResponse,
 };
 
 use super::build::{build_unsigned_tx, MIN_BOX_VALUE};
 use super::hints_codec::tx_hints_bag_from_dto;
 use super::sign::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
-use crate::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess};
+use crate::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess, WalletEngine};
 use ergo_wallet_protocol::WalletAdminError;
 
 /// `PaymentSend` + `TransactionSend` shared path: build, sign, self-verify, submit.
@@ -21,7 +28,7 @@ use ergo_wallet_protocol::WalletAdminError;
 /// confusing Internal/500 from `MissingSecret` deep in the signing path.
 /// `transaction_sign` is the only route that accepts the locked + externals path.
 #[allow(clippy::too_many_arguments)]
-pub async fn payment_send_impl(
+pub(crate) async fn payment_send_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
@@ -101,7 +108,7 @@ pub async fn payment_send_impl(
 /// Requires an unlocked wallet for the same reason as `payment_send_impl`.
 /// Returns `WalletAdminError::Locked` (400 wallet_locked) when locked.
 #[allow(clippy::too_many_arguments)]
-pub fn transaction_generate_impl(
+pub(crate) fn transaction_generate_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
@@ -153,7 +160,7 @@ pub fn transaction_generate_impl(
 
 /// `TransactionGenerateUnsigned` path: build only; no sign, no submit.
 #[allow(clippy::too_many_arguments)]
-pub fn transaction_generate_unsigned_impl(
+pub(crate) fn transaction_generate_unsigned_impl(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
@@ -184,7 +191,7 @@ pub fn transaction_generate_unsigned_impl(
 
 /// `TransactionSign` path: decode an unsigned tx hex, sign it, self-verify.
 /// Works with external secrets even when the wallet is locked.
-pub fn transaction_sign_impl(
+pub(crate) fn transaction_sign_impl(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
     hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
@@ -205,7 +212,7 @@ pub fn transaction_sign_impl(
     )
 }
 
-pub fn transaction_sign_impl_with_snapshot(
+pub(crate) fn transaction_sign_impl_with_snapshot(
     unsigned_tx_hex: &str,
     external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
     hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
@@ -249,7 +256,7 @@ pub fn transaction_sign_impl_with_snapshot(
 }
 
 /// `BoxesCollect` path: run box selection; no signing, no submit.
-pub fn boxes_collect_impl(
+pub(crate) fn boxes_collect_impl(
     request: &BoxesCollectRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<crate::state::WalletState>,
@@ -310,4 +317,252 @@ pub fn boxes_collect_impl(
         boxes,
         change_boxes,
     })
+}
+
+impl WalletEngine {
+    pub fn native_select_boxes(
+        &self,
+        req: ndto::BoxSelectRequest,
+    ) -> Result<ndto::BoxSelectResponse, WalletAdminError> {
+        if self.is_locked() {
+            return Err(WalletAdminError::Locked);
+        }
+        super::build::select_boxes_impl(
+            &req,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.config.network,
+        )
+    }
+
+    pub fn native_build_transaction(
+        &self,
+        intent: ndto::TxIntent,
+    ) -> Result<ndto::BuildTxResponse, WalletAdminError> {
+        if self.is_locked() {
+            return Err(WalletAdminError::Locked);
+        }
+        super::build::build_transaction_impl(
+            &intent,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.config.network,
+        )
+    }
+
+    pub fn native_sign_transaction(
+        &self,
+        req: ndto::SignTxRequest,
+    ) -> Result<ndto::SignTxResponse, WalletAdminError> {
+        // No `Locked` precondition: signing succeeds while locked when
+        // external secrets cover every input; otherwise the prover's missing-secret
+        // surfaces as `missing_secret`, never `wallet_locked`.
+        super::sign::sign_transaction_native_impl(
+            &req,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+        )
+    }
+
+    pub async fn native_send_transaction(
+        &self,
+        req: ndto::SendTxRequest,
+    ) -> Result<ndto::SendTxResponse, WalletAdminError> {
+        // `intent` builds + signs with the wallet's own secrets → needs unlock;
+        // `signed` submits caller-supplied bytes → no unlock needed.
+        if matches!(req, ndto::SendTxRequest::Intent { .. }) && self.is_locked() {
+            return Err(WalletAdminError::Locked);
+        }
+        super::sign::send_transaction_native_impl(
+            &req,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.submitter.as_ref(),
+            self.config.network,
+        )
+        .await
+    }
+
+    pub async fn payment_send(
+        &self,
+        requests: Vec<PaymentRequestDto>,
+    ) -> Result<String, WalletAdminError> {
+        super::send::payment_send_impl(
+            &requests,
+            None,
+            None,
+            None,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.submitter.as_ref(),
+            self.config.network,
+        )
+        .await
+    }
+
+    pub async fn retrieve_rewards(
+        &self,
+        req: ndto::RetrieveRewardsRequest,
+    ) -> Result<ndto::RetrieveRewardsResultDto, WalletAdminError> {
+        // Fee arrives as a decimal nanoErg string (native amount convention) — parse
+        // it before building so an out-of-range/garbage fee is a clean 400, not a 500.
+        let fee = match req.fee.as_deref().map(str::parse::<u64>).transpose() {
+            Ok(f) => f,
+            Err(_) => {
+                return Err(WalletAdminError::BadRequest(
+                    "fee must be a nanoErg decimal string".into(),
+                ));
+            }
+        };
+        super::sweep::retrieve_rewards_impl(
+            req.destination.as_deref(),
+            fee,
+            self.config.min_relay_fee_nano_erg,
+            self.config.max_tx_size_bytes,
+            req.box_ids.as_deref(),
+            req.dry_run,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.submitter.as_ref(),
+            self.mempool.as_ref(),
+            self.config.network,
+        )
+        .await
+        .map(|o| ndto::RetrieveRewardsResultDto {
+            box_count: o.box_count,
+            box_ids: o.box_ids,
+            remaining: o.remaining,
+            gross_erg: o.gross_erg.to_string(),
+            reemission_paid: o.reemission_paid.to_string(),
+            fee: o.fee.to_string(),
+            net_to_destination: o.net_to_destination.to_string(),
+            other_tokens: o
+                .other_tokens
+                .into_iter()
+                .map(|(id, amt)| ndto::SweptTokenDto {
+                    token_id: hex::encode(id),
+                    amount: amt.to_string(),
+                })
+                .collect(),
+            destination: o.destination,
+            tx_id: o.tx_id,
+        })
+    }
+
+    pub fn transaction_generate(
+        &self,
+        request: TransactionGenerateRequest,
+    ) -> Result<TransactionGenerateResponse, WalletAdminError> {
+        let result = super::send::transaction_generate_impl(
+            &request.requests,
+            request.inputs.as_deref(),
+            request.data_inputs.as_deref(),
+            request.fee,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.config.network,
+        );
+        result.map(|signed_tx_bytes| {
+            use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionGenerateResponse};
+            TransactionGenerateResponse {
+                transaction: SignedTxDto {
+                    bytes: hex::encode(signed_tx_bytes),
+                },
+            }
+        })
+    }
+
+    pub fn transaction_generate_unsigned(
+        &self,
+        request: TransactionGenerateUnsignedRequest,
+    ) -> Result<TransactionGenerateUnsignedResponse, WalletAdminError> {
+        let result = super::send::transaction_generate_unsigned_impl(
+            &request.requests,
+            request.inputs.as_deref(),
+            request.data_inputs.as_deref(),
+            request.fee,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.config.network,
+        );
+        result.map(|unsigned_tx_bytes| {
+            use ergo_wallet_protocol::scala::sending::{
+                TransactionGenerateUnsignedResponse, UnsignedTxDto,
+            };
+            TransactionGenerateUnsignedResponse {
+                unsigned_tx: UnsignedTxDto {
+                    bytes: hex::encode(unsigned_tx_bytes),
+                },
+            }
+        })
+    }
+
+    pub fn transaction_sign(
+        &self,
+        request: TransactionSignRequest,
+    ) -> Result<TransactionSignResponse, WalletAdminError> {
+        let result = super::send::transaction_sign_impl(
+            &request.unsigned_tx.bytes,
+            request.external_secrets.as_deref(),
+            request.hints.as_ref(),
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+        );
+        result.map(|signed_tx_bytes| {
+            use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionSignResponse};
+            TransactionSignResponse {
+                transaction: SignedTxDto {
+                    bytes: hex::encode(signed_tx_bytes),
+                },
+            }
+        })
+    }
+
+    pub async fn transaction_send(
+        &self,
+        request: TransactionSendRequest,
+    ) -> Result<String, WalletAdminError> {
+        super::send::payment_send_impl(
+            &request.requests,
+            request.inputs.as_deref(),
+            request.data_inputs.as_deref(),
+            request.fee,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+            self.submitter.as_ref(),
+            self.config.network,
+        )
+        .await
+    }
+
+    pub fn boxes_collect(
+        &self,
+        request: BoxesCollectRequest,
+    ) -> Result<BoxesCollectResponse, WalletAdminError> {
+        super::send::boxes_collect_impl(
+            &request,
+            &self.storage,
+            &self.state,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+        )
+    }
 }

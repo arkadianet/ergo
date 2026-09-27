@@ -11,38 +11,38 @@ use ergo_wallet_protocol::scala::sending::PaymentRequestDto;
 use ergo_wallet_protocol::WalletAdminError;
 
 /// Minimum fee in nanoERG. Mirrors Scala's `Parameters.MinFee`.
-pub const MIN_FEE: u64 = 1_000_000;
+pub(crate) const MIN_FEE: u64 = 1_000_000;
 /// Minimum box value in nanoERG. Mirrors Scala's `BoxUtils.MinBoxValue`.
-pub const MIN_BOX_VALUE: u64 = 1_000_000;
+pub(crate) const MIN_BOX_VALUE: u64 = 1_000_000;
 
 /// A selected input box, captured for the native `transactions/build` response.
 #[derive(Debug, Clone)]
-pub struct SelectedInputInfo {
-    pub box_id: [u8; 32],
-    pub value: u64,
-    pub tokens: BTreeMap<[u8; 32], u64>,
+pub(crate) struct SelectedInputInfo {
+    pub(crate) box_id: [u8; 32],
+    pub(crate) value: u64,
+    pub(crate) tokens: BTreeMap<[u8; 32], u64>,
 }
 
 /// What [`build_unsigned_tx`] produced: the serialized unsigned tx plus the exact
 /// selection / change / fee / EIP-27 burn it was built from, so the native
 /// `transactions/build` surface can report it precisely without re-deriving it
 /// from the serialized bytes. Compat callers use only [`BuiltTx::bytes`].
-pub struct BuiltTx {
+pub(crate) struct BuiltTx {
     /// Serialized `UnsignedTransaction` bytes.
-    pub bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
     /// Selected inputs (box_id, value, tokens), in input order.
-    pub selected: Vec<SelectedInputInfo>,
+    pub(crate) selected: Vec<SelectedInputInfo>,
     /// Emitted change boxes (0 or 1): `(erg, tokens)`. Empty when the change was
     /// folded into the fee or the selection was exact.
-    pub change_outputs: Vec<(u64, BTreeMap<[u8; 32], u64>)>,
+    pub(crate) change_outputs: Vec<(u64, BTreeMap<[u8; 32], u64>)>,
     /// Actual miner-fee-box value (the requested fee plus any folded sub-minimum
     /// change). Both branches preserve the requested fee — an EIP-27 burn is
     /// debited from change, never the fee.
-    pub fee: u64,
+    pub(crate) fee: u64,
     /// EIP-27 burn `(reemission_token_id, to_burn_nanoerg)`, or `None`.
-    pub reemission_burn: Option<([u8; 32], u64)>,
+    pub(crate) reemission_burn: Option<([u8; 32], u64)>,
     /// Wallet scan height the inputs were read at (`asOf`).
-    pub as_of: u32,
+    pub(crate) as_of: u32,
 }
 
 /// Build an unsigned transaction from payment requests (the shared build path).
@@ -53,7 +53,7 @@ pub struct BuiltTx {
 ///
 /// Returns the [`BuiltTx`] (serialized bytes + the selection/change/fee/burn plan).
 #[allow(clippy::too_many_arguments)]
-pub fn build_unsigned_tx(
+pub(crate) fn build_unsigned_tx(
     requests: &[PaymentRequestDto],
     override_inputs: Option<&[String]>,
     override_data_inputs: Option<&[String]>,
@@ -560,7 +560,7 @@ pub fn build_unsigned_tx(
 /// Map an `ergo_wallet` build error to a typed [`WalletAdminError`]. A box-selection
 /// shortfall (including a reward-box burn the inputs cannot fund) is a well-formed
 /// request the wallet cannot satisfy → `InsufficientFunds(422)`, not `Internal`.
-pub fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
+pub(crate) fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
     match &e {
         ergo_wallet::error::WalletError::BoxSelection(m) => {
             WalletAdminError::InsufficientFunds(m.clone())
@@ -574,13 +574,13 @@ pub fn map_build_error(e: ergo_wallet::error::WalletError) -> WalletAdminError {
 
 /// Parse a decimal-string amount into `u64`. A non-numeric / overflowing value is
 /// a client error (`bad_request`), the native amounts being decimal strings.
-pub fn parse_u64_dec(s: &str, field: &str) -> Result<u64, WalletAdminError> {
+pub(crate) fn parse_u64_dec(s: &str, field: &str) -> Result<u64, WalletAdminError> {
     s.parse::<u64>()
         .map_err(|_| WalletAdminError::BadRequest(format!("{field}: not a u64 decimal string")))
 }
 
 /// Decode a 32-byte hex id, `bad_request` on a malformed value.
-pub fn parse_box_id_hex(s: &str) -> Result<[u8; 32], WalletAdminError> {
+pub(crate) fn parse_box_id_hex(s: &str) -> Result<[u8; 32], WalletAdminError> {
     hex::decode(s)
         .ok()
         .and_then(|v| <[u8; 32]>::try_from(v).ok())
@@ -588,7 +588,7 @@ pub fn parse_box_id_hex(s: &str) -> Result<[u8; 32], WalletAdminError> {
 }
 
 /// Native asset list (`token_id` hex + decimal `amount`) → `(id, amount)` map.
-pub fn parse_native_assets(
+pub(crate) fn parse_native_assets(
     assets: &[ergo_wallet_protocol::native::dto::WalletAssetDto],
 ) -> Result<BTreeMap<[u8; 32], u64>, WalletAdminError> {
     let mut out: BTreeMap<[u8; 32], u64> = BTreeMap::new();
@@ -604,7 +604,7 @@ pub fn parse_native_assets(
 }
 
 /// `(id, amount)` map → native asset DTO list (decimal-string amounts).
-pub fn assets_map_to_dto(
+pub(crate) fn assets_map_to_dto(
     tokens: &BTreeMap<[u8; 32], u64>,
 ) -> Vec<ergo_wallet_protocol::native::dto::WalletAssetDto> {
     tokens
@@ -620,7 +620,7 @@ pub fn assets_map_to_dto(
 
 /// The `ReemissionBurn` DTO for a `to_burn` (or `None` when no burn). `to_burn > 0`
 /// implies EIP-27 rules are present (the obligation only triggers under them).
-pub fn reemission_burn_dto(
+pub(crate) fn reemission_burn_dto(
     to_burn: u64,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
 ) -> Option<ergo_wallet_protocol::native::dto::ReemissionBurn> {
@@ -636,7 +636,7 @@ pub fn reemission_burn_dto(
 
 /// Validate a supplied change address: it must decode as a P2PK for `network` AND
 /// be a tracked wallet tree, else `change_address_untracked(422)`.
-pub fn validate_tracked_change_address(
+pub(crate) fn validate_tracked_change_address(
     addr: &str,
     state: &RwLock<crate::state::WalletState>,
     network: ergo_ser::address::NetworkPrefix,
@@ -657,7 +657,7 @@ pub fn validate_tracked_change_address(
 /// and spending all on the other would let a dry-run under-report the burn. Funds
 /// the burn from change only (fee preserved); an exact set whose change cannot
 /// cover it is `insufficient_funds`. The re-emission token is stripped from change.
-pub fn exact_set_plan(
+pub(crate) fn exact_set_plan(
     boxes: &[crate::box_selector::BoxSummary],
     target_erg: u64,
     target_tokens: &BTreeMap<[u8; 32], u64>,
@@ -738,7 +738,7 @@ pub fn exact_set_plan(
 /// wallet's confirmed unspent boxes — real selected inputs, the real change plan,
 /// and the exact EIP-27 burn. `auto` uses the SHARED `select_with_reemission`;
 /// `boxIds` uses the exact set (so it agrees with `transactions/build`).
-pub fn select_boxes_impl(
+pub(crate) fn select_boxes_impl(
     req: &ergo_wallet_protocol::native::dto::BoxSelectRequest,
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,
@@ -895,7 +895,7 @@ pub fn select_boxes_impl(
 /// load-bearing; `mint`/`burn`/`payment.registers` and inline-serialized box
 /// sources ship `unsupported_intent(422)` until wired (a later 422→200 for the
 /// same well-formed request).
-pub fn build_transaction_impl(
+pub(crate) fn build_transaction_impl(
     intent: &ergo_wallet_protocol::native::dto::TxIntent,
     state: &RwLock<crate::state::WalletState>,
     store: &dyn crate::wallet::WalletStore,

@@ -5,7 +5,7 @@ use ergo_wallet_protocol::scala::types::{
     Page, WalletBoxEntry, WalletBoxesPage, WalletTransactionEntry, WalletTransactionsPage,
 };
 
-pub fn box_status_str(status: &crate::wallet::types::BoxStatus) -> String {
+pub(crate) fn box_status_str(status: &crate::wallet::types::BoxStatus) -> String {
     match status {
         crate::wallet::types::BoxStatus::Confirmed => "Confirmed".to_string(),
         crate::wallet::types::BoxStatus::Immature { .. } => "Immature".to_string(),
@@ -13,7 +13,7 @@ pub fn box_status_str(status: &crate::wallet::types::BoxStatus) -> String {
     }
 }
 
-pub fn box_provenance_str(provenance: &crate::wallet::types::BoxProvenance) -> String {
+pub(crate) fn box_provenance_str(provenance: &crate::wallet::types::BoxProvenance) -> String {
     match provenance {
         crate::wallet::types::BoxProvenance::Owned => "Owned".to_string(),
         crate::wallet::types::BoxProvenance::MinerReward => "MinerReward".to_string(),
@@ -21,7 +21,7 @@ pub fn box_provenance_str(provenance: &crate::wallet::types::BoxProvenance) -> S
     }
 }
 
-pub fn wallet_box_to_entry(wb: crate::wallet::types::WalletBox) -> WalletBoxEntry {
+pub(crate) fn wallet_box_to_entry(wb: crate::wallet::types::WalletBox) -> WalletBoxEntry {
     WalletBoxEntry {
         box_id: hex::encode(wb.box_id),
         value: wb.value,
@@ -31,7 +31,9 @@ pub fn wallet_box_to_entry(wb: crate::wallet::types::WalletBox) -> WalletBoxEntr
     }
 }
 
-pub fn wallet_tx_to_entry(wt: crate::wallet::types::WalletTransaction) -> WalletTransactionEntry {
+pub(crate) fn wallet_tx_to_entry(
+    wt: crate::wallet::types::WalletTransaction,
+) -> WalletTransactionEntry {
     WalletTransactionEntry {
         tx_id: hex::encode(wt.tx_id),
         block_height: wt.block_height,
@@ -44,7 +46,10 @@ pub fn wallet_tx_to_entry(wt: crate::wallet::types::WalletTransaction) -> Wallet
     }
 }
 
-pub fn paginate_boxes(all: Vec<crate::wallet::types::WalletBox>, page: Page) -> WalletBoxesPage {
+pub(crate) fn paginate_boxes(
+    all: Vec<crate::wallet::types::WalletBox>,
+    page: Page,
+) -> WalletBoxesPage {
     let total = all.len() as u32;
     let offset = page.offset as usize;
     let limit = page.limit as usize;
@@ -57,7 +62,7 @@ pub fn paginate_boxes(all: Vec<crate::wallet::types::WalletBox>, page: Page) -> 
     WalletBoxesPage { total, items }
 }
 
-pub fn paginate_transactions(
+pub(crate) fn paginate_transactions(
     all: Vec<crate::wallet::types::WalletTransaction>,
     page: Page,
 ) -> WalletTransactionsPage {
@@ -74,7 +79,7 @@ pub fn paginate_transactions(
 }
 
 /// Map a stored [`crate::wallet::types::WalletTransaction`] to the lean summary.
-pub fn tx_to_summary(
+pub(crate) fn tx_to_summary(
     wt: crate::wallet::types::WalletTransaction,
 ) -> ergo_wallet_protocol::native::dto::WalletTransactionSummary {
     use ergo_wallet_protocol::native::dto::WalletTransactionSummary;

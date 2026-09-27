@@ -12,17 +12,17 @@ use ergo_wallet_protocol::WalletAdminError;
 
 /// Outcome of a "retrieve matured mining rewards" sweep. `tx_id` is `None` on a
 /// dry-run (preview); `Some` once built, signed, self-verified, and submitted.
-pub struct RetrieveRewardsOutcome {
-    pub box_count: u32,
-    pub box_ids: Vec<String>,
-    pub remaining: u32,
-    pub gross_erg: u64,
-    pub reemission_paid: u64,
-    pub fee: u64,
-    pub net_to_destination: u64,
-    pub other_tokens: Vec<([u8; 32], u64)>,
-    pub destination: String,
-    pub tx_id: Option<String>,
+pub(crate) struct RetrieveRewardsOutcome {
+    pub(crate) box_count: u32,
+    pub(crate) box_ids: Vec<String>,
+    pub(crate) remaining: u32,
+    pub(crate) gross_erg: u64,
+    pub(crate) reemission_paid: u64,
+    pub(crate) fee: u64,
+    pub(crate) net_to_destination: u64,
+    pub(crate) other_tokens: Vec<([u8; 32], u64)>,
+    pub(crate) destination: String,
+    pub(crate) tx_id: Option<String>,
 }
 
 /// Validator cap on distinct tokens per output box (`context.rs` `max_tokens_per_box`).
@@ -188,7 +188,7 @@ fn validate_built_structural(
 /// the on-chain burn. `dry_run` builds only (no sign/submit); execute additionally
 /// signs (mandatory self-verify, incl. `verify_reemission_spending`) and submits.
 #[allow(clippy::too_many_arguments)]
-pub async fn retrieve_rewards_impl(
+pub(crate) async fn retrieve_rewards_impl(
     destination_override: Option<&str>,
     fee_override: Option<u64>,
     relay_floor: u64,

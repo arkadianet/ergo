@@ -130,85 +130,6 @@ pub(super) struct ApiBind {
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
-fn recover_interrupted_rescan(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
-    rescan: &ergo_wallet_service::engine::RescanCoordinator,
-) -> Result<(), ergo_wallet_service::wallet::WalletStoreError> {
-    let result = (|| {
-        let read = store.read()?;
-        let state = read.rescan_state()?;
-        let invalidated = read.scan_invalidated()?;
-        let cursor = read.scan_cursor()?;
-        let committed_tip = read.committed_tip()?.map(|(height, _)| height);
-        let tracked_count = read.tracked_pubkeys_with_paths()?.len();
-        let box_count = read.all_boxes()?.len();
-        let transaction_count = read.all_transactions()?.len();
-        let registered_scan_count = read.registered_scan_count()?;
-        let has_wallet_facts = tracked_count > 0
-            || box_count > 0
-            || transaction_count > 0
-            || registered_scan_count > 0;
-        let cursor_behind = has_wallet_facts
-            && cursor.is_some_and(|cursor| {
-                committed_tip.is_some_and(|tip_height| cursor.height < tip_height)
-            });
-        let cursor_ahead = has_wallet_facts
-            && cursor.is_some_and(|cursor| {
-                committed_tip.is_some_and(|tip_height| cursor.height > tip_height)
-            });
-        let cursor_missing_with_facts = has_wallet_facts
-            && cursor.is_none()
-            && committed_tip.is_some_and(|tip_height| tip_height > 0);
-        let unsafe_state = match &state {
-            ergo_wallet_service::wallet::RescanState::Running { .. }
-            | ergo_wallet_service::wallet::RescanState::Failed { .. } => true,
-            ergo_wallet_service::wallet::RescanState::Idle => {
-                invalidated || cursor_behind || cursor_ahead || cursor_missing_with_facts
-            }
-        };
-        if !unsafe_state {
-            rescan.clear_guards();
-            return Ok(());
-        }
-
-        rescan.latch_fail_closed();
-        let failed = match state {
-            ergo_wallet_service::wallet::RescanState::Running { from_height } => {
-                ergo_wallet_service::wallet::RescanState::Failed {
-                    height: from_height,
-                    reason: "interrupted by restart".to_string(),
-                }
-            }
-            ergo_wallet_service::wallet::RescanState::Failed { height, reason } => {
-                ergo_wallet_service::wallet::RescanState::Failed { height, reason }
-            }
-            ergo_wallet_service::wallet::RescanState::Idle => {
-                let height = cursor.map(|cursor| cursor.height).unwrap_or(0);
-                let reason = if cursor_behind {
-                    "wallet cursor behind committed tip on boot".to_string()
-                } else if cursor_ahead {
-                    "wallet cursor ahead of committed tip on boot".to_string()
-                } else if cursor_missing_with_facts {
-                    "wallet cursor missing with existing wallet data on boot".to_string()
-                } else {
-                    "wallet scan invalidated on boot".to_string()
-                };
-                ergo_wallet_service::wallet::RescanState::Failed { height, reason }
-            }
-        };
-        let mut write = store.begin_write()?;
-        write.set_scan_invalidated(true)?;
-        write.set_rescan_state(&failed)?;
-        write.commit()?;
-        rescan.latch_fail_closed();
-        Ok(())
-    })();
-    if result.is_err() {
-        rescan.latch_fail_closed();
-    }
-    result
-}
-
 struct WalletChainWiring {
     writer: Option<(
         Arc<super::super::wallet_bridge::InProcessChainClient>,
@@ -347,7 +268,9 @@ pub(super) async fn bind(
         // running rescan.
         let rescan = Arc::new(ergo_wallet_service::engine::RescanCoordinator::new());
         crate::wallet_boot::begin_wallet_session(rescan.clone());
-        if let Err(error) = recover_interrupted_rescan(wallet_store.as_ref(), &rescan) {
+        if let Err(error) =
+            ergo_wallet_service::engine::recover_interrupted_rescan(wallet_store.as_ref(), &rescan)
+        {
             tracing::warn!(%error, "wallet boot: failed to recover interrupted rescan; wallet remains fail-closed");
         }
         let session_id = crate::wallet_boot::wallet_session_id();
@@ -607,91 +530,18 @@ pub(super) async fn bind(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_wallet_chain_wiring, recover_interrupted_rescan};
+    use super::build_wallet_chain_wiring;
     use ergo_state::store::StateStore;
+    use ergo_wallet_service::engine::recover_interrupted_rescan;
     use ergo_wallet_service::engine::RescanCoordinator;
     use ergo_wallet_service::wallet::types::TrackedPubkeyMeta;
     use ergo_wallet_service::wallet::{RedbWalletStore, RescanState, WalletStore};
     use std::sync::Arc;
 
-    fn new_store() -> (tempfile::TempDir, RedbWalletStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            redb::Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        (dir, store)
-    }
-
     fn submit_bridge() -> Arc<dyn ergo_api::NodeSubmit> {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
         crate::api_bridge::SubmitBridge::new(tx, event_tx).into_dyn()
-    }
-
-    #[test]
-    fn recover_interrupted_rescan_marks_failed_and_reasserts_invalidation() {
-        let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
-        let (_dir, store) = new_store();
-        let mut write = store.begin_write().unwrap();
-        write
-            .set_rescan_state(&RescanState::Running { from_height: 7 })
-            .unwrap();
-        write.commit().unwrap();
-
-        recover_interrupted_rescan(&store, &rescan).unwrap();
-
-        assert_eq!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Failed {
-                height: 7,
-                reason: "interrupted by restart".to_string(),
-            }
-        );
-        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        assert!(rescan.fail_closed());
-        assert!(rescan.in_progress());
-        assert!(rescan.scan_rebuild_in_progress());
-        rescan.clear_guards();
-    }
-
-    #[test]
-    fn recover_failed_or_invalidated_state_is_unsafe_on_boot() {
-        let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
-        let (_dir, store) = new_store();
-        let mut write = store.begin_write().unwrap();
-        write
-            .set_rescan_state(&RescanState::Failed {
-                height: 9,
-                reason: "prior failure".to_string(),
-            })
-            .unwrap();
-        write.set_scan_invalidated(false).unwrap();
-        write.commit().unwrap();
-
-        recover_interrupted_rescan(&store, &rescan).unwrap();
-        assert_eq!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Failed {
-                height: 9,
-                reason: "prior failure".to_string(),
-            }
-        );
-        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        rescan.clear_guards();
-
-        let (_dir, store) = new_store();
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_invalidated(true).unwrap();
-        write.commit().unwrap();
-        recover_interrupted_rescan(&store, &rescan).unwrap();
-        assert!(matches!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Failed { .. }
-        ));
-        assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        rescan.clear_guards();
     }
 
     #[test]
@@ -861,22 +711,6 @@ mod tests {
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
         assert!(rescan.fail_closed());
         rescan.clear_guards();
-    }
-
-    #[test]
-    fn clean_idle_store_clears_stale_process_guards() {
-        let rescan = RescanCoordinator::new();
-        let (_dir, store) = new_store();
-        rescan.latch_fail_closed();
-        recover_interrupted_rescan(&store, &rescan).unwrap();
-        assert_eq!(
-            store.begin_read().unwrap().rescan_state().unwrap(),
-            RescanState::Idle
-        );
-        assert!(!store.begin_read().unwrap().scan_invalidated().unwrap());
-        assert!(!rescan.fail_closed());
-        assert!(!rescan.in_progress());
-        assert!(!rescan.scan_rebuild_in_progress());
     }
 
     #[test]

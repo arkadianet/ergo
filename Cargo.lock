@@ -1117,6 +1117,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "ergo-primitives",
+ "ergo-rest-json",
  "ergo-ser",
  "ergo-sigma",
  "ergo-validation",

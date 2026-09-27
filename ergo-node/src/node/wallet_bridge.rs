@@ -1,8 +1,25 @@
-//! Production WalletAdmin bridge. Single-writer pattern: the action
-//! loop in ergo-node owns the wallet storage + state behind a RwLock.
-//! The axum API task sends commands via a channel; the loop processes
-//! them serially and sends the responses back via the per-command
-//! oneshot channel.
+//! The node's thin adapter over the wallet engine
+//! ([`ergo_wallet_service::engine::WalletEngine`]).
+//!
+//! Single-writer pattern: one wallet writer task owns the engine (and through
+//! it the wallet storage + state behind a `RwLock`). The axum API task sends
+//! [`WalletCommand`]s through [`NodeWalletAdmin`] (the `ergo_api`
+//! `WalletAdmin` impl); the writer processes them serially, calls the engine
+//! method for each, and sends the response back via the per-command oneshot
+//! channel. Everything wallet-specific lives in the engine; this module owns
+//! only the transport and runtime concerns:
+//!
+//! - the command channel, the pre-enqueue and execution rescan fences, and
+//!   the rescan-control policy;
+//! - spawning a rescan's [`ergo_wallet_service::engine::RescanJob`] on a
+//!   blocking thread and tracking it with the wallet session;
+//! - the node-side seam implementations: [`ChainStateAccessorImpl`]
+//!   (`WalletChainAccess` over `ergo-state`), [`ChainSnapshot`]
+//!   (`SigningView`), [`NodeSubmitAdapter`] (`TxSubmitter` over the node's
+//!   admission bridge) and [`MempoolViewOverlay`] (`MempoolOverlay` over the
+//!   API mempool view);
+//! - decoding the Scala box JSON of `/scan/addBox`;
+//! - the in-process chain client / API adapter (`chain_client`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,7 +48,7 @@ use ergo_wallet_protocol::WalletAdminError;
 use ergo_wallet_service::chain::CommittedTip;
 use ergo_wallet_service::engine::{
     ChainAccessError, MempoolOverlay, RescanCoordinator, SigningView, TxSubmitError, TxSubmitter,
-    WalletChainAccess, WalletEngineConfig, WalletRescanGuard,
+    WalletChainAccess, WalletEngine, WalletEngineConfig, WalletEngineParts,
 };
 use ergo_wallet_service::state::WalletState;
 use ergo_wallet_service::wallet::scan::{RescanBlock, RescanReadError};
@@ -44,6 +61,9 @@ pub use chain_client::{
 };
 use chain_snapshot::chain_state_read_failed;
 pub use chain_snapshot::ChainSnapshot;
+/// The chain-apply hook lives in the wallet service; the node wires it into
+/// block apply / rollback.
+pub use ergo_wallet_service::engine::WalletStateHook;
 
 /// Production [`TxSubmitter`] backed by the node's `NodeSubmit` bridge.
 pub struct NodeSubmitAdapter {
@@ -1116,188 +1136,12 @@ impl WalletChainAccess for ChainStateAccessorImpl {
     }
 }
 
-/// Production `WalletApplyHook` backed by the shared `Arc<RwLock<WalletState>>`
-/// (synchronous `parking_lot::RwLock`).
-///
-/// Invoked from `StateStore::apply_block` and `rollback_to` on the chain-apply
-/// path inside `handle_sync_tick`. The trait is synchronous because the apply
-/// path is synchronous; the lock is synchronous because `WalletState` is plain
-/// in-memory data. Both hook methods clone one collection and drop the guard.
-///
-/// Contention coupling: admin commands (`unlock`, `restore`, `derive_*`) take
-/// the writer side across PBKDF2 / key-derivation work, so the hook can wait
-/// briefly when one is in flight. Block-apply cadence (~120 s mainnet) is
-/// much slower than even a slow PBKDF2 (sub-second), so the worst case is a
-/// single delayed apply per admin operation.
-pub struct WalletStateHook {
-    wallet: Arc<RwLock<WalletState>>,
-    /// Shared wallet store used for block-apply matching and invalidation.
-    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-    /// The wallet's rollback guard; its coordinator also drives this hook's
-    /// full-rescan quiesce gates.
-    rescan_guard: WalletRescanGuard,
-}
-
-impl WalletStateHook {
-    pub fn new(
-        wallet: Arc<RwLock<WalletState>>,
-        store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
-        rescan: Arc<RescanCoordinator>,
-    ) -> Self {
-        Self {
-            wallet,
-            store,
-            rescan_guard: WalletRescanGuard::new(rescan),
-        }
-    }
-
-    /// The chain-rollback guard sharing this hook's rescan coordinator.
-    pub fn rescan_guard(&self) -> &WalletRescanGuard {
-        &self.rescan_guard
-    }
-
-    /// The hook + rollback guard pair threaded through chain apply/rollback.
-    pub fn wiring(&self) -> ergo_wallet_service::wallet::WalletWiring<'_> {
-        ergo_wallet_service::wallet::WalletWiring {
-            hook: self,
-            rescan_guard: &self.rescan_guard,
-        }
-    }
-
-    fn rescan(&self) -> &RescanCoordinator {
-        self.rescan_guard.coordinator()
-    }
-}
-
-impl ergo_wallet_service::wallet::WalletApplyHook for WalletStateHook {
-    fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
-        // Full rescans and fail-closed recovery suppress wallet payloads;
-        // partial rescans leave live wallet apply enabled.
-        if self.rescan().scan_rebuild_in_progress() {
-            return std::collections::BTreeSet::new();
-        }
-        let state = self.wallet.read();
-        state.tracked_p2pk_trees().clone()
-    }
-
-    fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if self.rescan().scan_rebuild_in_progress() {
-            return std::collections::BTreeMap::new();
-        }
-        let state = self.wallet.read();
-        state.cached_pubkeys().clone()
-    }
-
-    fn wallet_state_snapshot(
-        &self,
-    ) -> (
-        std::collections::BTreeSet<Vec<u8>>,
-        std::collections::BTreeMap<u64, [u8; 33]>,
-    ) {
-        if self.rescan().scan_rebuild_in_progress() {
-            return (Default::default(), Default::default());
-        }
-        let state = self.wallet.read();
-        (
-            state.tracked_p2pk_trees().clone(),
-            state.cached_pubkeys().clone(),
-        )
-    }
-
-    fn allow_non_contiguous_wallet_apply(&self) -> bool {
-        self.rescan().in_progress() && !self.rescan().scan_rebuild_in_progress()
-    }
-
-    fn registered_scan_count(&self) -> usize {
-        // Skip live scan apply while a full rescan is rebuilding the scan
-        // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
-        // block, so a concurrent live write would race it (miss a spend
-        // against the cleared reverse index, or stale that index). Mirrors
-        // the full-rescan gate on the pubkey path. A PARTIAL
-        // rescan does not set this flag, so live scan tracking continues
-        // across it (scans have no range-rewind rebuild).
-        if self.rescan().scan_rebuild_in_progress() {
-            return 0;
-        }
-        // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
-        // independent of the wallet-pubkey rescan, so (unlike the methods above)
-        // it is NOT skipped while a *partial* rescan is in progress. A read error
-        // skips scan work for this block (logged) rather than aborting chain apply.
-        let count = self
-            .store
-            .read()
-            .and_then(|read| read.registered_scan_count());
-        match count {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
-                mark_scan_invalidated(self.store.as_ref(), self.rescan());
-                0
-            }
-        }
-    }
-
-    fn match_boxes(&self, boxes: &[ergo_ser::ergo_box::ErgoBox]) -> Vec<Vec<u16>> {
-        // Quiesced during a scan rebuild (see `registered_scan_count`). The
-        // count gate already returns 0 then, so this is defense in depth —
-        // mirrors the pubkey path gating both of its hook methods.
-        if self.rescan().scan_rebuild_in_progress() {
-            return vec![Vec::new(); boxes.len()];
-        }
-        // Load the registry once for the whole block, then match each box.
-        match commands::scan::load_registry_from_store(self.store.as_ref()) {
-            Ok(registry) => boxes
-                .iter()
-                .map(|b| registry.matching_scan_ids(b))
-                .collect(),
-            Err(e) => {
-                tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
-                mark_scan_invalidated(self.store.as_ref(), self.rescan());
-                vec![Vec::new(); boxes.len()]
-            }
-        }
-    }
-}
-
-/// Flip `WALLET_SCAN_INVALIDATED` after a scan-registry read failure so
-/// `/wallet/status` surfaces the condition and the operator can rescan. The
-/// rescan guards are latched before the write attempt, regardless of whether
-/// the durable flag write succeeds; the flag remains the recovery signal.
-fn mark_scan_invalidated(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
-    rescan: &RescanCoordinator,
-) {
-    const RETRIES: usize = 3;
-    rescan.latch_fail_closed();
-    let mut last_error = None;
-    for attempt in 0..RETRIES {
-        match try_mark_scan_invalidated(store) {
-            Ok(()) => return,
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < RETRIES {
-                    std::thread::yield_now();
-                }
-            }
-        }
-    }
-    if let Some(error) = last_error {
-        tracing::error!(error = %error, "scan apply: failed to set scan-invalidated flag after a registry read failure; continuing with in-memory invalidation");
-    }
-}
-
-fn try_mark_scan_invalidated(
-    store: &dyn ergo_wallet_service::wallet::WalletStore,
-) -> Result<(), ergo_wallet_service::wallet::WalletStoreError> {
-    store.persist_scan_invalidation(true)
-}
-
 /// Writer-task loop. Runs in a dedicated tokio task; receives commands and
 /// dispatches against owned `storage` + `state` + wallet store + `chain`
 /// accessor. Each command's reply is sent back via its oneshot. `rescan` is
 /// the wallet's rescan coordinator, shared with the [`NodeWalletAdmin`] fence
 /// and the chain-apply [`WalletStateHook`].
-#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
+#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into the engine
 pub async fn run_wallet_writer(
     rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
@@ -1398,201 +1242,267 @@ async fn run_wallet_writer_inner(
     wallet_session_id: u64,
     service: Option<Arc<ergo_wallet_service::runtime::WalletService>>,
 ) {
-    let mempool: Arc<dyn MempoolOverlay> = Arc::new(MempoolViewOverlay::new(mempool));
-    let ctx = commands::WriterContext {
-        storage: &storage,
-        state: &state,
-        store: &store,
-        chain: &chain,
-        cfg: &cfg,
-        submit_handle: &submit_handle,
-        mempool: &mempool,
-        service: service.as_deref(),
-        rescan: &rescan,
-        wallet_session_id,
-    };
-    // Sensitive-op failed-attempt budgets, owned by this loop (the single
-    // choke point every wallet surface funnels through). See
-    // `commands::admin::AttemptLimiter`.
-    let unlock_limiter = commands::admin::AttemptLimiter::new();
-    let check_limiter = commands::admin::AttemptLimiter::new();
+    let engine = WalletEngine::new(WalletEngineParts {
+        storage,
+        state,
+        store,
+        chain,
+        config: cfg,
+        submitter: submit_handle,
+        mempool: Arc::new(MempoolViewOverlay::new(mempool)),
+        service,
+        rescan,
+    });
     while let Some(cmd) = rx.recv().await {
-        if !cmd.is_rescan_control() && rescan.operations_fenced() {
+        if !cmd.is_rescan_control() && engine.rescan_coordinator().operations_fenced() {
             cmd.reject_during_rescan();
             continue;
         }
-        match cmd {
-            WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
-            WalletCommand::Init {
-                pass,
-                mnemonic_pass,
-                strength,
-                reply,
-            } => commands::admin::init(&ctx, pass, mnemonic_pass, strength, reply).await,
-            WalletCommand::Restore {
-                mnemonic,
-                mnemonic_pass,
-                pass,
-                use_pre_1627,
-                reply,
-            } => {
-                commands::admin::restore(&ctx, mnemonic, mnemonic_pass, pass, use_pre_1627, reply)
-                    .await
-            }
-            WalletCommand::Rescan { from_height, reply } => {
-                commands::admin::rescan(&ctx, from_height, reply).await
-            }
-            WalletCommand::Unlock { pass, reply } => {
-                commands::admin::unlock(&ctx, &unlock_limiter, pass, reply).await
-            }
-            WalletCommand::Lock { reply } => commands::admin::lock(&ctx, reply).await,
-            WalletCommand::Check {
-                mnemonic,
-                mnemonic_pass,
-                reply,
-            } => commands::admin::check(&ctx, &check_limiter, mnemonic, mnemonic_pass, reply).await,
-            WalletCommand::UpdateChangeAddress { address, reply } => {
-                commands::admin::update_change_address(&ctx, address, reply).await
-            }
-            WalletCommand::Balances { reply } => commands::admin::balances(&ctx, reply).await,
-            WalletCommand::BalancesWithUnconfirmed { reply } => {
-                commands::admin::balances_with_unconfirmed(&ctx, reply).await
-            }
-            WalletCommand::NativeBalance {
-                include_unconfirmed,
-                reply,
-            } => commands::admin::native_balance(&ctx, include_unconfirmed, reply).await,
-            WalletCommand::NativeStatus { reply } => {
-                commands::admin::native_status(&ctx, reply).await
-            }
-            WalletCommand::NativeAddresses {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_addresses(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeBoxes {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_boxes(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeBoxById { box_id_hex, reply } => {
-                commands::admin::native_box_by_id(&ctx, box_id_hex, reply).await
-            }
-            WalletCommand::NativeTransactions {
-                offset,
-                limit,
-                reply,
-            } => commands::admin::native_transactions(&ctx, offset, limit, reply).await,
-            WalletCommand::NativeTransactionById { tx_id_hex, reply } => {
-                commands::admin::native_transaction_by_id(&ctx, tx_id_hex, reply).await
-            }
-            WalletCommand::NativeSelectBoxes { req, reply } => {
-                commands::send::native_select_boxes(&ctx, *req, reply).await
-            }
-            WalletCommand::NativeBuildTransaction { intent, reply } => {
-                commands::send::native_build_transaction(&ctx, *intent, reply).await
-            }
-            WalletCommand::NativeSignTransaction { req, reply } => {
-                commands::send::native_sign_transaction(&ctx, *req, reply).await
-            }
-            WalletCommand::NativeSendTransaction { req, reply } => {
-                commands::send::native_send_transaction(&ctx, *req, reply).await
-            }
-            WalletCommand::Addresses { reply } => commands::admin::addresses(&ctx, reply).await,
-            WalletCommand::Boxes { page, reply } => commands::admin::boxes(&ctx, page, reply).await,
-            WalletCommand::BoxesUnspent { page, reply } => {
-                commands::admin::boxes_unspent(&ctx, page, reply).await
-            }
-            WalletCommand::Transactions { page, reply } => {
-                commands::admin::transactions(&ctx, page, reply).await
-            }
-            WalletCommand::TransactionById { tx_id_hex, reply } => {
-                commands::admin::transaction_by_id(&ctx, tx_id_hex, reply).await
-            }
-            WalletCommand::TransactionsByScanId {
-                scan_id,
-                page,
-                reply,
-            } => commands::admin::transactions_by_scan_id(&ctx, scan_id, page, reply).await,
-            WalletCommand::PaymentSend { requests, reply } => {
-                commands::send::payment_send(&ctx, requests, reply).await
-            }
-            WalletCommand::RetrieveRewards { req, reply } => {
-                commands::send::retrieve_rewards(&ctx, req, reply).await
-            }
-            WalletCommand::TransactionGenerate { request, reply } => {
-                commands::send::transaction_generate(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionGenerateUnsigned { request, reply } => {
-                commands::send::transaction_generate_unsigned(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionSign { request, reply } => {
-                commands::send::transaction_sign(&ctx, request, reply).await
-            }
-            WalletCommand::TransactionSend { request, reply } => {
-                commands::send::transaction_send(&ctx, request, reply).await
-            }
-            WalletCommand::BoxesCollect { request, reply } => {
-                commands::send::boxes_collect(&ctx, request, reply).await
-            }
-            WalletCommand::GenerateCommitments { request, reply } => {
-                commands::multisig::generate_commitments(&ctx, request, reply).await
-            }
-            WalletCommand::ExtractHints { request, reply } => {
-                commands::multisig::extract_hints(&ctx, request, reply).await
-            }
-            WalletCommand::DeriveKey { request, reply } => {
-                commands::multisig::derive_key(&ctx, request, reply).await
-            }
-            WalletCommand::DeriveNextKey { reply } => {
-                commands::multisig::derive_next_key(&ctx, reply).await
-            }
-            WalletCommand::GetPrivateKey { request, reply } => {
-                commands::multisig::get_private_key(&ctx, request, reply).await
-            }
-            WalletCommand::RegisterScan { request, reply } => {
-                commands::scan::register(&ctx, request, reply).await
-            }
-            WalletCommand::DeregisterScan { scan_id, reply } => {
-                commands::scan::deregister(&ctx, scan_id, reply).await
-            }
-            WalletCommand::ListScans { reply } => commands::scan::list(&ctx, reply).await,
-            WalletCommand::ScanUnspentBoxes {
-                scan_id,
-                filter,
-                reply,
-            } => commands::scan::unspent_boxes(&ctx, scan_id, filter, reply).await,
-            WalletCommand::ScanSpentBoxes {
-                scan_id,
-                filter,
-                reply,
-            } => commands::scan::spent_boxes(&ctx, scan_id, filter, reply).await,
-            WalletCommand::ScanStopTracking {
-                scan_id,
-                box_id,
-                reply,
-            } => commands::scan::stop_tracking(&ctx, scan_id, box_id, reply).await,
-            WalletCommand::ScanAddBox {
-                scan_ids,
-                box_json,
-                reply,
-            } => commands::scan::add_box(&ctx, scan_ids, box_json, reply).await,
-            WalletCommand::ScanP2sRule { p2s, reply } => {
-                commands::scan::p2s_rule(&ctx, p2s, reply).await
-            }
+        dispatch(&engine, wallet_session_id, cmd).await;
+    }
+}
+
+/// Run one command against the engine and send its reply. Commands run one
+/// at a time, in arrival order: this is the wallet's single writer.
+async fn dispatch(engine: &WalletEngine, wallet_session_id: u64, cmd: WalletCommand) {
+    match cmd {
+        WalletCommand::Status { reply } => {
+            let _ = reply.send(engine.status());
+        }
+        WalletCommand::Init {
+            pass,
+            mnemonic_pass,
+            strength,
+            reply,
+        } => {
+            let _ = reply.send(engine.init(pass, mnemonic_pass, strength));
+        }
+        WalletCommand::Restore {
+            mnemonic,
+            mnemonic_pass,
+            pass,
+            use_pre_1627,
+            reply,
+        } => {
+            let _ = reply.send(engine.restore(mnemonic, mnemonic_pass, pass, use_pre_1627));
+        }
+        WalletCommand::Rescan { from_height, reply } => {
+            rescan(engine, wallet_session_id, from_height, reply).await
+        }
+        WalletCommand::Unlock { pass, reply } => {
+            let _ = reply.send(engine.unlock(pass));
+        }
+        WalletCommand::Lock { reply } => {
+            let _ = reply.send(engine.lock());
+        }
+        WalletCommand::Check {
+            mnemonic,
+            mnemonic_pass,
+            reply,
+        } => {
+            let _ = reply.send(engine.check(mnemonic, mnemonic_pass));
+        }
+        WalletCommand::UpdateChangeAddress { address, reply } => {
+            let _ = reply.send(engine.update_change_address(address));
+        }
+        WalletCommand::Balances { reply } => {
+            let _ = reply.send(engine.balances());
+        }
+        WalletCommand::BalancesWithUnconfirmed { reply } => {
+            let _ = reply.send(engine.balances_with_unconfirmed());
+        }
+        WalletCommand::NativeBalance {
+            include_unconfirmed,
+            reply,
+        } => {
+            let _ = reply.send(engine.native_balance(include_unconfirmed));
+        }
+        WalletCommand::NativeStatus { reply } => {
+            let _ = reply.send(engine.native_status());
+        }
+        WalletCommand::NativeAddresses {
+            offset,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(engine.native_addresses(offset, limit));
+        }
+        WalletCommand::NativeBoxes {
+            offset,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(engine.native_boxes(offset, limit));
+        }
+        WalletCommand::NativeBoxById { box_id_hex, reply } => {
+            let _ = reply.send(engine.native_box_by_id(box_id_hex));
+        }
+        WalletCommand::NativeTransactions {
+            offset,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(engine.native_transactions(offset, limit));
+        }
+        WalletCommand::NativeTransactionById { tx_id_hex, reply } => {
+            let _ = reply.send(engine.native_transaction_by_id(tx_id_hex));
+        }
+        WalletCommand::NativeSelectBoxes { req, reply } => {
+            let _ = reply.send(engine.native_select_boxes(*req));
+        }
+        WalletCommand::NativeBuildTransaction { intent, reply } => {
+            let _ = reply.send(engine.native_build_transaction(*intent));
+        }
+        WalletCommand::NativeSignTransaction { req, reply } => {
+            let _ = reply.send(engine.native_sign_transaction(*req));
+        }
+        WalletCommand::NativeSendTransaction { req, reply } => {
+            let _ = reply.send(engine.native_send_transaction(*req).await);
+        }
+        WalletCommand::Addresses { reply } => {
+            let _ = reply.send(engine.addresses());
+        }
+        WalletCommand::Boxes { page, reply } => {
+            let _ = reply.send(engine.boxes(page));
+        }
+        WalletCommand::BoxesUnspent { page, reply } => {
+            let _ = reply.send(engine.boxes_unspent(page));
+        }
+        WalletCommand::Transactions { page, reply } => {
+            let _ = reply.send(engine.transactions(page));
+        }
+        WalletCommand::TransactionById { tx_id_hex, reply } => {
+            let _ = reply.send(engine.transaction_by_id(tx_id_hex));
+        }
+        WalletCommand::TransactionsByScanId {
+            scan_id,
+            page,
+            reply,
+        } => {
+            let _ = reply.send(engine.transactions_by_scan_id(scan_id, page));
+        }
+        WalletCommand::PaymentSend { requests, reply } => {
+            let _ = reply.send(engine.payment_send(requests).await);
+        }
+        WalletCommand::RetrieveRewards { req, reply } => {
+            let _ = reply.send(engine.retrieve_rewards(req).await);
+        }
+        WalletCommand::TransactionGenerate { request, reply } => {
+            let _ = reply.send(engine.transaction_generate(request));
+        }
+        WalletCommand::TransactionGenerateUnsigned { request, reply } => {
+            let _ = reply.send(engine.transaction_generate_unsigned(request));
+        }
+        WalletCommand::TransactionSign { request, reply } => {
+            let _ = reply.send(engine.transaction_sign(request));
+        }
+        WalletCommand::TransactionSend { request, reply } => {
+            let _ = reply.send(engine.transaction_send(request).await);
+        }
+        WalletCommand::BoxesCollect { request, reply } => {
+            let _ = reply.send(engine.boxes_collect(request));
+        }
+        WalletCommand::GenerateCommitments { request, reply } => {
+            let _ = reply.send(engine.generate_commitments(request));
+        }
+        WalletCommand::ExtractHints { request, reply } => {
+            let _ = reply.send(engine.extract_hints(request));
+        }
+        WalletCommand::DeriveKey { request, reply } => {
+            let _ = reply.send(engine.derive_key(request));
+        }
+        WalletCommand::DeriveNextKey { reply } => {
+            let _ = reply.send(engine.derive_next_key());
+        }
+        WalletCommand::GetPrivateKey { request, reply } => {
+            let _ = reply.send(engine.get_private_key(request));
+        }
+        WalletCommand::RegisterScan { request, reply } => {
+            let _ = reply.send(engine.register_scan(request));
+        }
+        WalletCommand::DeregisterScan { scan_id, reply } => {
+            let _ = reply.send(engine.deregister_scan(scan_id));
+        }
+        WalletCommand::ListScans { reply } => {
+            let _ = reply.send(engine.list_scans());
+        }
+        WalletCommand::ScanUnspentBoxes {
+            scan_id,
+            filter,
+            reply,
+        } => {
+            let _ = reply.send(engine.scan_unspent_boxes(scan_id, filter));
+        }
+        WalletCommand::ScanSpentBoxes {
+            scan_id,
+            filter,
+            reply,
+        } => {
+            let _ = reply.send(engine.scan_spent_boxes(scan_id, filter));
+        }
+        WalletCommand::ScanStopTracking {
+            scan_id,
+            box_id,
+            reply,
+        } => {
+            let _ = reply.send(engine.scan_stop_tracking(scan_id, box_id));
+        }
+        WalletCommand::ScanAddBox {
+            scan_ids,
+            box_json,
+            reply,
+        } => {
+            let _ = reply.send(engine.scan_add_box(&scan_ids, || decode_scan_box(&box_json)));
+        }
+        WalletCommand::ScanP2sRule { p2s, reply } => {
+            let _ = reply.send(engine.scan_p2s_rule(p2s));
         }
     }
 }
 
-// `run_wallet_writer` per-command handlers split into per-group
-// submodules. Each handler receives a borrowed
-// `commands::WriterContext` plus the per-command params +
-// reply oneshot.
-mod commands;
+/// `/wallet/rescan`: the engine validates and claims the rescan, the replay
+/// runs on a blocking thread tracked with the wallet session (so shutdown
+/// waits for it), and the reply is sent once the task is registered — the
+/// RPC never waits for the replay itself.
+async fn rescan(
+    engine: &WalletEngine,
+    wallet_session_id: u64,
+    from_height: u32,
+    reply: oneshot::Sender<Result<(), WalletAdminError>>,
+) {
+    let job = match engine.prepare_rescan(from_height) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
+        }
+    };
+    let uses_service = job.uses_service();
+    let task = tokio::task::spawn_blocking(move || job.run());
+    if let Err(error) = crate::wallet_boot::track_wallet_task(wallet_session_id, task).await {
+        if uses_service {
+            tracing::error!(%error, "wallet service rescan task failed");
+        } else {
+            tracing::error!(%error, "wallet rescan task failed");
+        }
+        let _ = reply.send(Err(WalletAdminError::Internal(format!(
+            "wallet rescan task failed: {error}"
+        ))));
+        return;
+    }
+    let _ = reply.send(Ok(()));
+}
+
+/// Decode the `box` member of a `/scan/addBox` body (Scala SDK `ErgoBox`
+/// JSON) for the engine. The JSON wire shape is the transport's concern; the
+/// decoder keeps on-chain wire bytes verbatim so the box id is preserved.
+fn decode_scan_box(box_json: &serde_json::Value) -> Result<ErgoBox, WalletAdminError> {
+    ergo_rest_json::decode::decode_on_chain_ergo_box_json(box_json)
+        .map_err(WalletAdminError::BadRequest)
+}
 #[cfg(test)]
 mod command_fencing_tests {
     use super::*;
-    use ergo_wallet_service::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
 
     #[tokio::test]
     async fn normal_commands_are_fenced_but_rescan_is_allowed() {
@@ -1692,118 +1602,5 @@ mod command_fencing_tests {
             reply_rx.await.unwrap(),
             Err(WalletAdminError::RescanUnavailable(_))
         ));
-    }
-
-    struct FailingInvalidationStore;
-
-    impl WalletStore for FailingInvalidationStore {
-        fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
-            panic!("read is not used by this test")
-        }
-
-        fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
-            Err(WalletStoreError::Decode("injected".to_string()))
-        }
-    }
-
-    #[tokio::test]
-    async fn invalidation_write_failure_latches_fail_closed_guards() {
-        let coordinator = RescanCoordinator::new();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::mark_scan_invalidated(&FailingInvalidationStore, &coordinator)
-        }));
-        assert!(result.is_ok());
-        assert!(coordinator.fail_closed());
-        assert!(coordinator.in_progress());
-        assert!(coordinator.scan_rebuild_in_progress());
-    }
-}
-
-#[cfg(test)]
-mod scan_invalidation_tests {
-    use super::*;
-    use ergo_wallet_service::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
-
-    fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
-        (dir, Arc::new(db))
-    }
-
-    fn flag_set(db: &redb::Database) -> bool {
-        let r = db.begin_read().unwrap();
-        match r.open_table(WALLET_SCAN_INVALIDATED) {
-            Ok(t) => t.get(()).unwrap().map(|g| g.value()).unwrap_or(false),
-            Err(_) => false,
-        }
-    }
-
-    #[test]
-    fn mark_scan_invalidated_sets_the_flag() {
-        let coordinator = RescanCoordinator::new();
-        let (_d, db) = temp_db();
-        assert!(!flag_set(&db), "flag starts clear");
-        let store: Arc<dyn ergo_wallet_service::wallet::WalletStore> = Arc::new(
-            ergo_wallet_service::wallet::RedbWalletStore::new(db.clone()),
-        );
-        mark_scan_invalidated(store.as_ref(), &coordinator);
-        assert!(flag_set(&db), "flag set after mark");
-        assert!(coordinator.fail_closed());
-        assert!(coordinator.in_progress());
-        assert!(coordinator.scan_rebuild_in_progress());
-    }
-
-    #[test]
-    fn wallet_state_hook_snapshots_trees_and_pubkeys_together() {
-        let state = Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
-            false,
-        )));
-        state
-            .write()
-            .insert_tracked_pubkey(0, [2; 33], ergo_ser::address::NetworkPrefix::Mainnet)
-            .unwrap();
-        let (_dir, db) = temp_db();
-        let hook = WalletStateHook::new(
-            state,
-            Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(db)),
-            Arc::new(RescanCoordinator::new()),
-        );
-        let (trees, pubkeys) =
-            ergo_wallet_service::wallet::WalletApplyHook::wallet_state_snapshot(&hook);
-        assert!(!trees.is_empty());
-        assert!(!pubkeys.is_empty());
-    }
-
-    #[test]
-    fn match_boxes_registry_load_failure_invalidates_for_rescan() {
-        let (_d, db) = temp_db();
-        // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
-        // fail when match_boxes loads it for the block.
-        {
-            let w = db.begin_write().unwrap();
-            w.open_table(WALLET_SCANS)
-                .unwrap()
-                .insert(11u16, vec![0xFFu8, 0x00])
-                .unwrap();
-            w.commit().unwrap();
-        }
-        let store: Arc<dyn ergo_wallet_service::wallet::WalletStore> = Arc::new(
-            ergo_wallet_service::wallet::RedbWalletStore::new(db.clone()),
-        );
-        let hook = WalletStateHook::new(
-            Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
-                false,
-            ))),
-            store,
-            Arc::new(RescanCoordinator::new()),
-        );
-        // match_boxes loads the registry first (regardless of the box slice), so
-        // the corrupt row trips the Err branch even with no boxes.
-        let out = ergo_wallet_service::wallet::WalletApplyHook::match_boxes(&hook, &[]);
-        assert!(out.is_empty());
-        assert!(
-            flag_set(&db),
-            "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
-        );
     }
 }

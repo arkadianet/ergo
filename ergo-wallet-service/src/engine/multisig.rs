@@ -1,11 +1,16 @@
-//! Multi-sig dispatch helpers: input/data-input resolution for
-//! `generateCommitments`/`extractHints`, and their writer-task implementations.
+//! Multi-sig commands: `generateCommitments` / `extractHints`, and the
+//! input/data-input resolution they share.
 
 use parking_lot::RwLock;
 
+use ergo_wallet_protocol::scala::multi_sig::{
+    GenerateCommitmentsRequest, GenerateCommitmentsResponse, HintExtractionRequest,
+    HintExtractionResponse,
+};
+
 use super::hints_codec::tx_hints_bag_to_dto;
 use super::sign::decode_external_secret;
-use crate::engine::{map_chain_error, SigningView, WalletChainAccess};
+use crate::engine::{map_chain_error, SigningView, WalletChainAccess, WalletEngine};
 use ergo_wallet_protocol::WalletAdminError;
 
 /// Collect all `SigmaBoolean` propositions the registry can prove.
@@ -68,7 +73,7 @@ fn collect_generate_for(
 /// - **JSON object**: `{"g":"<hex>","h":"<hex>","u":"<hex>","v":"<hex>"}` →
 ///   `ProveDHTuple`. Detect by trying `serde_json::from_str` first; fall back
 ///   to hex-DLog parse on failure.
-pub fn hex_pk_to_sigma_boolean(
+pub(crate) fn hex_pk_to_sigma_boolean(
     s: &str,
 ) -> Result<ergo_ser::sigma_value::SigmaBoolean, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -135,7 +140,7 @@ fn lookup_snapshot_utxo(
 
 /// Resolve input box IDs: use `override_ids` if supplied, else look up every
 /// input in the unsigned transaction from the UTXO set via `chain`.
-pub fn resolve_inputs_for_unsigned(
+pub(crate) fn resolve_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -169,7 +174,7 @@ pub fn resolve_inputs_for_unsigned(
 }
 
 /// Resolve data-input box IDs (same logic, from `unsigned_tx.data_inputs`).
-pub fn resolve_data_inputs_for_unsigned(
+pub(crate) fn resolve_data_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -202,7 +207,7 @@ pub fn resolve_data_inputs_for_unsigned(
 }
 
 /// Resolve input box IDs for a signed transaction.
-pub fn resolve_inputs_for_signed(
+pub(crate) fn resolve_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -233,7 +238,7 @@ pub fn resolve_inputs_for_signed(
 }
 
 /// Resolve data-input boxes for a signed transaction.
-pub fn resolve_data_inputs_for_signed(
+pub(crate) fn resolve_data_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
     snapshot: &dyn SigningView,
@@ -270,7 +275,7 @@ pub fn resolve_data_inputs_for_signed(
 /// Decodes the unsigned tx, collects all propositions the wallet knows
 /// secrets for (HD-derived + external), builds a signing context, and
 /// calls `generate_commitments_for_tx`.
-pub fn generate_commitments_impl(
+pub(crate) fn generate_commitments_impl(
     request: &ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     store: &dyn crate::wallet::WalletStore,
@@ -334,7 +339,7 @@ pub fn generate_commitments_impl(
 ///
 /// Decodes the signed tx, parses the `real` / `simulated` pubkey lists,
 /// and calls `bag_for_transaction`.
-pub fn extract_hints_impl(
+pub(crate) fn extract_hints_impl(
     request: &ergo_wallet_protocol::scala::multi_sig::HintExtractionRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     chain: &dyn WalletChainAccess,
@@ -381,4 +386,25 @@ pub fn extract_hints_impl(
 
     let hints_dto = tx_hints_bag_to_dto(&tbag);
     Ok(HintExtractionResponse { hints: hints_dto })
+}
+
+impl WalletEngine {
+    pub fn generate_commitments(
+        &self,
+        request: GenerateCommitmentsRequest,
+    ) -> Result<GenerateCommitmentsResponse, WalletAdminError> {
+        super::multisig::generate_commitments_impl(
+            &request,
+            &self.storage,
+            self.store.as_ref(),
+            self.chain.as_ref(),
+        )
+    }
+
+    pub fn extract_hints(
+        &self,
+        request: HintExtractionRequest,
+    ) -> Result<HintExtractionResponse, WalletAdminError> {
+        super::multisig::extract_hints_impl(&request, &self.storage, self.chain.as_ref())
+    }
 }

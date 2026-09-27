@@ -39,6 +39,10 @@ test-support = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# TEST-ONLY: the `/scan/addBox` tests decode their Scala box JSON with the same
+# decoder the node uses in production. Kept out of the normal graph so the
+# service (and the daemon) never pull in the REST JSON layer.
+ergo-rest-json = { workspace = true }
 
 [[test]]
 name = "it"
