@@ -1,0 +1,296 @@
+[
+  {
+    "at": 1790532642.6735537,
+    "end": 1790532642.6777318,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532643.792338,
+    "end": 1790532643.7962599,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532644.7985992,
+    "end": 1790532644.802785,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532645.804622,
+    "end": 1790532645.8088415,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532646.8113782,
+    "end": 1790532646.8187358,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532647.873626,
+    "end": 1790532647.8776515,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  },
+  {
+    "at": 1790532648.8800118,
+    "end": 1790532648.8837016,
+    "miner": 29,
+    "actual": 28,
+    "tracked": 26,
+    "raw_statuses": [
+      {
+        "address": "/127.0.0.3:19573",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 29
+      },
+      {
+        "address": "/127.0.0.2:19571",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Younger",
+        "height": 26
+      },
+      {
+        "address": "N/A",
+        "version": "6.5.0",
+        "mode": {
+          "state": "utxo",
+          "verifyingTransactions": true,
+          "fullBlocksSuffix": -1
+        },
+        "status": "Equal",
+        "height": 28
+      }
+    ]
+  }
+]

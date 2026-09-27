@@ -434,7 +434,9 @@ Identical `--base-build` and `--build` values are supported, including with
 `--reference-follower both`.
 
 The measurement opens after the mempool workload. Its miner-log boundaries
-are `Updating state with new ordering block …, height: …`. It includes the
+are the miner’s successful `Valid modifier with header … applied to UtxoState
+at height …` lines. The input-tree reset message is conditional and absent
+on these miner builds; using it would leave every interval open. It includes the
 initial partial interval and completed intervals thereafter, excluding the
 terminal open interval. Empty mined intervals do not count as delivery
 blackouts. Raw source lines, sample times, missing IDs and denominators are
@@ -454,7 +456,11 @@ retained in JSON so totals can be recomputed.
   nonempty mined intervals with no observed member by the receipt cutoff.
 * M2 samples the miner's `/peers/syncInfo` and follower `/info.fullHeight`,
   bracketing the sweep with miner-height reads. A moving miner tip or absent
-  peer status is unknown, not zero. The share uses comparable samples; stale
+  peer status is unknown, not zero. The route exists on `base`
+  (a1bd938ef) and `syncfix` (6fad0e04e); its addresses are declared peer
+  addresses, so both Scala followers match their configured 127.0.0.x
+  addresses. Rust advertises no address and appears as `N/A`; its M2
+  samples remain unknown because that label cannot identify a peer. The share uses comparable samples; stale
   means tracked distance >2 while actual distance ≤2. The longest observed
   stretch spans consecutive stale samples; unknown samples break it. Reads
   are sequential, and raw start/end times expose the sampling skew.
@@ -481,7 +487,30 @@ Run the new tests through the existing suite:
 TMPDIR="$PWD/.tmp" python3 scripts/devnet-matrix/verdict_self_test.py --self-test
 ```
 
-The checked-in parser fixtures are source-derived. A live smoke must still
-validate the formats and supply captured fixtures before acceptance evidence
-is claimed. Preserve the workspace-local dependency cache referenced by
+The checked-in fixtures under `fixtures/relay-*` are verbatim captures from
+the first smoke’s logs and REST samples; their README records provenance.
+The three metric regression tests fail against 7e8a335e. A traffic source
+without a completed interval is unavailable, even if frames were parsed. Preserve the workspace-local dependency cache referenced by
 provisioned classpaths when archiving or moving these builds.
+
+
+For the relay campaign, keep `MATRIX_WORK` under the worktree’s `.tmp`,
+**outside** the evidence archive. `lifecycle.py` writes wallet mnemonics in
+`$MATRIX_WORK/<node>-wallet.mnemonic`; campaign node data lives in
+`$MATRIX_WORK/campaign/steady/<node>/`.
+Export only the campaign’s top-level `*.json`, `*.jsonl`, `*.log` and
+`attempts/` after completion, including failed runs. Never copy the `steady/`
+node directory or wallet files into evidence. The external relay `run.sh`
+uses `.tmp/relay-campaign/<arm>` for node work and exports measurements to
+`relay-refresh-2026-09-28/<arm>/campaign/`.
+
+The 12-block validation command is:
+
+```bash
+export TMPDIR="$PWD/.tmp" CARGO_TARGET_DIR="$PWD/target"
+export RUST_NODE="$PWD/target/release/ergo-node"
+export JDK_JAVA_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:ActiveProcessorCount=3"
+MATRIX_WORK="$PWD/.tmp/relay-smoke2" nice -n 19 python3 scripts/devnet-matrix/campaign.py \
+  --scenario steady --fresh --base-build base --build syncfix \
+  --reference-follower both --ordering-blocks 12
+```

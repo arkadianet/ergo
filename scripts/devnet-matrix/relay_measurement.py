@@ -15,7 +15,8 @@ ID = r'[0-9a-f]{64}'
 RECEIPT = re.compile(rf'(?:Adding input block ({ID}) to existing tree|Creating new tree for input block ({ID}) and ordering block)')
 SYNC = re.compile(r'Received message MessageSpec\(65: Sync\) from ConnectionId\(remote=/([^,:]+):(\d+)')
 CONNECTION = re.compile(r'ConnectionId\(remote=/([^,]+), local=/([^,]+), direction=')
-HEIGHT = re.compile(r'Updating state with new ordering block [0-9a-f]{64}, height: (\d+)')
+# UtxoState logs successful full-block application on the miner as well as followers.
+HEIGHT = re.compile(r'Valid modifier with header [0-9a-f]{64} and emission box .* applied to UtxoState at height (\d+)')
 
 
 def timestamp(line):
@@ -96,7 +97,7 @@ def peer_traffic(sender_lines, receiver_lines, boundaries):
     result = traffic(selected, None, boundaries)
     result['matched_connections'] = len({CONNECTION.search(e['line']).groups() for e in selected})
     result['receiver_events'] = selected
-    result['available'] = bool(selected)
+    result['available'] = bool(selected) and bool(result['per_interval'])
     return result
 
 
