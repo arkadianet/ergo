@@ -74,11 +74,13 @@ fn report_sync_storage_failure(
 /// apply — versus a transient/IO/consistency failure that must NOT poison
 /// the branch (it might be our bug, a stale local root, or missing data).
 ///
-/// Only the consensus-rule verdicts qualify: `Validation`, `HeaderMeta`,
-/// `EpochExtension`, and `AdProofsHashMismatch` (the regenerated proof
+/// Only the consensus-rule verdicts qualify: `Validation`,
+/// `TransactionValidation`, `HeaderMeta`, `EpochExtension`, and
+/// `AdProofsHashMismatch` (the regenerated proof
 /// hash contradicting the header's declared `adProofsRoot` is exactly
 /// Scala's "Regenerated proofHash is not equal to the declared one"
-/// reject). `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
+/// reject). `TransactionValidation` has the same durable-invalidation semantics
+/// as `Validation`. `Deserialize`, `HeaderNotFound`, `ParentNotFound`, and `State`
 /// are data/IO/consistency paths (a stored section that won't parse could
 /// be disk corruption, not a bad block); `DigestApply` is session-scoped by
 /// its own contract. When in doubt we do NOT invalidate — the conservative
