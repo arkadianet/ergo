@@ -193,10 +193,12 @@ impl SyncExecutor {
     /// evict the dead branch from the download queue, and drop stale
     /// `header_index` rows above the re-anchored tip. Persisting this across
     /// restart is what stops an invalid block being retried forever. Any other
-    /// error (transient / IO / digest-ambiguous) gets only a session-scoped
-    /// mark, cleared on restart — we must never persistently poison a branch
-    /// that might be failing on our own bug or a stale local root. If the
-    /// durable walk itself fails (IO), fall back to the session mark.
+    /// error (transient / IO / digest-ambiguous) gets a session-scoped
+    /// mark and may promote an eligible stored branch, without lowering the
+    /// selected score. Marks are cleared on restart: a local bug or stale root
+    /// must not persistently poison a branch. A durable-walk IO failure also
+    /// falls back to a session mark and promotion. Later drains retry selection
+    /// if a promotion write fails.
     ///
     /// Shared by [`Self::try_apply_next_blocks`] and `handle_assemble_block`
     /// so both apply-failure paths classify a failure identically.
@@ -212,6 +214,15 @@ impl SyncExecutor {
             // Transient / IO / digest-ambiguous failure: never poison the
             // branch persistently. Session-scoped only, cleared on restart.
             store.mark_session_invalid(header_id);
+            if let Err(error) = self.promote_session_sibling(store, coordinator, header_id, height)
+            {
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "promote_session_sibling",
+                    &error,
+                );
+            }
             return;
         }
         match store.invalidate_validation_branch(header_id) {
@@ -220,9 +231,22 @@ impl SyncExecutor {
                     invalidated.iter().copied().collect();
                 // Evict the dead branch from the download queue so the
                 // coordinator stops targeting it.
+                for id in &invalidated {
+                    coordinator.assembly_mut().remove(id);
+                }
                 coordinator
                     .sync_state_mut()
                     .retain_pending_blocks(|b| !invalid_ids.contains(&b.header_id));
+                if let Err(error) =
+                    self.promote_session_sibling(store, coordinator, header_id, height)
+                {
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "promote_verdict_sibling",
+                        &error,
+                    );
+                }
                 let cs = store.chain_state_meta();
                 // Drop stale header_index entries above the re-anchored tip so
                 // a later recover_coordinator can't re-seed the dead branch.
@@ -231,22 +255,95 @@ impl SyncExecutor {
                     height,
                     header_id = %hex::encode(header_id),
                     invalidated = invalidated.len(),
-                    reanchored_best_header_height = cs.best_header_height,
-                    "invalidated block and descendants; best_header re-anchored",
+                    selected_best_header_height = cs.best_header_height,
+                    "invalidated block and descendants; best_header selection updated",
                 );
             }
             Err(inv_err) => {
                 // Persisting the invalidation itself failed (IO). Fall back to
-                // a session mark so we at least stop re-applying this tick; the
-                // durable walk retries next drain.
+                // a session mark so we stop re-applying this session.
                 warn!(
                     height,
                     error = %inv_err,
                     "branch invalidation failed; session-marking",
                 );
                 store.mark_session_invalid(header_id);
+                if let Err(error) =
+                    self.promote_session_sibling(store, coordinator, header_id, height)
+                {
+                    super::report_sync_storage_failure(
+                        store,
+                        "block_apply",
+                        "promote_session_sibling",
+                        &error,
+                    );
+                }
             }
         }
+    }
+
+    /// Promote a validated, unmarked branch anchored at the applied tip when
+    /// the first unapplied block is rejected. Search is bounded by
+    /// `SESSION_PROMOTION_SEARCH_DEPTH`,
+    /// require score >= current best, and preserve slot order on equal scores.
+    fn promote_session_sibling(
+        &mut self,
+        store: &mut ergo_state::StateBackendKind,
+        coordinator: &mut SyncCoordinator,
+        rejected: [u8; 32],
+        height: u32,
+    ) -> StorageResult<()> {
+        let chain = store.chain_state_meta();
+        if height != chain.best_full_block_height + 1
+            || store.get_header_id_at_height(height)? != Some(rejected)
+        {
+            return Ok(());
+        }
+        let mut best_score = num_bigint::BigUint::from_bytes_be(&chain.best_header_score);
+        let mut candidate = None;
+        let upper = chain
+            .best_full_block_height
+            .saturating_add(crate::header_proc::SESSION_PROMOTION_SEARCH_DEPTH);
+        for h in height..=upper {
+            for id in store.reader_handle().header_ids_at_height_all(h)? {
+                let Some(meta) = store.get_header_meta(&id)? else {
+                    continue;
+                };
+                if meta.pow_validity != 1 || store.is_invalid(&id)? {
+                    continue;
+                }
+                let eligible = if h == height {
+                    meta.parent_id == chain.best_full_block_id
+                } else {
+                    crate::header_proc::branch_session_eligible(store, meta.parent_id, &chain)?
+                };
+                if !eligible {
+                    continue;
+                }
+                let score = num_bigint::BigUint::from_bytes_be(&meta.cumulative_score);
+                if score > best_score || (candidate.is_none() && score == best_score) {
+                    best_score = score;
+                    candidate = Some((id, meta));
+                }
+            }
+        }
+        if let Some((id, meta)) = candidate {
+            let bytes = store.get_header(&id)?.ok_or_else(|| {
+                ergo_state::store::StateError::DbCorruption {
+                    table: "headers",
+                    key: hex::encode(id),
+                    reason: "validated candidate has no header bytes".to_owned(),
+                }
+            })?;
+            let new_best = Some((meta.height, meta.cumulative_score.clone()));
+            store.store_validated_header(&id, &bytes, &meta, new_best)?;
+            coordinator.prune_pending_to_best_chain(store);
+            coordinator
+                .sync_state_mut()
+                .set_best_known_header(meta.height);
+            self.register_download_window(store, coordinator);
+        }
+        Ok(())
     }
 
     /// Apply consecutive stored blocks until no progress can be made.
@@ -318,7 +415,21 @@ impl SyncExecutor {
             // restart. Scala refuses re-application via the `validityKey -> 0`
             // row (`ErgoHistoryReader.isSemanticallyValid`).
             match HeaderSectionStore::is_invalid(store, &header_id) {
-                Ok(true) => break,
+                Ok(true) => {
+                    // Retry selection after a transient promotion write failure;
+                    // the marked block itself must never be applied again.
+                    if let Err(error) =
+                        self.promote_session_sibling(store, coordinator, header_id, next)
+                    {
+                        super::report_sync_storage_failure(
+                            store,
+                            "block_apply",
+                            "retry_session_promotion",
+                            &error,
+                        );
+                    }
+                    break;
+                }
                 Ok(false) => {}
                 Err(e) => {
                     super::report_sync_storage_failure(
@@ -409,6 +520,13 @@ impl SyncExecutor {
                 ) => {
                     guard.failure();
                     hit_section_wait = true;
+                    if !coordinator
+                        .sync_state()
+                        .pending_blocks_iter()
+                        .any(|b| b.header_id == header_id)
+                    {
+                        self.register_download_window(store, coordinator);
+                    }
                     break;
                 }
                 Err(

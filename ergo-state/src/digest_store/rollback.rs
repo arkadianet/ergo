@@ -21,7 +21,8 @@ use super::{
 impl DigestStateStore {
     /// Roll back to `target_height`. Reads
     /// `DIGEST_HISTORY[target_height]` and
-    /// `CHAIN_STATE_HISTORY[target_height]`, writes them back to
+    /// `CHAIN_STATE_HISTORY[target_height]`, preserves current best-header selection,
+    /// and writes the restored applied state back to
     /// `STATE_META["root_digest"]` and
     /// `CHAIN_STATE_META["chain_state"]`, truncates every height-
     /// indexed table (`DIGEST_HISTORY`, `CHAIN_STATE_HISTORY`,
@@ -45,7 +46,7 @@ impl DigestStateStore {
         // Pre-read both restoration rows in a read txn so we fail
         // before touching the write txn if either is missing.
         let restored_root = read_digest_history_row(&self.db, target_height)?;
-        let restored_chain_state = read_chain_state_history_row(&self.db, target_height)?;
+        let mut restored_chain_state = read_chain_state_history_row(&self.db, target_height)?;
 
         // Validate the restored ROOT digest BEFORE committing it —
         // applied live so a reorg never installs a poisoned root.
@@ -89,6 +90,12 @@ impl DigestStateStore {
                 ),
             });
         }
+        // Header selection is independent of applied digest history and must
+        // remain aligned with HEADER_CHAIN_INDEX on every rollback.
+        restored_chain_state.best_header_id = self.chain_state.best_header_id;
+        restored_chain_state.best_header_height = self.chain_state.best_header_height;
+        restored_chain_state.best_header_score = self.chain_state.best_header_score.clone();
+
         if let Err(reason) = chain_state_internal_invariant(&restored_chain_state) {
             return Err(StateError::DbCorruption {
                 table: "chain_state_history",

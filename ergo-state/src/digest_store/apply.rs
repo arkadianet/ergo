@@ -156,6 +156,18 @@ impl crate::backend::ChainStateRead for DigestStateStore {
 }
 
 impl crate::backend::HeaderSectionStore for DigestStateStore {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        for id in &self.session_invalids {
+            if self
+                .get_header_meta(id)?
+                .is_some_and(|meta| meta.height == height)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         self.headers.get_header(header_id)
     }

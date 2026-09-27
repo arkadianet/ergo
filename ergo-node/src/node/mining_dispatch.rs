@@ -933,13 +933,18 @@ pub(super) fn handle_mining_request(
             //      refuses children only of durably invalid parents, so its
             //      descendants are still accepted and draw no penalties, while
             //      try_apply_next_blocks stops at the session-marked id. A
-            //      transient cause (e.g. a storage error) wedges apply there
-            //      until restart. A deterministic one (the UTXO state-root
-            //      `DigestMismatch`, `BoxNotFound`, `Deserialize`) wedges it
-            //      across restarts, because the re-applied block fails and is
-            //      session-marked again. That is general session-mark
-            //      behaviour, which announcing before apply makes reachable for
-            //      mined blocks.
+            //      blocked chain yields to eligible equal-score arrivals or
+            //      stored competitors within SESSION_PROMOTION_SEARCH_DEPTH. If it
+            //      remains strictly heavier, apply stays stalled until a usable
+            //      branch catches up or restart clears the mark. Deterministic
+            //      local failures can recur after restart.
+            //      Once a tied sibling applies, the node extends that chain.
+            //      If the rejected block is network-valid, a heavier chain on
+            //      it rolls the sibling chain back when it arrives. Repeated
+            //      flips repeat that work; exceeding retained rollback history
+            //      can require resync. Equal-score branches forking below the
+            //      applied tip are ineligible: this node waits for their next
+            //      block, where Scala's loopHeightDown could switch immediately.
             //    - If our validator is the one in error on a verdict, the
             //      network adopts a block this node invalidated: the node forks
             //      itself off and penalizes honest peers relaying its

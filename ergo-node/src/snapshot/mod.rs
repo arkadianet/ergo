@@ -403,7 +403,7 @@ pub struct SnapshotParts<'a> {
     /// The most recent block-apply REJECTION projected to the API DTO
     /// (age computed at publish time from the executor's `Instant`), or `None`.
     /// Drives `ApiStatus.last_block_apply_error`. Overlays health as
-    /// `Rejecting` until applied blocks advance beyond the rejected height.
+    /// `Rejecting` until applied blocks pass that height or a sibling applies there.
     pub last_block_apply_error: Option<ergo_api::types::ApiBlockApplyError>,
     /// Monotonic block-apply rejection count, for the
     /// `ergo_node_block_apply_errors_total` Prometheus counter.

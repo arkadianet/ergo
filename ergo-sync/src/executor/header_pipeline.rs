@@ -84,6 +84,17 @@ fn report_header_flush_failure(
     super::report_sync_storage_failure(store, "header_pipeline", operation, error);
 }
 
+/// Whether the best header before a header batch is no longer on the best
+/// chain after it, meaning the batch switched branches.
+fn previous_best_left_chain(
+    store: &ergo_state::StateBackendKind,
+    (id, height): ([u8; 32], u32),
+) -> bool {
+    use ergo_state::HeaderSectionStore;
+    store.chain_state_meta().best_header_id != id
+        && store.get_header_id_at_height(height).ok().flatten() != Some(id)
+}
+
 impl SyncExecutor {
     /// Run the full single-header validation pipeline for an
     /// out-of-band local header (e.g. the §12 `POST /blocks`
@@ -131,6 +142,9 @@ impl SyncExecutor {
         self.header_perf.add_headers(1);
         let pre = pre_result?;
 
+        // A new best whose parent is not the previous best is a branch switch;
+        // only then can pending entries fall off the best chain.
+        let previous_best = store.chain_state_meta().best_header_id;
         let t_fin = Instant::now();
         let finalize_result = header_proc::finalize_header(
             store,
@@ -144,6 +158,9 @@ impl SyncExecutor {
             .add_finalize(t_fin.elapsed().as_nanos() as u64);
         let processed = finalize_result?;
 
+        if processed.is_new_best && processed.parent_id != previous_best {
+            coordinator.prune_pending_to_best_chain(store);
+        }
         self.push_validated_header(&processed, header_bytes);
         let drain_actions = self.drain_orphans(store, coordinator, now);
         Ok((processed, drain_actions))
@@ -190,6 +207,9 @@ impl SyncExecutor {
         // Cheap clone (PreValidatedHeader is ~hundreds of bytes).
         let pre_for_buffer = pre.clone();
 
+        // A new best whose parent is not the previous best is a branch switch;
+        // only then can pending entries fall off the best chain.
+        let previous_best = store.chain_state_meta().best_header_id;
         let t_fin = Instant::now();
         let finalize_result = header_proc::finalize_header(
             store,
@@ -217,6 +237,9 @@ impl SyncExecutor {
                     expected,
                     now,
                 );
+                if processed.is_new_best && processed.parent_id != previous_best {
+                    coordinator.prune_pending_to_best_chain(store);
+                }
                 self.push_validated_header(&processed, header_bytes);
 
                 // Drain orphan buffer — each success may unlock more orphans.
@@ -353,6 +376,8 @@ impl SyncExecutor {
         // Phase 2: sequential finalization (chain linkage + deferred persist)
         // Batch mode: store writes go to in-memory buffer, flushed to one
         // redb transaction at the end. Parent lookups hit the buffer first.
+        let previous = store.chain_state_meta();
+        let previous_best = (previous.best_header_id, previous.best_header_height);
         store.begin_header_batch();
         let t_fin = Instant::now();
         let mut actions = Vec::new();
@@ -446,6 +471,12 @@ impl SyncExecutor {
         }
         self.header_perf
             .add_flush(t_flush.elapsed().as_nanos() as u64);
+        // Best-chain index reads reflect the new selection only after flush.
+        // Pending entries can only fall off the best chain when the previous
+        // best header left it (a branch switch), not on a plain extension.
+        if previous_best_left_chain(store, previous_best) {
+            coordinator.prune_pending_to_best_chain(store);
+        }
 
         // Single orphan drain covers all newly stored headers
         actions.extend(self.drain_orphans(store, coordinator, now));
@@ -525,6 +556,8 @@ impl SyncExecutor {
         // end. Without this, every cascaded header was its own redb
         // commit (~400μs each) — at 24k cascade length that's ~10s
         // of write churn blocking the action loop.
+        let previous = store.chain_state_meta();
+        let previous_best = (previous.best_header_id, previous.best_header_height);
         store.begin_header_batch();
         let mut newly_installed_local = newly_installed;
         let config = self.chain_config.clone();
@@ -638,6 +671,12 @@ impl SyncExecutor {
         if let Err(error) = store.flush_header_batch() {
             report_header_flush_failure(store, "flush_orphan_header_batch", &error);
             panic!("orphan drain flush_header_batch failed — redb write error is fatal: {error}");
+        }
+        // Best-chain index reads reflect the new selection only after flush.
+        // Pending entries can only fall off the best chain when the previous
+        // best header left it (a branch switch), not on a plain extension.
+        if previous_best_left_chain(store, previous_best) {
+            coordinator.prune_pending_to_best_chain(store);
         }
         // Suppress dead_code: keep the local set live until end of
         // function so cascade tracking is observable in trace.

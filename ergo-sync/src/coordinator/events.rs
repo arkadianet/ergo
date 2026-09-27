@@ -637,11 +637,16 @@ impl SyncCoordinator {
         self.assembly.remove(&header_id);
     }
 
-    /// Drop pending block downloads that are no longer on the best-header
-    /// chain after a full-block rollback/reorg.
+    /// Drop pending downloads and assembly registrations outside the selected
+    /// best-header chain after promotion or rollback.
     pub fn prune_pending_to_best_chain(&mut self, chain: &dyn ChainView) {
-        self.sync_state
-            .retain_pending_blocks(|b| chain.is_on_best_chain(&b.header_id));
+        self.sync_state.retain_pending_blocks(|b| {
+            let keep = chain.is_on_best_chain(&b.header_id);
+            if !keep {
+                self.assembly.remove(&b.header_id);
+            }
+            keep
+        });
     }
 
     /// Check for delivery timeouts and re-request from alternative peers.

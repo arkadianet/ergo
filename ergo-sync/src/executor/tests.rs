@@ -1297,3 +1297,346 @@ fn is_validation_verdict_false_for_io_and_consistency_failures() {
         );
     }
 }
+
+mod session_promotion {
+    use super::*;
+    use ergo_state::HeaderSectionStore;
+
+    // ----- helpers -----
+
+    fn header(
+        store: &mut ergo_state::StateBackendKind,
+        byte: u8,
+        parent: u8,
+        height: u32,
+        score: u8,
+        best: bool,
+    ) {
+        store
+            .store_validated_header(
+                &id(byte),
+                &[byte; 8],
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: if parent == 0 { [0; 32] } else { id(parent) },
+                    height,
+                    cumulative_score: vec![score],
+                    pow_validity: 1,
+                    timestamp: u64::from(height),
+                },
+                best.then_some((height, vec![score])),
+            )
+            .unwrap();
+    }
+
+    fn fail(store: &mut ergo_state::StateBackendKind, rejected: u8, height: u32) {
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.invalidate_or_session_mark(
+            store,
+            &mut SyncCoordinator::new(0),
+            id(rejected),
+            height,
+            &block_proc::BlockProcessError::State(ergo_state::store::StateError::DigestMismatch {
+                computed: "local".to_owned(),
+                expected: "header".to_owned(),
+            }),
+        );
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn session_promotion_demoted_branch_prunes_pending_and_assembly() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 0, 1, 1, false);
+        header(&mut store, 4, 3, 2, 2, false);
+        let mut coordinator = SyncCoordinator::new(0);
+        coordinator.sync_state_mut().set_best_known_header(2);
+        for (h, byte) in [(1, 1), (2, 2)] {
+            coordinator.sync_state_mut().add_pending_block(h, id(byte));
+            coordinator.assembly_mut().register_header(
+                ergo_ser::modifier_id::ExpectedSections::from_header(
+                    &id(byte),
+                    &id(byte + 10),
+                    &id(byte + 20),
+                    &id(byte + 30),
+                ),
+                false,
+            );
+        }
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.invalidate_or_session_mark(
+            &mut store,
+            &mut coordinator,
+            id(1),
+            1,
+            &block_proc::BlockProcessError::Deserialize("local".into()),
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+        assert!(!coordinator
+            .sync_state()
+            .pending_blocks_iter()
+            .any(|b| b.header_id == id(1) || b.header_id == id(2)));
+        assert!(coordinator
+            .assembly_mut()
+            .expected_section_ids(&id(1))
+            .is_none());
+        assert!(coordinator
+            .assembly_mut()
+            .expected_section_ids(&id(2))
+            .is_none());
+    }
+
+    #[test]
+    fn durable_promotion_demoted_branch_prunes_pending_and_assembly() {
+        for promote in [false, true] {
+            let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+            header(&mut store, 1, 0, 1, 1, true);
+            header(&mut store, 2, 1, 2, 2, true);
+            if promote {
+                header(&mut store, 3, 0, 1, 1, false);
+                header(&mut store, 4, 3, 2, 2, false);
+            }
+            let mut coordinator = SyncCoordinator::new(0);
+            coordinator.sync_state_mut().set_best_known_header(2);
+            for (h, byte) in [(1, 1), (2, 2)] {
+                coordinator.sync_state_mut().add_pending_block(h, id(byte));
+                coordinator.assembly_mut().register_header(
+                    ergo_ser::modifier_id::ExpectedSections::from_header(
+                        &id(byte),
+                        &id(byte + 10),
+                        &id(byte + 20),
+                        &id(byte + 30),
+                    ),
+                    false,
+                );
+            }
+            let section_ids: Vec<_> = [id(1), id(2)]
+                .iter()
+                .flat_map(|id| coordinator.assembly_mut().expected_section_ids(id).unwrap())
+                .collect();
+            let mut executor = SyncExecutor::new(
+                ProtocolParams::mainnet_default(),
+                DifficultyParams::mainnet(),
+            );
+            executor.invalidate_or_session_mark(
+                &mut store,
+                &mut coordinator,
+                id(1),
+                1,
+                &block_proc::BlockProcessError::AdProofsHashMismatch {
+                    header_id: id(1),
+                    declared_root: id(10),
+                    computed_root: id(11),
+                },
+            );
+            if promote {
+                assert_eq!(store.chain_state_meta().best_header_id, id(4));
+            } else {
+                assert_eq!(store.chain_state_meta().best_header_height, 0);
+            }
+            for (_, section_id) in section_ids {
+                assert!(coordinator
+                    .assembly_mut()
+                    .identify_section(&section_id)
+                    .is_none());
+            }
+            assert!(!coordinator
+                .sync_state()
+                .pending_blocks_iter()
+                .any(|b| b.header_id == id(1) || b.header_id == id(2)));
+            assert!(coordinator
+                .assembly_mut()
+                .expected_section_ids(&id(1))
+                .is_none());
+            assert!(coordinator
+                .assembly_mut()
+                .expected_section_ids(&id(2))
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn session_promotion_multiple_candidates_selects_greatest_score() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 3, false);
+        header(&mut store, 3, 0, 1, 2, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+        assert_eq!(store.get_header_id_at_height(1).unwrap(), Some(id(2)));
+    }
+
+    #[test]
+    fn session_promotion_equal_candidates_keeps_first() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        header(&mut store, 3, 0, 1, 1, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn session_promotion_stored_descendant_selects_eligible_tip() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 0, 1, 1, false);
+        header(&mut store, 4, 3, 2, 2, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+        assert_eq!(store.get_header_id_at_height(1).unwrap(), Some(id(3)));
+    }
+
+    #[test]
+    fn session_promotion_search_boundary_limits_configured_depth() {
+        let depth = crate::header_proc::SESSION_PROMOTION_SEARCH_DEPTH as u8;
+        for tip in [depth, depth + 1] {
+            let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+            for h in 1..=tip {
+                header(&mut store, h, h - 1, u32::from(h), h, true);
+                header(
+                    &mut store,
+                    h + 32,
+                    if h == 1 { 0 } else { h + 31 },
+                    u32::from(h),
+                    h,
+                    false,
+                );
+            }
+            fail(&mut store, 1, 1);
+            assert_eq!(
+                store.chain_state_meta().best_header_id,
+                id(if tip == depth { tip + 32 } else { tip })
+            );
+        }
+    }
+
+    #[test]
+    fn session_promotion_existing_mark_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        store.mark_session_invalid(id(1));
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.try_apply_next_blocks(
+            &mut store,
+            &mut SyncCoordinator::new(0),
+            Instant::now(),
+            None,
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn durable_promotion_failed_header_read_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        let db = store.as_utxo().unwrap().db_arc();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(redb::TableDefinition::<&[u8], &[u8]>::new("headers"))
+            .unwrap()
+            .remove(id(2).as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        let mut coordinator = SyncCoordinator::new(0);
+        executor.invalidate_or_session_mark(
+            &mut store,
+            &mut coordinator,
+            id(1),
+            1,
+            &block_proc::BlockProcessError::AdProofsHashMismatch {
+                header_id: id(1),
+                declared_root: id(10),
+                computed_root: id(11),
+            },
+        );
+        assert!(store.is_durably_invalid(&id(1)).unwrap());
+        assert_ne!(store.chain_state_meta().best_header_id, id(2));
+        header(&mut store, 2, 0, 1, 1, false);
+        executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn session_promotion_different_parent_keeps_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 99, 1, 1, false);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(1));
+    }
+
+    #[test]
+    fn session_promotion_unrelated_failure_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 2, false);
+        header(&mut store, 3, 0, 1, 3, false);
+        fail(&mut store, 2, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(1));
+    }
+
+    #[test]
+    fn session_promotion_durable_mark_retries_selection() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        let mut meta = store.get_header_meta(&id(1)).unwrap().unwrap();
+        meta.pow_validity = 3;
+        store
+            .store_validated_header(&id(1), &[1; 8], &meta, None)
+            .unwrap();
+        let mut executor = SyncExecutor::new(
+            ProtocolParams::mainnet_default(),
+            DifficultyParams::mainnet(),
+        );
+        executor.try_apply_next_blocks(
+            &mut store,
+            &mut SyncCoordinator::new(0),
+            Instant::now(),
+            None,
+        );
+        assert_eq!(store.chain_state_meta().best_header_id, id(2));
+    }
+
+    #[test]
+    fn session_promotion_non_tip_failure_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 0, 1, 1, false);
+        header(&mut store, 3, 1, 2, 2, true);
+        fail(&mut store, 1, 1);
+        assert_eq!(store.chain_state_meta().best_header_id, id(3));
+    }
+
+    #[test]
+    fn session_promotion_failure_above_next_height_preserves_best() {
+        let mut store = ergo_state::StateBackendKind::Utxo(open_initialized_store());
+        header(&mut store, 1, 0, 1, 1, true);
+        header(&mut store, 2, 1, 2, 2, true);
+        header(&mut store, 3, 1, 2, 3, false);
+        header(&mut store, 4, 2, 3, 3, true);
+        header(&mut store, 5, 3, 3, 4, false);
+        fail(&mut store, 2, 2);
+        assert_eq!(store.chain_state_meta().best_header_id, id(4));
+    }
+}
