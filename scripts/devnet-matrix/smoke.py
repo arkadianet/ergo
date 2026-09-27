@@ -1580,8 +1580,29 @@ def evaluate_tip_consistency(samples, mined=None):
     }
 
 
-def evaluate_chain_consistency(samples, mined=None):
+def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
+                               settle_absent=None, settle_unreachable=None):
     """Assertion 3, as amended by the controller after round 1.
+
+    `settle_grace_s`, `settle_absent`, `settle_unreachable` (round 5,
+    rm-A-steady-armB-2): an ahead-by-one Rust tip that the IN-SERIES read
+    never confirmed is not automatically a violation any more. A live
+    settle read (`settle_unconfirmed_chain_tips`, run after the window
+    closes and before teardown) gives the miner a real chance to catch
+    up; its outcome per `(ordering, tip)` overrides everything below:
+    `settle_absent` (checked live, still absent) stands as a violation
+    regardless of the grace window, and `settle_unreachable` (the miner
+    stopped answering mid-check) is never a violation. Absent a settle
+    read at all — every already-recorded run, and any candidate the live
+    read did not reach — a tip still unconfirmed when the series has
+    fewer than `settle_grace_s` seconds left to run is unknowable, not
+    wrong: the series simply ended before the miner's read window (the
+    same window a confirmed allowance elsewhere in THIS series measures)
+    had time to close. `armB-2` violated at sample 10867 of 10871, 4
+    samples (about the last second) from the end of a 10871-sample
+    series, in a run whose reference follower itself lagged up to 22
+    samples — nowhere near enough runway for Scala to have confirmed it
+    even if it always would.
 
     At every same-ordering-block sample Rust's chain must be a prefix of
     Scala's read oldest-first — Scala's chain with the newest k entries
@@ -1617,10 +1638,19 @@ def evaluate_chain_consistency(samples, mined=None):
     for i, s in kept:
         for block in s.get('scala_chain') or []:
             scala_last_listed[(s['ordering'], block)] = i
+    # The last qualifying sample's own timestamp — real samples carry
+    # `at` (`time.time()` at the start of the sweep); synthetic
+    # self-test series do not, and then the grace window never applies
+    # (no timing to measure it against), which is exactly the old,
+    # exact-match behaviour those tests still check.
+    last_at = kept[-1][1].get('at') if kept else None
+    settle_absent = settle_absent or set()
+    settle_unreachable = settle_unreachable or set()
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
     allowed_by_log, longest_lead = 0, 0
+    not_measured_count, not_measured_samples = 0, []
     for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
@@ -1653,6 +1683,24 @@ def evaluate_chain_consistency(samples, mined=None):
                         'scala_confirmed_at_sample': confirmed_at,
                     })
                 continue
+            key = (s['ordering'], tip)
+            if key in settle_unreachable:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': 'settle read: the miner stopped answering'})
+                continue
+            if key not in settle_absent and settle_grace_s is not None \
+                    and last_at is not None and s.get('at') is not None \
+                    and (last_at - s['at']) < settle_grace_s:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': f'only {last_at - s["at"]:.1f}s of series remained, '
+                              f'under the {settle_grace_s:.1f}s grace window'})
+                continue
         lead = rust_lead_mined(scala_chain, rust_chain, mined or ())
         if lead:
             allowed_by_log += 1
@@ -1682,6 +1730,9 @@ def evaluate_chain_consistency(samples, mined=None):
         'allowed_ahead_by_miner_log': allowed_by_log,
         'longest_lead_by_miner_log': longest_lead or None,
         'max_truncation_depth': max(depths) if depths else None,
+        'not_measured_tail_count': not_measured_count,
+        'not_measured_tail_sample': not_measured_samples,
+        'settle_grace_s': settle_grace_s,
         'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
     if compared == 0 and kept:
@@ -2361,6 +2412,64 @@ def _self_test():
     ]))
     assert only_before['prefix_violation_count'] == 1, only_before
     assert only_before['allowed_prefix_by_one_count'] == 0, only_before
+
+    # ----- round 5: the tail grace window (rm-A-steady-armB-2) -----
+
+    def timed_tail_series(tail_pairs, pad_before=MIN_QUALIFYING_SAMPLES, gap_s=1.0):
+        """`pad_before` agreeing samples, then `tail_pairs` (oldest first)
+        at the very END of the series, one `gap_s` apart — so a pair's
+        distance from the series' last `at` is exactly how many pairs
+        after it there are, times `gap_s`. `chain_series` pads AFTER its
+        pairs instead, which is the wrong shape for a tail test."""
+        agree = (['b1'], ['b1'])
+        pairs = [agree] * pad_before + list(tail_pairs)
+        return [dict(sample(sc, rc), at=n * gap_s) for n, (sc, rc) in enumerate(pairs)]
+
+    # An ahead-by-one 3 samples (3 s) from the end of the series, with a
+    # follower lag of 22 s observed elsewhere in the same run: nowhere
+    # near enough runway for Scala to confirm it even if it always
+    # would. Not a violation — unknowable.
+    near_tail = timed_tail_series(
+        [(['b1'], ['b2', 'b1'])] + [(['b1'], ['b1'])] * 3)
+    excused = evaluate_chain_consistency(near_tail, settle_grace_s=22.0)
+    assert excused['prefix_violation_count'] == 0, excused
+    assert excused['allowed_prefix_by_one_count'] == 0, excused
+    assert excused['not_measured_tail_count'] == 1, excused
+    assert excused['not_measured_tail_sample'][0]['rust_only_tip'] == 'b2', excused
+
+    # The SAME shape, but with 90 s of series left after it (past any
+    # plausible grace window): a real, standing violation. Distance from
+    # the tail is what excuses a violation, not merely being unconfirmed.
+    far_from_tail = timed_tail_series(
+        [(['b1'], ['b2', 'b1'])] + [(['b1'], ['b1'])] * 90)
+    not_excused = evaluate_chain_consistency(far_from_tail, settle_grace_s=22.0)
+    assert not_excused['prefix_violation_count'] == 1, not_excused
+    assert not_excused['not_measured_tail_count'] == 0, not_excused
+
+    # A live settle read that checked and found it still absent stands as
+    # a violation EVEN INSIDE the grace window — the grace window is
+    # benefit of the doubt for a check nobody made, not for one that came
+    # back negative.
+    settled_absent = evaluate_chain_consistency(
+        near_tail, settle_grace_s=22.0, settle_absent={('O', 'b2')})
+    assert settled_absent['prefix_violation_count'] == 1, settled_absent
+    assert settled_absent['not_measured_tail_count'] == 0, settled_absent
+
+    # A live settle read that could not reach the miner is unknowable —
+    # never a violation — even FAR from the tail, where the plain grace
+    # window would not have excused it.
+    settled_unreachable = evaluate_chain_consistency(
+        far_from_tail, settle_grace_s=22.0, settle_unreachable={('O', 'b2')})
+    assert settled_unreachable['prefix_violation_count'] == 0, settled_unreachable
+    assert settled_unreachable['not_measured_tail_count'] == 1, settled_unreachable
+
+    # No `settle_grace_s` at all (the pre-round-5 call shape, and every
+    # caller that has not been updated) is unchanged: still a hard
+    # violation, exactly as the pre-round-5 assertions above check with
+    # untimed series.
+    no_grace = evaluate_chain_consistency(near_tail)
+    assert no_grace['prefix_violation_count'] == 1, no_grace
+    assert no_grace['not_measured_tail_count'] == 0, no_grace
 
     # ----- fix round 1: the REAL sampler, not a copy of its conditional -
 
@@ -3171,6 +3280,73 @@ def check_sampler(run, evidence):
         run.fail('sampler', reason)
 
 
+def settle_unconfirmed_chain_tips(run, mined):
+    """Give every still-unconfirmed 'Scala ahead-by-one' candidate a real
+    chance to catch up, live, instead of judging it from wherever the
+    series happened to stop (rm-A-steady-armB-2).
+
+    Runs after the window closes but before teardown — the nodes the
+    scenario started are still up. For each candidate left by a TRIAL
+    pass of `evaluate_chain_consistency` (an ahead-by-one the in-series
+    read never confirmed): poll the miner's `/blocks/bestInputChain` for
+    up to `max(30, the run's own observed propagation-lag max)` seconds.
+    If it lists the tip under the SAME ordering id, a real sample is
+    appended to `run.series` — the ordinary in-series confirmation path
+    then picks it up with no further change. Still absent while the
+    miner keeps answering is `absent` (a real violation, not excused by
+    the grace window). The miner going unreachable mid-check is
+    `unreachable` (unknowable, never a violation). Ordering moving past
+    the candidate's own id closes its window the same as a timeout: nothing
+    then distinguishes "would have confirmed" from "would not have".
+    """
+    trial = evaluate_chain_consistency(run.series, mined)
+    candidates = [v for v in trial['prefix_violations_sample'] if v.get('ahead_by_one')]
+    result = {'checked': len(candidates), 'confirmed': 0, 'absent': set(),
+             'unreachable': set()}
+    if not candidates:
+        return result
+    grace = max(30.0, max(run.propagation_lags, default=0.0))
+    result['grace_s'] = grace
+    for v in candidates:
+        ordering = v['ordering']
+        rust_old = list(reversed(v.get('rust_chain') or []))
+        if not rust_old:
+            continue
+        tip = rust_old[-1]
+        key = (ordering, tip)
+        deadline = time.monotonic() + grace
+        outcome = 'absent'
+        while True:
+            try:
+                chain_now = api('scala', '/blocks/bestInputChain') or {}
+            except Unavailable:
+                outcome = 'unreachable'
+                break
+            if chain_now.get('bestOrdering') == ordering:
+                scala_now = chain_now.get('bestInputBlocks') or []
+                if tip in scala_now:
+                    run.series.append({
+                        'ordering': ordering, 'scala_chain': scala_now,
+                        'rust_chain': v.get('rust_chain'),
+                        'scala_tip': scala_now[0] if scala_now else None,
+                        'rust_tip': (v.get('rust_chain') or [None])[0],
+                        'at': time.time(), 'settle_read': True})
+                    outcome = 'confirmed'
+                    break
+            elif chain_now.get('bestOrdering'):
+                break  # ordering moved on; the window is closed either way
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1.0)
+        if outcome == 'confirmed':
+            result['confirmed'] += 1
+        elif outcome == 'unreachable':
+            result['unreachable'].add(key)
+        else:
+            result['absent'].add(key)
+    return result
+
+
 def finalize_agreement(run, evidence):
     """Evaluate assertions 2 and 3 over EVERY retained sample.
 
@@ -3181,9 +3357,14 @@ def finalize_agreement(run, evidence):
     # The miner's own record of what it mined, for leads the in-sweep
     # read order produces (`rust_lead_mined`).
     mined = mined_input_blocks(scala_log_lines('scala'))
+    settle = settle_unconfirmed_chain_tips(run, mined)
     tip = evaluate_tip_consistency(run.series, mined)
-    chain = evaluate_chain_consistency(run.series, mined)
     lags = [round(v, 3) for v in run.propagation_lags]
+    chain = evaluate_chain_consistency(
+        run.series, mined, settle_grace_s=max(30.0, max(lags) if lags else 0.0),
+        settle_absent=settle['absent'], settle_unreachable=settle['unreachable'])
+    evidence['chain_consistency_settle'] = {
+        k: (sorted(v) if isinstance(v, set) else v) for k, v in settle.items()}
     evidence['2_best_input_block'] = {
         'definition': ("every Rust bestInputBlock must be a block Scala had on its "
                        "best chain for the same ordering block; lag p95 <= "
@@ -3205,6 +3386,16 @@ def finalize_agreement(run, evidence):
         'artifacts_written_at_mismatch_time': run.live_artifact_paths,
         **chain,
     }
+    if chain.get('not_measured_tail_count'):
+        evidence.setdefault('not_measured', []).append({
+            'scenario': '3_best_input_chain',
+            'message': f"{chain['not_measured_tail_count']} ahead-by-one Rust "
+                      'tip(s) were still unconfirmed when the series ended, '
+                      'either unreachable during the post-window settle read or '
+                      "within the run's own observed-lag grace window "
+                      f"({chain['settle_grace_s']:.1f}s) — not a failure of "
+                      'either node',
+            'evidence': chain['not_measured_tail_sample']})
     # The lag of EVERY follower in the run, by one definition (spec §7a).
     # The Rust port's is assertion 2's own number; a Scala reference
     # follower's is the baseline it has to be read against, and a node
