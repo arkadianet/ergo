@@ -150,9 +150,18 @@ ROOT_FLOOD_PLANS = {
     'hit-and-run': {'hosts': 10, 'per_host': 40, 'waves': 12,
                     'interval_ms': 20_000, 'first_octet': 100,
                     'hold_ms': None},
+    # rm-A-flood-armA-held-patched-1 (main, checked against a1bd938ef):
+    # PendingInputAnnouncements.expire() runs only from take() (an
+    # ordering block applying and replaying announcements) or the
+    # synchronizer's 5-minute CleanupLocalInputBlockChunks tick. A hold
+    # only 10s past ttlMs gives expiry no reliable chance to run at all
+    # before the sockets close — the earlier 130_000 measured nothing
+    # either way. ttlMs + 330_000 (5.5 minutes) comfortably covers one
+    # ordinary ordering block (this devnet mines continuously, ~30-85s
+    # apart) or the 5-minute sweep, whichever comes first.
     'held': {'hosts': 10, 'per_host': 160, 'waves': 12,
              'interval_ms': 20_000, 'first_octet': 100,
-             'hold_ms': 130_000},
+             'hold_ms': ROOT_FLOOD_CAPS['ttlMs'] + 330_000},
 }
 # The default plan, under its old name.
 ROOT_FLOOD = ROOT_FLOOD_PLANS['hit-and-run']
@@ -379,16 +388,42 @@ def held_coverage(result, plan):
             and result['finished_ms'] >= result['hold_end_ms'])
 
 
-def evaluate_store_window(samples, baseline, patched, plan, result):
-    """Pure verdict; an unavailable measurement is incomplete, never zero."""
+def tip_change_epoch_ms(samples, target, height_before):
+    """The FIRST `request_started_ms` (epoch ms) at which `target`
+    reported a height greater than `height_before`, among `samples` —
+    the caller decides which samples (e.g. flood/drain phase only) and
+    which baseline height are in scope. `None` if it never did. Pure,
+    so `--self-test` drives it directly."""
+    if height_before is None:
+        return None
+    candidates = sorted(
+        (s['request_started_ms'], s[f'{target}_height'])
+        for s in samples
+        if s.get('request_started_ms') is not None
+        and s.get(f'{target}_height') is not None)
+    for req_ms, height in candidates:
+        if height > height_before:
+            return req_ms
+    return None
+
+
+def evaluate_store_window(samples, baseline, patched, plan, result, tip_change_at=None):
+    """Pure verdict; an unavailable measurement is incomplete, never zero.
+
+    `tip_change_at` (round 6, rm-A-flood-armA-held-patched-1): the epoch
+    ms `tip_change_epoch_ms` found for the target, restricted to samples
+    taken during the flood/drain window — needed to judge whether
+    `drops.expired` growth was even POSSIBLE to observe (see below).
+    """
     errors = []
+    not_measured = []
     present = any(isinstance(s.get('pending'), dict) for s in samples)
     shape = smoke.pending_telemetry_label(
         [baseline] + [s.get('pending') for s in samples])
     old = shape == 'old telemetry'
     report = {'store_present': present,
               'telemetry': shape if present or old else 'missing',
-              'errors': errors}
+              'errors': errors, 'not_measured': not_measured}
     held = plan.get('hold_ms') is not None
     coverage = held_coverage(result, plan) if held else None
     report['held_coverage'] = coverage
@@ -426,11 +461,38 @@ def evaluate_store_window(samples, baseline, patched, plan, result):
         deltas = [counters_between(baseline, s.get('pending')) for s in live]
         report['live_samples'] = len(live)
         report['live_counter_deltas'] = deltas[-1] if deltas else {}
+        # `drops.expired` needs more than sockets held past ttlMs: expire()
+        # only runs from an ordering block applying (replaying
+        # announcements) or the synchronizer's 5-minute cleanup tick
+        # (rm-A-flood-armA-held-patched-1). Neither is guaranteed just
+        # because the hold is long enough — it is measurable only once
+        # the target's OWN height has actually moved at or after
+        # last_send + ttlMs, while its sockets were still open.
+        ttl_deadline = ((result['started_unix_ms'] + result['last_send_ms']
+                        + ROOT_FLOOD_CAPS['ttlMs']) if coverage else None)
+        expiry_measurable = (
+            plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs']
+            and ttl_deadline is not None and tip_change_at is not None
+            and opened <= tip_change_at < ended
+            and tip_change_at >= ttl_deadline)
+        report['ttl_deadline_ms'] = ttl_deadline
+        report['tip_change_at_ms'] = tip_change_at
+        report['expiry_measurable'] = expiry_measurable
         for key, exercised in (
-                ('drops.hostLimit', plan['per_host'] > ROOT_FLOOD_CAPS['perPeer']),
-                ('drops.expired', plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs'])):
+                ('drops.hostLimit', plan['per_host'] > ROOT_FLOOD_CAPS['perPeer']),):
             if not exercised or not any(d.get(key, 0) > 0 for d in deltas):
                 errors.append(f'{key} growth not observed while sockets were open')
+        if plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs']:
+            if expiry_measurable:
+                if not any(d.get('drops.expired', 0) > 0 for d in deltas):
+                    errors.append(
+                        'drops.expired growth not observed while sockets were open')
+            else:
+                not_measured.append(
+                    'drops.expired: no ordering block advanced the target\'s '
+                    'height at or after last_send+ttlMs while its sockets were '
+                    'still open (and no evidence of the 5-minute cleanup tick '
+                    'either), so expiry could not be observed either way')
     return report
 
 
@@ -445,7 +507,7 @@ def self_test_held_evaluation():
     pending.update(size=256, bytes=40000)
     pending['drops'].update(hostLimit=31, expired=31)
     result = dict(ok=True, started_unix_ms=1000, sockets_open_ms=10,
-                  last_send_ms=220000, hold_end_ms=350000, finished_ms=350010,
+                  last_send_ms=220000, hold_end_ms=670000, finished_ms=670010,
                   waves=[dict(wave=i, sent=1600, write_errors=0, height_observed=True)
                          for i in range(12)],
                   connections=[dict(source=f'127.{k}.0.1', opened=True,
@@ -453,11 +515,17 @@ def self_test_held_evaluation():
                                for k in adversary_octets(plan)])
     sample = dict(pending=pending, request_started_ms=340000,
                   request_finished_ms=340100)
+    # ttl_deadline = started_unix_ms + last_send_ms + ttlMs = 341000; the
+    # window (`opened`..`ended`) runs 1010..351000. A tip change has to
+    # land inside both to make `drops.expired` measurable at all.
+    TIP_AFTER_TTL = 345000
 
-    def verdict(samples=None, base=None, outcome=None, patched=True):
+    def verdict(samples=None, base=None, outcome=None, patched=True,
+               tip=TIP_AFTER_TTL):
         return evaluate_store_window([sample] if samples is None else samples,
                                      baseline if base is None else base,
-                                     patched, plan, result if outcome is None else outcome)
+                                     patched, plan, result if outcome is None else outcome,
+                                     tip)
 
     assert not verdict()['errors'], verdict()
     assert verdict()['telemetry'] == 'fixed telemetry', verdict()
@@ -501,7 +569,7 @@ def self_test_held_evaluation():
     # before those counts were accumulated during the honest baseline blocks.
     assert verdict(base=deepcopy(pending))['errors']
     assert verdict(base=deepcopy(pending))['store_counters_in_window']['drops.expired'] == 0
-    late = dict(sample, request_finished_ms=351001)
+    late = dict(sample, request_finished_ms=671001)
     assert verdict(samples=[late])['errors']
     for mutate in ('wave', 'close', 'short_hold', 'write_error'):
         truncated = deepcopy(result)
@@ -531,6 +599,60 @@ def self_test_held_evaluation():
     over = deepcopy(sample)
     over['pending']['bytes'] = ROOT_FLOOD_CAPS['maxBytes'] + 1
     assert verdict(samples=[over, sample])['errors']
+
+    # ----- round 6: drops.expired needs a tip change, not just a long hold -
+
+    # tip_change_epoch_ms: pure over samples carrying `request_started_ms`
+    # and `{target}_height`. Height must be STRICTLY greater than the
+    # baseline to count, and the EARLIEST qualifying sample wins even out
+    # of order.
+    height_samples = [
+        {'request_started_ms': 342000, 'scala3_height': 11},   # == before
+        {'request_started_ms': 348000, 'scala3_height': 12},   # first real rise
+        {'request_started_ms': 344000, 'scala3_height': 11},   # out of order, no rise
+        {'request_started_ms': 349000, 'scala3_height': 13},   # later still
+    ]
+    assert tip_change_epoch_ms(height_samples, 'scala3', 11) == 348000
+    assert tip_change_epoch_ms(height_samples, 'scala3', 13) is None
+    assert tip_change_epoch_ms([], 'scala3', 11) is None
+    assert tip_change_epoch_ms(height_samples, 'scala3', None) is None
+
+    # A sample with NEITHER counter grown, independent of the leftover
+    # loop variable above (which only reset one key at a time).
+    no_growth = deepcopy(sample)
+    no_growth['pending']['drops'].update(hostLimit=baseline['drops']['hostLimit'],
+                                         expired=baseline['drops']['expired'])
+
+    # No tip change at all while sockets were open: drops.expired is
+    # NOT MEASURED, never a failure — armA-held-patched-1's own shape,
+    # where the store had already evicted everything by capacity long
+    # before any block gave expiry a chance to run.
+    never_measured = verdict(samples=[no_growth], tip=None)
+    assert 'drops.expired' not in ' '.join(never_measured['errors']), never_measured
+    assert any('drops.expired' in n for n in never_measured['not_measured']), \
+        never_measured
+    assert never_measured['expiry_measurable'] is False, never_measured
+    # hostLimit is unconditional — still a real, named failure alongside it.
+    assert any('drops.hostLimit' in e for e in never_measured['errors']), \
+        never_measured
+
+    # A tip change BEFORE ttl_deadline (341000) does not make it
+    # measurable either — the window it needs to fall in starts there.
+    too_early = verdict(samples=[no_growth], tip=340000)
+    assert too_early['expiry_measurable'] is False, too_early
+    assert any('drops.expired' in n for n in too_early['not_measured']), too_early
+
+    # A tip change at/after ttl_deadline, but AFTER the sockets already
+    # closed (>= ended = 671000), is the same as none.
+    too_late_tip = verdict(samples=[no_growth], tip=671000)
+    assert too_late_tip['expiry_measurable'] is False, too_late_tip
+
+    # A tip change that DOES qualify (already the default, TIP_AFTER_TTL)
+    # restores the original bar: no growth is a real, named failure.
+    qualifying = verdict(samples=[no_growth])
+    assert qualifying['expiry_measurable'] is True, qualifying
+    assert any('drops.expired' in e for e in qualifying['errors']), qualifying
+    assert any('drops.hostLimit' in e for e in qualifying['errors']), qualifying
 
 
 def _percentiles(values):
@@ -712,8 +834,9 @@ def _run_against_scala_follower(ctx, target):
     # Only an explicitly stock role receives the missing-store exemption.
     spec = campaign.lifecycle_roles().get(role)
     patched = spec is None or spec.patched
+    tip_change_at = tip_change_epoch_ms(flood_samples, target, height_before)
     store_verdict = evaluate_store_window(
-        flood_samples, baseline, patched, plan, result)
+        flood_samples, baseline, patched, plan, result, tip_change_at)
     verdict.update(store_verdict)
     store_present = verdict['store_present']
     verdict['log_window'] = {'from_line': log_from, 'to_line': log_to}
@@ -722,6 +845,8 @@ def _run_against_scala_follower(ctx, target):
         if k == 'drops' or k.startswith('drops.')}
     for error in store_verdict['errors']:
         ctx.fail(error, store_verdict)
+    for reason in store_verdict.get('not_measured') or []:
+        ctx.not_measured(reason, store_verdict)
     ctx.note('root_flood', verdict)
 
     # The same three counts BEFORE the flood, as the honest baseline the

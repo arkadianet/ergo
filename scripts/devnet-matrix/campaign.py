@@ -4114,7 +4114,7 @@ def _self_test_remeasure():
         '10', '40', '12', '20000', '100'], flood.root_flood_command(
             '/b', 't:1', 'a:2', _hit)
     assert flood.root_flood_command('/b', 't:1', 'a:2', _held)[-2:] == \
-        ['--hold-ms', '130000']
+        ['--hold-ms', str(flood.ROOT_FLOOD_CAPS['ttlMs'] + 330_000)]
     # Each mode tests what it is for: hit-and-run saturates the entry cap
     # every wave; held exceeds the per-host cap every wave and holds past
     # the TTL, on few enough connections for Scala's maxConnections (30).
