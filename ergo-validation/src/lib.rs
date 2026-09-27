@@ -23,6 +23,9 @@
 //!   rejection reason with Scala-parity error codes.
 //! * [`cost`] — re-exports the JIT-cost accumulator from
 //!   `ergo_primitives` so callers can stay on `ergo_validation` types.
+//! * [`fee`] — the canonical mainnet miner-fee proposition
+//!   ([`MAINNET_FEE_PROPOSITION_BYTES`]) shared by the mempool, the
+//!   candidate builder, and the wallet transaction builder.
 //!
 //! What is **not** here:
 //!
@@ -35,6 +38,7 @@ pub mod block;
 pub mod context;
 pub mod cost;
 pub mod error;
+pub mod fee;
 pub mod header;
 pub mod popow;
 pub mod pre_header;
@@ -49,6 +53,7 @@ pub use active_params::{
 pub use context::{LocalPolicy, ProtocolParams, TransactionContext, UtxoView};
 pub use cost::{CostAccumulator, CostError, JitCost};
 pub use error::ValidationError;
+pub use fee::MAINNET_FEE_PROPOSITION_BYTES;
 pub use header::CheckedHeader;
 pub use tx::reemission::{
     reemission_obligation_core, verify_reemission_spending, ReemissionObligation,

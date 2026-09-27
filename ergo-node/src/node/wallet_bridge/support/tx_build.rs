@@ -132,7 +132,7 @@ pub(crate) async fn build_unsigned_tx(
         return Err(WalletAdminError::ChangeAddressUntracked);
     }
 
-    let fee_ergo_tree = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES.to_vec();
+    let fee_ergo_tree = ergo_validation::MAINNET_FEE_PROPOSITION_BYTES.to_vec();
 
     // Get the chain tip height for candidate creation_height.
     let current_height = chain
@@ -1189,7 +1189,7 @@ mod tests {
 
         // (c) the explicit branch funds the burn from CHANGE ONLY — the
         // requested fee is preserved (NOT shaved), matching the auto branch.
-        let fee_tree_bytes = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES;
+        let fee_tree_bytes = ergo_validation::MAINNET_FEE_PROPOSITION_BYTES;
         let fee_paid: u64 = utx
             .output_candidates
             .iter()

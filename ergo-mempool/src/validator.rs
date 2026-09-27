@@ -14,36 +14,17 @@ use ergo_validation::{validate_transaction_parsed, UtxoView, ValidationError};
 
 use crate::admission::{PeekedStructure, PeekedTx, Validated, ValidationErr, Validator};
 
-/// Canonical miner-fee ErgoTree serialization on Ergo mainnet. Any
-/// output whose `ergo_tree_bytes()` equals this tree is counted as
-/// paying a miner fee. Derived empirically from the mainnet
-/// `transactions_1761000_1762000` corpus: the fee proposition appears
-/// exactly as one output on ~83% of txs, consistent across all blocks
-/// surveyed. Mirrors Scala's `MonetarySettings.feePropositionBytes`.
-///
-/// The tree is `proveDlog(minerPk) ∧ HEIGHT >= SelfCreationHeight + 720`,
-/// constant-segregated with a fixed emission delay (`delta = 720` on
-/// mainnet). Const bytes are stable across versions.
+/// Canonical mainnet miner-fee ErgoTree bytes, defined once in
+/// [`ergo_validation::fee`] and re-exported here so the historical
+/// `ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES` path keeps
+/// working. Used by the mempool admission gate AND by the §10.4 fee-stats
+/// routes (`poolHistogram` / `getFee` / `waitTime`) to compute per-tx fee
+/// without resolving inputs.
+pub use ergo_validation::MAINNET_FEE_PROPOSITION_BYTES;
+
 /// Test-only re-export for the harness at `tests/m7_mainnet_corpus.rs`.
 #[doc(hidden)]
 pub const MAINNET_FEE_PROPOSITION_BYTES_FOR_TEST: &[u8] = MAINNET_FEE_PROPOSITION_BYTES;
-
-/// Canonical mainnet miner-fee ErgoTree bytes. Outputs whose
-/// `ergo_tree_bytes()` exactly equals this slice are the
-/// fee-bearing outputs of a transaction; their value sum IS the
-/// fee under Ergo's `inputs == outputs` ERG conservation rule.
-/// Used by the mempool admission gate AND by the §10.4 fee-stats
-/// routes (`poolHistogram` / `getFee` / `waitTime`) to compute
-/// per-tx fee without resolving inputs.
-pub const MAINNET_FEE_PROPOSITION_BYTES: &[u8] = &[
-    0x10, 0x05, 0x04, 0x00, 0x04, 0x00, 0x0e, 0x36, 0x10, 0x02, 0x04, 0xa0, 0x0b, 0x08, 0xcd, 0x02,
-    0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
-    0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
-    0xea, 0x02, 0xd1, 0x92, 0xa3, 0x9a, 0x8c, 0xc7, 0xa7, 0x01, 0x73, 0x00, 0x73, 0x01, 0x10, 0x01,
-    0x02, 0x04, 0x02, 0xd1, 0x96, 0x83, 0x03, 0x01, 0x93, 0xa3, 0x8c, 0xc7, 0xb2, 0xa5, 0x73, 0x00,
-    0x00, 0x01, 0x93, 0xc2, 0xb2, 0xa5, 0x73, 0x01, 0x00, 0x74, 0x73, 0x02, 0x73, 0x03, 0x83, 0x01,
-    0x08, 0xcd, 0xee, 0xac, 0x93, 0xb1, 0xa5, 0x73, 0x04,
-];
 
 /// Default production validator. Resolves regular inputs against
 /// `input_view` (the pool overlay), data inputs against `data_input_view`
