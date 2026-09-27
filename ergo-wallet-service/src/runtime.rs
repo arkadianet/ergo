@@ -931,6 +931,13 @@ mod tests {
             Ok(None)
         }
 
+        fn applied_header_at_or_below(
+            &self,
+            _height: u32,
+        ) -> Result<Option<(u32, [u8; 32])>, WalletStoreError> {
+            Ok(None)
+        }
+
         fn scan_invalidated(&self) -> Result<bool, WalletStoreError> {
             Ok(self.facts.lock().unwrap().invalidated)
         }

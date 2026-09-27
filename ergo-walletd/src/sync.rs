@@ -172,9 +172,18 @@ impl StandaloneSyncer {
     pub fn sync_once(&self) -> Result<SyncReport, SyncError> {
         match self.sync_once_inner() {
             Ok(report) => Ok(report),
-            Err(_) if self.is_cancelled() => Err(SyncError::Cancelled),
-            Err(SyncError::Cancelled) => Err(SyncError::Cancelled),
-            Err(error) if error.retryable() => Err(error),
+            Err(_) if self.is_cancelled() => {
+                self.clear_running()?;
+                Err(SyncError::Cancelled)
+            }
+            Err(SyncError::Cancelled) => {
+                self.clear_running()?;
+                Err(SyncError::Cancelled)
+            }
+            Err(error) if error.retryable() => {
+                self.clear_running()?;
+                Err(error)
+            }
             Err(SyncError::Pruned(minimum_height)) => {
                 Err(self.fail(SyncError::Pruned(minimum_height)))
             }
@@ -251,7 +260,27 @@ impl StandaloneSyncer {
             let limit = remaining
                 .min(self.config.page)
                 .min(self.config.batch - processed);
-            let response = self.blocks_since(cursor.clone(), limit)?;
+            let response = if cursor.height > tip.height {
+                match self.probe_ancestor(&tip, limit, &mut rewinds_without_progress)? {
+                    Some(response) => response,
+                    None => {
+                        if full_rebuilds > 0 {
+                            return Err(SyncError::Protocol(
+                                "no retained ancestor after full rebuild".to_string(),
+                            ));
+                        }
+                        full_rebuilds += 1;
+                        rebuild = true;
+                        full_rebuild = true;
+                        rebuild_origin = true;
+                        from_height = 0;
+                        self.persist_state(RescanState::Running { from_height })?;
+                        continue;
+                    }
+                }
+            } else {
+                self.blocks_since(cursor.clone(), limit)?
+            };
             self.check_cancelled()?;
             match response {
                 ergo_wallet_service::BlocksSinceResponse::Forward(forward) => {
@@ -386,6 +415,80 @@ impl StandaloneSyncer {
                 }
             }
         }
+    }
+
+    // A node cannot resolve an above-tip cursor. Probe our own retained
+    // headers instead; a Forward answer proves that probe is canonical.
+    fn probe_ancestor(
+        &self,
+        tip: &CommittedTip,
+        limit: u32,
+        attempts: &mut u32,
+    ) -> Result<Option<ergo_wallet_service::BlocksSinceResponse>, SyncError> {
+        use ergo_wallet_service::{AncestorBlocksSince, BlocksSinceResponse};
+        let mut ceiling = tip.height;
+        let mut rejected = false;
+        loop {
+            self.check_cancelled()?;
+            let header = self
+                .service
+                .store()
+                .read()?
+                .applied_header_at_or_below(ceiling)?;
+            let Some((height, header_id)) = header else {
+                if rejected {
+                    return Err(SyncError::Protocol(
+                        "node rejected all retained ancestor probes".to_string(),
+                    ));
+                }
+                return Ok(None);
+            };
+            *attempts = attempts.saturating_add(1);
+            if *attempts > MAX_UNPROGRESSIVE_REWINDS {
+                return Err(SyncError::Protocol(
+                    "ancestor probe/rewind limit exceeded without forward progress".to_string(),
+                ));
+            }
+            let probe = ChainCursor { height, header_id };
+            match self.blocks_since(probe.clone(), limit) {
+                Ok(BlocksSinceResponse::Forward(forward)) => {
+                    validate_page(&probe, &forward.blocks, &forward.tip, limit)?;
+                    if forward.tip.height < probe.height {
+                        return Err(SyncError::Protocol(
+                            "probe is above response tip".to_string(),
+                        ));
+                    }
+                    return Ok(Some(BlocksSinceResponse::Ancestor(AncestorBlocksSince {
+                        tip: forward.tip,
+                        ancestor: probe,
+                    })));
+                }
+                Ok(BlocksSinceResponse::Ancestor(ancestor)) => {
+                    if ancestor.ancestor.height > probe.height {
+                        return Err(SyncError::Protocol("ancestor is above probe".to_string()));
+                    }
+                    return Ok(Some(BlocksSinceResponse::Ancestor(ancestor)));
+                }
+                Err(SyncError::Chain(ChainClientError::UnsupportedHistory { .. })) => {
+                    rejected = true;
+                    if height == 0 {
+                        return Err(SyncError::Protocol(
+                            "node rejected all retained ancestor probes".to_string(),
+                        ));
+                    }
+                    ceiling = height - 1;
+                }
+                other => return other.map(Some),
+            }
+        }
+    }
+
+    fn clear_running(&self) -> Result<(), SyncError> {
+        let state = self.service.store().read()?.rescan_state()?;
+        if matches!(state, RescanState::Running { .. }) {
+            self.persist_state(RescanState::Idle)?;
+        }
+        Ok(())
     }
 
     fn initial_cursor(&self) -> Result<SyncStart, SyncError> {
@@ -730,6 +833,7 @@ mod tests {
         tip_calls: Arc<Mutex<usize>>,
         requests: Arc<Mutex<Vec<(u32, u32)>>>,
         dynamic: bool,
+        error: Option<ChainClientError>,
     }
 
     struct FakeClient {
@@ -755,6 +859,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((request.cursor.height, request.limit));
+            if request.cursor.height > self.state.tip.height {
+                return Err(ChainClientError::stale_tip(
+                    CommittedTip::new(request.cursor.height, request.cursor.header_id),
+                    self.state.tip.clone(),
+                ));
+            }
+            if let Some(error) = &self.state.error {
+                return Err(error.clone());
+            }
             let mut responses = self.state.responses.lock().unwrap();
             if responses.is_empty() && self.state.dynamic {
                 let first = request.cursor.height.saturating_add(1);
@@ -817,6 +930,15 @@ mod tests {
         responses: Vec<ergo_wallet_service::BlocksSinceResponse>,
         tip: CommittedTip,
     ) -> (StandaloneSyncer, RequestLog) {
+        syncer_with_error_and_log(dir, responses, tip, None)
+    }
+
+    fn syncer_with_error_and_log(
+        dir: &tempfile::TempDir,
+        responses: Vec<ergo_wallet_service::BlocksSinceResponse>,
+        tip: CommittedTip,
+        error: Option<ChainClientError>,
+    ) -> (StandaloneSyncer, RequestLog) {
         let store =
             Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -826,6 +948,7 @@ mod tests {
             tip_calls: Arc::new(Mutex::new(0)),
             requests: requests.clone(),
             dynamic: false,
+            error,
         };
         let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
         let service = Arc::new(WalletService::new(store, chain.clone()));
@@ -894,6 +1017,7 @@ mod tests {
             tip_calls: Arc::new(Mutex::new(0)),
             requests: requests.clone(),
             dynamic: true,
+            error: None,
         };
         let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
         let service = Arc::new(WalletService::new(store, chain.clone()));
@@ -992,6 +1116,7 @@ mod tests {
             tip_calls: Arc::new(Mutex::new(0)),
             requests: requests.clone(),
             dynamic: false,
+            error: None,
         };
         let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
         let service = Arc::new(WalletService::new(store, chain.clone()));
@@ -1009,8 +1134,28 @@ mod tests {
         assert_eq!(report.wallet_height, 3);
         assert_eq!(report.blocks_processed, 2);
         assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap(),
+            RescanState::Idle
+        );
+        assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .chain_index_header(initial_height.max(4))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
             requests.lock().unwrap().clone(),
-            vec![(initial_height, 1), (1, 3)]
+            vec![(initial_height.min(3), 1), (1, 3)]
         );
         assert_eq!(
             syncer
@@ -1023,6 +1168,123 @@ mod tests {
                 .unwrap()
                 .header_id,
             Some([30; 32])
+        );
+    }
+
+    fn seed_wallet(syncer: &StandaloneSyncer, height: u32) {
+        let mut write = syncer.service.store().begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        for height in 1..=height {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: vec![],
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.finish_rescan(0).unwrap();
+        write.commit().unwrap();
+    }
+
+    #[test]
+    fn retryable_error_after_running_restores_idle_and_preserves_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_error_and_log(
+            &dir,
+            vec![],
+            CommittedTip::new(3, [3; 32]),
+            Some(ChainClientError::Conflict),
+        );
+        seed_wallet(&syncer, 1);
+        let before = syncer
+            .service
+            .store()
+            .read()
+            .unwrap()
+            .scan_cursor()
+            .unwrap();
+        assert!(syncer.sync_once().unwrap_err().retryable());
+        assert_eq!(*requests.lock().unwrap(), vec![(1, 3); MAX_RETRY_ATTEMPTS]);
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap(), before);
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+    }
+
+    #[test]
+    fn rejected_ancestor_probes_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_error_and_log(
+            &dir,
+            vec![],
+            CommittedTip::new(65, [165; 32]),
+            Some(ChainClientError::UnsupportedHistory {
+                reason: "missing ancestor".to_string(),
+            }),
+        );
+        seed_wallet(&syncer, 66);
+        assert!(matches!(syncer.sync_once(), Err(SyncError::Protocol(_))));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            MAX_UNPROGRESSIVE_REWINDS as usize
+        );
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 66);
+        assert!(matches!(
+            read.rescan_state().unwrap(),
+            RescanState::Failed { height: 66, .. }
+        ));
+    }
+
+    #[test]
+    fn lower_tip_forward_probe_rewinds_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_log(&dir, vec![], CommittedTip::new(2, [2; 32]));
+        seed_wallet(&syncer, 4);
+        let report = syncer.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(report.wallet_height, 2);
+        assert_eq!(*requests.lock().unwrap(), vec![(2, 1)]);
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 2);
+        assert_eq!(read.chain_index_header(3).unwrap(), None);
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+    }
+
+    #[test]
+    fn lower_tip_without_retained_headers_rebuilds_from_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(1, [1; 32]);
+        let (syncer, requests) = syncer_with_log(
+            &dir,
+            vec![ergo_wallet_service::BlocksSinceResponse::Forward(
+                ergo_wallet_service::ForwardBlocksSince {
+                    tip: tip.clone(),
+                    blocks: vec![block(1, 0)],
+                },
+            )],
+            tip,
+        );
+        let mut write = syncer.service.store().begin_write().unwrap();
+        write.set_scan_cursor(3, Some(&[3; 32])).unwrap();
+        write.commit().unwrap();
+        let report = syncer.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(*requests.lock().unwrap(), vec![(0, 2)]);
+        assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap(),
+            RescanState::Idle
         );
     }
 
@@ -1088,26 +1350,19 @@ mod tests {
     async fn permanently_lower_tip_without_a_valid_ancestor_is_terminal_on_status() {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
-        let tip = CommittedTip::new(1, [1; 32]);
-        let (syncer, requests) = syncer_with_log(
+        let tip = CommittedTip::new(2, [20; 32]);
+        let (syncer, requests) = syncer_with_error_and_log(
             &dir,
-            vec![ergo_wallet_service::BlocksSinceResponse::Ancestor(
-                ergo_wallet_service::AncestorBlocksSince {
-                    tip: tip.clone(),
-                    ancestor: ChainCursor {
-                        height: 3,
-                        header_id: [3; 32],
-                    },
-                },
-            )],
+            vec![],
             tip,
+            Some(ChainClientError::UnsupportedHistory {
+                reason: "ancestor history missing".to_string(),
+            }),
         );
-        let mut write = syncer.service.store().begin_write().unwrap();
-        write.set_scan_cursor(3, Some(&[3; 32])).unwrap();
-        write.commit().unwrap();
+        seed_wallet(&syncer, 3);
         let error = syncer.sync_once().unwrap_err();
         assert!(!error.retryable());
-        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(*requests.lock().unwrap(), vec![(2, 1), (1, 1)]);
         let router = crate::api::router(crate::api::ApiContext {
             service: syncer.service.clone(),
             network: crate::config::Network::Mainnet,
@@ -1145,6 +1400,7 @@ mod tests {
             tip_calls: Arc::new(Mutex::new(0)),
             requests: requests.clone(),
             dynamic: true,
+            error: None,
         };
         let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
         let open = || {
@@ -1236,6 +1492,7 @@ mod tests {
             tip_calls: Arc::new(Mutex::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
             dynamic: false,
+            error: None,
         };
         let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
         let service = Arc::new(WalletService::new(store, chain.clone()));
