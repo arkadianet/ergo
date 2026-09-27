@@ -2171,8 +2171,8 @@ mod tests {
             vec![vec![11u16]]
         );
 
-        // Flag set: both hook methods quiesce. Capture under the flag, then
-        // reset BEFORE asserting so a failure can't leak the flag to siblings.
+        // Flag set: both hook methods quiesce. Capture under the flag; the
+        // hook shares the coordinator, so clearing it re-enables live apply.
         coordinator.set_scan_rebuild_for_test(true);
         let gated_count = hook.registered_scan_count();
         let gated_match = hook.match_boxes(std::slice::from_ref(&b));
@@ -2193,14 +2193,10 @@ mod tests {
     fn scan_mutation_guard_rejects_during_rebuild() {
         let coordinator = RescanCoordinator::new();
         // Guard passes when no rebuild is in flight...
-        coordinator.set_scan_rebuild_for_test(false);
         assert!(reject_during_scan_rebuild(&coordinator).is_ok());
         // ...and rejects scan mutations while a rebuild snapshot is live.
-        // Capture under the flag, then reset BEFORE asserting so a failure
-        // can't leak the flag to sibling tests (same discipline as above).
         coordinator.set_scan_rebuild_for_test(true);
         let gated = reject_during_scan_rebuild(&coordinator);
-        coordinator.set_scan_rebuild_for_test(false);
         assert!(
             matches!(gated, Err(WalletAdminError::BadRequest(_))),
             "scan mutation must be rejected during rebuild, got {gated:?}"

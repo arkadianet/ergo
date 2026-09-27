@@ -1221,7 +1221,6 @@ mod boot_recovery_tests {
     #[test]
     fn recover_interrupted_rescan_marks_failed_and_reasserts_invalidation() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let (_dir, store) = new_store();
         let mut write = store.begin_write().unwrap();
         write
@@ -1242,13 +1241,11 @@ mod boot_recovery_tests {
         assert!(rescan.fail_closed());
         assert!(rescan.in_progress());
         assert!(rescan.scan_rebuild_in_progress());
-        rescan.clear_guards();
     }
 
     #[test]
     fn recover_failed_or_invalidated_state_is_unsafe_on_boot() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let (_dir, store) = new_store();
         let mut write = store.begin_write().unwrap();
         write
@@ -1281,7 +1278,6 @@ mod boot_recovery_tests {
             RescanState::Failed { .. }
         ));
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        rescan.clear_guards();
     }
 
     #[test]

@@ -539,7 +539,6 @@ mod tests {
     #[test]
     fn recover_cursor_behind_committed_tip_is_unsafe_on_boot() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut chain = StateStore::open(&path).unwrap();
@@ -571,13 +570,11 @@ mod tests {
         ));
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
         assert!(rescan.fail_closed());
-        rescan.clear_guards();
     }
 
     #[test]
     fn recover_cursor_ahead_committed_tip_is_unsafe_on_boot() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut chain = StateStore::open(&path).unwrap();
@@ -609,13 +606,11 @@ mod tests {
         ));
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
         assert!(rescan.fail_closed());
-        rescan.clear_guards();
     }
 
     #[test]
     fn recover_missing_cursor_with_wallet_facts_is_unsafe_on_boot() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut chain = StateStore::open(&path).unwrap();
@@ -656,13 +651,11 @@ mod tests {
             if reason.contains("cursor missing with existing wallet data")
         ));
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
-        rescan.clear_guards();
     }
 
     #[test]
     fn recover_missing_cursor_without_wallet_facts_is_safe_on_boot() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut chain = StateStore::open(&path).unwrap();
@@ -683,7 +676,6 @@ mod tests {
     #[test]
     fn recover_scan_only_cursor_lag_is_not_silently_clean() {
         let rescan = RescanCoordinator::new();
-        rescan.clear_guards();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut chain = StateStore::open(&path).unwrap();
@@ -702,7 +694,6 @@ mod tests {
         ));
         assert!(store.begin_read().unwrap().scan_invalidated().unwrap());
         assert!(rescan.fail_closed());
-        rescan.clear_guards();
     }
 
     #[test]

@@ -424,8 +424,7 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         }
     })
     .await
-    .expect("rescan task must finish before resetting global state");
-    admin.rescan_coordinator().clear_guards();
+    .expect("rescan task must finish before the test ends");
 }
 
 #[tokio::test]
@@ -508,8 +507,7 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
         }
     })
     .await
-    .expect("rescan task must finish before resetting global state");
-    admin.rescan_coordinator().clear_guards();
+    .expect("rescan task must finish before the test ends");
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed
