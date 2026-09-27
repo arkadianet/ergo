@@ -423,3 +423,65 @@ reply arms (already known, pending, already solved, invalid solution,
 timeout, deferral limit) are counted separately, never as PoW
 failures. `rejections_exceed_error_replies` flags a window with more
 rejections than `ErgoMiningThread` error replies.
+
+### SyncInfo refresh (#2597) before/after
+
+`steady` records `relay_refresh` (M1–M3) and prints the measurements in
+`result_line`. Keeping the existing steady scenario preserves its funded
+workload and follower seeding in every arm. `syncfix`, `2566`, and
+`syncfix+2566` are pinned in `builds.toml`, using the same sigma as `base`.
+Identical `--base-build` and `--build` values are supported, including with
+`--reference-follower both`.
+
+The measurement opens after the mempool workload. Its miner-log boundaries
+are `Updating state with new ordering block …, height: …`. It includes the
+initial partial interval and completed intervals thereafter, excluding the
+terminal open interval. Empty mined intervals do not count as delivery
+blackouts. Raw source lines, sample times, missing IDs and denominators are
+retained in JSON so totals can be recomputed.
+
+* M1 intersects the miner's `mined_input_blocks` IDs with each follower's
+  observed IDs. Scala's `Adding input block … to existing tree` and
+  `Creating new tree for input block …` are mutually exclusive branches
+  after the duplicate-record check in `InputBlocksProcessor.applyInputBlock`.
+  They include disconnected blocks, and IDs are deduplicated across retries.
+  Rust is queried at `/blocks/{id}/inputBlockTransactionIds`: HTTP 200,
+  including `[]`, proves a retained record; 404 is not observed; other errors
+  leave coverage incomplete. New IDs are queried each sweep, unresolved IDs
+  retried on ordering progress and at close. `never_observed` means missing
+  at that receipt cutoff, **not proof of no network receipt**: Rust polling
+  can miss records evicted between probes. `zero_receipt_intervals` counts
+  nonempty mined intervals with no observed member by the receipt cutoff.
+* M2 samples the miner's `/peers/syncInfo` and follower `/info.fullHeight`,
+  bracketing the sweep with miner-height reads. A moving miner tip or absent
+  peer status is unknown, not zero. The share uses comparable samples; stale
+  means tracked distance >2 while actual distance ≤2. The longest observed
+  stretch spans consecutive stale samples; unknown samples break it. Reads
+  are sequential, and raw start/end times expose the sampling skew.
+* M3 counts `Received message MessageSpec(65: Sync)` at the Scala miner for
+  both Scala followers, and at the stock Scala follower for the miner.
+  Reversed local/remote socket pairs in sender and receiver logs identify
+  the sender even with ephemeral source ports. The receiver logs once per
+  deserialized frame before dispatch, including frames later suppressed by
+  the sync lock. Mean and maximum include zero-message completed intervals;
+  the smallest gap uses receiver timestamps at millisecond resolution.
+  These are receiver-specific totals, including protocol replies, not a
+  test that every SyncInfo is subject to the refresh timer's 250 ms floor.
+  Rust's peer API has byte totals rather than per-code timestamps, and its
+  operator event feed has no input-block receipt event.
+
+For steady runs, Python generates `relay-logback.xml` under `MATRIX_WORK`,
+adding UTC timestamps and enabling the history and peer-handler DEBUG
+loggers. The committed logging configuration remains the baseline for
+other scenarios. Missing measurement sources are reported as NOT MEASURED.
+
+Run the new tests through the existing suite:
+
+```bash
+TMPDIR="$PWD/.tmp" python3 scripts/devnet-matrix/verdict_self_test.py --self-test
+```
+
+The checked-in parser fixtures are source-derived. A live smoke must still
+validate the formats and supply captured fixtures before acceptance evidence
+is claimed. Preserve the workspace-local dependency cache referenced by
+provisioned classpaths when archiving or moving these builds.

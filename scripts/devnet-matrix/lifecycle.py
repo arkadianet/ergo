@@ -356,7 +356,12 @@ def _command(name):
         raise SystemExit(
             f'Scala weak-blocks classpath for {name} not found at {cp}; '
             f'provision the build or set MATRIX_CLASSPATH_{name.upper()}')
-    return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(HERE / 'logback.xml'),
+    log_config = HERE / 'logback.xml'
+    if os.environ.get('MATRIX_RELAY_MEASUREMENT') == '1':
+        from relay_measurement import logback
+        log_config = WORK / 'relay-logback.xml'
+        log_config.write_text(logback((HERE / 'logback.xml').read_text()))
+    return ['java', '-Xmx2g', '-Dlogback.configurationFile=' + str(log_config),
             '-cp', cp.read_text().strip(), 'org.ergoplatform.ErgoApp',
             '--config', _config_path(name)]
 

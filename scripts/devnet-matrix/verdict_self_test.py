@@ -13,6 +13,7 @@ import campaign
 import lifecycle
 import smoke
 from scenarios import common, fork, miner_self_reject, reconstruct_rate
+from relay_self_test import RelayTests
 
 
 # ----- helpers -----

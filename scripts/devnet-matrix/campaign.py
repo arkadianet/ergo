@@ -455,6 +455,7 @@ def configure_environment(scenario, nodes, roles=(), build='stock',
                           base_build='stock'):
     """Point `lifecycle` at this campaign's ports, configs, dirs and builds."""
     os.environ['MATRIX_NODES'] = ','.join(nodes)
+    os.environ['MATRIX_RELAY_MEASUREMENT'] = '1' if scenario == 'steady' else '0'
     for name in nodes:
         os.environ[f'MATRIX_P2P_{name.upper()}'] = str(CAMPAIGN_P2P[name])
         os.environ[f'MATRIX_REST_{name.upper()}'] = str(CAMPAIGN_REST[name])

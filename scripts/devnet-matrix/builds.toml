@@ -137,3 +137,21 @@ work_dir = ".work-soak"
 ergo_ref = "abf02c053946ae780fabcf5ad48b2d1e5680e023"
 branch = "soak/matrix-2026-09-25b"
 description = "a1bd938ef + every patch we filed: retained mining work (#2504 + the #2505 miner parts), #2562, #2563 fixed, #2564, waitlist sibling order, and the #2505 route line; the integration soak build, never used for a per-patch claim"
+
+[builds.syncfix]
+work_dir = ".work-syncfix"
+ergo_ref = "6fad0e04e1377380a1b95e99d8f23d0935ec2ea9"
+branch = "upstream/post-progress-sync-refresh"
+description = "#2597: refresh follower SyncInfo after applied progress"
+
+[builds.2566]
+work_dir = ".work-2566"
+ergo_ref = "516b30efdd3d2a61668db9c0ae92d97f9574406c"
+branch = "pr/2566"
+description = "#2566 input-block Inv relay on a1bd938ef"
+
+[builds."syncfix+2566"]
+work_dir = ".work-syncfix-plus-2566"
+ergo_ref = "91c1c08237fe810c238aee8396528fc8537812ca"
+branch = "tmp/sync-refresh-plus-2566"
+description = "#2597 composed with #2566, including composition tests"
