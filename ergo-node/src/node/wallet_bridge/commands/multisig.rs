@@ -21,8 +21,13 @@ pub(crate) async fn generate_commitments(
     request: GenerateCommitmentsRequest,
     reply: oneshot::Sender<Result<GenerateCommitmentsResponse, WalletAdminError>>,
 ) {
-    let result =
-        super::generate_commitments_impl(&request, ctx.storage, ctx.db, ctx.chain.as_ref()).await;
+    let result = super::generate_commitments_impl(
+        &request,
+        ctx.storage,
+        ctx.store.as_ref(),
+        ctx.chain.as_ref(),
+    )
+    .await;
     let _ = reply.send(result);
 }
 
@@ -44,7 +49,7 @@ pub(crate) async fn derive_key(
         &request,
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
     )
@@ -59,7 +64,7 @@ pub(crate) async fn derive_next_key(
     let result = super::derive_next_key_impl(
         ctx.storage,
         ctx.state,
-        ctx.db,
+        ctx.store.as_ref(),
         ctx.chain.as_ref(),
         ctx.cfg.network,
     )
@@ -72,6 +77,7 @@ pub(crate) async fn get_private_key(
     request: GetPrivateKeyRequest,
     reply: oneshot::Sender<Result<GetPrivateKeyResponse, WalletAdminError>>,
 ) {
-    let result = super::get_private_key_impl(&request, ctx.storage, ctx.db, ctx.cfg).await;
+    let result =
+        super::get_private_key_impl(&request, ctx.storage, ctx.store.as_ref(), ctx.cfg).await;
     let _ = reply.send(result);
 }

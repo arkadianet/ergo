@@ -285,6 +285,29 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     security: Option<Arc<crate::auth::ApiSecurity>>,
     allowed_hosts: &[String],
 ) -> JoinHandle<()> {
+    serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        allowed_hosts,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    wallet_moved: Option<&str>,
+) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
@@ -292,7 +315,13 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     if let Some(addr) = bind_addr {
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
-    let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
+    let app = router_with_mempool_and_wallet_and_wallet_moved(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        wallet_moved,
+    );
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -667,11 +696,44 @@ pub fn router_with_mempool_and_wallet_and_security(
     router_with_mempool_and_wallet_and_security_and_inventory(ctx, admin, wallet_admin, security).0
 }
 
+pub fn router_with_mempool_and_wallet_and_wallet_moved(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
+) -> Router {
+    router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        wallet_moved,
+    )
+    .0
+}
+
 pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     ctx: ServerCtx,
     admin: Option<Arc<dyn NodeAdmin>>,
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> (Router, ApiRouteInventory) {
+    router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        None,
+    )
+}
+
+fn router_with_mempool_and_wallet_and_security_and_inventory_and_wallet_moved(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> (Router, ApiRouteInventory) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
@@ -804,6 +866,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             emission,
             emission_scripts,
             security.clone(),
+            wallet_moved,
         ),
     );
 
@@ -827,7 +890,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,
-        scala_api::wallet_router(wallet_admin.clone(), security.clone()),
+        scala_api::wallet_router(wallet_admin.clone(), security.clone(), wallet_moved),
     );
     // The v1 T1 (operator) auth config — the same api-key gate the wallet
     // surface uses, reused for the `webhooks/*` management routes below.
@@ -840,7 +903,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let assembled = route_registry::merge_family_router(
         assembled,
         &mut inventory,
-        rust_api::wallet_router(wallet_admin, security),
+        rust_api::wallet_router(wallet_admin, security, wallet_moved),
     );
 
     // Native `/api/v1/*` product API — the `chain/*` + `transactions/*` reads
@@ -1000,6 +1063,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             webhooks: v1_webhooks_state,
             governor: v1_governor,
             auth: v1_auth,
+            wallet_moved: wallet_moved.map(str::to_string),
         }),
     );
 
@@ -1032,11 +1096,23 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
 /// SPA's wallet section (`/#wallet`). Kept as their own router merged before the
 /// gated `/wallet/*` router so the static routes win over its `/wallet/*rest`
 /// catch-all (otherwise these would 403 instead of redirecting).
-fn wallet_ui_router() -> Router {
-    Router::new()
-        .route("/wallet/ui", get(wallet_ui_redirect))
-        .route("/wallet/ui/index.html", get(wallet_ui_redirect))
-        .route("/wallet/ui/wallet.js", get(wallet_ui_redirect))
+fn wallet_ui_router(wallet_moved: Option<&str>) -> Router {
+    if let Some(address) = wallet_moved {
+        let address = address.to_string();
+        let moved = move || {
+            let address = address.clone();
+            async move { crate::wallet::wallet_moved_response(&address) }
+        };
+        Router::new()
+            .route("/wallet/ui", get(moved.clone()))
+            .route("/wallet/ui/index.html", get(moved.clone()))
+            .route("/wallet/ui/wallet.js", get(moved))
+    } else {
+        Router::new()
+            .route("/wallet/ui", get(wallet_ui_redirect))
+            .route("/wallet/ui/index.html", get(wallet_ui_redirect))
+            .route("/wallet/ui/wallet.js", get(wallet_ui_redirect))
+    }
 }
 
 async fn wallet_ui_redirect() -> Redirect {

@@ -261,7 +261,18 @@ fn app(hard_deny: bool) -> axum::Router {
         admin: Arc::new(Mock::default()),
         network: NetworkPrefix::Mainnet,
     };
-    accounts_router(state, governor, auth)
+    accounts_router(state, governor, auth, None)
+}
+
+fn external_app() -> axum::Router {
+    let sec = Arc::new(ApiSecurity::new(ApiSecurity::hash_key(KEY)).unwrap());
+    let auth = V1AuthConfig::new(Some(sec)).into_shared();
+    let governor = ergo_api::v1::Governor::new(GovernorConfig::default()).unwrap();
+    let state = AccountsState {
+        admin: Arc::new(Mock::default()),
+        network: NetworkPrefix::Mainnet,
+    };
+    accounts_router(state, governor, auth, Some("http://127.0.0.1:19090"))
 }
 
 fn req(
@@ -294,6 +305,91 @@ async fn json_of(app: axum::Router, r: Request<Body>) -> (StatusCode, serde_json
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (st, v)
+}
+
+#[tokio::test]
+async fn external_v1_t0_routes_return_nested_wallet_moved_without_key() {
+    for (method, path) in [
+        (Method::GET, "/api/v1/accounts/watch"),
+        (Method::GET, "/api/v1/accounts/watch/7/unspent"),
+    ] {
+        let (status, body) = json_of(
+            external_app(),
+            req(method.clone(), path, None, Body::empty(), Some(LOCAL)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "path {path}: {body}");
+        assert_eq!(
+            body["error"]["reason"], "wallet_moved",
+            "path {path}: {body}"
+        );
+        assert_eq!(body["error"]["detail"], "http://127.0.0.1:19090");
+        assert!(body.get("reason").is_none(), "path {path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn external_v1_t1_routes_authenticate_before_nested_wallet_moved() {
+    for (method, path) in [
+        (Method::GET, "/api/v1/scan/scans"),
+        (Method::GET, "/api/v1/accounts"),
+        (Method::POST, "/api/v1/transactions-psbt"),
+    ] {
+        let (status, body) = json_of(
+            external_app(),
+            req(method.clone(), path, None, Body::empty(), Some(LOCAL)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "path {path}: {body}");
+        assert_eq!(
+            body["error"]["reason"], "unauthorized",
+            "path {path}: {body}"
+        );
+
+        let (status, body) = json_of(
+            external_app(),
+            req(method, path, Some(KEY), Body::empty(), Some(LOCAL)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "path {path}: {body}");
+        assert_eq!(
+            body["error"]["reason"], "wallet_moved",
+            "path {path}: {body}"
+        );
+        assert_eq!(body["error"]["detail"], "http://127.0.0.1:19090");
+    }
+}
+
+#[tokio::test]
+async fn external_v1_t2_route_authenticates_before_nested_wallet_moved() {
+    let (status, body) = json_of(
+        external_app(),
+        req(
+            Method::POST,
+            "/api/v1/accounts/private-key",
+            None,
+            Body::empty(),
+            Some(LOCAL),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert_eq!(body["error"]["reason"], "unauthorized");
+
+    let (status, body) = json_of(
+        external_app(),
+        req(
+            Method::POST,
+            "/api/v1/accounts/private-key",
+            Some(KEY),
+            Body::empty(),
+            Some(LOCAL),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "body: {body}");
+    assert_eq!(body["error"]["reason"], "wallet_moved");
+    assert_eq!(body["error"]["detail"], "http://127.0.0.1:19090");
 }
 
 // ----- scan T1 gating -----

@@ -206,6 +206,23 @@ fn seam(what: &str, detail: &str) -> Response {
     )
 }
 
+#[derive(Clone)]
+struct WalletMovedState {
+    address: Arc<str>,
+}
+
+async fn wallet_moved_guard(
+    axum::extract::State(state): axum::extract::State<WalletMovedState>,
+    _request: axum::http::Request<axum::body::Body>,
+    _next: axum::middleware::Next,
+) -> Response {
+    v1_error(
+        Reason::WalletMoved,
+        "the wallet is owned by an external daemon",
+        state.address.as_ref(),
+    )
+}
+
 // ==========================================================================
 //  Watch-only addresses (BACKED via the scan registry)
 // ==========================================================================
@@ -490,6 +507,7 @@ pub fn accounts_router(
     state: AccountsState,
     governor: Arc<Governor>,
     auth: Arc<V1AuthConfig>,
+    wallet_moved: Option<&str>,
 ) -> Router {
     // ----- T0: watch-only reads (public info, governor-bounded) -----
     let t0: Router<AccountsState> = Router::new()
@@ -504,6 +522,15 @@ pub fn accounts_router(
             governor.state(RouteClass::CheapRead),
             governor_mw,
         ));
+    let t0 = match wallet_moved {
+        Some(address) => t0.route_layer(axum::middleware::from_fn_with_state(
+            WalletMovedState {
+                address: Arc::from(address),
+            },
+            wallet_moved_guard,
+        )),
+        None => t0,
+    };
 
     // ----- T1: operator (api_key) -----
     let t1: Router<AccountsState> = Router::new()
@@ -546,19 +573,37 @@ pub fn accounts_router(
         .route("/api/v1/transactions-psbt", post(psbt_seam))
         .route(super::PSBT_SEAM.axum_path, get(psbt_seam))
         .route(super::PSBT_CONTRIBUTIONS_SEAM.axum_path, post(psbt_seam))
-        .route(super::PSBT_FINALIZE_SEAM.axum_path, post(psbt_seam))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth.state(Tier::Operator),
-            require_tier,
-        ));
+        .route(super::PSBT_FINALIZE_SEAM.axum_path, post(psbt_seam));
+    let t1 = match wallet_moved {
+        Some(address) => t1.route_layer(axum::middleware::from_fn_with_state(
+            WalletMovedState {
+                address: Arc::from(address),
+            },
+            wallet_moved_guard,
+        )),
+        None => t1,
+    };
+    let t1 = t1.route_layer(axum::middleware::from_fn_with_state(
+        auth.state(Tier::Operator),
+        require_tier,
+    ));
 
     // ----- T2: admin (api_key + loopback-preferred) — secret export -----
-    let t2: Router<AccountsState> = Router::new()
-        .route("/api/v1/accounts/private-key", post(private_key))
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth.state(Tier::Admin),
-            require_tier,
-        ));
+    let t2: Router<AccountsState> =
+        Router::new().route("/api/v1/accounts/private-key", post(private_key));
+    let t2 = match wallet_moved {
+        Some(address) => t2.route_layer(axum::middleware::from_fn_with_state(
+            WalletMovedState {
+                address: Arc::from(address),
+            },
+            wallet_moved_guard,
+        )),
+        None => t2,
+    };
+    let t2 = t2.route_layer(axum::middleware::from_fn_with_state(
+        auth.state(Tier::Admin),
+        require_tier,
+    ));
 
     t0.merge(t1).merge(t2).with_state(state)
 }

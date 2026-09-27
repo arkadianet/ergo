@@ -44,6 +44,7 @@ pub struct RunHandle {
     /// shutdown signal when the embedder drops the handle without
     /// calling [`shutdown`](Self::shutdown).
     pub(super) shutdown_tx: Option<oneshot::Sender<()>>,
+    pub(crate) wallet_session_id: u64,
     /// Graceful-shutdown channel for the API task. `Some` only when
     /// the API was actually bound. Sending (or dropping) triggers
     /// axum's `with_graceful_shutdown` so in-flight HTTP handlers
@@ -177,6 +178,7 @@ impl RunHandle {
     pub async fn shutdown(mut self) -> Result<(), NodeError> {
         let shutdown_started = std::time::Instant::now();
         info!("shutdown initiated");
+        crate::wallet_boot::request_rescan_shutdown_for(self.wallet_session_id);
         // Action-loop shutdown — taken so Drop can't double-fire if
         // this future is cancelled mid-await.
         if let Some(tx) = self.shutdown_tx.take() {
@@ -316,9 +318,22 @@ impl RunHandle {
             }
         }
         // Loop completion — surfaces shutdown_cleanly result.
-        let result = match (&mut self.loop_handle).await {
+        let loop_result = match (&mut self.loop_handle).await {
             Ok(r) => r,
             Err(join_err) => Err(Box::new(join_err) as NodeError),
+        };
+        let wallet_tasks_result =
+            crate::wallet_boot::await_wallet_tasks(self.wallet_session_id).await;
+        let result = match (wallet_tasks_result, loop_result) {
+            (Ok(()), result) => result,
+            (Err(join_err), Ok(())) => {
+                error!(%join_err, "wallet task join failed during shutdown");
+                Err(Box::new(join_err) as NodeError)
+            }
+            (Err(join_err), Err(error)) => {
+                error!(%join_err, "wallet task join failed during shutdown");
+                Err(error)
+            }
         };
         let elapsed_ms = shutdown_started.elapsed().as_millis() as u64;
         match &result {
@@ -420,6 +435,7 @@ impl Drop for RunHandle {
         //
         // If the handle was already drained by `shutdown().await`,
         // every `take()` returns `None` and this is a no-op.
+        crate::wallet_boot::request_rescan_shutdown_for(self.wallet_session_id);
         if let Some(tx) = self.api_shutdown_tx.take() {
             let _ = tx.send(());
         }

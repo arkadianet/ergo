@@ -570,6 +570,22 @@ fn wallet_rollback_to_nonzero_and_genesis_restores_cursor_identity() {
 }
 
 #[test]
+fn wallet_hook_without_rescan_guard_allows_rewind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.redb");
+    let data = load_test_data();
+    let hook = TestWalletHook {
+        tree: vec![0x01, 0x02, 0x03],
+    };
+    let mut store = StateStore::open(&db_path).unwrap();
+    init_genesis(&mut store);
+    apply_blocks_with_wallet(&mut store, &data, &hook, 1, 5);
+
+    store.rollback_to(3, Some(&hook), None).unwrap();
+    assert_eq!(store.height(), 3);
+}
+
+#[test]
 fn test_force_set_best_header_unsafe_persists_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.redb");

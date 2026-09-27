@@ -25,6 +25,13 @@ pub mod types;
 
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+
 /// `WalletAdmin` is the trait the integrator implements to give
 /// the API task access to the wallet. The trait is `async` because
 /// most lifecycle operations cross task boundaries (the wallet
@@ -542,6 +549,37 @@ pub enum WalletAdminError {
     TxNotFound,
 }
 
+/// State used by the short-circuit guard for an externally owned wallet.
+#[derive(Clone)]
+pub(crate) struct WalletMovedGuard {
+    pub(crate) daemon_address: Arc<str>,
+    pub(crate) security: Option<Arc<crate::auth::ApiSecurity>>,
+}
+
+pub(crate) async fn wallet_moved_guard(
+    State(guard): State<WalletMovedGuard>,
+    req: Request<Body>,
+    _next: Next,
+) -> Response {
+    if let Some(security) = &guard.security {
+        if !crate::auth::request_is_authorized(security, &req) {
+            return crate::auth::reject_invalid();
+        }
+    }
+    wallet_moved_response(&guard.daemon_address)
+}
+
+pub(crate) fn wallet_moved_response(address: &str) -> Response {
+    (
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "reason": "wallet_moved",
+            "address": address,
+        })),
+    )
+        .into_response()
+}
+
 /// Build the `/wallet/*` axum router and, if `security` is `Some`,
 /// wrap it with the [`crate::auth::require_api_key`] middleware via
 /// `route_layer` — which fires only on matched routes. A plain `layer`
@@ -562,6 +600,14 @@ pub enum WalletAdminError {
 pub fn router_with_security(
     admin: Arc<dyn WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+) -> axum::Router {
+    router_with_security_and_moved(admin, security, None)
+}
+
+pub(crate) fn router_with_security_and_moved(
+    admin: Arc<dyn WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    daemon_address: Option<&str>,
 ) -> axum::Router {
     use axum::routing::{any, get, post};
     let r = axum::Router::new()
@@ -634,12 +680,26 @@ pub fn router_with_security(
         .route("/scan", any(crate::auth::unknown_gated_subpath))
         .route("/scan/*rest", any(crate::auth::unknown_gated_subpath))
         .with_state(admin);
-    match security {
-        Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(
+    match (security, daemon_address) {
+        (Some(sec), Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+            WalletMovedGuard {
+                daemon_address: Arc::from(address),
+                security: Some(sec),
+            },
+            wallet_moved_guard,
+        )),
+        (None, Some(address)) => r.route_layer(axum::middleware::from_fn_with_state(
+            WalletMovedGuard {
+                daemon_address: Arc::from(address),
+                security: None,
+            },
+            wallet_moved_guard,
+        )),
+        (Some(sec), None) => r.route_layer(axum::middleware::from_fn_with_state(
             sec,
             crate::auth::require_api_key,
         )),
-        None => r,
+        (None, None) => r,
     }
 }
 

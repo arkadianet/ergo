@@ -59,7 +59,7 @@ pub(crate) async fn build_unsigned_tx(
     fee_override: Option<u64>,
     change_address_override: Option<&str>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<BuiltTx, WalletAdminError> {
@@ -449,11 +449,10 @@ pub(crate) async fn build_unsigned_tx(
         })
     } else {
         // Automatic box selection from wallet unspent boxes.
-        let read_txn = db
-            .begin_read()
+        let read = store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let unspent = wallet_reader
+        let unspent = read
             .unspent_boxes()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
@@ -740,7 +739,7 @@ pub(crate) fn exact_set_plan(
 pub(crate) fn select_boxes_impl(
     req: &ergo_api::wallet::native::dto::BoxSelectRequest,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
@@ -750,11 +749,10 @@ pub(crate) fn select_boxes_impl(
     let target_tokens = parse_native_assets(&req.target.assets)?;
 
     // Confirmed unspent set → summaries, narrowed by the input source.
-    let read_txn = db
-        .begin_read()
+    let read = store
+        .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let unspent = wallet_reader
+    let unspent = read
         .unspent_boxes()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     let mut summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
@@ -898,7 +896,7 @@ pub(crate) fn select_boxes_impl(
 pub(crate) async fn build_transaction_impl(
     intent: &ergo_api::wallet::native::dto::TxIntent,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
@@ -974,7 +972,7 @@ pub(crate) async fn build_transaction_impl(
         fee_override,
         intent.change_address.as_deref(),
         state,
-        db,
+        store,
         chain,
         network,
     )

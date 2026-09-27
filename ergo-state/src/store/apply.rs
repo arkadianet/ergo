@@ -198,8 +198,8 @@ impl StateStore {
         // apply. The payload bundles owned data only, so it can later
         // cross the pipeline-worker thread boundary (M5 follow-up).
         let payload: Option<crate::store::WalletApplyPayload> = if let Some(hook) = wallet_hook {
-            let trees = hook.tracked_p2pk_trees();
-            let pubkeys = hook.cached_pubkeys();
+            let (trees, pubkeys) = hook.wallet_state_snapshot();
+            let allow_non_contiguous_wallet = hook.allow_non_contiguous_wallet_apply();
             let scan_count = hook.registered_scan_count();
             // Build a payload if there is ANY wallet tracking — tracked pubkeys
             // OR registered scans. Scan matching is gated on `scan_count > 0`
@@ -219,6 +219,7 @@ impl StateStore {
                     block_txs_owned: owned,
                     scan_matches,
                     has_registered_scans: scan_count > 0,
+                    allow_non_contiguous_wallet,
                 })
             }
         } else {
@@ -253,6 +254,7 @@ impl StateStore {
     /// Shared apply core for a `CheckedBlock` and the test harness path
     /// that drives individual CheckedTransactions without building a real
     /// block header. Production code should not call this directly.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_checked_transactions(
         &mut self,
         height: u32,
@@ -380,12 +382,16 @@ impl StateStore {
             height,
             transactions.iter(),
         )?;
-        let wallet_payload = wallet_hook.map(|hook| crate::store::WalletApplyPayload {
-            tracked_p2pk_trees: hook.tracked_p2pk_trees(),
-            cached_pubkeys: hook.cached_pubkeys(),
-            block_txs_owned: Vec::new(),
-            scan_matches: Vec::new(),
-            has_registered_scans: hook.registered_scan_count() > 0,
+        let wallet_payload = wallet_hook.map(|hook| {
+            let (trees, pubkeys) = hook.wallet_state_snapshot();
+            crate::store::WalletApplyPayload {
+                tracked_p2pk_trees: trees,
+                cached_pubkeys: pubkeys,
+                block_txs_owned: Vec::new(),
+                scan_matches: Vec::new(),
+                has_registered_scans: hook.registered_scan_count() > 0,
+                allow_non_contiguous_wallet: hook.allow_non_contiguous_wallet_apply(),
+            }
         });
         self.apply_utxo_changes(
             height,
@@ -592,6 +598,7 @@ impl StateStore {
     /// (height, best_full_block, validation-settings cache) on success.
     /// On error, rebuilds in-memory state from disk via
     /// `rebuild_from_committed`.
+    #[allow(clippy::too_many_arguments)]
     fn apply_utxo_changes(
         &mut self,
         height: u32,

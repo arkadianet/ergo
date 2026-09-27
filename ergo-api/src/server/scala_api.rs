@@ -82,6 +82,7 @@ pub(super) fn auxiliary_router(
     emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> FamilyRouter {
     let documented = super::scala_openapi_operations();
     let mut operations = std::collections::BTreeSet::new();
@@ -179,6 +180,16 @@ pub(super) fn auxiliary_router(
             "/script/p2shAddress",
             post(crate::script::p2sh_address_handler),
         );
+    let scripts = match wallet_moved {
+        Some(address) => scripts.route_layer(axum::middleware::from_fn_with_state(
+            crate::wallet::WalletMovedGuard {
+                daemon_address: Arc::from(address),
+                security: None,
+            },
+            crate::wallet::wallet_moved_guard,
+        )),
+        None => scripts,
+    };
     operations.extend(
         documented
             .iter()
@@ -525,9 +536,11 @@ pub(super) fn compat_write_router(submit: Arc<dyn NodeSubmit>) -> FamilyRouter {
 pub(super) fn wallet_router(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    wallet_moved: Option<&str>,
 ) -> FamilyRouter {
-    let router = super::wallet_ui_router()
-        .merge(crate::wallet::router_with_security(wallet_admin, security));
+    let router = super::wallet_ui_router(wallet_moved).merge(
+        crate::wallet::router_with_security_and_moved(wallet_admin, security, wallet_moved),
+    );
     let operations = super::scala_openapi_operations()
         .into_iter()
         .filter(|operation| {

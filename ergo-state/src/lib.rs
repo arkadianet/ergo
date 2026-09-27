@@ -216,8 +216,7 @@ pub mod test_helpers {
             checked: &[CheckedTransaction],
             wallet_hook: &dyn crate::wallet::WalletApplyHook,
         ) -> Result<(), StateError> {
-            let trees = wallet_hook.tracked_p2pk_trees();
-            let pubkeys = wallet_hook.cached_pubkeys();
+            let (trees, pubkeys) = wallet_hook.wallet_state_snapshot();
             let owned = crate::store::build_wallet_block_txs_checked(checked, height)?;
             let payload = crate::store::WalletApplyPayload {
                 tracked_p2pk_trees: trees,
@@ -225,6 +224,7 @@ pub mod test_helpers {
                 block_txs_owned: owned,
                 scan_matches: Vec::new(),
                 has_registered_scans: false,
+                allow_non_contiguous_wallet: wallet_hook.allow_non_contiguous_wallet_apply(),
             };
             self.apply_checked_transactions(
                 height,

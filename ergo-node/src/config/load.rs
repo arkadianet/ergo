@@ -16,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use super::toml_sections::*;
 use super::{
     validate_supported, Cli, LoggingConfig, LoggingFileConfig, LoggingFormat, Network, NodeConfig,
-    StateType, MAX_DOWNLOAD_WINDOW,
+    StateType, WalletMode, MAX_DOWNLOAD_WINDOW,
 };
 
 impl NodeConfig {
@@ -916,6 +916,24 @@ impl NodeConfig {
             }
         }
 
+        let wallet_mode = match toml_cfg.wallet.mode.as_deref() {
+            None => WalletMode::Embedded,
+            Some(value) => value
+                .parse::<WalletMode>()
+                .map_err(|e| format!("[wallet] {e}"))?,
+        };
+        let wallet_daemon_address = toml_cfg
+            .wallet
+            .daemon_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "http://127.0.0.1:9090".to_string());
+        if wallet_daemon_address.is_empty() {
+            return Err("[wallet] daemon_address must be non-empty".into());
+        }
+
         // [mining] — external-miner subsystem. Defaults disabled. CLI
         // overrides applied below.
         let mut mining_config = toml_cfg.mining.clone();
@@ -927,6 +945,17 @@ impl NodeConfig {
         }
         if let Err(e) = mining_config.validate() {
             return Err(format!("[mining]: {e}"));
+        }
+        if wallet_mode == WalletMode::External
+            && mining_config.enabled
+            && mining_config.miner_public_key_hex.is_none()
+        {
+            return Err(
+                "[wallet] mode = \"external\" with [mining] enabled = true requires \
+                 [mining].miner_public_key_hex (or --mining-public-key); wallet-backed \
+                 reward keys are unavailable in external mode"
+                    .into(),
+            );
         }
 
         // [voting] — operator on-chain voting policy. Resolve each
@@ -1136,6 +1165,8 @@ impl NodeConfig {
             mining_config,
             voting_targets,
             wallet_expose_private_keys: toml_cfg.wallet.expose_private_keys.unwrap_or(false),
+            wallet_mode,
+            wallet_daemon_address,
         })
     }
 }

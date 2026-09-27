@@ -65,6 +65,36 @@ impl std::str::FromStr for StateType {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WalletMode {
+    #[default]
+    Embedded,
+    External,
+}
+
+impl WalletMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::External => "external",
+        }
+    }
+}
+
+impl std::str::FromStr for WalletMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "embedded" => Ok(WalletMode::Embedded),
+            "external" => Ok(WalletMode::External),
+            other => Err(format!(
+                "unknown wallet mode: {other:?}; expected \"embedded\" or \"external\""
+            )),
+        }
+    }
+}
+
 // ---- NodeConfig ----
 
 #[derive(Debug)]
@@ -228,6 +258,8 @@ pub struct NodeConfig {
     /// returns `403 Forbidden`. Threaded into the wallet writer task's
     /// `WriterConfig` at boot.
     pub wallet_expose_private_keys: bool,
+    pub wallet_mode: WalletMode,
+    pub wallet_daemon_address: String,
     /// Step C — when `true`, the per-peer SyncInfo dispatch swaps
     /// our recent-header-tail `lastHeaderIds` for a single anchor ID
     /// drawn from the REST-built `AnchorMap` whenever the peer is

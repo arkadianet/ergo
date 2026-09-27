@@ -82,6 +82,39 @@ impl StateStore {
         launch_params: ergo_validation::ActiveProtocolParameters,
         voting_settings: ergo_chain_spec::VotingParams,
     ) -> Result<Self, StateError> {
+        Self::open_with_cache_launch_voting_and_wallet(
+            path,
+            cache_bytes,
+            launch_params,
+            voting_settings,
+            true,
+        )
+    }
+
+    /// Opens the chain store without touching wallet tables. Used when the
+    /// wallet is owned by an external process.
+    pub fn open_with_cache_launch_voting_without_wallet(
+        path: &Path,
+        cache_bytes: usize,
+        launch_params: ergo_validation::ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+    ) -> Result<Self, StateError> {
+        Self::open_with_cache_launch_voting_and_wallet(
+            path,
+            cache_bytes,
+            launch_params,
+            voting_settings,
+            false,
+        )
+    }
+
+    fn open_with_cache_launch_voting_and_wallet(
+        path: &Path,
+        cache_bytes: usize,
+        launch_params: ergo_validation::ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+        migrate_wallet: bool,
+    ) -> Result<Self, StateError> {
         let t0 = std::time::Instant::now();
         let db = Arc::new(
             Database::builder()
@@ -314,7 +347,9 @@ impl StateStore {
             blocks_to_keep: -1,
             rollback_window: ROLLBACK_WINDOW,
         };
-        crate::wallet::migrate_schema(&store.db)?;
+        if migrate_wallet {
+            crate::wallet::migrate_schema(&store.db)?;
+        }
         store.backfill_header_chain_index_if_needed()?;
         store.reconcile_voted_params()?;
         store.migrate_voted_params_codec_v2_if_needed()?;

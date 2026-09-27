@@ -518,7 +518,8 @@ pub use wallet_tx_bridge::{
     OwnedBlockTxData,
 };
 pub(crate) use wallet_tx_bridge::{
-    build_scan_match_records, build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
+    block_txs_for_wallet_at_height_in_read_txn, build_scan_match_records,
+    build_wallet_block_txs_checked, build_wallet_block_txs_from_sections,
 };
 
 // (StateMeta lives in store/meta.rs.)
@@ -574,6 +575,7 @@ pub struct WalletApplyPayload {
     /// derived from `scan_matches.is_empty()`: a registered scan still needs
     /// phase-2 spend transitions on a block that produced no new matches.
     pub has_registered_scans: bool,
+    pub allow_non_contiguous_wallet: bool,
 }
 
 impl WalletApplyPayload {
@@ -1494,21 +1496,6 @@ impl StateStore {
     /// [`crate::reader::ChainStoreReader`] for the exact contract.
     pub fn reader_handle(&self) -> crate::reader::ChainStoreReader {
         crate::reader::ChainStoreReader::new(self.db.clone())
-    }
-
-    /// Resolve the wallet's EIP-3 first-address pubkey as the miner reward
-    /// key. Narrow read seam for the mining subsystem (which holds `&StateStore`
-    /// but should not touch redb / wallet-table plumbing directly). A failure
-    /// to even open a read transaction maps to `Corrupt` — consistent with the
-    /// resolver's rule that only true table absence/emptiness is `Pending`.
-    /// See [`crate::wallet::reader::WalletReader::resolve_eip3_reward_key`].
-    pub fn resolve_eip3_reward_key(&self) -> crate::wallet::reader::RewardKeyResolution {
-        match self.db.begin_read() {
-            Ok(read_txn) => {
-                crate::wallet::reader::WalletReader::new(&read_txn).resolve_eip3_reward_key()
-            }
-            Err(_) => crate::wallet::reader::RewardKeyResolution::Corrupt,
-        }
     }
 
     /// Active protocol parameters for the given height: the row in
@@ -3604,6 +3591,7 @@ impl StateStore {
     /// and returns `CommitDurability::PendingJob(seq)` so the caller pins
     /// the block's nodes until that job commits. Otherwise it falls back to
     /// a synchronous write transaction and returns `Durable`.
+    #[allow(clippy::too_many_arguments)]
     fn persist_apply(
         &mut self,
         height: u32,
@@ -4095,6 +4083,7 @@ mod tests {
             cached_pubkeys: pubkeys,
             block_txs_owned: Vec::new(),
             scan_matches,
+            allow_non_contiguous_wallet: false,
         }
     }
 

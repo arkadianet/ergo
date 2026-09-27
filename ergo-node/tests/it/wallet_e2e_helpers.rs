@@ -5,7 +5,6 @@
 //! purely-in-memory variant would bypass the persistence contract
 //! the production boot path depends on.
 
-use ergo_state::wallet::reader::WalletReader;
 use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 use redb::Database;
@@ -91,12 +90,13 @@ impl TestWallet {
             .expect("secret file must exist for reopen");
         let mut state = WalletState::empty(use_pre_1627);
         // Hydrate from redb tables. This is the boot-path contract.
-        let txn = db.begin_read().unwrap();
-        let reader = WalletReader::new(&txn);
+        let read = ergo_state::wallet::WalletStore::read(&db).unwrap();
+        let hydration =
+            ergo_state::wallet::hydration::HydrationSnapshot::load(read.as_ref()).unwrap();
         state
-            .hydrate_from_reader(&reader, ergo_ser::address::NetworkPrefix::Mainnet)
+            .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
             .expect("hydrate from redb");
-        drop(txn);
+        drop(read);
         Self {
             dir,
             db,

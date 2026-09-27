@@ -8883,6 +8883,7 @@ components:
       - acknowledgement_required
       - secret_not_recoverable
       - change_address_untracked
+      - wallet_moved
       - rate_limited
       - limit_exceeded
       - batch_too_large

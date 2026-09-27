@@ -274,6 +274,10 @@ or the top-level `data_dir` key. The node creates the following under it:
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
+With `[wallet] mode = "external"`, the node does not open or create the
+`wallet/` secret directory, does not require wallet tables in `state.redb`, and
+returns `410 wallet_moved` for wallet-owned routes.
+
 Each redb file is updated under its own transactions; the consensus state DB
 applies every block under a single atomic commit (undo log + AVL mutations +
 chain index + state meta land together or not at all).

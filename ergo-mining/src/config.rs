@@ -216,9 +216,8 @@ impl MiningConfig {
         if !self.enabled {
             return Ok(());
         }
-        // `miner_public_key_hex` is OPTIONAL: when absent, the reward key is
-        // resolved from the wallet's EIP-3 first-address key at candidate time
-        // (Scala parity — see ergo-mining handle `RewardKeySource::Wallet`).
+        // `miner_public_key_hex` is optional for embedded mode; external mode
+        // enforces that it is present at the node config boundary.
         // But a value that IS present must be well-formed (66 hex chars → 33
         // bytes), validated early at startup rather than failing later.
         if let Some(pk_hex) = self.miner_public_key_hex.as_ref() {

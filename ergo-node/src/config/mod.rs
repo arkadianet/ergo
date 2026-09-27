@@ -27,7 +27,9 @@ mod resolved;
 mod toml_sections;
 
 pub use cli::Cli;
-pub use resolved::{LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, StateType};
+pub use resolved::{
+    LoggingConfig, LoggingFileConfig, LoggingFormat, NodeConfig, StateType, WalletMode,
+};
 
 #[cfg(test)]
 mod tests;

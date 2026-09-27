@@ -284,7 +284,7 @@ either way.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enables the external-miner subsystem and mounts `/mining/*`. Rejected when `state_type = "digest"` (candidate generation needs UTXO state). CLI flag `--mining-enabled` forces it on. |
-| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time (the node must have a wallet). A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
+| `miner_public_key_hex` | string (hex) | none | 33-byte compressed secp256k1 public key (66 hex chars) for the reward output. **Optional in embedded mode**: when set, it is the pinned reward pubkey; when omitted, the wallet's EIP-3 first-address key is resolved at candidate time. It is **required when `[wallet] mode = "external"` and mining is enabled**, because external mode has no wallet tables to resolve. A value that is present must be well-formed (66 hex chars → 33 bytes) or load fails. CLI flag: `--mining-public-key`. |
 | `block_candidate_generation_interval_ms` | u64 | `1000` | Debounce window (ms) for same-parent mempool-refresh rebuilds. When the mempool changes but the tip has not, the node coalesces the burst and regenerates the candidate at most once per window. Lower = fresher candidates but faster churn of the retained template ring. |
 | `use_external_miner` | bool | `true` | Must be `true` — an internal CPU miner is not supported, so `false` is rejected at load. |
 | `candidate_base_cache` | bool | `false` | Caches the hydrated AVL working set between candidate builds, keyed on the committed tip. Same-tip rebuilds (enriched refresh, mempool-driven rebuilds) are near-instant. When the tip advances by exactly one block, the engine attempts a single-step incremental advance of the cached tree (replaying the new block's UTXO changes, verifying the resulting digest) before falling back to full rehydration. Full rehydration is always the fallback on multi-block jumps, reorgs, decode errors, or digest mismatches. Holds the full UTXO AVL node graph resident — multi-GB on a mainnet archival node, scaling with the UTXO-set size — so enable it only on a mining node with RAM headroom. |
@@ -335,6 +335,8 @@ storageFeeFactor = 1250000
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `mode` | string | `"embedded"` | Wallet ownership mode. `"embedded"` keeps the existing wallet writer, secret storage, hydration, and apply hook. `"external"` does not open wallet secrets, hydrate wallet state, start the writer, or install the wallet apply hook; wallet-owned HTTP routes return `410` with `reason = "wallet_moved"` and the configured daemon address. |
+| `daemon_address` | string | `"http://127.0.0.1:9090"` | Address returned by external-mode wallet route responses. It is informational routing guidance; the node does not proxy requests to it. |
 | `expose_private_keys` | bool | `false` | When `true`, `POST /wallet/getPrivateKey` returns the derived secret scalar for an address; otherwise that route returns `403 Forbidden`. Setting this `true` lets any authenticated `api_key` request extract per-address private material. |
 
 ## `[logging]`
@@ -388,6 +390,9 @@ checks and are enforced at load:
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the
   votes are only ever cast by blocks this node mines.
+- `[wallet] mode = "external"` with `[mining] enabled = true` requires
+  `[mining].miner_public_key_hex`; wallet-backed reward-key resolution is
+  available only in embedded mode.
 
 ## Minimal example
 

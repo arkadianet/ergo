@@ -229,7 +229,7 @@ impl WalletState {
     ///
     /// Atomicity: the caller wraps this in a single redb read
     /// transaction so the snapshot is consistent.
-    pub fn hydrate_from_reader<R: HydrationSource>(
+    pub fn hydrate_from_reader<R: HydrationSource + ?Sized>(
         &mut self,
         reader: &R,
         network: ergo_ser::address::NetworkPrefix,

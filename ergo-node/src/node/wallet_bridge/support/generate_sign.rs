@@ -27,7 +27,7 @@ pub(crate) async fn payment_send_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
@@ -45,7 +45,7 @@ pub(crate) async fn payment_send_impl(
         fee_override,
         None, // change_address_override (compat path uses the persisted change address)
         state,
-        db,
+        store,
         chain,
         network,
     )
@@ -69,7 +69,7 @@ pub(crate) async fn payment_send_impl(
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
-            db,
+            store,
             &snapshot,
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
@@ -108,7 +108,7 @@ pub(crate) async fn transaction_generate_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -123,7 +123,7 @@ pub(crate) async fn transaction_generate_impl(
         fee_override,
         None, // change_address_override (compat path uses the persisted change address)
         state,
-        db,
+        store,
         chain,
         network,
     )
@@ -141,7 +141,7 @@ pub(crate) async fn transaction_generate_impl(
     let signed_tx = sign_unsigned_tx(
         &unsigned_tx,
         &storage,
-        db,
+        store,
         &snapshot,
         &[],
         &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
@@ -161,7 +161,7 @@ pub(crate) async fn transaction_generate_unsigned_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
@@ -176,7 +176,7 @@ pub(crate) async fn transaction_generate_unsigned_impl(
         fee_override,
         None, // change_address_override (compat path uses the persisted change address)
         state,
-        db,
+        store,
         chain,
         network,
     )
@@ -192,7 +192,7 @@ pub(crate) async fn transaction_sign_impl(
     hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
@@ -202,7 +202,7 @@ pub(crate) async fn transaction_sign_impl(
         hints,
         storage,
         state,
-        db,
+        store,
         &snapshot,
     )
 }
@@ -213,7 +213,7 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
     hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     snapshot: &ChainSnapshot,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let unsigned_tx_bytes = hex::decode(unsigned_tx_hex)
@@ -237,7 +237,14 @@ pub(crate) fn transaction_sign_impl_with_snapshot(
     };
 
     let storage = storage.read();
-    let signed_tx = sign_unsigned_tx(&unsigned_tx, &storage, db, snapshot, &externals, &hints_bag)?;
+    let signed_tx = sign_unsigned_tx(
+        &unsigned_tx,
+        &storage,
+        store,
+        snapshot,
+        &externals,
+        &hints_bag,
+    )?;
     drop(storage);
 
     serialize_signed_tx(&signed_tx)
@@ -248,15 +255,14 @@ pub(crate) fn boxes_collect_impl(
     request: &BoxesCollectRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<BoxesCollectResponse, WalletAdminError> {
     let _ = chain; // used for UTXO lookup in future phases
-    let read_txn = db
-        .begin_read()
+    let read = store
+        .read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let unspent = wallet_reader
+    let unspent = read
         .unspent_boxes()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 

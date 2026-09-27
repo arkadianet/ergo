@@ -1271,7 +1271,7 @@ fn handle_message_emits_span_with_peer_and_code() {
 
 // ----- mode_label_for: future-mode arms -----
 
-fn cfg_with_mode(
+pub(super) fn cfg_with_mode(
     state_type: crate::config::StateType,
     vt: bool,
     btk: i32,
@@ -1338,6 +1338,8 @@ fn cfg_with_mode(
         mining_config: ergo_mining::MiningConfig::default(),
         voting_targets: std::collections::BTreeMap::new(),
         wallet_expose_private_keys: false,
+        wallet_mode: crate::config::WalletMode::Embedded,
+        wallet_daemon_address: "http://127.0.0.1:9090".into(),
     }
 }
 

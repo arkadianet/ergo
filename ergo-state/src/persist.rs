@@ -786,7 +786,6 @@ impl PersistPipeline {
 
         let mut write_txn = crate::begin_write_qr(db)
             .observe_persist_error(failure_context, "background_persist_begin_write")?;
-
         // Durability mode per batch:
         //   - `None`     : pure-memory commit, queued for next durable flush.
         //                  Used between IBD durable points.
@@ -1292,6 +1291,7 @@ mod tests {
             block_txs_owned: vec![tx],
             scan_matches: Vec::new(),
             has_registered_scans: false,
+            allow_non_contiguous_wallet: false,
         });
         j
     }
@@ -1577,6 +1577,50 @@ mod tests {
             "watch should reflect 4 committed jobs, got {}",
             s.committed_count
         );
+    }
+
+    #[test]
+    fn full_rescan_with_queued_persist_jobs_converges_without_invalidation() {
+        use crate::wallet::scan::{RescanBlock, WalletScanService};
+        use crate::wallet::{RedbWalletStore, WalletStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let pipeline = PersistPipeline::new(db.clone(), path, 8, 1024, -1, None);
+        let store = RedbWalletStore::new(db.clone());
+        // Hold the database writer so the jobs cannot commit before rescan starts.
+        let write = db.begin_write().unwrap();
+        for height in 1..=3 {
+            pipeline.send(minimal_job(height)).unwrap();
+        }
+        let worker = std::thread::spawn(move || {
+            WalletScanService::rescan_full_rebuild_store(
+                &store,
+                Default::default(),
+                Default::default(),
+                0,
+                0,
+                |height| {
+                    Ok(Some(RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: vec![],
+                    }))
+                },
+                || {
+                    assert!(pipeline.flush().is_none());
+                    Ok(3)
+                },
+                || false,
+                None,
+            )
+            .unwrap()
+        });
+        drop(write);
+        assert_eq!(worker.join().unwrap(), 3);
+        let store = RedbWalletStore::new(db);
+        let read = store.read().unwrap();
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 3);
     }
 
     /// M5 final-slice atomic-pipeline test: a `PersistJob` carrying

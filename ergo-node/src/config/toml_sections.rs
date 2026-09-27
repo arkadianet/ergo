@@ -73,6 +73,8 @@ pub(super) struct TomlVoting {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TomlWallet {
+    pub(super) mode: Option<String>,
+    pub(super) daemon_address: Option<String>,
     /// `[wallet] expose_private_keys`: when `true`, the
     /// `POST /wallet/getPrivateKey` route returns the derived secret
     /// scalar for an address; when `false`/absent the route returns

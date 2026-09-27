@@ -50,7 +50,7 @@ pub(crate) async fn sign_transaction_native_impl(
     req: &ergo_api::wallet::native::dto::SignTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
     let externals: Vec<ergo_api::wallet::sending::ExternalSecretDto> = req
@@ -64,7 +64,7 @@ pub(crate) async fn sign_transaction_native_impl(
         None,
         storage,
         state,
-        db,
+        store,
         chain,
     )
     .await?;
@@ -112,7 +112,7 @@ pub(crate) async fn send_transaction_native_impl(
     req: &ergo_api::wallet::native::dto::SendTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
@@ -122,7 +122,7 @@ pub(crate) async fn send_transaction_native_impl(
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, db, chain, network).await?;
+            let built = build_transaction_impl(intent, state, store, chain, network).await?;
             let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
@@ -130,7 +130,7 @@ pub(crate) async fn send_transaction_native_impl(
                 None,
                 storage,
                 state,
-                db,
+                store,
                 &snapshot,
             )?;
             (bytes, Some(snapshot))
@@ -160,11 +160,10 @@ pub(crate) async fn send_transaction_native_impl(
     // summary, no re-submit. (Without an indexer a confirmed non-wallet tx is not
     // detectable here; it falls through to submit, where `duplicate` is caught.)
     {
-        let read_txn = db
-            .begin_read()
+        let read = store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        if let Some(wt) = reader
+        if let Some(wt) = read
             .transaction_by_id(&tx_id)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?
         {
@@ -293,23 +292,21 @@ pub(crate) fn decode_external_secret(
 /// proof time with `MissingSecret` — that is the correct failure mode.
 pub(crate) fn build_prover(
     storage: &ergo_wallet::storage::SecretStorage,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     params: &ergo_wallet::tx_context::BlockchainParameters,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<ergo_wallet::proving::prover::Prover, WalletAdminError> {
     let registry = if let Some(unlocked) = storage.unlocked() {
         // Wallet unlocked: pre-derive secrets for all tracked pubkeys.
-        let read_txn = db
-            .begin_read()
+        let read = store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let tracked_with_paths: std::collections::BTreeMap<u64, ([u8; 33], Vec<u32>)> =
-            wallet_reader
-                .tracked_pubkeys_with_paths()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|(idx, pk, path)| (idx, (pk, path)))
-                .collect();
+        let tracked_with_paths: std::collections::BTreeMap<u64, ([u8; 33], Vec<u32>)> = read
+            .tracked_pubkeys_with_paths()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .into_iter()
+            .map(|(idx, pk, path)| (idx, (pk, path)))
+            .collect();
 
         ergo_wallet::proving::secrets::SecretRegistry::from_master_key(
             &unlocked.master,
@@ -342,14 +339,14 @@ pub(crate) fn build_prover(
 pub(crate) fn sign_unsigned_tx(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     storage: &ergo_wallet::storage::SecretStorage,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     snapshot: &ChainSnapshot,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
     hints: &ergo_wallet::proving::hints::TransactionHintsBag,
 ) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
     let state_ctx = snapshot.state_context();
     let params = snapshot.signing_params();
-    let prover = build_prover(storage, db, params, externals)?;
+    let prover = build_prover(storage, store, params, externals)?;
 
     let boxes_to_spend: Vec<ergo_ser::ergo_box::ErgoBox> = unsigned_tx
         .inputs

@@ -157,7 +157,9 @@ pub use store::{
     RedbWalletStore, RescanState, ScanRegistrySnapshot, StoredScan, WalletRead, WalletStore,
     WalletStoreError, WalletWrite,
 };
-pub use types::{Balance, BoxProvenance, BoxStatus, WalletBox, WalletTransaction};
+pub use types::{
+    Balance, BoxProvenance, BoxStatus, ScanTrackedBox, ScanTxRecord, WalletBox, WalletTransaction,
+};
 
 /// Bundle of wallet-side dependencies threaded through the chain-
 /// apply / chain-rollback paths. Carries the apply hook (snapshot of
@@ -174,6 +176,7 @@ pub struct WalletWiring<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn migrate_schema_fills_legacy_cursor_from_applied_chain() {
         let dir = tempfile::tempdir().unwrap();

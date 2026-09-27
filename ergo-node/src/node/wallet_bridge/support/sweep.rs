@@ -196,7 +196,7 @@ pub(crate) async fn retrieve_rewards_impl(
     dry_run: bool,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
     mempool: &dyn ergo_api::MempoolView,
@@ -213,12 +213,10 @@ pub(crate) async fn retrieve_rewards_impl(
     //    auto-selection below; a PINNED retry must keep its (now pool-spent) boxes
     //    so it reaches the idempotent/duplicate submit handling.
     let mut matured: Vec<ergo_state::wallet::types::WalletBox> = {
-        let read_txn = db
-            .begin_read()
+        let read = store
+            .read()
             .map_err(|e| WalletAdminError::Internal(format!("wallet read txn: {e}")))?;
-        let reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        reader
-            .unspent_boxes()
+        read.unspent_boxes()
             .map_err(|e| WalletAdminError::Internal(format!("unspent_boxes: {e}")))?
             .into_iter()
             .filter(|b| {
@@ -403,7 +401,7 @@ pub(crate) async fn retrieve_rewards_impl(
         Some(fee), // the effective fee (override-or-floor) — not the raw override
         destination_override,
         state,
-        db,
+        store,
         chain,
         network,
     )
@@ -452,7 +450,7 @@ pub(crate) async fn retrieve_rewards_impl(
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
-            db,
+            store,
             &snapshot,
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),

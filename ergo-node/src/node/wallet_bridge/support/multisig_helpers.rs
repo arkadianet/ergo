@@ -19,7 +19,7 @@ use crate::node::wallet_bridge::{
 /// which leaves to generate commitments for.
 fn collect_generate_for(
     storage: &ergo_wallet::storage::SecretStorage,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<Vec<ergo_ser::sigma_value::SigmaBoolean>, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -30,11 +30,10 @@ fn collect_generate_for(
 
     // Wallet-derived DLog keys (available when unlocked).
     if storage.unlocked().is_some() {
-        let read_txn = db
-            .begin_read()
+        let read = store
+            .read()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let tracked: Vec<(u64, [u8; 33], Vec<u32>)> = wallet_reader
+        let tracked: Vec<(u64, [u8; 33], Vec<u32>)> = read
             .tracked_pubkeys_with_paths()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         for (_, pk, _) in tracked {
@@ -275,7 +274,7 @@ pub(crate) fn resolve_data_inputs_for_signed(
 pub(crate) async fn generate_commitments_impl(
     request: &ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    db: &redb::Database,
+    store: &dyn ergo_state::wallet::WalletStore,
     chain: &dyn ChainStateAccessor,
 ) -> Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
     use ergo_api::wallet::multi_sig::GenerateCommitmentsResponse;
@@ -299,7 +298,7 @@ pub(crate) async fn generate_commitments_impl(
         .collect::<Result<_, _>>()?;
 
     let storage_guard = storage.read();
-    let generate_for = collect_generate_for(&storage_guard, db, &externals)?;
+    let generate_for = collect_generate_for(&storage_guard, store, &externals)?;
     drop(storage_guard);
 
     let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
