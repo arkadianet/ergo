@@ -156,8 +156,10 @@ transitional `ergo-state -> ergo-wallet-service` integration
 - **Rescan runs off the command path.** `WalletEngine::prepare_rescan`
   performs every check and transition that can refuse a rescan and returns a
   `RescanJob`; the embedder runs `RescanJob::run` on a blocking thread. The
-  job's guard releases the fences (or keeps them failed closed) when it
-  finishes or unwinds.
+  job's guard is armed, failed closed, when the job is built, and releases the
+  fences (or keeps them failed closed) when the job finishes or unwinds; a job
+  dropped without running releases the task slot and leaves the wallet failed
+  closed, so a full rescan can recover it.
 - **Signing reads one committed view.** Sign and self-verify read a single
   `SigningView`; the paths that submit re-check it against the committed tip
   (`WalletChainAccess::ensure_view_current`) first, so a tip that moved

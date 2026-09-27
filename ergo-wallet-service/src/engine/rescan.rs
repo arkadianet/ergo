@@ -337,10 +337,16 @@ impl RescanGuard for WalletRescanGuard {
 /// that can refuse the rescan; [`RescanJob::run`] performs the replay and
 /// persists its outcome. The embedding process decides where `run` executes
 /// (the node spawns it with `tokio::task::spawn_blocking` and tracks the task
-/// with its wallet session). Dropping a job without running it leaves the
-/// claim in place, exactly like a blocking task that never started.
+/// with its wallet session).
+///
+/// The job's fence guard is armed when the job is built, failed closed by
+/// default: a job dropped without running (a blocking task that never
+/// started) releases the task slot and leaves the wallet failed closed, as a
+/// failed rescan start does, so a full (`fromHeight = 0`) rescan can recover
+/// it.
 pub struct RescanJob {
     kind: RescanJobKind,
+    flags: RescanFlagsGuard,
 }
 
 enum RescanJobKind {
@@ -369,6 +375,14 @@ struct ServiceRescan {
 }
 
 impl RescanJob {
+    /// A claimed rescan, with its fence guard armed failed closed.
+    fn new(kind: RescanJobKind, rescan: Arc<RescanCoordinator>) -> Self {
+        Self {
+            kind,
+            flags: RescanFlagsGuard::armed(rescan),
+        }
+    }
+
     /// True when the job replays through the service runtime (the embedded
     /// node's configuration) rather than the chain accessor.
     pub fn uses_service(&self) -> bool {
@@ -379,15 +393,16 @@ impl RescanJob {
     /// persist its outcome. The coordinator's fences are released, or kept
     /// failed closed, when this returns (or unwinds).
     pub fn run(self) {
-        match self.kind {
-            RescanJobKind::Rebuild(job) => job.run(),
-            RescanJobKind::Service(job) => job.run(),
+        let RescanJob { kind, flags } = self;
+        match kind {
+            RescanJobKind::Rebuild(job) => job.run(flags),
+            RescanJobKind::Service(job) => job.run(flags),
         }
     }
 }
 
 impl RebuildRescan {
-    fn run(self) {
+    fn run(self, flags: RescanFlagsGuard) {
         let RebuildRescan {
             chain,
             store,
@@ -401,7 +416,8 @@ impl RebuildRescan {
         let reached_height = Arc::new(AtomicU32::new(start_h));
         let reached_for_block = reached_height.clone();
         let reached_for_tip = reached_height.clone();
-        let mut flags = RescanFlagsGuard::new(rescan.clone());
+        let mut flags = flags;
+        flags.start();
         let result = WalletScanService::rescan_full_rebuild_store(
             store.as_ref(),
             trees,
@@ -449,14 +465,15 @@ impl RebuildRescan {
 }
 
 impl ServiceRescan {
-    fn run(self) {
+    fn run(self, flags: RescanFlagsGuard) {
         let ServiceRescan {
             service,
             store,
             rescan,
             from_height,
         } = self;
-        let mut flags = RescanFlagsGuard::new(rescan.clone());
+        let mut flags = flags;
+        flags.start();
         let result =
             service.rescan_to_tip_with_cancellation(from_height, || rescan.rescan_cancelled());
         if let Err(error) = &result {
@@ -550,8 +567,8 @@ impl WalletEngine {
                 state.cached_pubkeys().clone(),
             )
         };
-        Ok(RescanJob {
-            kind: RescanJobKind::Rebuild(RebuildRescan {
+        Ok(RescanJob::new(
+            RescanJobKind::Rebuild(RebuildRescan {
                 chain: self.chain.clone(),
                 store: self.store.clone(),
                 rescan: self.rescan.clone(),
@@ -561,7 +578,8 @@ impl WalletEngine {
                 tip_h,
                 scan_matcher,
             }),
-        })
+            self.rescan.clone(),
+        ))
     }
 
     #[allow(clippy::result_large_err)]
@@ -604,14 +622,15 @@ impl WalletEngine {
                 return Err(WalletAdminError::Internal(error.to_string()));
             }
         }
-        Ok(RescanJob {
-            kind: RescanJobKind::Service(ServiceRescan {
+        Ok(RescanJob::new(
+            RescanJobKind::Service(ServiceRescan {
                 service: service.clone(),
                 store: self.store.clone(),
                 rescan: self.rescan.clone(),
                 from_height,
             }),
-        })
+            self.rescan.clone(),
+        ))
     }
 }
 
@@ -724,18 +743,27 @@ fn rescan_should_stay_blocked(
 }
 
 /// Releases (or keeps failed closed) the coordinator's fences when a rescan
-/// job ends, including by unwinding.
+/// job ends, including by unwinding or by being dropped without running.
 struct RescanFlagsGuard {
     rescan: Arc<RescanCoordinator>,
     keep_blocked: bool,
 }
 
 impl RescanFlagsGuard {
-    fn new(rescan: Arc<RescanCoordinator>) -> Self {
+    /// Armed failed closed: dropped before [`Self::start`], it releases the
+    /// task slot and keeps the wallet failed closed, like
+    /// [`RescanCoordinator::fail_rescan_start`].
+    fn armed(rescan: Arc<RescanCoordinator>) -> Self {
         Self {
             rescan,
-            keep_blocked: false,
+            keep_blocked: true,
         }
+    }
+
+    /// The job is running: from here on its outcome decides whether the
+    /// wallet stays blocked ([`Self::block`]).
+    fn start(&mut self) {
+        self.keep_blocked = false;
     }
 
     fn block(&mut self) {
@@ -906,6 +934,109 @@ mod tests {
         assert!(rescan.cancel_requested());
         assert!(rescan.task_active());
         assert!(rescan.in_progress());
+    }
+
+    /// A chain whose blocks are all "unavailable" but whose block reads are
+    /// supported, at tip `tip`: enough for `prepare_rescan` to claim a
+    /// rescan (the tests below never run the job).
+    struct TipChain {
+        tip: u32,
+    }
+
+    impl WalletChainAccess for TipChain {
+        fn wallet_scan_height(&self) -> Result<u32, super::super::ChainAccessError> {
+            Ok(0)
+        }
+
+        fn tip_height(&self) -> Result<u32, super::super::ChainAccessError> {
+            Ok(self.tip)
+        }
+
+        fn is_pruned(&self) -> bool {
+            false
+        }
+
+        fn read_block_at(
+            &self,
+            _height: u32,
+        ) -> Result<Option<crate::wallet::scan::RescanBlock>, RescanReadError> {
+            Ok(None)
+        }
+
+        fn read_block_at_supported(&self) -> Result<bool, RescanReadError> {
+            Ok(true)
+        }
+    }
+
+    struct NoSubmit;
+
+    #[async_trait::async_trait]
+    impl super::super::TxSubmitter for NoSubmit {
+        async fn submit_transaction(
+            &self,
+            _tx_bytes: Vec<u8>,
+        ) -> Result<String, super::super::TxSubmitError> {
+            unreachable!("rescan tests never submit")
+        }
+    }
+
+    /// An engine over a store whose cursor sits at 0 and a chain at tip 1.
+    fn engine_at_tip_one() -> (tempfile::TempDir, WalletEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        )));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        let engine = WalletEngine::new(super::super::WalletEngineParts {
+            storage: Arc::new(parking_lot::RwLock::new(
+                ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
+            )),
+            state: Arc::new(parking_lot::RwLock::new(crate::state::WalletState::empty(
+                false,
+            ))),
+            store,
+            chain: Arc::new(TipChain { tip: 1 }),
+            config: super::super::WalletEngineConfig {
+                network: ergo_ser::address::NetworkPrefix::Mainnet,
+                expose_private_keys: false,
+                reemission: None,
+                min_relay_fee_nano_erg: 1_000_000,
+                max_tx_size_bytes: 98_304,
+            },
+            submitter: Arc::new(NoSubmit),
+            mempool: Arc::new(super::super::NoopMempoolOverlay::new()),
+            service: None,
+            rescan: Arc::new(RescanCoordinator::new()),
+        });
+        (dir, engine)
+    }
+
+    #[test]
+    fn a_prepared_job_dropped_unrun_fails_closed_and_frees_the_task_slot() {
+        let (_dir, mut engine) = engine_at_tip_one();
+        let rescan = engine.rescan_coordinator().clone();
+        let job = engine.prepare_rescan(1).unwrap();
+        assert!(rescan.task_active());
+        assert!(!rescan.fail_closed());
+
+        drop(job);
+        assert!(!rescan.task_active());
+        assert!(rescan.fail_closed());
+        assert!(rescan.in_progress());
+        assert!(rescan.scan_rebuild_in_progress());
+
+        // Failed closed: a partial rescan is refused, a full one recovers.
+        assert!(matches!(
+            engine.prepare_rescan(1),
+            Err(WalletAdminError::RescanUnavailable(message))
+                if message == "full rescan required to recover wallet state"
+        ));
+        let recovery = engine.prepare_rescan(0).unwrap();
+        assert!(rescan.task_active());
+        assert!(!rescan.fail_closed());
+        drop(recovery);
     }
 
     #[test]
