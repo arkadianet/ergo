@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -266,7 +267,23 @@ def stop(names=None):
             while owned(pid, configs) and time.monotonic() < deadline:
                 time.sleep(0.2)
             if owned(pid, configs):
-                raise RuntimeError(f'{name} did not stop; PID {pid} retained')
+                # rm-A-restart-armA-3: two Scala JVMs (mid-restart,
+                # never reached readiness) ignored SIGTERM for the full
+                # 30 s grace and were still holding their ports minutes
+                # later — this used to give up here and raise, leaving
+                # them running and the ports bound for every run after.
+                # SIGKILL only the SAME pid `owned` already verified
+                # (never a fresh lookup, so nothing new gets matched by
+                # coincidence), with its own short grace before giving
+                # up for real.
+                os.kill(pid, signal.SIGKILL)
+                deadline = time.monotonic() + 10
+                while owned(pid, configs) and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                if owned(pid, configs):
+                    raise RuntimeError(
+                        f'{name} did not stop; PID {pid} retained a port even '
+                        'after SIGKILL')
         path.unlink()
         config_path.unlink(missing_ok=True)
 
@@ -348,13 +365,65 @@ def _config_path(name):
     return os.environ.get(CONFIG_ENV[name]) or str(HERE / DEFAULT_CONFIG[name])
 
 
+def _state_root_pending(state_root):
+    """True before a node's genesis snapshot has reached its `/info`
+    handler: the key absent (`None`) or present but still the type's
+    default (`''`). Both mean "poll again", not "wrong genesis".
+
+    rm-A-steady-armA-1: `spawn('rust')`, called from `restart_follower`
+    a few hundred ms into a freshly-started process, read `stateRoot:
+    ""` on its first successful `/info` response — the API had started
+    listening (`ergo_api::server: api listening`) fractionally before
+    the snapshot handle's first swap populated `best_full_block`
+    (`ergo-node/src/api_bridge/scala_compat/mod.rs`, whose `ScalaInfo`
+    default carries `state_root: String::new()`, see
+    `ergo-api/src/compat/types.rs`). `None` was already retried via
+    `ValueError`; `''` fell through to the genesis-mismatch branch and
+    raised an unretried `RuntimeError`, aborting the scenario although
+    the same process's own heartbeat a few ms later logged the correct
+    `tip_state`. A node whose root is genuinely wrong never starts
+    reporting `''` — it is absent or wrong from the first response — so
+    treating `''` as "not yet" costs nothing but the existing 0.5 s
+    retry step, up to the existing deadline.
+    """
+    return state_root is None or state_root == ''
+
+
+# Log lines a node emits and then HANGS after, rather than exiting or
+# recovering (rm-A-restart-armA-3: a respawned Scala node whose data
+# directory lock lost the race logged this and then sat there, "Readers
+# are not initialized yet" forever, never serving /info) — waiting out
+# the full readiness deadline for one wastes it and reports a generic
+# timeout instead of the real cause.
+FATAL_STARTUP_LOG_PATTERNS = ('Failed to initialize storage',)
+
+
+def _fatal_startup_error(log_path, patterns=FATAL_STARTUP_LOG_PATTERNS, start_offset=0):
+    """The first known-fatal line after this launch's byte offset, or `None`.
+    Pure over the file's current contents, so `--self-test` drives it
+    directly against a real temp file."""
+    try:
+        with log_path.open('rb') as log:
+            log.seek(start_offset)
+            text = log.read().decode(errors='replace')
+    except OSError:
+        return None
+    for pattern in patterns:
+        if pattern in text:
+            return next((line.strip() for line in text.splitlines()
+                        if pattern in line), pattern)
+    return None
+
+
 def spawn(name):
     """Launch one node and wait for its REST `/info` to report a live state."""
     WORK.mkdir(exist_ok=True)
     (WORK / name).mkdir(exist_ok=True)
     env = dict(os.environ)
     env.setdefault('RUST_LOG', DEFAULT_RUST_LOG)
-    with (WORK / (name + '.log')).open('a') as log:
+    log_path = WORK / (name + '.log')
+    with log_path.open('a') as log:
+        start_offset = log.tell()
         process = subprocess.Popen(_command(name), cwd=ROOT, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True,
                                    env=env)
@@ -366,7 +435,7 @@ def spawn(name):
             with urllib.request.urlopen(
                     f'http://127.0.0.1:{REST[name]}/info', timeout=2) as response:
                 info = json.load(response)
-            if info.get('stateRoot') is None:
+            if _state_root_pending(info.get('stateRoot')):
                 raise ValueError('node state is not initialized yet')
             if name.startswith('scala'):
                 version = info.get('appVersion')
@@ -390,6 +459,11 @@ def spawn(name):
             (WORK / (name + '.appVersion')).write_text(str(info.get('appVersion')))
             return info
         except (OSError, ValueError):
+            fatal = _fatal_startup_error(log_path, start_offset=start_offset)
+            if fatal:
+                raise RuntimeError(
+                    f'{name} logged a fatal startup error and will never become '
+                    f'ready: {fatal}')
             if time.monotonic() > deadline:
                 raise RuntimeError(f'{name} did not become ready; see .work/{name}.log')
             time.sleep(0.5)
@@ -495,6 +569,87 @@ def start(names=None):
         raise
 
 
+def _self_test():
+    """Pure: no I/O, so `--self-test` drives it directly."""
+    assert _state_root_pending(None) is True
+    assert _state_root_pending('') is True
+    # A real hash, even one that will fail the caller's equality check
+    # against GENESIS_STATE_ROOT, is never "pending" — only absent or
+    # default-empty is.
+    assert _state_root_pending('deadbeef') is False
+    assert _state_root_pending(GENESIS_STATE_ROOT) is False
+    print('self-test OK: _state_root_pending treats None and "" as not '
+          'ready yet, and any other string as a reportable root')
+
+    with tempfile.TemporaryDirectory() as _tmp:
+        _log = Path(_tmp) / 'scala2.log'
+        _log.write_text('INFO boot\nINFO still booting\n')
+        assert _fatal_startup_error(_log) is None, 'no fatal line yet'
+        _log.write_text(_log.read_text() +
+                        'ERROR scorex.db.StoreRegistry - Failed to initialize '
+                        'storage: lock .../peers/LOCK\n')
+        found = _fatal_startup_error(_log)
+        assert found is not None and 'Failed to initialize storage' in found, found
+        # A log that has not been written yet (or was already rotated
+        # away) is "no fatal line seen", never an error of its own — the
+        # readiness loop's own deadline still owns that case.
+        assert _fatal_startup_error(Path(_tmp) / 'missing.log') is None
+    print('self-test OK: _fatal_startup_error finds a known-fatal line once it '
+          "appears and reports none before it does or if the log can't be read")
+    _self_test_stop_escalates_to_sigkill()
+
+
+def _self_test_stop_escalates_to_sigkill():
+    """rm-A-restart-armA-3: two Scala JVMs ignored SIGTERM for the full
+    30 s grace and were still holding their ports minutes later — `stop`
+    used to give up right there and raise, leaving them running. Spawns
+    a REAL process that truly ignores SIGTERM (only `owned()`-verified
+    PIDs are ever signalled, so this proves the escalation against the
+    exact mechanism it protects, not a mock of it) and checks `stop`
+    still brings it down. Takes ~30 s: the SIGTERM grace it is exercising
+    is not itself shortened for the test.
+    """
+    WORK.mkdir(exist_ok=True)
+    ready = WORK / 'selftest-sigkill.ready'
+    ready.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        ['python3', '-c',
+         f'import signal, time\n'
+         f'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+         f'open({str(ready)!r}, "w").close()\n'
+         f'while True:\n    time.sleep(1)\n',
+         # An arg matching one of `owned`'s known config substrings —
+         # `stop` only ever signals a PID it can verify this way.
+         'devnet-matrix/rust-node.toml'],
+        cwd=ROOT)
+    try:
+        (WORK / 'selftest-sigkill.pid').write_text(str(proc.pid))
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists(), 'the test process never confirmed SIGTERM is ignored'
+        assert owned(proc.pid), 'the spawned process must be recognized as owned'
+        started = time.monotonic()
+        stop(names=['selftest-sigkill'])
+        elapsed = time.monotonic() - started
+        assert not owned(proc.pid), 'SIGKILL escalation must still bring it down'
+        # `stop` killed it with a raw os.kill, not through this Popen
+        # object, so it is a zombie — still unreaped, not still running —
+        # until something here calls wait(); `.poll()` alone can race it.
+        assert proc.wait(timeout=5) is not None, 'the process must actually be gone'
+        assert elapsed >= 29, (
+            f'expected the full ~30s SIGTERM grace before escalation, got {elapsed:.1f}s '
+            '— stop is no longer giving a real SIGTERM grace before SIGKILL')
+    finally:
+        ready.unlink(missing_ok=True)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    print(f'self-test OK: stop() escalates to SIGKILL after a {elapsed:.1f}s SIGTERM '
+         'grace against a process that truly ignores it')
+
+
 if __name__ == '__main__':
     os.chdir(ROOT)
-    {'start': start, 'stop': stop}[sys.argv[1]]()
+    {'start': start, 'stop': stop,
+     'self-test': _self_test}[sys.argv[1]]()

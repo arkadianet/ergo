@@ -2,5 +2,12 @@
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder><pattern>%level %logger - %msg%n</pattern></encoder>
   </appender>
+  <!-- rm-A-steady-armB-2 / upstream #2504 (open): the stock miner's
+       CandidateGenerator.collectTxs silently eliminates a pool tx whose
+       parent sealed into an earlier input block in the same window,
+       logged only at DEBUG. Named loggers only, so this is otherwise
+       the same INFO-everywhere config the rest of the campaign ran on. -->
+  <logger name="org.ergoplatform.mining.CandidateGenerator" level="DEBUG"/>
+  <logger name="org.ergoplatform.nodeView.mempool.ErgoMemPool" level="DEBUG"/>
   <root level="INFO"><appender-ref ref="STDOUT"/></root>
 </configuration>

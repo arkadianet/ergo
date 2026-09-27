@@ -221,6 +221,16 @@ def rust_log_lines(match, limit=40):
     return [line for line in text.splitlines() if match in line][-limit:]
 
 
+def scala_log_lines(node='scala'):
+    """Every line of one Scala node's log in this run. Best effort: a
+    log that cannot be read is empty, and `mined_input_blocks` over it
+    then confirms nothing."""
+    try:
+        return (WORK / f'{node}.log').read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+
+
 def rust_log_window(unix_seconds, before=10.0, after=5.0, limit=400):
     """Every debug-log line the Rust node emitted around `unix_seconds`.
 
@@ -368,6 +378,43 @@ def next_finding_path():
     return FINDINGS / f'{day}-{n}.json'
 
 
+def _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty, final_empty):
+    """This sweep's fetch candidates, in priority order (`Run.
+    _collect_input_block_txids` applies its own budget on top).
+
+    `have_nonempty`: ids with a real answer already cached — never
+    refetched. `final_empty`: ids `_input_block_empty_is_final` has
+    already confirmed permanently empty — never refetched either.
+    Everything else is a candidate, but an id NEVER fetched at all goes
+    ahead of one that came back empty on an earlier sweep and is merely
+    still pending (`attempted_empty`): an empty answer is not yet known
+    to be final, so it keeps being retried, and under a burst-pulled
+    chain — more ids than one sweep's budget — that retry starved every
+    id behind it forever. `chain_ids` is newest-first (the API's own
+    order); this only reorders WITHIN it by fetch state, never inverts
+    it, so two ids in the same state keep their relative order.
+    """
+    never_fetched, pending = [], []
+    for bid in chain_ids:
+        if bid in have_nonempty or bid in final_empty:
+            continue
+        (pending if bid in attempted_empty else never_fetched).append(bid)
+    return never_fetched + pending
+
+
+def _input_block_empty_is_final(first_empty_tip, current_tip):
+    """An id fetched empty becomes permanently cacheable once the tip it
+    was FIRST seen empty under is no longer current: at least one more
+    full (ordering) block has sealed since, so nothing more can arrive
+    for it — Rust attaches an input block's transaction ids no later
+    than the ordering block that reconstructs from it. Neither tip being
+    known yet (a cold sampler, or a sweep whose bracket never held)
+    withholds the verdict rather than guessing one.
+    """
+    return (first_empty_tip is not None and current_tip is not None
+            and first_empty_tip != current_tip)
+
+
 class Run:
     """The whole observation: samples, accumulated counters, failures.
 
@@ -456,6 +503,17 @@ class Run:
         self.input_block_txids = {}
         self.input_block_seen_under = {}
         self._fetched_this_sweep = 0
+        # rm-A-steady-armB-1: an id fetched empty is not yet KNOWN to be
+        # final (the tx-id announcement can lag the header by a sweep or
+        # two), so `_input_block_fetch_order` keeps offering it a lower
+        # priority than an id never fetched at all, rather than treating
+        # them alike. `_input_block_empty_since[bid]` is the tip it was
+        # FIRST seen empty under; once the current tip differs, one more
+        # ordering block has sealed since, nothing more can arrive for
+        # it, and it moves to `_input_block_final_empty` — cached empty
+        # for good, freeing its slot in the fetch budget permanently.
+        self._input_block_empty_since = {}
+        self._input_block_final_empty = set()
 
     # ----- the sampler thread -----
 
@@ -868,6 +926,9 @@ class Run:
             # `/info` read as the rest of this sample; `None` for a build
             # without the store. `pending_store_summary` reads it.
             'pending': pending_announcements(reading),
+            # Which PROCESS each node is (`/info.launchTime`), so a chain
+            # can be traced to a process that has since been restarted.
+            'launch': launch_times(reading),
             # Nodes sampled as deliberately down (killed, not respawned).
             'down': sorted(n for n, r in reading.items()
                            if isinstance(r, dict) and r.get('down')),
@@ -961,19 +1022,24 @@ class Run:
         Bounded per sweep. A cold chain can list dozens of blocks at
         once and a sweep that stopped to fetch all of them would stall
         the monitoring it exists to do; the rest are picked up by the
-        sweeps that follow, a third of a second apart.
+        sweeps that follow, a third of a second apart. Which ones go
+        first is `_input_block_fetch_order` (rm-A-steady-armB-1: with no
+        priority at all, a burst-pulled chain's own newest-first order
+        let seven ids that would NEVER get a body starve the budget
+        every sweep, and the payment's own input block — at index 8 —
+        never got a single fetch in 52 samples).
         """
         self._fetched_this_sweep = 0
         staged = {}
         tip = reading['rust']['info'].get('bestFullHeaderId')
-        for bid in reading['rust']['chain'].get('bestInputBlocks') or []:
+        chain_ids = reading['rust']['chain'].get('bestInputBlocks') or []
+        have_nonempty = {bid for bid, ids in self.input_block_txids.items() if ids}
+        order = _input_block_fetch_order(
+            chain_ids, have_nonempty, set(self._input_block_empty_since),
+            self._input_block_final_empty)
+        for bid in order:
             if self._fetched_this_sweep >= INPUT_BLOCK_ID_FETCHES_PER_SWEEP:
                 break
-            # Only a NON-EMPTY answer is cached. An input block shows up
-            # in the chain before its bodies are attached, so caching the
-            # first empty answer would permanently hide its transactions.
-            if self.input_block_txids.get(bid):
-                continue
             ids = api('rust', f'/blocks/{bid}/inputBlockTransactionIds') or []
             self._fetched_this_sweep += 1
             staged[bid] = ids
@@ -989,12 +1055,27 @@ class Run:
         under iteration could raise outright. Staging and committing
         once makes a sweep all-or-nothing, and the consumer reads the
         immutable copy hung on the reading rather than the live cache.
+
+        An id fetched empty is provisional until `_input_block_empty_is_final`
+        says otherwise (`_input_block_empty_since` records the tip it was
+        FIRST seen empty under); only then does it join
+        `_input_block_final_empty` and stop being fetched at all — Rust
+        reports it applied by then, in the sense that matters here: the
+        ordering block that would have carried its reconstruction has
+        already sealed, so nothing more can arrive for it.
         """
         if reading['rust'].get('pool_tip_stable'):
             for bid, ids in staged.items():
                 self.input_block_txids[bid] = ids
                 if ids:
                     self.input_block_seen_under[bid] = tip
+                    self._input_block_empty_since.pop(bid, None)
+                else:
+                    first_tip = self._input_block_empty_since.get(bid)
+                    if first_tip is None:
+                        self._input_block_empty_since[bid] = tip
+                    elif _input_block_empty_is_final(first_tip, tip):
+                        self._input_block_final_empty.add(bid)
         # Published snapshot: what a consumer of THIS reading may use.
         # An unstable sweep publishes the standing set, never its own
         # unvalidated observations.
@@ -1139,9 +1220,30 @@ def pending_announcements(reading):
     return out
 
 
+def launch_times(reading):
+    """`{node: /info.launchTime}` for one sweep. Pure. A node sampled as
+    down, or one whose `/info` has no launch time, maps to `None`."""
+    return {node: ((value or {}).get('info') or {}).get('launchTime')
+            for node, value in sorted((reading or {}).items())
+            if isinstance(value, dict)}
+
+
 # The store's GAUGES: everything else it publishes that is a number is a
 # counter, monotonic within one process.
 PENDING_GAUGES = ('size', 'bytes')
+# The fixed #2563 store's counters, as ergoplatform/ergo#2563 13fc25df2
+# publishes them (`PendingInputAnnouncements.Stats` and the `NodeInfo`
+# schema in `openapi.yaml`): `drops` split by reason, with no `fairness`
+# reason (that refusal branch was unreachable and was removed) and the
+# replays that did not reach the view holder counted as
+# `replayNotForwarded`. The pre-review store published `size`, `bytes`,
+# `evictions` and ONE `drops` number.
+PENDING_COUNTERS = ('admitted', 'replayed', 'replayNotForwarded', 'evictions')
+PENDING_DROP_REASONS = ('duplicate', 'hostLimit', 'variantLimit', 'oversize',
+                        'expired', 'staleParent', 'disconnected')
+PENDING_FIXED_COUNTERS = PENDING_COUNTERS + tuple(
+    f'drops.{reason}' for reason in PENDING_DROP_REASONS)
+PENDING_FIXED_KEYS = PENDING_GAUGES + PENDING_FIXED_COUNTERS
 
 
 def flatten_counters(value, prefix=''):
@@ -1161,6 +1263,43 @@ def flatten_counters(value, prefix=''):
             out.update(flatten_counters(inner, f'{prefix}.{key}' if prefix
                                         else str(key)))
     return out
+
+
+def pending_telemetry(reading):
+    """The shape of one `/info.pendingInputAnnouncements` reading. Pure.
+
+    `old`: the pre-review store, whose `drops` is one number. `fixed`:
+    every key in `PENDING_FIXED_KEYS` is a number. `unrecognised`: a
+    store object that is neither, such as a reading with keys missing.
+    `None`: no store at all.
+    """
+    if not isinstance(reading, dict):
+        return None
+    drops = reading.get('drops')
+    if isinstance(drops, (int, float)) and not isinstance(drops, bool):
+        return 'old'
+    flat = flatten_counters(reading)
+    if all(key in flat for key in PENDING_FIXED_KEYS):
+        return 'fixed'
+    return 'unrecognised'
+
+
+def pending_telemetry_label(readings):
+    """One label for a node's readings over a window. Pure.
+
+    A single old reading makes the node's telemetry `old telemetry`: the
+    build is the pre-review store, whatever else was read. Only a window
+    whose every store reading is complete is `fixed telemetry`.
+    """
+    shapes = [shape for shape in map(pending_telemetry, readings)
+              if shape is not None]
+    if not shapes:
+        return 'missing'
+    if 'old' in shapes:
+        return 'old telemetry'
+    if all(shape == 'fixed' for shape in shapes):
+        return 'fixed telemetry'
+    return 'unrecognised telemetry'
 
 
 def counter_increase(values, restarts=None):
@@ -1215,7 +1354,13 @@ def pending_store_summary(samples, node):
         out['store'] = ('absent: no sample carried '
                         '/info.pendingInputAnnouncements for this node')
         return out
+    out['telemetry'] = pending_telemetry_label(r for _, r in present)
     flat = [flatten_counters(r) for _, r in present]
+    if out['telemetry'] != 'old telemetry':
+        # Which fixed-store keys some reading lacked, so an incomplete
+        # reading is named rather than summarised as a zero.
+        out['missing_fixed_keys'] = sorted(
+            {key for f in flat for key in PENDING_FIXED_KEYS if key not in f})
     for gauge in PENDING_GAUGES:
         values = [f[gauge] for f in flat if gauge in f]
         out[f'peak_{gauge}'] = max(values) if values else None
@@ -1245,9 +1390,10 @@ def restart_recovery(samples, since, node, window_s=30.0):
     * `first_apply_at`: the first sample after the respawn at which the
       node's ordering block differs from the one it came back on — the
       first block it applied after the restart;
-    * `replay_burst`: how much each `replayed*` counter of its pending
-      store grew in the `window_s` seconds from that first apply (the
-      store is in memory, so it starts empty and this is its refill).
+    * `replay_burst`: how much each replay counter of its pending store
+      (`replayed`, and `replayNotForwarded` on the fixed store) grew in
+      the `window_s` seconds from that first apply (the store is in
+      memory, so it starts empty and this is its refill).
     """
     tip_key, ordering_key = f'{node}_tip', f'{node}_ordering'
     after = [s for s in samples if (s.get('at') or 0) >= since]
@@ -1273,12 +1419,36 @@ def restart_recovery(samples, since, node, window_s=30.0):
               if isinstance((s.get('pending') or {}).get(node), dict)]
     if stores:
         keys = sorted({k for f in stores for k in f
-                       if k.split('.')[0].startswith('replayed')})
+                       if k.split('.')[0].startswith('replay')})
         out['replay_burst'] = {
             'window_s': window_s,
             **{k: counter_increase([f[k] for f in stores if k in f])[0]
                for k in keys}}
     return out
+
+
+def _no_tip_gaps(kept, tip_key):
+    """Durations (seconds) of each CONTIGUOUS run of no-tip samples,
+    bounded by the last known-good sample before it and the first known-
+    good one after — the relay-gap LENGTH, not merely how many samples
+    it spanned (rm-A-steady-armB-2's lag of 44 was one sample catching
+    Rust mid-pull after a single 28.5 s gap, not a sustained lag; `max`/
+    `p95` over lag alone cannot tell the two apart). A run open at
+    either end of the series (no known-good sample bounding it there)
+    contributes nothing: an unmeasured edge is not a measured gap.
+    """
+    gaps, last_good_at, gap_start_at, in_gap = [], None, None, False
+    for _, s in kept:
+        at = s.get('at')
+        if s.get(tip_key):
+            if in_gap and gap_start_at is not None and at is not None:
+                gaps.append(round(at - gap_start_at, 3))
+            in_gap = False
+            last_good_at = at
+        elif not in_gap:
+            gap_start_at = last_good_at
+            in_gap = True
+    return gaps
 
 
 def lag_distribution(samples, tip_key, chain_key='scala_chain',
@@ -1326,6 +1496,9 @@ def lag_distribution(samples, tip_key, chain_key='scala_chain',
         'excluded_samples': excluded,
         'lag_samples': len(lags),
         'no_tip': no_tip,
+        'no_tip_gap_seconds': (gaps := _no_tip_gaps(kept, tip_key)),
+        'no_tip_gap_max_seconds': max(gaps) if gaps else None,
+        'no_tip_gap_p95_seconds': percentile(gaps, 95) if gaps else None,
         'not_on_miner_chain': off_chain,
         # The share of qualifying samples in which this follower held an
         # input chain at all (had a tip), beside the lag it had when it did.
@@ -1371,10 +1544,74 @@ def _coverage_violations(kept, lags, what):
     return out
 
 
-def evaluate_tip_consistency(samples):
+# The Scala miner's own log line for an input block it mined. Two
+# formats across builds, same event: the base build's `CandidateGenerator`
+# "Input-block <id> mined @ height <h>!", and the soak build's (feb78d675,
+# "retained-work") "New input block <id> w. nonce <n>" — that commit
+# dropped the first line and renamed the event. The second alternative
+# requires "New INPUT block", never "New ORDERING block" (the miner logs
+# that too, at the same call site, one line apart).
+MINED_INPUT_BLOCK = re.compile(
+    r'Input-block ([0-9a-f]{64}) mined|New input block ([0-9a-f]{64}) w\. nonce')
+
+
+def mined_input_blocks(lines):
+    """Every input block a Scala miner's log says it mined. Pure."""
+    out = set()
+    for line in lines:
+        match = MINED_INPUT_BLOCK.search(line)
+        if match:
+            out.add(match.group(1) or match.group(2))
+    return out
+
+
+def mined_log_plausible(mined, series):
+    """False when the miner log parsed to zero mined blocks while the
+    series shows input blocks moving on either chain — a silent
+    `mined_input_blocks` miss (a log-format change outrunning the
+    regex again, as it did for the soak build until this fix) rather
+    than a miner that genuinely mined nothing. Pure.
+
+    Callers must report this loudly, not fold it into a quiet empty
+    set: everything downstream that leans on `mined` (the lead-by-log
+    allowance, the settle-read's mined-log fallback) silently stops
+    granting any allowance it should when this is False.
+    """
+    if mined:
+        return True
+    return not any(s.get('scala_chain') or s.get('rust_chain') for s in series)
+
+
+def rust_lead_mined(scala_chain, rust_chain, mined):
+    """How many blocks Rust's chain leads the miner's, when that lead is
+    the miner's own. Pure; 0 when it is not.
+
+    The miner is read first in every sweep and the follower after it, up
+    to seconds later under load, so Rust can hold input blocks the
+    miner's sampled chain does not list yet (FINDING-rust-fork-chain-
+    divergence-2026-09-25.md §3: leads of 1 to 4 blocks, every one in the
+    miner's own log). A lead counts only when the miner's sampled chain is
+    a strict prefix of Rust's read oldest-first, so the history is the
+    same, and EVERY block beyond it is one the single miner's log says it
+    mined. A different block at any position, or a block the miner never
+    mined, is not a lead.
+    """
+    scala_old, rust_old = list(reversed(scala_chain)), list(reversed(rust_chain))
+    if (len(rust_old) > len(scala_old) and rust_old[:len(scala_old)] == scala_old
+            and all(block in mined for block in rust_old[len(scala_old):])):
+        return len(rust_old) - len(scala_old)
+    return 0
+
+
+def evaluate_tip_consistency(samples, mined=None, confirmed_committed=None):
     """Assertion 2. Every Rust tip must be a block Scala had on its best
     chain for the same ordering block, the lag must stay inside the
-    bounds, and there must be enough qualifying samples to say so."""
+    bounds, and there must be enough qualifying samples to say so.
+
+    `mined` is the miner's own list of input blocks it mined: a tip that
+    leads the miner's sampled chain is confirmed by it only through
+    `rust_lead_mined`. A committed child may also confirm the exact
+    (ordering, tip), without supplying a live lag measurement."""
     scala_seen = {}          # ordering -> set of every id Scala ever listed
     scala_later = {}         # ordering -> [ (index, ids) ], for "at or later"
     for i, s in enumerate(samples):
@@ -1386,6 +1623,7 @@ def evaluate_tip_consistency(samples):
 
     kept, excluded = qualifying_samples(samples)
     lags, unconfirmed, earlier_only, exact, compared = [], [], [], 0, 0
+    confirmed_by_miner_log = 0
     for i, s in kept:
         ordering, rust_tip = s['ordering'], s.get('rust_tip')
         if not rust_tip:
@@ -1395,9 +1633,21 @@ def evaluate_tip_consistency(samples):
         compared += 1
         if rust_tip == s.get('scala_tip'):
             exact += 1
-        confirmed = any(rust_tip in ids
-                        for j, ids in scala_later.get(ordering, ())
-                        if j >= i)
+        confirmed = ((ordering, rust_tip) in (confirmed_committed or ())
+                     or any(rust_tip in ids
+                            for j, ids in scala_later.get(ordering, ())
+                            if j >= i))
+        # Rust's tip is read AFTER its chain in the same sweep, so it can
+        # be a block the chain read did not list yet
+        # (rm-B-reconstruct_rate-2562f-1, the last sample). Judged on the
+        # chain the two reads describe together.
+        rust_chain = list(s.get('rust_chain') or [])
+        if rust_tip not in rust_chain:
+            rust_chain = [rust_tip] + rust_chain
+        if (not confirmed and mined and rust_chain[0] == rust_tip
+                and rust_lead_mined(s.get('scala_chain') or [], rust_chain, mined)):
+            confirmed = True
+            confirmed_by_miner_log += 1
         if not confirmed:
             # Scala listed it, but only BEFORE this sample. Recorded in
             # its own bucket rather than waved through: it is how the
@@ -1446,6 +1696,7 @@ def evaluate_tip_consistency(samples):
         'min_qualifying_samples': MIN_QUALIFYING_SAMPLES,
         'exact_tip_matches': exact,
         'unconfirmed_count': len(unconfirmed),
+        'confirmed_by_miner_log': confirmed_by_miner_log,
         'unconfirmed_rust_tips_sample': unconfirmed[:10],
         'confirmed_only_earlier_count': len(earlier_only),
         'confirmed_only_earlier_sample': earlier_only[:10],
@@ -1453,8 +1704,37 @@ def evaluate_tip_consistency(samples):
     }
 
 
-def evaluate_chain_consistency(samples):
+def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
+                               settle_absent=None, settle_unreachable=None,
+                               settle_inconclusive=None, confirmed_committed=None,
+                               settle_candidates=None):
     """Assertion 3, as amended by the controller after round 1.
+
+    `settle_grace_s`, `settle_absent`, `settle_unreachable`,
+    `settle_inconclusive` (round 5, rm-A-steady-armB-2; round 6,
+    rm-C-steady-soak-1/rm-C-fork-soak-1): an ahead-by-one Rust tip that
+    the IN-SERIES read never confirmed is not automatically a violation
+    any more. A live settle read (`settle_unconfirmed_chain_tips`, run
+    after the window closes and before teardown) gives the miner a real
+    chance to catch up; its outcome per `(ordering, tip)` overrides
+    everything below: `settle_absent` (checked live or via committed
+    data, definitively absent either way) stands as a violation
+    regardless of the grace window; `settle_unreachable` (the miner
+    stopped answering mid-check) and `settle_inconclusive` (the ordering
+    moved on before a live poll could check it, and the committed chain
+    after it does not reach `ordering`'s own child within the walk
+    bound) are never violations — both are unknowable, not wrong, just
+    for different reasons. Absent a settle read at all — every
+    already-recorded run, and any candidate the live read did not reach
+    — a tip still unconfirmed when the series has
+    fewer than `settle_grace_s` seconds left to run is unknowable, not
+    wrong: the series simply ended before the miner's read window (the
+    same window a confirmed allowance elsewhere in THIS series measures)
+    had time to close. `armB-2` violated at sample 10867 of 10871, 4
+    samples (about the last second) from the end of a 10871-sample
+    series, in a run whose reference follower itself lagged up to 22
+    samples — nowhere near enough runway for Scala to have confirmed it
+    even if it always would.
 
     At every same-ordering-block sample Rust's chain must be a prefix of
     Scala's read oldest-first — Scala's chain with the newest k entries
@@ -1470,6 +1750,17 @@ def evaluate_chain_consistency(samples):
     position, a prefix by two or more, or a tip Scala never went on to
     confirm.
 
+    With `mined` (the miner's own log of the input blocks it mined), a
+    lead of any length is the miner's read window as well, when every
+    lead block is the miner's own (`rust_lead_mined`): the miner is read
+    first in a sweep and the follower later. Counted apart
+    (`allowed_ahead_by_miner_log`, with the longest lead), never silently.
+
+    `confirmed_committed` contains exact (ordering, tip) keys verified
+    against the ordering child. It allows only an otherwise valid
+    ahead-by-one prefix, never a different history. `settle_candidates`,
+    when supplied, collects every distinct unresolved ahead-by-one key.
+
     Counts are TOTALS; the recorded lists are samples of them.
     """
     kept, excluded = qualifying_samples(samples)
@@ -1484,9 +1775,20 @@ def evaluate_chain_consistency(samples):
     for i, s in kept:
         for block in s.get('scala_chain') or []:
             scala_last_listed[(s['ordering'], block)] = i
+    # The last qualifying sample's own timestamp — real samples carry
+    # `at` (`time.time()` at the start of the sweep); synthetic
+    # self-test series do not, and then the grace window never applies
+    # (no timing to measure it against), which is exactly the old,
+    # exact-match behaviour those tests still check.
+    last_at = kept[-1][1].get('at') if kept else None
+    settle_absent = settle_absent or set()
+    settle_unreachable = settle_unreachable or set()
+    settle_inconclusive = settle_inconclusive or set()
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
+    allowed_by_log, longest_lead = 0, 0
+    not_measured_count, not_measured_samples = 0, []
     for i, s in kept:
         scala_chain = s.get('scala_chain') or []
         rust_chain = s.get('rust_chain') or []
@@ -1510,7 +1812,8 @@ def evaluate_chain_consistency(samples):
         if ahead_by_one:
             tip = rust_old[-1]
             confirmed_at = scala_last_listed.get((s['ordering'], tip))
-            if confirmed_at is not None and confirmed_at > i:
+            if ((confirmed_at is not None and confirmed_at > i)
+                    or (s['ordering'], tip) in (confirmed_committed or ())):
                 allowed_by_one += 1
                 if len(allowed_samples) < 10:
                     allowed_samples.append({
@@ -1519,7 +1822,44 @@ def evaluate_chain_consistency(samples):
                         'scala_confirmed_at_sample': confirmed_at,
                     })
                 continue
+            key = (s['ordering'], tip)
+            if key in settle_unreachable:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': 'settle read: the miner stopped answering'})
+                continue
+            if key in settle_inconclusive:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': ('settle read: the ordering moved on before a live '
+                                "poll could check it, and the committed chain "
+                                "after it never reached ordering's own child "
+                                "within the walk bound")})
+                continue
+            if key not in settle_absent and settle_grace_s is not None \
+                    and last_at is not None and s.get('at') is not None \
+                    and (last_at - s['at']) < settle_grace_s:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': f'only {last_at - s["at"]:.1f}s of series remained, '
+                              f'under the {settle_grace_s:.1f}s grace window'})
+                continue
+        lead = rust_lead_mined(scala_chain, rust_chain, mined or ())
+        if lead:
+            allowed_by_log += 1
+            longest_lead = max(longest_lead, lead)
+            continue
         violation_count += 1
+        # Settle every distinct unresolved tip; report samples are capped.
+        if ahead_by_one and settle_candidates is not None:
+            settle_candidates.setdefault((s['ordering'], tip), {
+                'ordering': s['ordering'], 'rust_chain': rust_chain})
         if len(violations) < 10:
             violations.append({'sample': i, 'ordering': s['ordering'],
                                'scala_chain': scala_chain,
@@ -1540,7 +1880,12 @@ def evaluate_chain_consistency(samples):
         'prefix_violations_sample': violations,
         'allowed_prefix_by_one_count': allowed_by_one,
         'allowed_prefix_by_one_sample': allowed_samples,
+        'allowed_ahead_by_miner_log': allowed_by_log,
+        'longest_lead_by_miner_log': longest_lead or None,
         'max_truncation_depth': max(depths) if depths else None,
+        'not_measured_tail_count': not_measured_count,
+        'not_measured_tail_sample': not_measured_samples,
+        'settle_grace_s': settle_grace_s,
         'violations': _coverage_violations(kept, None, 'chain consistency'),
     }
     if compared == 0 and kept:
@@ -1824,6 +2169,72 @@ def _self_test():
     ahead = ([sample(['b', 'a'], ['c', 'b', 'a'])]
              + series(['c', 'b', 'a'], ['c', 'b', 'a']))
     assert evaluate_tip_consistency(ahead)['unconfirmed_count'] == 0
+
+    # ----- leads the in-sweep read order produces (FINDING §3) -----
+    #
+    # The miner is read first and the follower up to seconds later, so a
+    # follower can hold blocks the miner's sampled chain does not list
+    # yet, and never lists under this ordering id if the next ordering
+    # block lands first. A lead counts only when every lead block is the
+    # miner's own, by its log.
+    skewed = ([sample(['b', 'a'], ['e', 'd', 'c', 'b', 'a'])]
+              + series(['b', 'a'], ['b', 'a']))
+    # Without the miner's log: the three-block lead and its tip fail.
+    assert evaluate_chain_consistency(skewed)['prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed)['unconfirmed_count'] == 1
+    mined = {'c', 'd', 'e'}
+    chain = evaluate_chain_consistency(skewed, mined)
+    assert chain['prefix_violation_count'] == 0, chain
+    assert chain['allowed_ahead_by_miner_log'] == 1, chain
+    assert chain['longest_lead_by_miner_log'] == 3, chain
+    tip = evaluate_tip_consistency(skewed, mined)
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    # One lead block the miner never mined fails the whole lead.
+    assert evaluate_chain_consistency(skewed, {'c', 'd'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(skewed, {'c', 'd'})['unconfirmed_count'] == 1
+    # A different block at any position still fails, mined or not.
+    swapped = ([sample(['b', 'a'], ['e', 'x', 'a'])]
+               + series(['b', 'a'], ['b', 'a']))
+    assert evaluate_chain_consistency(swapped, {'e', 'x'})[
+        'prefix_violation_count'] == 1
+    assert evaluate_tip_consistency(swapped, {'e', 'x'})['unconfirmed_count'] == 1
+    assert mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
+        + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
+    # The soak build (feb78d675) logs the same event under a different
+    # phrase, and logs an unrelated ORDERING-block line one call apart
+    # that must NOT match.
+    assert mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - New ordering '
+        'block ' + 'ff' * 32 + ' w. nonce 3148',
+        'INFO org.ergoplatform.mining.CandidateGenerator - New input '
+        'block ' + 'cd' * 32 + ' w. nonce 294']) == {'cd' * 32}
+    # Both formats in the same log (a run straddling a build change, or
+    # just belt-and-braces): both are collected.
+    assert mined_input_blocks([
+        'INFO x - Input-block ' + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - New input block ' + 'cd' * 32 + ' w. nonce 7']) == {
+        'ab' * 32, 'cd' * 32}
+    # The guard: zero mined blocks is plausible only when the series
+    # never shows an input block either — never when it did (the
+    # rm-C-steady-soak-1 / rm-C-fork-soak-1 bug, where the soak-format
+    # log yielded an empty `mined` while both chains carried blocks).
+    _plausible_series = [{'scala_chain': ['x'], 'rust_chain': ['x']}]
+    assert mined_log_plausible(set(), []) is True
+    assert mined_log_plausible(set(), _plausible_series) is False
+    assert mined_log_plausible({'ab' * 32}, _plausible_series) is True
+    assert mined_log_plausible(set(), [{'scala_chain': [], 'rust_chain': []}]) is True
+    # Rust's tip is read after its chain: at the series' last sample the
+    # tip can be a block its own chain read did not list yet, and no
+    # later sample lists it. The miner's log confirms it; nothing else.
+    torn = series(['b', 'a'], ['b', 'a'])
+    torn[-1] = dict(torn[-1], rust_tip='c')
+    assert evaluate_tip_consistency(torn)['unconfirmed_count'] == 1
+    tip = evaluate_tip_consistency(torn, {'c'})
+    assert tip['unconfirmed_count'] == 0 and tip['confirmed_by_miner_log'] == 1, tip
+    assert evaluate_tip_consistency(torn, {'x'})['unconfirmed_count'] == 1
 
     # Lag past the bounds fails, even though every tip is consistent.
     deep = ['t%02d' % n for n in range(30, -1, -1)]
@@ -2178,6 +2589,258 @@ def _self_test():
     assert only_before['prefix_violation_count'] == 1, only_before
     assert only_before['allowed_prefix_by_one_count'] == 0, only_before
 
+    # ----- round 5: the tail grace window (rm-A-steady-armB-2) -----
+
+    def timed_tail_series(tail_pairs, pad_before=MIN_QUALIFYING_SAMPLES, gap_s=1.0):
+        """`pad_before` agreeing samples, then `tail_pairs` (oldest first)
+        at the very END of the series, one `gap_s` apart — so a pair's
+        distance from the series' last `at` is exactly how many pairs
+        after it there are, times `gap_s`. `chain_series` pads AFTER its
+        pairs instead, which is the wrong shape for a tail test."""
+        agree = (['b1'], ['b1'])
+        pairs = [agree] * pad_before + list(tail_pairs)
+        return [dict(sample(sc, rc), at=n * gap_s) for n, (sc, rc) in enumerate(pairs)]
+
+    # An ahead-by-one 3 samples (3 s) from the end of the series, with a
+    # follower lag of 22 s observed elsewhere in the same run: nowhere
+    # near enough runway for Scala to confirm it even if it always
+    # would. Not a violation — unknowable.
+    near_tail = timed_tail_series(
+        [(['b1'], ['b2', 'b1'])] + [(['b1'], ['b1'])] * 3)
+    excused = evaluate_chain_consistency(near_tail, settle_grace_s=22.0)
+    assert excused['prefix_violation_count'] == 0, excused
+    assert excused['allowed_prefix_by_one_count'] == 0, excused
+    assert excused['not_measured_tail_count'] == 1, excused
+    assert excused['not_measured_tail_sample'][0]['rust_only_tip'] == 'b2', excused
+
+    # The SAME shape, but with 90 s of series left after it (past any
+    # plausible grace window): a real, standing violation. Distance from
+    # the tail is what excuses a violation, not merely being unconfirmed.
+    far_from_tail = timed_tail_series(
+        [(['b1'], ['b2', 'b1'])] + [(['b1'], ['b1'])] * 90)
+    not_excused = evaluate_chain_consistency(far_from_tail, settle_grace_s=22.0)
+    assert not_excused['prefix_violation_count'] == 1, not_excused
+    assert not_excused['not_measured_tail_count'] == 0, not_excused
+
+    # A live settle read that checked and found it still absent stands as
+    # a violation EVEN INSIDE the grace window — the grace window is
+    # benefit of the doubt for a check nobody made, not for one that came
+    # back negative.
+    settled_absent = evaluate_chain_consistency(
+        near_tail, settle_grace_s=22.0, settle_absent={('O', 'b2')})
+    assert settled_absent['prefix_violation_count'] == 1, settled_absent
+    assert settled_absent['not_measured_tail_count'] == 0, settled_absent
+
+    # A live settle read that could not reach the miner is unknowable —
+    # never a violation — even FAR from the tail, where the plain grace
+    # window would not have excused it.
+    settled_unreachable = evaluate_chain_consistency(
+        far_from_tail, settle_grace_s=22.0, settle_unreachable={('O', 'b2')})
+    assert settled_unreachable['prefix_violation_count'] == 0, settled_unreachable
+    assert settled_unreachable['not_measured_tail_count'] == 1, settled_unreachable
+
+    # A settle read whose ordering moved on before a live poll could
+    # check it, and whose committed-data walk never reached ordering's
+    # own child (round 6, rm-C-steady-soak-1 / rm-C-fork-soak-1): also
+    # unknowable, also never a violation, even far from the tail.
+    settled_inconclusive = evaluate_chain_consistency(
+        far_from_tail, settle_grace_s=22.0, settle_inconclusive={('O', 'b2')})
+    assert settled_inconclusive['prefix_violation_count'] == 0, settled_inconclusive
+    assert settled_inconclusive['not_measured_tail_count'] == 1, settled_inconclusive
+
+    # No `settle_grace_s` at all (the pre-round-5 call shape, and every
+    # caller that has not been updated) is unchanged: still a hard
+    # violation, exactly as the pre-round-5 assertions above check with
+    # untimed series.
+    no_grace = evaluate_chain_consistency(near_tail)
+    assert no_grace['prefix_violation_count'] == 1, no_grace
+    assert no_grace['not_measured_tail_count'] == 0, no_grace
+
+    # ----- round 6: input-block fetch-order priority (rm-A-steady-armB-1) -
+
+    # A burst-pulled chain, newest-first: 12 ids, the payment's own block
+    # ('b8') at index 8 — one past a budget of 8. Every OTHER id is
+    # genuinely empty forever (a plain input block with no transactions);
+    # only 'b8' will ever answer non-empty, once it is finally asked.
+    chain_ids = [f'b{i}' for i in range(12)]
+    budget = 8
+
+    def sweep_fetch(order, already_fetched_this_sweep=0):
+        """Apply the budget the way `_collect_input_block_txids` does,
+        and answer each fetched id: empty for everything but 'b8'."""
+        fetched = order[:budget - already_fetched_this_sweep]
+        return {bid: (['payment-tx'] if bid == 'b8' else []) for bid in fetched}
+
+    have_nonempty, attempted_empty, final_empty, empty_since = set(), set(), set(), {}
+    tip = 't0'
+    # Sweep 1: nothing has been fetched yet, so every id is "never
+    # fetched" and ties are broken by the chain's own (newest-first)
+    # order — ids 0-7 are asked, exactly filling the budget.
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert order == chain_ids, order  # nothing cached yet: no reordering
+    answers = sweep_fetch(order)
+    assert set(answers) == {f'b{i}' for i in range(8)}, answers
+    assert 'b8' not in answers, 'the OLD code never got past index 7 either'
+    for bid, ids in answers.items():
+        if ids:
+            have_nonempty.add(bid)
+        else:
+            empty_since.setdefault(bid, tip)
+            attempted_empty.add(bid)
+
+    # Sweep 2, same tip: ids 0-7 are now ATTEMPTED (empty, not yet
+    # final), so ids 8-11 — never fetched — go first. 'b8' is reached
+    # this time, well within the round's budget. This is the fix: no
+    # tip change was even needed, only the priority order.
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert order[:4] == ['b8', 'b9', 'b10', 'b11'], order
+    answers = sweep_fetch(order)
+    assert answers.get('b8') == ['payment-tx'], \
+        f"the payment's input block must be fetchable by sweep 2, got {answers}"
+    have_nonempty.add('b8')
+
+    # Once found, 'b8' is never re-fetched (it has a real answer), and
+    # never demoted back behind the ids still stuck at [].
+    order = _input_block_fetch_order(chain_ids, have_nonempty, attempted_empty,
+                                      final_empty)
+    assert 'b8' not in order, order
+
+    # `_input_block_empty_is_final`: an id is cacheable-empty for good
+    # once the tip it was first seen empty under has moved on — one more
+    # full block sealed since, so nothing more can arrive for it. Same
+    # tip is still provisional; no recorded tip at all is never final.
+    assert _input_block_empty_is_final('t0', 't1') is True
+    assert _input_block_empty_is_final('t0', 't0') is False
+    assert _input_block_empty_is_final(None, 't0') is False
+    assert _input_block_empty_is_final('t0', None) is False
+
+    # A final-empty id drops out of the fetch order entirely, freeing its
+    # slot in the budget for good — the other half of the fix, for a
+    # chain that stays wider than the budget for many ordering blocks
+    # running (not just the one extra sweep round 6's own case needed).
+    final_empty.add('b0')
+    order = _input_block_fetch_order(chain_ids, have_nonempty,
+                                     attempted_empty - {'b8'}, final_empty)
+    assert 'b0' not in order, order
+
+    # ----- round 6: the stock miner's #2504 elimination (rm-A-steady-armB-2) -
+
+    # 'child' spends 'parentBox', an output of 'parent'. 'parent' sealed
+    # into input block 'ibP'; 'child' never reached any block, but a
+    # follower still holds it. That is exactly the shape #2504 fixes:
+    # the stock miner's collectTxs only checks the ordering block's own
+    # UTXO set plus its own call, not an earlier input block in the same
+    # window, and silently drops a pool tx whose parent sits there.
+    produced_by = _produced_by({'parent': ['parentBox'], 'other': ['otherBox']})
+    assert produced_by == {'parentBox': 'parent', 'otherBox': 'other'}, produced_by
+    tx_inputs_mb = {'child': ['parentBox'], 'unrelated': ['otherBox']}
+    sealed = {'parent'}
+
+    assert _miner_eliminated_payment(
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=True) is True
+
+    # Any one of the four conditions failing must NOT classify it as an
+    # elimination — it stays a real, unresolved failure.
+    assert _miner_eliminated_payment(  # parent never sealed
+        'child', tx_inputs_mb, produced_by, set(),
+        absent_from_miner=True, held_elsewhere=True) is False
+    assert _miner_eliminated_payment(  # still in the miner's own pool
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=False, held_elsewhere=True) is False
+    assert _miner_eliminated_payment(  # gone everywhere, not just eliminated
+        'child', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=False) is False
+    assert _miner_eliminated_payment(  # spends a box no submitted tx produced
+        'unrelated', tx_inputs_mb, produced_by, sealed,
+        absent_from_miner=True, held_elsewhere=True) is False
+
+    # ----- round 6: no-tip gap durations (rm-A-steady-armB-2) -----
+
+    def tipped(at, has_tip):
+        return {'ordering': 'O', 'scala_chain': ['c', 'b', 'a'],
+               'rust_tip': 'a' if has_tip else None, 'at': at}
+
+    kept_gap = list(enumerate([
+        tipped(0.0, True), tipped(1.0, True),
+        tipped(2.0, False), tipped(3.0, False), tipped(4.0, False),
+        tipped(5.0, True),
+    ]))
+    # From the last good sample (at=1.0) to the next (at=5.0): the full
+    # span the follower's state is uncertain over, not merely the 3.0 s
+    # between the two no-tip readings themselves.
+    assert _no_tip_gaps(kept_gap, 'rust_tip') == [4.0], _no_tip_gaps(kept_gap, 'rust_tip')
+
+    # A gap open at either end of the series is not a MEASURED gap — its
+    # true length is unknown, so it contributes nothing rather than an
+    # understatement dressed up as a real number.
+    open_at_start = list(enumerate([tipped(0.0, False), tipped(1.0, False),
+                                    tipped(2.0, True)]))
+    assert _no_tip_gaps(open_at_start, 'rust_tip') == []
+    open_at_end = list(enumerate([tipped(0.0, True), tipped(1.0, False)]))
+    assert _no_tip_gaps(open_at_end, 'rust_tip') == []
+
+    # A run with no gap at all reports none, and every tip present
+    # reports the empty list, not a null placeholder.
+    assert _no_tip_gaps(list(enumerate([tipped(0.0, True), tipped(1.0, True)])),
+                        'rust_tip') == []
+
+    # ----- round 6: progress-based maturity wait (rm-A-steady-armB-5) -----
+
+    assert _maturity_wait_stalled(599, 0) is False   # under the floor
+    assert _maturity_wait_stalled(601, 0) is True    # over the floor, no blocks yet
+    assert _maturity_wait_stalled(601, 150) is False  # under 5x the mean interval (750)
+    assert _maturity_wait_stalled(749, 150) is False  # 5x the mean interval (750) is now the bar
+    assert _maturity_wait_stalled(751, 150) is True   # over 5x the (larger) mean interval
+
+    class _FakeRun:
+        def __init__(self, deadline):
+            self.deadline = deadline
+
+    def scripted_wait(schedule, matures_at, deadline=1e9, stall_step=3600.0):
+        """`schedule` is `[(elapsed_s, height), ...]`, absolute elapsed
+        seconds, in order. Each `idle()` call advances the fake clock to
+        the schedule's next entry; once the schedule is exhausted, time
+        keeps jumping forward by `stall_step` with the height unchanged —
+        exactly what "the miner produced nothing more" looks like to this
+        function, however coarsely simulated. Balance turns positive the
+        first time height >= `matures_at`."""
+        clock, idx, height = [0.0], [0], [None]
+
+        def read_balance():
+            return 1 if height[0] is not None and height[0] >= matures_at else 0
+
+        def idle():
+            if idx[0] < len(schedule):
+                clock[0], height[0] = schedule[idx[0]]
+                idx[0] += 1
+            else:
+                clock[0] += stall_step
+        return _wait_for_spendable_balance(
+            _FakeRun(deadline), now=lambda: clock[0], read_height=lambda: height[0],
+            read_balance=read_balance, idle=idle)
+
+    # A chain that never stops advancing, just slowly (85s/block, matching
+    # armB-5's own measured pace): reaches height 11 at 935s, well past
+    # the OLD flat 900s budget. Must PASS — nothing here ever stalled.
+    slow_schedule = [(85.0 * h, h) for h in range(1, 12)]
+    balance, ev = scripted_wait(slow_schedule, matures_at=11)
+    assert balance == 1, ev
+    assert ev['stalled'] is None, ev
+    assert ev['wait_seconds'] == 935.0, ev
+    assert ev['height_reached'] == 11, ev
+
+    # A chain that advances a few times and then genuinely stops: must
+    # fail as a STALL (a real absence of progress), not as "no spendable
+    # coin" — the two are different findings and read differently.
+    stalled_schedule = [(85.0 * h, h) for h in range(1, 4)]  # stops at height 3
+    balance, ev = scripted_wait(stalled_schedule, matures_at=11)
+    assert balance == 0, ev
+    assert ev['stalled'] is not None and 'no new ordering block' in ev['stalled'], ev
+    assert ev['height_reached'] == 3, ev
+
     # ----- fix round 1: the REAL sampler, not a copy of its conditional -
 
     def sampler_over(sweeps, interval=0.0):
@@ -2510,6 +3173,8 @@ def _self_test():
         r = Run.__new__(Run)
         r.input_block_txids = {}
         r.input_block_seen_under = {}
+        r._input_block_empty_since = {}
+        r._input_block_final_empty = set()
         return r
 
     # Codex's mocked sweep: the bracket did NOT hold, so nothing of that
@@ -2717,8 +3382,139 @@ def _self_test():
                for m, _ in rebuilt_twice['failures']), rebuilt_twice
 
     _self_test_pending_and_restart()
+    _self_test_settle_via_committed_extension()
 
     print('self-test OK: evaluators behave as the round-5 definitions require')
+
+
+def _self_test_settle_via_committed_extension():
+    """`_confirm_via_committed_tip`, `_walk_ordering_chain_back`, and
+    `settle_unconfirmed_chain_tips`'s use of them when the ordering moves
+    on before a live poll can check a candidate (round 6,
+    rm-C-steady-soak-1 / rm-C-fork-soak-1: the prior code recorded
+    `absent` unconditionally on a single early poll, which is what made
+    a harness artifact read as a chain divergence)."""
+    # ----- the pure classifier -----
+    ordering, tip = 'O', 'T'
+    child_confirms = [{'id': 'C', 'parent': ordering, 'named_input_tip': tip}]
+    assert _confirm_via_committed_tip(child_confirms, ordering, tip) == 'confirmed'
+    child_denies = [{'id': 'C', 'parent': ordering, 'named_input_tip': 'other'}]
+    assert _confirm_via_committed_tip(child_denies, ordering, tip) == 'not_named'
+    child_names_nothing = [{'id': 'C', 'parent': ordering, 'named_input_tip': None}]
+    assert _confirm_via_committed_tip(child_names_nothing, ordering, tip) == 'not_named'
+    still_climbing = [{'id': 'D', 'parent': 'E', 'named_input_tip': 'x'},
+                      {'id': 'E', 'parent': 'F', 'named_input_tip': 'y'}]
+    assert _confirm_via_committed_tip(still_climbing, ordering, tip) == 'inconclusive'
+    assert _confirm_via_committed_tip([], ordering, tip) == 'inconclusive'
+    # `ordering`'s child is found by PARENT, not by walk position: a
+    # walk that passes unrelated blocks first still finds it.
+    with_prefix = [{'id': 'D', 'parent': 'E', 'named_input_tip': 'x'},
+                   {'id': 'C', 'parent': ordering, 'named_input_tip': tip}]
+    assert _confirm_via_committed_tip(with_prefix, ordering, tip) == 'confirmed'
+
+    # ----- the walk against a fake transport -----
+    blocks = {
+        'C': {'header': {'parentId': ordering},
+              'extension': {'fields': [['0302', tip]]}},
+        'D': {'header': {'parentId': 'C'}, 'extension': {'fields': []}},
+        'Z': {'header': {}, 'extension': {'fields': []}},
+    }
+
+    def fake_api(node, path, data=None, timeout=15):
+        assert node == 'scala'
+        return blocks.get(path.rsplit('/', 1)[-1], {})
+
+    real_api, globals()['api'] = api, fake_api
+    try:
+        walk = _walk_ordering_chain_back('scala', 'D', ordering)
+        assert [b['id'] for b in walk] == ['D', 'C'], walk
+        assert _confirm_via_committed_tip(walk, ordering, tip) == 'confirmed', walk
+        # Starting AT the child: a one-block walk still finds it.
+        walk_from_child = _walk_ordering_chain_back('scala', 'C', ordering)
+        assert [b['id'] for b in walk_from_child] == ['C'], walk_from_child
+        # A block with no parent stops the walk instead of looping.
+        walk_orphan = _walk_ordering_chain_back('scala', 'Z', ordering)
+        assert [b['id'] for b in walk_orphan] == ['Z'], walk_orphan
+
+        def flaky_api(node, path, data=None, timeout=15):
+            raise Unavailable('scala down mid-walk')
+
+        globals()['api'] = flaky_api
+        # An unreadable block stops the walk (transport failure), never
+        # an infinite retry.
+        assert _walk_ordering_chain_back('scala', 'D', ordering) == []
+    finally:
+        globals()['api'] = real_api
+
+    # ----- end to end through settle_unconfirmed_chain_tips -----
+    def make_run(series):
+        r = Run.__new__(Run)
+        Run.__init__(r, deadline=time.monotonic() + 30)
+        r._series_file = None
+        r.series = series
+        r.propagation_lags = []
+        return r
+
+    # rust_chain newest-first, as the sampler stores it; the candidate's
+    # tip is 'T' under ordering 'O', which Scala's live chain never
+    # listed before the window closed.
+    unsettled_series = [{'ordering': ordering, 'scala_chain': [],
+                         'rust_chain': [tip], 'at': 0.0}]
+
+    def api_moved_on_confirms(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'NEXT', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'NEXT':
+            return {'header': {'parentId': ordering},
+                    'extension': {'fields': [['0302', tip]]}}
+        return {}
+
+    real_api, globals()['api'] = api, api_moved_on_confirms
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 1, result
+        assert result['absent'] == set(), result
+        assert result['moved_on_inconclusive'] == set(), result
+        assert result['confirmed_committed'] == {(ordering, tip)}, result
+        assert r.series == unsettled_series, r.series
+    finally:
+        globals()['api'] = real_api
+
+    def api_moved_on_denies(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'NEXT', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'NEXT':
+            return {'header': {'parentId': ordering},
+                    'extension': {'fields': [['0302', 'someone-else']]}}
+        return {}
+
+    real_api, globals()['api'] = api, api_moved_on_denies
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 0, result
+        assert result['absent'] == {(ordering, tip)}, result
+        assert result['moved_on_inconclusive'] == set(), result
+    finally:
+        globals()['api'] = real_api
+
+    def api_moved_on_still_climbing(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'FAR', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'FAR':
+            return {'header': {'parentId': 'UNRELATED'}, 'extension': {'fields': []}}
+        return {}  # 'UNRELATED': parentId None, so the walk stops there
+
+    real_api, globals()['api'] = api, api_moved_on_still_climbing
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 0, result
+        assert result['absent'] == set(), result
+        assert result['moved_on_inconclusive'] == {(ordering, tip)}, result
+    finally:
+        globals()['api'] = real_api
 
 
 def _self_test_pending_and_restart():
@@ -2736,6 +3532,11 @@ def _self_test_pending_and_restart():
     # A build without the store and a malformed value are both `None`,
     # never an empty store; the Rust node is not a Scala store.
     assert pending == {'scala': None, 'scala2': store, 'scala3': None}, pending
+    # Which process each node is, from the same `/info` read.
+    assert launch_times({'scala': {'info': {'launchTime': 1000}},
+                         'rust': {'info': {'launchTime': 2000}},
+                         'scala2': {'info': {}, 'down': True}}) == {
+        'rust': 2000, 'scala': 1000, 'scala2': None}
 
     # ----- counters: nested drops, restarts, gauges -----
     assert flatten_counters(store) == {
@@ -2787,12 +3588,48 @@ def _self_test_pending_and_restart():
     assert absent['samples_with_store'] == 0 and 'absent' in absent['store'], absent
     assert pending_store_summary(series, 'scala3')['samples'] == 0
 
+    # ----- which store a reading comes from -----
+    # Exactly what the fixed store's encoder emits (#2563 13fc25df2,
+    # `PendingInputAnnouncements.Stats.jsonEncoder`): all seven reasons.
+    fixed = {'size': 2, 'bytes': 700, 'admitted': 9, 'replayed': 4,
+             'replayNotForwarded': 1, 'evictions': 0,
+             'drops': {reason: 0 for reason in PENDING_DROP_REASONS}}
+    assert pending_telemetry(fixed) == 'fixed', fixed
+    assert 'fairness' not in PENDING_DROP_REASONS
+    assert pending_telemetry(
+        {'size': 1, 'bytes': 9, 'evictions': 0, 'drops': 4}) == 'old'
+    # A draft of the review's counters that never shipped: `replayInvalid`
+    # and a `fairness` reason, no `replayNotForwarded`.
+    draft = dict(fixed, replayInvalid=1,
+                 drops=dict(fixed['drops'], fairness=0))
+    del draft['replayNotForwarded']
+    assert pending_telemetry(draft) == 'unrecognised', draft
+    assert pending_telemetry(None) is None and pending_telemetry('x') is None
+    assert pending_telemetry_label([None, fixed, fixed]) == 'fixed telemetry'
+    assert pending_telemetry_label([fixed, {'drops': 4}]) == 'old telemetry'
+    assert pending_telemetry_label([fixed, draft]) == 'unrecognised telemetry'
+    assert pending_telemetry_label([None]) == 'missing'
+    fixed_summary = pending_store_summary(
+        [at(0, fixed), at(1, dict(fixed, replayNotForwarded=3))], 'scala2')
+    assert fixed_summary['telemetry'] == 'fixed telemetry', fixed_summary
+    assert fixed_summary['missing_fixed_keys'] == [], fixed_summary
+    assert fixed_summary['counters']['replayNotForwarded']['increase'] == 2
+    old_summary = pending_store_summary(
+        [at(0, {'size': 0, 'bytes': 0, 'evictions': 0, 'drops': 1})], 'scala2')
+    assert old_summary['telemetry'] == 'old telemetry', old_summary
+    assert 'missing_fixed_keys' not in old_summary, old_summary
+    # The synthetic series above lacks most fixed keys: each is named.
+    assert summary['telemetry'] == 'unrecognised telemetry', summary
+    assert 'drops.hostLimit' in summary['missing_fixed_keys'], summary
+
     # ----- restart recovery -----
-    def rs(t, tip, miner, ordering, replayed=None):
+    def rs(t, tip, miner, ordering, replayed=None, not_forwarded=None):
         entry = {'at': t, 'scala_tip': miner, 'scala2_tip': tip,
                  'scala2_ordering': ordering, 'pending': {}}
         if replayed is not None:
             entry['pending']['scala2'] = {'replayed': replayed}
+            if not_forwarded is not None:
+                entry['pending']['scala2']['replayNotForwarded'] = not_forwarded
         return entry
 
     recovery = restart_recovery([
@@ -2811,6 +3648,15 @@ def _self_test_pending_and_restart():
     never = restart_recovery([rs(12, 'a', 'm', 'O1')], since=10, node='scala2')
     assert never['seconds_to_miner_tip'] is None and \
         never['first_apply_at'] is None and never['replay_burst'] is None, never
+    # The fixed store's burst carries the replays it did not forward too.
+    burst = restart_recovery([
+        rs(10, None, 'm1', None),
+        rs(12, 'a', 'm2', 'O1', replayed=0, not_forwarded=0),
+        rs(20, 'c', 'm4', 'O2', replayed=3, not_forwarded=1),
+        rs(35, 'm5', 'm5', 'O2', replayed=9, not_forwarded=2),
+    ], since=10, node='scala2')
+    assert burst['replay_burst'] == {'window_s': 30.0, 'replayed': 6,
+                                     'replayNotForwarded': 1}, burst
 
     # ----- the sampler across a deliberately killed follower -----
     down_node = 'scala2'
@@ -2937,6 +3783,161 @@ def check_sampler(run, evidence):
         run.fail('sampler', reason)
 
 
+# The extension key under which an ordering block names the input block
+# its PARENT's committed input chain ended at (weak-blocks
+# `Extension.PrevInputBlockIdKey`, `InputBlocksDataPrefix` 0x03 then
+# 0x02 — see `ordering_blocks_between` in scenarios/common.py, which
+# reads the same key for a different purpose). Duplicated here rather
+# than imported: smoke.py and scenarios/common.py are independent
+# entry points with no shared import today.
+NAMED_INPUT_TIP_KEY = '0302'
+
+
+def _walk_ordering_chain_back(node, start, ordering, max_depth=64):
+    """Ordering blocks read back from `start` towards `ordering`,
+    nearest-to-`start` first, stopping as soon as a block naming
+    `ordering` as its own parent is found (that block is `ordering`'s
+    child — the one whose extension names what was committed while
+    `ordering` was still the tip), at `max_depth` blocks, at a block
+    with no parent, or when a block cannot be read. Each entry:
+    `{'id', 'parent', 'named_input_tip'}`. Impure (real API calls);
+    `_confirm_via_committed_tip` below is the pure part this feeds.
+    """
+    chain = []
+    block_id = start
+    for _ in range(max_depth):
+        try:
+            block = api(node, f'/blocks/{block_id}') or {}
+        except Unavailable:
+            break
+        header = block.get('header') or {}
+        parent = header.get('parentId')
+        fields = {k: v for k, v in
+                  (block.get('extension') or {}).get('fields') or []}
+        chain.append({'id': block_id, 'parent': parent,
+                      'named_input_tip': fields.get(NAMED_INPUT_TIP_KEY)})
+        if parent == ordering or not parent:
+            break
+        block_id = parent
+    return chain
+
+
+def _confirm_via_committed_tip(chain_walk, ordering, tip):
+    """Decide a settle-read confirmation from a walk of ordering blocks
+    back from the new best ordering towards `ordering`
+    (`_walk_ordering_chain_back`). Pure.
+
+    The block mined immediately after `ordering` — its child — names,
+    in its own extension, the input tip that was actually committed
+    while `ordering` was still the tip. If that child is in the walk:
+    its named tip settles the question outright, both ways — `tip`
+    confirms it, anything else (including "names nothing") answers
+    NOT confirmed, just as definitively. If the walk never reaches a
+    child of `ordering` at all (still climbing past several ordering
+    blocks within `max_depth`, or `ordering` was never this chain's
+    ancestor — a different fork), the walk is inconclusive: neither
+    answer is available, which is not the same as "absent".
+
+    Returns 'confirmed', 'not_named', or 'inconclusive'.
+    """
+    child = next((b for b in chain_walk if b.get('parent') == ordering), None)
+    if child is None:
+        return 'inconclusive'
+    return 'confirmed' if child.get('named_input_tip') == tip else 'not_named'
+
+
+def settle_unconfirmed_chain_tips(run, mined):
+    """Give every still-unconfirmed 'Scala ahead-by-one' candidate a real
+    chance to catch up, live, instead of judging it from wherever the
+    series happened to stop (rm-A-steady-armB-2).
+
+    Runs after the window closes but before teardown — the nodes the
+    scenario started are still up. For each candidate left by a TRIAL
+    pass of `evaluate_chain_consistency` (an ahead-by-one the in-series
+    read never confirmed): poll the miner's `/blocks/bestInputChain` for
+    up to `max(30, the run's own observed propagation-lag max)` seconds.
+    If it lists the tip under the SAME ordering id, a real sample is
+    appended to `run.series` — the ordinary in-series confirmation path
+    then picks it up with no further change. Still absent while the
+    miner keeps answering is `absent` (a real violation, not excused by
+    the grace window). The miner going unreachable mid-check is
+    `unreachable` (unknowable, never a violation).
+
+    Ordering moving past the candidate's own id closes the LIVE window,
+    but not the question: `ordering`'s own committed data survives it.
+    `_walk_ordering_chain_back` + `_confirm_via_committed_tip` check the
+    committed extension of the block mined right after `ordering`
+    (rm-C-steady-soak-1, rm-C-fork-soak-1 — the prior version recorded
+    `absent` here unconditionally, on the strength of a single poll,
+    which is what made a harness artifact read as a chain divergence).
+    A confirmation from committed data records only its (ordering, tip),
+    without inventing a sampled chain or lag. A definite "not named" is
+    `absent`; a walk that
+    cannot reach `ordering`'s child at all is its own outcome,
+    `moved_on_inconclusive` — not `absent`, because nothing was actually
+    checked.
+    """
+    candidates = {}
+    evaluate_chain_consistency(run.series, mined, settle_candidates=candidates)
+    result = {'checked': len(candidates), 'confirmed': 0, 'absent': set(),
+             'unreachable': set(), 'moved_on_inconclusive': set(),
+             'confirmed_committed': set()}
+    if not candidates:
+        return result
+    grace = max(30.0, max(run.propagation_lags, default=0.0))
+    result['grace_s'] = grace
+    for v in candidates.values():
+        ordering = v['ordering']
+        rust_old = list(reversed(v.get('rust_chain') or []))
+        if not rust_old:
+            continue
+        tip = rust_old[-1]
+        key = (ordering, tip)
+        deadline = time.monotonic() + grace
+        outcome = 'absent'
+        while True:
+            try:
+                chain_now = api('scala', '/blocks/bestInputChain') or {}
+            except Unavailable:
+                outcome = 'unreachable'
+                break
+            if chain_now.get('bestOrdering') == ordering:
+                scala_now = chain_now.get('bestInputBlocks') or []
+                if tip in scala_now:
+                    run.series.append({
+                        'ordering': ordering, 'scala_chain': scala_now,
+                        'rust_chain': v.get('rust_chain'),
+                        'scala_tip': scala_now[0] if scala_now else None,
+                        'rust_tip': (v.get('rust_chain') or [None])[0],
+                        'at': time.time(), 'settle_read': True})
+                    outcome = 'confirmed'
+                    break
+            elif chain_now.get('bestOrdering'):
+                walk = _walk_ordering_chain_back(
+                    'scala', chain_now['bestOrdering'], ordering)
+                verdict = _confirm_via_committed_tip(walk, ordering, tip)
+                if verdict == 'confirmed':
+                    result['confirmed_committed'].add(key)
+                    outcome = 'confirmed'
+                elif verdict == 'not_named':
+                    outcome = 'absent'
+                else:
+                    outcome = 'moved_on_inconclusive'
+                break  # ordering moved on; the live window is closed either way
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1.0)
+        if outcome == 'confirmed':
+            result['confirmed'] += 1
+        elif outcome == 'unreachable':
+            result['unreachable'].add(key)
+        elif outcome == 'moved_on_inconclusive':
+            result['moved_on_inconclusive'].add(key)
+        else:
+            result['absent'].add(key)
+    return result
+
+
 def finalize_agreement(run, evidence):
     """Evaluate assertions 2 and 3 over EVERY retained sample.
 
@@ -2944,9 +3945,31 @@ def finalize_agreement(run, evidence):
     samples taken during funding, the workload and the restart are
     observations of the same two nodes and used to be discarded.
     """
-    tip = evaluate_tip_consistency(run.series)
-    chain = evaluate_chain_consistency(run.series)
+    # The miner's own record of what it mined, for leads the in-sweep
+    # read order produces (`rust_lead_mined`).
+    mined = mined_input_blocks(scala_log_lines('scala'))
+    if not mined_log_plausible(mined, run.series):
+        print('WARNING: mined_input_blocks() parsed ZERO mined input blocks '
+              "from the scala miner's log, but the series recorded input "
+              'blocks on a chain — the log format probably changed again; '
+              'every allowance downstream that depends on the miner log '
+              '(allowed_ahead_by_miner_log, the settle-read mined-log '
+              'fallback) is NOT MEASURED for this run, not zero.')
+        evidence['mined_log_unmeasured'] = (
+            'mined_input_blocks() returned an empty set while the series '
+            "shows input blocks on a chain; treat this run's miner-log-"
+            'derived allowances as unmeasured, not proof of a violation')
+    settle = settle_unconfirmed_chain_tips(run, mined)
+    tip = evaluate_tip_consistency(
+        run.series, mined, confirmed_committed=settle['confirmed_committed'])
     lags = [round(v, 3) for v in run.propagation_lags]
+    chain = evaluate_chain_consistency(
+        run.series, mined, settle_grace_s=max(30.0, max(lags) if lags else 0.0),
+        settle_absent=settle['absent'], settle_unreachable=settle['unreachable'],
+        settle_inconclusive=settle.get('moved_on_inconclusive'),
+        confirmed_committed=settle['confirmed_committed'])
+    evidence['chain_consistency_settle'] = {
+        k: (sorted(v) if isinstance(v, set) else v) for k, v in settle.items()}
     evidence['2_best_input_block'] = {
         'definition': ("every Rust bestInputBlock must be a block Scala had on its "
                        "best chain for the same ordering block; lag p95 <= "
@@ -2968,6 +3991,16 @@ def finalize_agreement(run, evidence):
         'artifacts_written_at_mismatch_time': run.live_artifact_paths,
         **chain,
     }
+    if chain.get('not_measured_tail_count'):
+        evidence.setdefault('not_measured', []).append({
+            'scenario': '3_best_input_chain',
+            'message': f"{chain['not_measured_tail_count']} ahead-by-one Rust "
+                      'tip(s) were still unconfirmed when the series ended, '
+                      'either unreachable during the post-window settle read or '
+                      "within the run's own observed-lag grace window "
+                      f"({chain['settle_grace_s']:.1f}s) — not a failure of "
+                      'either node',
+            'evidence': chain['not_measured_tail_sample']})
     # The lag of EVERY follower in the run, by one definition (spec §7a).
     # The Rust port's is assertion 2's own number; a Scala reference
     # follower's is the baseline it has to be read against, and a node
@@ -3069,6 +4102,44 @@ def conflicting_submissions(tx_inputs):
         clusters.setdefault(find(txid), []).append(txid)
     return sorted(t for group in clusters.values() if len(group) > 1
                   for t in group)
+
+
+def _produced_by(tx_outputs):
+    """`{boxId: txid}` over the submitted payments' own outputs. A box
+    produced by more than one submitted tx cannot happen (box ids are
+    unique), so the last writer winning is never exercised in practice;
+    pure, so `--self-test` drives it directly."""
+    return {box: txid for txid, boxes in tx_outputs.items() for box in boxes or ()}
+
+
+def _miner_eliminated_payment(txid, tx_inputs, produced_by, sealed_txids,
+                              absent_from_miner, held_elsewhere):
+    """rm-A-steady-armB-2 / upstream #2504 (open, a-shannon): the stock
+    Scala miner's `CandidateGenerator.collectTxs` checks a pool tx's
+    inputs against the ORDERING block's own UTXO set plus THIS CALL's
+    own included transactions — not against transactions this SAME
+    ordering window already sealed into an earlier input block. A pool
+    tx whose parent sits there fails `inputsNotSpent` and is silently
+    eliminated from the miner's pool (logged only at DEBUG), even though
+    the parent is genuinely confirmed and the followers still hold the
+    child as valid.
+
+    True exactly when ALL of: the payment spends an output one of the
+    OTHER submitted payments produced (`produced_by`); that producer was
+    itself sealed into an input block this run saw (`sealed_txids` —
+    `dict(run.input_block_txids)`'s own txid union); the miner's own
+    pool no longer holds it (`absent_from_miner`); and at least one
+    follower still does (`held_elsewhere`) — a payment nobody holds any
+    more is genuinely gone, not merely eliminated from one pool. Pure
+    over its inputs; the caller does the polling.
+    """
+    if not absent_from_miner or not held_elsewhere:
+        return False
+    for box in tx_inputs.get(txid) or ():
+        producer = produced_by.get(box)
+        if producer is not None and producer in sealed_txids:
+            return True
+    return False
 
 
 class PaymentOutcomeTracker:
@@ -3405,6 +4476,85 @@ def resolve_rust_chain(heights, tip_height, tip_header, parent_cache):
     return chain, parent_cache
 
 
+MATURITY_STALL_FLOOR_S = 600.0
+MATURITY_STALL_MULTIPLIER = 5
+
+
+def _maturity_wait_stalled(since_progress, mean_interval):
+    """True once no new ordering block has arrived for longer than
+    `max(600s, 5x the mean block interval observed so far in this wait)`
+    (round 6, rm-A-steady-armB-5). A flat 900s budget failed a run that
+    was still advancing normally, just slower than usual under host load
+    (939s to height 11 at ~85s/block) — the miner had not stalled, the
+    budget was merely too tight for that run's own pace. `mean_interval`
+    of 0 (no block seen yet) reads as the floor alone: pure, so
+    `--self-test` drives it directly."""
+    return since_progress > max(MATURITY_STALL_FLOOR_S,
+                                MATURITY_STALL_MULTIPLIER * mean_interval)
+
+
+def _wait_for_spendable_balance(run, now=None, read_height=None,
+                                read_balance=None, idle=None):
+    """Progress-based wait for a spendable miner reward.
+
+    Keeps waiting exactly as long as the miner's height keeps advancing,
+    however slowly; only gives up as a STALL (no spendable coin ever
+    will appear this way) once `_maturity_wait_stalled` says no new
+    ordering block has arrived in too long, or the scenario's own
+    deadline (`run.deadline`) arrives first — never merely because a
+    fixed number of seconds passed while the chain was still moving.
+
+    `now`/`read_height`/`read_balance`/`idle` default to the real clock,
+    `scala_height`, `/wallet/balances` and `run.idle(1)`; `--self-test`
+    injects a scripted clock and chain instead, so the real decision
+    logic runs with no sleeping and no live nodes.
+
+    Returns `(balance, evidence)`. `evidence['stalled']` is the stall
+    reason, or `None` if a balance appeared or the scenario deadline
+    simply arrived first (still recorded, distinctly, in `evidence`).
+    """
+    now = now or time.monotonic
+    read_height = read_height or (lambda: scala_height(run))
+    read_balance = read_balance or (
+        lambda: (api('scala', '/wallet/balances') or {}).get('balance') or 0)
+    idle = idle or (lambda: run.idle(1))
+    start = now()
+    last_height, last_change, intervals = None, start, []
+    balance = 0
+    while now() < run.deadline:
+        # Height before balance: a balance found positive this same tick
+        # is still credited against the height that produced it, not the
+        # PREVIOUS reading — `height_reached` in the evidence means "the
+        # height the moment it became spendable", not "one behind it".
+        current = now()
+        try:
+            height = read_height()
+        except Unavailable:
+            height = None
+        if height is not None and (last_height is None or height > last_height):
+            if last_height is not None:
+                intervals.append(current - last_change)
+            last_height, last_change = height, current
+        try:
+            balance = read_balance()
+        except Unavailable:
+            balance = 0
+        if balance > 0:
+            break
+        mean_interval = sum(intervals) / len(intervals) if intervals else 0.0
+        if _maturity_wait_stalled(current - last_change, mean_interval):
+            return balance, {
+                'wait_seconds': round(current - start, 1), 'height_reached': last_height,
+                'mean_block_interval_s': round(mean_interval, 1),
+                'stalled': f'no new ordering block for {current - last_change:.0f}s '
+                          f'(threshold {max(MATURITY_STALL_FLOOR_S, MATURITY_STALL_MULTIPLIER * mean_interval):.0f}s)'}
+        idle()
+    return balance, {'wait_seconds': round(now() - start, 1), 'height_reached': last_height,
+                     'mean_block_interval_s': round(
+                         sum(intervals) / len(intervals) if intervals else 0.0, 1),
+                     'stalled': None}
+
+
 def assertion_6_mempool(run, evidence, count):
     """Funded workload: `count` accepted submissions, each located inside
     a Rust input block, each gone from Rust's pool at the first sample
@@ -3412,22 +4562,17 @@ def assertion_6_mempool(run, evidence, count):
     agreement with every Scala-only residue attributed to D1 or F6."""
     result = {'requested': count, 'submitted': [], 'submit_failures': []}
     evidence['6_mempool'] = result
-    # A miner reward matures at ordering block 11, and the recipe's
-    # target is ~55 s per ordering block, so the wait is minutes.
-    deadline = min(run.deadline, time.monotonic() + 900)
-
-    balance = 0
-    while time.monotonic() < deadline:
-        try:
-            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
-        except Unavailable:
-            balance = 0
-        if balance > 0:
-            break
-        run.idle(1)
+    # A miner reward matures at ordering block 11. Progress-based, not a
+    # flat budget (rm-A-steady-armB-5): see _wait_for_spendable_balance.
+    balance, wait_evidence = _wait_for_spendable_balance(run)
     result['balance_nano'] = balance
+    result['maturity_wait'] = wait_evidence
     if not balance:
-        run.fail('6_mempool', 'no spendable coin on the Scala wallet within budget')
+        reason = wait_evidence.get('stalled') or (
+            'the scenario deadline arrived first, still at height '
+            f"{wait_evidence.get('height_reached')}")
+        run.fail('6_mempool', f'no spendable coin on the Scala wallet: {reason}',
+                 wait_evidence)
         result['result'] = 'FAIL'
         return
     try:
@@ -3453,6 +4598,11 @@ def assertion_6_mempool(run, evidence, count):
     # transaction to land in the pool is what makes the workload
     # spendable, and `tx_inputs` below is what proves it was.
     tx_inputs = {}
+    # Each payment's OWN output box ids — not used for eviction (that is
+    # `tx_inputs`), but for `_miner_eliminated_payment` below: whether an
+    # UNRESOLVED payment spends a box another submitted payment produced,
+    # and that producer already sealed into an earlier input block.
+    tx_outputs = {}
     settle_budget = time.monotonic() + MEMPOOL_SETTLE_TOTAL_SECONDS
     for i in range(count):
         try:
@@ -3476,6 +4626,8 @@ def assertion_6_mempool(run, evidence, count):
             if entry is not None:
                 tx_inputs[txid] = [b.get('boxId') for b in entry.get('inputs')
                                    or () if b.get('boxId')]
+                tx_outputs[txid] = [b.get('boxId') for b in entry.get('outputs')
+                                    or () if b.get('boxId')]
                 break
             run.idle(0.2)
         else:
@@ -3483,6 +4635,7 @@ def assertion_6_mempool(run, evidence, count):
             # unknown, which the conflict check reads as "no evidence",
             # never as "disjoint".
             tx_inputs.setdefault(txid, [])
+            tx_outputs.setdefault(txid, [])
     submitted = set(result['submitted'])
     if len(submitted) != count:
         run.fail('6_mempool',
@@ -3667,14 +4820,56 @@ def assertion_6_mempool(run, evidence, count):
                   'scala_input_chain_txids_seen': len(scala_input_chain_txids),
                   'rust_log': rust_log_lines('input_blocks')})
 
-    # An observation that did not happen is not a pass.
+    # An observation that did not happen is not a pass — UNLESS it is the
+    # stock miner's own #2504 elimination (rm-A-steady-armB-2): polled
+    # live, because `unresolved` only means "not seen by the tracker
+    # inside the window", and both "still absent" and "still held
+    # elsewhere" are facts about right now.
     if unresolved:
-        run.fail('6_mempool',
-                 f'{len(unresolved)} payments reached neither a Rust input block nor '
-                 f'an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
-                 {'unresolved': unresolved,
-                  'input_blocks_seen': len(dict(run.input_block_txids)),
-                  'rust_log': rust_log_lines('input_blocks')})
+        produced_by = _produced_by(tx_outputs)
+        sealed_txids = {t for ids in dict(run.input_block_txids).values() for t in ids}
+        eliminated, still_unresolved = [], []
+        for txid in unresolved:
+            try:
+                miner_pool = {t.get('id') for t in
+                              api('scala', '/transactions/unconfirmed') or []}
+                absent_from_miner = txid not in miner_pool
+            except Unavailable:
+                absent_from_miner = False
+            held_elsewhere = False
+            for follower in ('scala2', 'scala3'):
+                try:
+                    pool = {t.get('id') for t in
+                           api(follower, '/transactions/unconfirmed') or []}
+                except Unavailable:
+                    continue
+                if txid in pool:
+                    held_elsewhere = True
+                    break
+            if _miner_eliminated_payment(txid, tx_inputs, produced_by, sealed_txids,
+                                         absent_from_miner, held_elsewhere):
+                eliminated.append(txid)
+            else:
+                still_unresolved.append(txid)
+        if eliminated:
+            evidence.setdefault('not_measured', []).append({
+                'scenario': '6_mempool',
+                'message': f'{len(eliminated)} payment(s) spend an output of another '
+                          "submitted payment already sealed into an earlier input "
+                          "block, and the stock miner's own collectTxs checks only "
+                          "the ordering block's UTXO set plus its own call — not "
+                          "earlier input blocks in the same window — so it silently "
+                          'eliminated them from its pool (upstream #2504, open, '
+                          'fixes this); the followers still hold them as valid',
+                'evidence': {'eliminated': sorted(eliminated),
+                            'sealed_producer_txids': sorted(sealed_txids)}})
+        if still_unresolved:
+            run.fail('6_mempool',
+                     f'{len(still_unresolved)} payments reached neither a Rust input '
+                     f'block nor an ordering block within {MEMPOOL_ROUTE_SECONDS:.0f}s',
+                     {'unresolved': still_unresolved,
+                      'input_blocks_seen': len(dict(run.input_block_txids)),
+                      'rust_log': rust_log_lines('input_blocks')})
 
     # The strict path has to be EXERCISED. A run in which the miner
     # sealed nothing proves nothing about input-block eviction, so it is
