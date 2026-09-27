@@ -19,7 +19,7 @@
 //!    far-future-timestamp seed satisfies (see `seed_synced_chain` /
 //!    `meta_timestamp` for the two boot-hydration adaptations that were needed).
 //! 2. The submit path's **authoritative re-verification** inside the action
-//!    loop: `verify_solution` → `apply_mined_block` → `process_header_cfg`,
+//!    loop: `verify_solution` → `prepare_mined_block` → `process_header_cfg`,
 //!    which re-runs PoW (`verify_pow_solution`, strict `hit >= target`
 //!    rejection), re-derives `n_bits` off the parent epoch headers, and checks
 //!    `height == parent + 1` before the executor's `AssembleBlock` applies and
@@ -48,7 +48,7 @@
 //! via `ergo_mining::candidate::unpack_interlinks_from_extension`, which decodes
 //! the canonical `ergo_ser::extension::write_extension` layout (`[32-byte
 //! header_id][u16 n_fields]` then per field `[2-byte key][u8 val_len][val]`) —
-//! the same layout `apply_mined_block` and peer-block ingest (`ergo_sync::
+//! the same layout `store_mined_sections` and peer-block ingest (`ergo_sync::
 //! block_proc`) persist. The parser recovers the full interlinks vector, so the
 //! engine hands a non-empty vector to `update_interlinks` and builds the next
 //! candidate for N+2. `engine_builds_second_candidate_after_block_applies`
@@ -208,7 +208,7 @@ fn header(
 /// Serialize the parent's Extension section in the canonical Scala wire shape
 /// `read_parent_extension_bytes` / `unpack_interlinks_from_extension` read —
 /// the exact bytes `ergo_ser::extension::write_extension` emits and that
-/// `apply_mined_block` / peer ingest persist (`[32-byte header_id][u16
+/// `store_mined_sections` / peer ingest persist (`[32-byte header_id][u16
 /// n_fields]` then per field `[2-byte key][u8 val_len][val]`). The interlinks
 /// keys come from `pack_interlinks`, which are exactly 2 bytes.
 fn extension_section_bytes(header_id: &[u8; 32], fields: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
@@ -595,8 +595,9 @@ async fn boots_synced_and_serves_a_candidate() {
 /// The headline: GET the candidate, CPU-solve it, POST the solution, and watch
 /// the booted node's best-full tip advance from N to N+1. This drives the whole
 /// authoritative submit path inside the action loop — `verify_solution` →
-/// `apply_mined_block` → `process_header_cfg` (PoW re-verify, `n_bits`
-/// re-derivation off the synthetic parent, height check) → `AssembleBlock`.
+/// `prepare_mined_block` → `process_header_cfg` (PoW re-verify, `n_bits`
+/// re-derivation off the synthetic parent, height check) →
+/// `store_mined_sections` → `AssembleBlock`.
 #[tokio::test]
 async fn solve_and_submit_advances_the_tip() {
     let (_dir, handle, parent_tip) = boot_synced_mining_node().await;
@@ -644,8 +645,9 @@ async fn solve_and_submit_advances_the_tip() {
     // The advance is genuine, not a transient mis-read: the new best-full tip
     // is a real, distinct block id (the mined block at N+1), and the read
     // snapshot's height/id agree on it. This is the full solve → submit →
-    // verify_solution → apply_mined_block → process_header_cfg → AssembleBlock
-    // path having landed a block through a booted node.
+    // verify_solution → prepare_mined_block → process_header_cfg →
+    // store_mined_sections → AssembleBlock path having landed a block through
+    // a booted node.
     let new_tip = handle.read.tip();
     assert_eq!(
         new_tip.best_full_block.height, CANDIDATE_HEIGHT,
@@ -669,7 +671,7 @@ async fn solve_and_submit_advances_the_tip() {
 /// consensus validator is the strongest oracle for cache-built blocks. Boot a
 /// node with the per-tip dry-run base cache enabled, then mine TWO successive
 /// blocks through the real solve → submit → `verify_solution` →
-/// `apply_mined_block` → `process_header_cfg` path:
+/// `prepare_mined_block` → `process_header_cfg` → `store_mined_sections` path:
 ///
 ///   - The N+1 block is built off a COLD base (the worker's slot is empty at
 ///     boot, so the first candidate hydrates + memoizes the pristine tree).
@@ -818,7 +820,7 @@ async fn engine_builds_second_candidate_after_block_applies() {
 
     // The headline guard: the engine builds a SECOND candidate for the new tip.
     // This build reads the just-applied N+1 block's Extension section — written
-    // by `apply_mined_block` via the canonical `write_extension` — back through
+    // by `store_mined_sections` via the canonical `write_extension` — back through
     // `unpack_interlinks_from_extension`. Before the parser matched the canonical
     // layout the recovered interlinks were empty and `update_interlinks` panicked
     // the engine task; now the parser recovers the full vector and the build

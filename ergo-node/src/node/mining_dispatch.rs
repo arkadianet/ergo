@@ -40,12 +40,12 @@
 //! `best_full_block_height`, `ergo-state/src/store/mod.rs`), so a leading header
 //! tip cannot make a candidate script-divergent.
 //!
-//! On `SubmitSolution`, walks the same persistence + header pipeline
-//! peer-received blocks go through (BT/Extension/ADProofs persist →
-//! `process_header_cfg` → executor `AssembleBlock`), announcing a new best
-//! header to peers before `AssembleBlock` (or, after a mined block on the
-//! same parent failed to apply, once it applies), then confirms the new tip
-//! matches the submitted header before replying `Ok`.
+//! On `SubmitSolution`, walks the same header pipeline + persistence
+//! peer-received blocks go through (`process_header_cfg_with_genesis` → one
+//! durable BT/Extension/ADProofs write → executor `AssembleBlock`), announcing
+//! a new best header to peers before `AssembleBlock` (or, after a mined block
+//! on the same parent failed to apply, once it applies), then confirms the new
+//! tip matches the submitted header before replying `Ok`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -644,18 +644,17 @@ pub(super) fn handle_mining_request(
                 }
             };
             let parent_id = block.parent_id;
-            // 2. Persist BT/Extension/ADProofs + recheck parent_id
-            //    under the action-loop lock (the consensus-bearing
-            //    TOCTOU close). Returns header bytes + id we feed
-            //    to process_header next.
-            let (header_id, header_bytes) = match ergo_mining::submit::apply_mined_block(
+            // 2. Recheck parent_id under the action-loop lock (the
+            //    consensus-bearing TOCTOU close) and serialize the header
+            //    and sections. Nothing is written yet.
+            let mined = match ergo_mining::submit::prepare_mined_block(
                 state
                     .store
-                    .as_utxo_mut()
+                    .as_utxo()
                     .expect("utxo-only: mined-block persist is gated off in digest mode"),
                 block,
             ) {
-                Ok(pair) => pair,
+                Ok(mined) => mined,
                 Err(ergo_mining::submit::MiningSubmitError::StaleParent { .. }) => {
                     // Fresh-at-verify but tip moved before persist: still a
                     // stale-parent submission — count it once here so the
@@ -665,20 +664,21 @@ pub(super) fn handle_mining_request(
                     return;
                 }
                 Err(e) => {
-                    warn!(error = %e, "mining: section persist failed");
+                    warn!(error = %e, "mining: block serialization failed");
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                         "persist: {e}"
                     ))));
                     return;
                 }
             };
+            let header_id = mined.header_id;
             // 3. Run the same header pipeline peer-received headers
             //    go through: PoW verify, chain linkage, difficulty
-            //    check, persist into HEADERS + HEADER_META + (if
-            //    best) HEADER_CHAIN_INDEX. Mining's PoW already
-            //    passed the pre-check above, but process_header
-            //    re-verifies — same consensus path as inbound
-            //    blocks.
+            //    check, persist into HEADERS + HEADER_META +
+            //    SECTION_HEIGHT_INDEX + (if best) HEADER_CHAIN_INDEX.
+            //    Mining's PoW already passed the pre-check above, but
+            //    process_header re-verifies — same consensus path as
+            //    inbound blocks.
             //
             //    Uses `process_header_cfg_with_genesis` with the MiningHandle's
             //    chain_config so testnet mining is validated under
@@ -691,17 +691,58 @@ pub(super) fn handle_mining_request(
             //    `hdrCheckpoint` in `HeadersProcessor` regardless of where the
             //    header came from, so a locally mined header that lands on the
             //    checkpoint height with the wrong id is refused here too.
-            let processed = match ergo_sync::header_proc::process_header_cfg_with_genesis(
+            //
+            //    A resubmitted solution whose header is known goes on only
+            //    when some of its sections are missing, the state a failed
+            //    write in step 3a leaves: step 3a stores them, and a best
+            //    header is then announced and applied like a first
+            //    submission. With every section stored it stops here with the
+            //    known-header error. (`POST /blocks` re-runs apply for any
+            //    known header.)
+            let is_new_best = match ergo_sync::header_proc::process_header_cfg_with_genesis(
                 state
                     .store
                     .as_utxo_mut()
                     .expect("utxo-only: mined-header processing is gated off in digest mode"),
-                &header_bytes,
+                &mined.header_bytes,
                 handle.chain_config(),
                 state.executor.header_checkpoint(),
                 state.executor.genesis_id(),
             ) {
-                Ok(processed) => processed,
+                Ok(processed) => processed.is_new_best,
+                Err(e @ ergo_sync::header_proc::HeaderProcessError::AlreadyKnown { .. }) => {
+                    let store = state
+                        .store
+                        .as_utxo()
+                        .expect("utxo-only: mined-block persist is gated off in digest mode");
+                    match mined.sections_stored(store) {
+                        Ok(false) => {
+                            let is_best =
+                                state.store.chain_state_meta().best_header_id == header_id;
+                            info!(
+                                id = %hex::encode(header_id),
+                                best_header = is_best,
+                                "mining: resubmitted block's header is stored without its \
+                                 sections; storing them",
+                            );
+                            is_best
+                        }
+                        Ok(true) => {
+                            warn!(error = %e, "mining: header proc failed");
+                            let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
+                                "process_header: {e}"
+                            ))));
+                            return;
+                        }
+                        Err(read) => {
+                            warn!(error = %read, "mining: cannot read a known mined header's sections");
+                            let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
+                                "process_header: {e}; section read: {read}"
+                            ))));
+                            return;
+                        }
+                    }
+                }
                 Err(e) => {
                     warn!(error = %e, "mining: header proc failed");
                     let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
@@ -710,10 +751,85 @@ pub(super) fn handle_mining_request(
                     return;
                 }
             };
+            // 3a. Persist BT/Extension/ADProofs now that the header is
+            //    stored: its SECTION_HEIGHT_INDEX rows place each section at
+            //    the block's height, which the store's prune guard requires
+            //    of every section on a node whose serving window starts
+            //    above height one (pruned, or bootstrapped from a UTXO
+            //    snapshot or NiPoPoW proof). The mined height is the applied
+            //    tip plus one, never below that window. Scala stores a
+            //    locally mined block in the same order: `sendToNodeView`
+            //    hands its view holder the header before the sections
+            //    (CandidateGenerator.scala:79-85 at v6.0.6 23aabead8), and a
+            //    section without a stored header, or below the minimal
+            //    full-block height, is refused
+            //    (FullBlockSectionProcessor.scala:47-53, :102-103,
+            //    FullBlockPruningProcessor.scala:47-49).
+            //
+            //    The three sections commit in one durable transaction before
+            //    the block is announced or applied. No peer holds them until
+            //    this node serves them, and the header is already durable, so
+            //    a node killed after a non-durable section write would restart
+            //    with that header, possibly as its best header, and no body
+            //    for it anywhere.
+            //
+            //    If the write fails, the header stays stored without a body
+            //    and nothing is announced. When that header became the best
+            //    header, it stalls block production on its parent:
+            //    - Any other block on the same parent ties its score, so it is
+            //      stored as a fork, and `AssembleBlock` applies only the best
+            //      header chain. That holds for this node's other solutions
+            //      and for peers' blocks alike.
+            //    - It reaches peers through SyncInfo, which carries the best
+            //      header chain's recent headers (V2) or ids (V1). A Rust peer
+            //      that adopts it as its best header stalls the same way, and
+            //      Rust miners build on the full tip, so they do not produce
+            //      the heavier chain that would replace it. Scala nodes take
+            //      any full block whose chain outscores their best full block
+            //      (FullBlockProcessor.scala:83-86, :123-128) and mine on it,
+            //      so a mixed network recovers once their chain outweighs
+            //      the header.
+            //    - Resubmitting this solution retries the write and, once it
+            //      succeeds, applies the block (step 3). The miner has no block
+            //      bytes to post to `POST /blocks` instead, and after a
+            //      restart the cached template it would resubmit against is
+            //      gone.
+            if let Err(e) = ergo_mining::submit::store_mined_sections(
+                state
+                    .store
+                    .as_utxo()
+                    .expect("utxo-only: mined-block persist is gated off in digest mode"),
+                &mined,
+            ) {
+                let chain = state.store.chain_state_meta();
+                ergo_state::storage_observability::report_storage_failure(
+                    &ergo_state::storage_observability::StorageFailureContext {
+                        subsystem: "mining",
+                        component: "mined_block_persistence",
+                        database_path: Some(state.store.database_path()),
+                        operation: "mined_block_store_section",
+                        best_full_block_height: Some(chain.best_full_block_height),
+                        best_header_height: Some(chain.best_header_height),
+                        attempted_height: Some(mined.height),
+                    },
+                    &e,
+                );
+                error!(
+                    id = %hex::encode(header_id),
+                    new_best_header = is_new_best,
+                    error = %e,
+                    "mining: header stored but its sections were not; the block is not \
+                     announced and does not apply until the solution is resubmitted",
+                );
+                let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
+                    "persist: {e}"
+                ))));
+                return;
+            }
             // 3b. Announce before apply, as Scala's `NewBlockMined` does
             //    (CandidateGenerator.scala:77, ErgoNodeViewSynchronizer.scala
             //    :1435-1443 at v6.0.6 23aabead8). The header has passed the
-            //    full header pipeline and step 2 stored every section, so each
+            //    full header pipeline and step 3a stored every section, so each
             //    advertised id is servable; Scala announces after only a PoW
             //    check, before storing anything. The stored section bytes are
             //    first re-hashed against the header roots, the check this node
@@ -775,7 +891,7 @@ pub(super) fn handle_mining_request(
             //      descendants (+10 each, the header pipeline's catch-all).
             //      Scala, announcing after only a PoW check, before
             //      header-chain or state validation, carries the same exposure.
-            let submitted = if processed.is_new_best {
+            let submitted = if is_new_best {
                 super::block_relay::MinedSubmission::NewBest {
                     announced: super::block_relay::announce_mined_block_before_apply(
                         state, header_id, parent_id,
@@ -812,30 +928,62 @@ pub(super) fn handle_mining_request(
                 let _ = reply.send(Ok(()));
             } else {
                 let observed = hex::encode(state.store.chain_state_meta().best_full_block_id);
-                if matches!(
-                    submitted,
-                    super::block_relay::MinedSubmission::NewBest { announced: true }
-                ) {
-                    let (invalidity, note) = failed_apply_invalidity(state, &header_id);
-                    error!(
-                        expected = %hex::encode(header_id),
-                        observed = %observed,
-                        apply_ms,
-                        invalidity,
-                        note,
-                        "mining: announced block did not apply; peers may still fetch it. \
-                         Blocks on the same parent are announced only after they apply",
-                    );
-                } else {
-                    warn!(
-                        expected = %hex::encode(header_id),
-                        observed = %observed,
-                        "mining: block submission did not advance tip — likely validation rejection downstream",
-                    );
-                }
-                let _ = reply.send(Err(ergo_api::MiningApiError::Internal(
-                    "block apply failed (see node logs for the validation failure)".into(),
-                )));
+                let failure = match submitted {
+                    super::block_relay::MinedSubmission::NewBest { announced: true } => {
+                        let (invalidity, note) = failed_apply_invalidity(state, &header_id);
+                        error!(
+                            expected = %hex::encode(header_id),
+                            observed = %observed,
+                            apply_ms,
+                            invalidity,
+                            note,
+                            "mining: announced block did not apply; peers may still fetch it. \
+                             Blocks on the same parent are announced only after they apply",
+                        );
+                        "see node logs for the validation failure".to_owned()
+                    }
+                    super::block_relay::MinedSubmission::NewBest { announced: false } => {
+                        warn!(
+                            expected = %hex::encode(header_id),
+                            observed = %observed,
+                            "mining: block submission did not advance tip — likely validation rejection downstream",
+                        );
+                        "see node logs for the validation failure".to_owned()
+                    }
+                    super::block_relay::MinedSubmission::Fork => {
+                        match best_header_missing_sections_at(state, mined.height) {
+                            Some(best) => {
+                                warn!(
+                                    expected = %hex::encode(header_id),
+                                    best_header = %hex::encode(best),
+                                    height = mined.height,
+                                    "mining: block stored as a fork of a best header whose \
+                                     sections are not all stored; no block at this height \
+                                     applies until they are, or until a chain with more \
+                                     work replaces that header",
+                                );
+                                format!(
+                                    "stored as a fork: best header {} at height {} ties or \
+                                     outweighs it, and its sections are not all stored",
+                                    hex::encode(best),
+                                    mined.height
+                                )
+                            }
+                            None => {
+                                warn!(
+                                    expected = %hex::encode(header_id),
+                                    observed = %observed,
+                                    "mining: block stored as a fork; only the best header chain \
+                                     is applied",
+                                );
+                                "stored as a fork; only the best header chain is applied".to_owned()
+                            }
+                        }
+                    }
+                };
+                let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
+                    "block apply failed ({failure})"
+                ))));
             }
         }
         // GetRewardKey is answered before the mining-started gate (above).
@@ -843,6 +991,34 @@ pub(super) fn handle_mining_request(
             unreachable!("GetRewardKey is handled before the mining-started gate")
         }
     }
+}
+
+/// The best-chain header at `height` when some of its sections are not stored.
+/// Presence is read without draining persistence results, so a pending
+/// persistence failure still reaches the next apply.
+/// Apply takes only the best header chain, so a mined block at that height
+/// that does not outscore it is stored as a fork, and no block at that height
+/// applies until those sections arrive or a chain with more work replaces the
+/// header.
+fn best_header_missing_sections_at(state: &NodeState, height: u32) -> Option<[u8; 32]> {
+    let id = state.store.get_header_id_at_height(height).ok().flatten()?;
+    let bytes = state.store.get_header(&id).ok().flatten()?;
+    let header =
+        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes)).ok()?;
+    let sections = ergo_ser::modifier_id::ExpectedSections::from_header(
+        &id,
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    [
+        sections.transactions_id,
+        sections.extension_id,
+        sections.ad_proofs_id,
+    ]
+    .iter()
+    .any(|section| matches!(state.store.read_section_for_serving(section, 1), Ok(None)))
+    .then_some(id)
 }
 
 /// How apply left an announced mined block that did not apply, with what that

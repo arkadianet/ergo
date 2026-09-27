@@ -254,15 +254,16 @@ pub enum StateError {
          boundaries, the first non-trivial boundary is at 1024 testnet / 52224 mainnet)"
     )]
     InstallSnapshotAtGenesisRefused,
-    /// Mode 3: `store_block_section_typed` rejected a
-    /// section write whose parent header is below the current
-    /// prune sentinel. Returned to the caller (sync executor)
-    /// which logs + silently drops; the peer is NOT penalized
+    /// Mode 3: `store_block_section_typed` or
+    /// `store_block_sections_durable` rejected a section write whose
+    /// parent header is below the current prune sentinel, or not
+    /// stored while the sentinel is above one. Returned to the caller
+    /// (sync executor) which logs + silently drops; the peer is NOT penalized
     /// because timing-racy late deliveries are normal during sync.
     /// Defense-in-depth against an executor that bypasses
     /// receive-side gating.
     #[error(
-        "store_block_section_typed: section_id={section_id} at height {section_height} \
+        "block section write refused: section_id={section_id} at height {section_height} \
          is below prune sentinel {sentinel}"
     )]
     PrunedSection {

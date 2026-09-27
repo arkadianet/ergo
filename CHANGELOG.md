@@ -26,6 +26,22 @@ infrastructure.
   stands, and later blocks on the same parent are announced only after they
   apply. POST /blocks announces after a successful apply, with the remote
   freshness/tip gates; Scala announces submissions before apply, ungated.
+- Mining works on pruned UTXO nodes, and on UTXO nodes bootstrapped from a
+  snapshot or NiPoPoW proof once the first block above the bootstrap height has
+  applied from peers (the candidate builder reads its parent's extension).
+  Once their full-block window started above height one, every locally mined
+  block was refused at section persist, because its sections were stored
+  before the header that indexes them. The mined header now goes through the
+  header pipeline first, as Scala stores it.
+- The sections of a mined block, and of a POST /blocks submission, are now
+  written in one durable transaction before the block is announced or
+  applied; before, a node killed during apply could restart with the header
+  and without its body. Failure paths that changed for every node: a mined
+  header the pipeline refuses leaves no sections behind; a failed section
+  write is reported to storage health and leaves the header stored without
+  its body, and resubmitting the same solution stores the sections and applies
+  the block; a mined block stored as a fork is reported as such rather than as
+  a validation failure.
 
 
 ## [0.9.0] - 2026-09-25

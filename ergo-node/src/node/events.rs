@@ -782,46 +782,47 @@ fn inject_local_full_block(
     }
 
     // ----- Sections: persist directly under canonical section ids -----
-    let persist = |id: &[u8; 32], bytes: &[u8], type_id: u8| -> Result<(), SubmitError> {
-        state
-            .store
-            .store_block_section_typed(id, bytes, type_id)
-            .map_err(|e| {
-                let chain = state.store.chain_state_meta();
-                ergo_state::storage_observability::report_storage_failure(
-                    &ergo_state::storage_observability::StorageFailureContext {
-                        subsystem: "mining",
-                        component: "mined_block_persistence",
-                        database_path: Some(state.store.database_path()),
-                        operation: "mined_block_store_section",
-                        best_full_block_height: Some(chain.best_full_block_height),
-                        best_header_height: Some(chain.best_header_height),
-                        attempted_height: None,
-                    },
-                    &e,
-                );
-                SubmitError {
-                    reason: "internal_error".to_string(),
-                    detail: Some(format!("store_block_section_typed (type {type_id}): {e}")),
-                }
-            })
-    };
-    persist(
-        &expected.transactions_id,
-        &bt_bytes,
-        ModifierTypeId::BlockTransactions.as_byte(),
-    )?;
-    persist(
-        &expected.extension_id,
-        &ext_bytes,
-        ModifierTypeId::Extension.as_byte(),
-    )?;
+    // One durable transaction for all of them, before apply: the submitter
+    // may hold the only other copy, and the header is already durable, so a
+    // node killed after a non-durable write would restart with that header,
+    // possibly as its best header, and no body for it.
+    let mut sections: Vec<(&[u8; 32], &[u8], u8)> = vec![
+        (
+            &expected.transactions_id,
+            bt_bytes.as_slice(),
+            ModifierTypeId::BlockTransactions.as_byte(),
+        ),
+        (
+            &expected.extension_id,
+            ext_bytes.as_slice(),
+            ModifierTypeId::Extension.as_byte(),
+        ),
+    ];
     if let Some(ad) = &ad_proofs_bytes {
-        persist(
+        sections.push((
             &expected.ad_proofs_id,
-            ad,
+            ad.as_slice(),
             ModifierTypeId::ADProofs.as_byte(),
-        )?;
+        ));
+    }
+    if let Err(e) = state.store.store_block_sections_durable(&sections) {
+        let chain = state.store.chain_state_meta();
+        ergo_state::storage_observability::report_storage_failure(
+            &ergo_state::storage_observability::StorageFailureContext {
+                subsystem: "mining",
+                component: "mined_block_persistence",
+                database_path: Some(state.store.database_path()),
+                operation: "mined_block_store_section",
+                best_full_block_height: Some(chain.best_full_block_height),
+                best_header_height: Some(chain.best_header_height),
+                attempted_height: None,
+            },
+            &e,
+        );
+        return Err(SubmitError {
+            reason: "internal_error".to_string(),
+            detail: Some(format!("store_block_sections_durable: {e}")),
+        });
     }
 
     // ----- Apply: AssembleBlock kicks process_block if next in line -----

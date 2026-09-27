@@ -1146,9 +1146,9 @@ mod tests {
 
     /// Serialize an interlinks vector into the canonical Extension section
     /// bytes — `pack_interlinks` into 2-byte-keyed fields, then
-    /// `write_extension` — i.e. exactly what `apply_mined_block` / peer ingest
-    /// persist for a block's parent. This is the byte form the read side under
-    /// test must accept.
+    /// `write_extension` — i.e. exactly what `store_mined_sections` / peer
+    /// ingest persist for a block's parent. This is the byte form the read
+    /// side under test must accept.
     fn canonical_extension_bytes(header_id: [u8; 32], interlinks: &[ModifierId]) -> Vec<u8> {
         let fields = pack_interlinks(interlinks);
         let ext = Extension {

@@ -83,6 +83,13 @@ pub trait HeaderSectionStore {
         section_bytes: &[u8],
         section_type: u8,
     ) -> Result<(), StateError>;
+    /// Store `(modifier id, bytes, modifier type)` sections in one durable
+    /// transaction: all of them or none. For the sections of a block this
+    /// node mined or was handed whole, which no peer holds yet.
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError>;
     fn begin_header_batch(&mut self);
     fn flush_header_batch(&mut self) -> Result<(), StateError>;
     fn mark_session_invalid(&mut self, header_id: [u8; 32]);
@@ -222,6 +229,12 @@ impl HeaderSectionStore for StateStore {
         section_type: u8,
     ) -> Result<(), StateError> {
         StateStore::store_block_section_typed(self, modifier_id, section_bytes, section_type)
+    }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        StateStore::store_block_sections_durable(self, sections)
     }
     fn begin_header_batch(&mut self) {
         StateStore::begin_header_batch(self)
@@ -487,6 +500,15 @@ impl HeaderSectionStore for StateBackendKind {
             StateBackendKind::Digest(d) => {
                 d.store_block_section_typed(modifier_id, section_bytes, section_type)
             }
+        }
+    }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        match self {
+            StateBackendKind::Utxo(s) => s.store_block_sections_durable(sections),
+            StateBackendKind::Digest(d) => d.store_block_sections_durable(sections),
         }
     }
     fn begin_header_batch(&mut self) {

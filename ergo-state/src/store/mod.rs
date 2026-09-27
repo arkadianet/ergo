@@ -2243,9 +2243,9 @@ impl StateStore {
     /// rogue peer pushing directly, or an executor bug that
     /// bypassed receive gating). `SECTION_HEIGHT_INDEX` provides
     /// the height lookup that was stamped at header-store time
-    /// (Phase 1a wiring) — sections whose parent we never indexed
-    /// are passed through (no height to compare against; the
-    /// serve gate will catch them on read if needed).
+    /// (Phase 1a wiring). While the sentinel is above one, a
+    /// section with no `SECTION_HEIGHT_INDEX` row (its header is
+    /// not stored) is refused too.
     pub fn store_block_section_typed(
         &self,
         modifier_id: &[u8; 32],
@@ -2254,6 +2254,25 @@ impl StateStore {
     ) -> Result<(), StateError> {
         self.headers
             .store_block_section_typed(modifier_id, section_bytes, section_type)
+    }
+
+    /// Store `(modifier id, bytes, modifier type)` block sections in
+    /// one transaction that commits with the default
+    /// `Durability::Immediate`: on `Ok` every section is on disk, on
+    /// `Err` none was written. Each passes the prune guard of
+    /// [`Self::store_block_section_typed`].
+    ///
+    /// For the sections of a block this node mined or was handed
+    /// whole (`POST /blocks`): no peer holds them yet, so the
+    /// redownload that recovers a lost `Durability::None` section
+    /// cannot recover these. Their header is stored first, durably,
+    /// and without them it can stand as the best header with a body
+    /// no node can serve.
+    pub fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        self.headers.store_block_sections_durable(sections)
     }
 
     /// Read the persistent UTXO-bootstrap provenance marker. Returns

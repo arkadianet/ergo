@@ -98,8 +98,8 @@ same state root from a block's ADProofs instead of a box arena.
 - `HeaderAvailability` (enum) — Dense vs PoPowSparse history mode — `src/chain.rs:135`
 - `ChainStoreReader` (struct) — lock-free read handle — `src/reader.rs:31`
 - `CommittedSnapshot` (struct) — single-txn committed view for off-loop builds — `src/store/snapshot.rs`
-- `StateBackend` / `ChainStateRead` / `HeaderSectionStore` / `BlockApply` (traits) — backend dispatch surface — `src/backend.rs:40`–`:120`
-- `StateBackendKind` (enum) — `Utxo` / `Digest` runtime dispatch — `src/backend.rs:246`
+- `StateBackend` / `ChainStateRead` / `HeaderSectionStore` / `BlockApply` (traits) — backend dispatch surface — `src/backend.rs:42`–`:158`
+- `StateBackendKind` (enum) — `Utxo` / `Digest` runtime dispatch — `src/backend.rs:299`
 - `DigestStateStore` (struct) — Mode 5 digest-verifier backend — `src/digest_store.rs:140`
 - `DigestProofVerifier` (struct) — ADProof-driven digest derivation — `src/digest_apply.rs:156`
 - `PersistPipeline` / `PersistResult` (struct/enum) — background commit batching — `src/persist.rs:284`, `:261`

@@ -277,7 +277,7 @@ fn header(
 /// Serialize the parent's Extension section in the canonical Scala wire shape
 /// `read_parent_extension_bytes` / `unpack_interlinks_from_extension` read —
 /// the exact bytes `ergo_ser::extension::write_extension` emits and that
-/// `apply_mined_block` / peer ingest persist (`[32-byte header_id][u16
+/// `store_mined_sections` / peer ingest persist (`[32-byte header_id][u16
 /// n_fields]` then per field `[2-byte key][u8 val_len][val]`). The interlinks
 /// keys come from `pack_interlinks`, which are exactly 2 bytes.
 fn extension_section_bytes(header_id: &[u8; 32], fields: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {

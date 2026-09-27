@@ -4,6 +4,7 @@ mod avl_format_compat;
 mod avl_labels_oracle;
 mod avl_root_digest_reads;
 mod before_image_undo;
+mod block_sections_durable;
 mod bootstrap_pruning_sentinel;
 mod branch_invalidation;
 mod cached_disk_arena;
