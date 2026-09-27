@@ -16,45 +16,113 @@ infrastructure.
 
 ## [Unreleased]
 
-- Applied fresh remote blocks near the header tip now announce their header
-  and servable sections to peers. Rust-mined blocks announce on mainnet and
-  testnet as well as devnet, including servable sections instead of only headers.
-  A mined block that becomes the best header is announced before it is
-  applied, once its header is validated, its sections are stored and their
-  bytes match the header roots (Scala announces every mined block before
-  storing it). If that apply fails, the node logs an error, the announcement
-  stands, and later blocks on the same parent are announced only after they
-  apply. POST /blocks announces after a successful apply, with the remote
-  freshness/tip gates; Scala announces submissions before apply, ungated.
-- Mining works on pruned UTXO nodes, and on UTXO nodes bootstrapped from a
-  snapshot or NiPoPoW proof once the first block above the bootstrap height has
-  applied from peers (the candidate builder reads its parent's extension).
-  Once their full-block window started above height one, every locally mined
-  block was refused at section persist, because its sections were stored
-  before the header that indexes them. The mined header now goes through the
-  header pipeline first, as Scala stores it.
-- The sections of a mined block, and of a POST /blocks submission, are now
-  written in one durable transaction before the block is announced or
-  applied; before, a node killed during apply could restart with the header
-  and without its body. Failure paths that changed for every node: a mined
-  header the pipeline refuses leaves no sections behind; a failed section
-  write is reported to storage health and leaves the header stored without
-  its body, and resubmitting the same solution stores the sections and applies
-  the block; a mined block stored as a fork is reported as such rather than as
-  a validation failure.
-- When a locally mined block that became the best header fails to apply, the
-  node now withdraws every candidate template on its parent, as Scala's
-  `onSolvedBlockFailed` drops its cached candidates, instead of accepting more
-  solutions for the template that produced it. It then rebuilds at once;
-  Scala rebuilds on the next candidate request. A solution to a withdrawn
-  template is refused before anything is stored with 400 `stale_candidate`
-  (counted as stale, not as invalid PoW), unless the nonce also solves the
-  rebuilt template. `GET /mining/candidate` answers 503 until the rebuild
-  publishes, a longpoll on a withdrawn template wakes, and the rebuilt
-  template carries `clean_jobs`. A section write that fails after the mined
-  header is stored is not an apply failure: the template stays offered, so
-  resubmitting the same solution is not refused as stale.
+## [0.9.1] - 2026-09-28
 
+Block relay and mining reliability release: Scala-parity block announcements,
+mined-block storage and recovery fixes, a storage-rent validation parity fix,
+indexer and candidate-construction performance work, and an operator activity
+log in the dashboard.
+
+### Added
+
+- Operator-key-protected `GET /api/v1/diagnostics/activity` serves recent
+  structured logs with session cursors and `Cache-Control: no-store`. Retention
+  is bounded to 2,048 INFO-or-higher records and 4 MiB per process session;
+  responses report resets, evictions, truncation and capture losses. The new
+  Activity & logs workspace adds filtering, paused inspection and NDJSON
+  downloads. File logs remain the durable history (#405).
+- Mining candidate responses include optional `metrics` from the assembled
+  template: total and selected transaction counts, fees, transaction-section
+  size, validation cost and active size/cost limits. Fees are decimal strings
+  in nanoERG; existing mining fields retain their encodings (#405).
+- Dashboard storage-rent estimates show boxes newly eligible in the next block
+  and next 720 blocks, with distinct token counts. Estimates require a healthy,
+  caught-up index and exclude already-overdue boxes; they are not guaranteed
+  miner revenue (#405).
+
+### Changed
+
+- Redesign the dashboard with separate header, block and index sync rings,
+  a stage table, recent-block chart and table, and workspace search. Reorganize
+  the wallet into Assets, Build transaction, Receive, Activity and Manage.
+  Multi-recipient ERG/token payments use the existing wallet APIs, with unsigned
+  transaction review and explicit confirmation before signing and broadcasting;
+  uncertain submission outcomes retain the signed bytes for retry (#405).
+- Mining with the default `candidate_base_cache = false` loads authenticated
+  UTXO paths on demand instead of loading the entire tree for each candidate.
+  Full builds also avoid copying the frozen mempool snapshot, reducing candidate
+  construction work without requiring a configuration change (#414).
+- Run indexer catch-up on a dedicated worker so database work does not occupy
+  async runtime workers. Commit up to 16 blocks per atomic batch, checking
+  50 ms and 8 MiB budgets between blocks; shutdown waits for the worker to
+  finish its in-flight work (#414).
+- Reduce indexer history reads and writes by locating historical spends in
+  ordered segments and writing only changed rows. Address, template and token
+  pages read the needed segments in one consistent read transaction, avoiding
+  full-history materialization; unspent queries filter before pagination (#414).
+- Report sampled resident memory on Windows and macOS when available, instead
+  of always reporting zero on those platforms (#414).
+- Announce applied remote blocks less than two hours old and within 16 heights
+  of the header tip, advertising their headers and servable sections. Mined
+  blocks now announce on mainnet and testnet as well as devnet. A mined block
+  that becomes the best header announces before apply, after header validation,
+  section storage and checks that section bytes match the header roots. If apply
+  fails, the node logs an error; the announcement stands, and later mined blocks
+  on that parent announce only after they apply. `POST /blocks` announces after
+  successful apply with the remote freshness and tip gates (#413).
+
+### Fixed
+
+- Reject storage-rent claims whose readable `Short` output index selects an
+  output that fails the rent checks, even if the box's script would pass.
+  Rejection occurs before charging rent-check cost. An `Int` or other non-Short
+  index, or a negative or out-of-range Short index, uses ordinary script
+  verification instead of granting a rent spend. This aligns block validation
+  and mempool admission with Scala (#402).
+- Refresh SyncInfo to a peer after accepting a requested header, including an
+  already-known header or one that does not advance the best header. This keeps
+  peers' view of the node current for relay decisions; unsolicited or rejected
+  deliveries do not trigger the refresh (#399).
+- Store mined headers through the header pipeline before their sections,
+  allowing mining on pruned UTXO nodes. Snapshot- or NiPoPoW-bootstrapped UTXO
+  nodes can mine once a peer block above the bootstrap height has applied;
+  candidate construction still needs the parent's extension (#419).
+- Durably store all sections of a mined block or `POST /blocks` submission in
+  one transaction before announcement or apply, preventing a crash during
+  apply from losing the body. A refused mined header leaves no sections behind.
+  A failed section write is reported to storage health and leaves the stored
+  header without its body; resubmitting the same solution retries storage and
+  apply. Fork submissions are reported as stored forks rather than validation
+  failures. Header and section commits remain separate (#419).
+- Withdraw every template on a locally mined block's parent when that block
+  becomes the best header but fails to apply, and rebuild immediately. Solutions
+  to withdrawn templates return 400 `stale_candidate` before storage, counted
+  as stale rather than invalid PoW, unless they also solve an offered template.
+  `GET /mining/candidate` returns 503 until replacement work is published;
+  withdrawal wakes longpoll waiters and rebuilt work carries `clean_jobs`.
+  A section-write failure keeps the template available for resubmission (#421).
+- Prefer recovering a stored mined header with missing sections when a
+  resubmitted solution also solves a newer template on the same parent. This
+  restores the original block instead of storing a competing fork; withdrawn
+  templates remain ineligible and storage-read errors propagate (#422).
+- Evict a transaction specifically named by block-validation failure from the
+  mempool, along with dependent transactions, so rebuilt mining templates do
+  not repeatedly include it. This covers local and remote blocks in UTXO and
+  digest modes; failures that identify no transaction leave the pool alone
+  (#423).
+- Allow an eligible equal-work branch to replace a best-header chain blocked
+  by a session-marked first unapplied block. Search stored alternatives within
+  16 heights of the applied tip after rejection, update branch downloads, and
+  retain session marks across in-process UTXO rebuilds. Alternative branches
+  must descend from the applied tip without crossing marked or invalid headers;
+  ordinary greater-work selection is unchanged (#425).
+- Preserve the selected best header during digest-state rollback, allowing
+  reorg application to continue instead of stalling on the old header tip
+  (#425).
+- Retain block-rejection details as history once applied blocks advance beyond
+  the rejected height, rather than keeping an active dashboard and health alarm.
+  `/health` also clears its rejection state when a different block applies at
+  the same height (#405, #425).
 
 ## [0.9.0] - 2026-09-25
 
