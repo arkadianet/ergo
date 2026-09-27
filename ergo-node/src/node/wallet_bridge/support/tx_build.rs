@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 
-use crate::node::wallet_bridge::{map_chain_error, ChainStateAccessor, WalletAdminError};
-use ergo_api::wallet::sending::PaymentRequestDto;
+use ergo_wallet_protocol::scala::sending::PaymentRequestDto;
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::engine::{map_chain_error, WalletChainAccess};
 
 /// Minimum fee in nanoERG. Mirrors Scala's `Parameters.MinFee`.
 pub(crate) const MIN_FEE: u64 = 1_000_000;
@@ -59,8 +60,8 @@ pub(crate) async fn build_unsigned_tx(
     fee_override: Option<u64>,
     change_address_override: Option<&str>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<BuiltTx, WalletAdminError> {
     let state = state.read();
@@ -590,7 +591,7 @@ pub(crate) fn parse_box_id_hex(s: &str) -> Result<[u8; 32], WalletAdminError> {
 
 /// Native asset list (`token_id` hex + decimal `amount`) → `(id, amount)` map.
 pub(crate) fn parse_native_assets(
-    assets: &[ergo_api::wallet::native::dto::WalletAssetDto],
+    assets: &[ergo_wallet_protocol::native::dto::WalletAssetDto],
 ) -> Result<BTreeMap<[u8; 32], u64>, WalletAdminError> {
     let mut out: BTreeMap<[u8; 32], u64> = BTreeMap::new();
     for a in assets {
@@ -607,13 +608,15 @@ pub(crate) fn parse_native_assets(
 /// `(id, amount)` map → native asset DTO list (decimal-string amounts).
 pub(crate) fn assets_map_to_dto(
     tokens: &BTreeMap<[u8; 32], u64>,
-) -> Vec<ergo_api::wallet::native::dto::WalletAssetDto> {
+) -> Vec<ergo_wallet_protocol::native::dto::WalletAssetDto> {
     tokens
         .iter()
-        .map(|(id, amt)| ergo_api::wallet::native::dto::WalletAssetDto {
-            token_id: hex::encode(id),
-            amount: amt.to_string(),
-        })
+        .map(
+            |(id, amt)| ergo_wallet_protocol::native::dto::WalletAssetDto {
+                token_id: hex::encode(id),
+                amount: amt.to_string(),
+            },
+        )
         .collect()
 }
 
@@ -622,10 +625,10 @@ pub(crate) fn assets_map_to_dto(
 pub(crate) fn reemission_burn_dto(
     to_burn: u64,
     reemission: Option<&ergo_validation::ReemissionRuleInputs>,
-) -> Option<ergo_api::wallet::native::dto::ReemissionBurn> {
+) -> Option<ergo_wallet_protocol::native::dto::ReemissionBurn> {
     (to_burn > 0).then(|| {
         let rules = reemission.expect("a re-emission burn implies the rules are present");
-        ergo_api::wallet::native::dto::ReemissionBurn {
+        ergo_wallet_protocol::native::dto::ReemissionBurn {
             token_id: hex::encode(rules.reemission_token_id),
             tokens_burned: to_burn.to_string(),
             nano_erg_routed: to_burn.to_string(),
@@ -738,13 +741,13 @@ pub(crate) fn exact_set_plan(
 /// and the exact EIP-27 burn. `auto` uses the SHARED `select_with_reemission`;
 /// `boxIds` uses the exact set (so it agrees with `transactions/build`).
 pub(crate) fn select_boxes_impl(
-    req: &ergo_api::wallet::native::dto::BoxSelectRequest,
+    req: &ergo_wallet_protocol::native::dto::BoxSelectRequest,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
-    use ergo_api::wallet::native::dto as ndto;
+) -> Result<ergo_wallet_protocol::native::dto::BoxSelectResponse, WalletAdminError> {
+    use ergo_wallet_protocol::native::dto as ndto;
 
     let target_erg = parse_u64_dec(&req.target.nano_erg, "target.nanoErg")?;
     let target_tokens = parse_native_assets(&req.target.assets)?;
@@ -897,13 +900,13 @@ pub(crate) fn select_boxes_impl(
 /// sources ship `unsupported_intent(422)` until wired (a later 422→200 for the
 /// same well-formed request).
 pub(crate) async fn build_transaction_impl(
-    intent: &ergo_api::wallet::native::dto::TxIntent,
+    intent: &ergo_wallet_protocol::native::dto::TxIntent,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
-    use ergo_api::wallet::native::dto as ndto;
+) -> Result<ergo_wallet_protocol::native::dto::BuildTxResponse, WalletAdminError> {
+    use ergo_wallet_protocol::native::dto as ndto;
 
     if intent.outputs.is_empty() {
         return Err(WalletAdminError::BadRequest(
@@ -925,7 +928,7 @@ pub(crate) async fn build_transaction_impl(
                 let assets = assets
                     .iter()
                     .map(|a| {
-                        Ok(ergo_api::wallet::sending::AssetDto {
+                        Ok(ergo_wallet_protocol::scala::sending::AssetDto {
                             token_id: a.token_id.clone(),
                             amount: parse_u64_dec(&a.amount, "output asset amount")?,
                         })
@@ -1050,11 +1053,11 @@ mod tests {
         tip: u32,
     }
 
-    impl ChainStateAccessor for BurnTestChain {
-        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    impl WalletChainAccess for BurnTestChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(self.tip)
         }
-        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        fn tip_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(self.tip)
         }
         fn is_pruned(&self) -> bool {
@@ -1064,8 +1067,8 @@ mod tests {
             &self,
             _h: u32,
         ) -> Result<
-            Option<ergo_state::wallet::scan::RescanBlock>,
-            ergo_state::wallet::scan::RescanReadError,
+            Option<ergo_wallet_service::wallet::scan::RescanBlock>,
+            ergo_wallet_service::wallet::scan::RescanReadError,
         > {
             Ok(None)
         }
@@ -1075,8 +1078,10 @@ mod tests {
         fn lookup_utxo(
             &self,
             box_id: &[u8; 32],
-        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
-        {
+        ) -> Result<
+            Option<ergo_ser::ergo_box::ErgoBox>,
+            ergo_wallet_service::engine::ChainAccessError,
+        > {
             Ok((box_id == &self.reward_id).then(|| self.reward_box.clone()))
         }
     }
@@ -1203,11 +1208,11 @@ mod tests {
     }
 
     struct NoBlocksChain;
-    impl ChainStateAccessor for NoBlocksChain {
-        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    impl WalletChainAccess for NoBlocksChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(0)
         }
-        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        fn tip_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(0)
         }
         fn is_pruned(&self) -> bool {
@@ -1217,8 +1222,8 @@ mod tests {
             &self,
             _h: u32,
         ) -> Result<
-            Option<ergo_state::wallet::scan::RescanBlock>,
-            ergo_state::wallet::scan::RescanReadError,
+            Option<ergo_wallet_service::wallet::scan::RescanBlock>,
+            ergo_wallet_service::wallet::scan::RescanReadError,
         > {
             Ok(None)
         }
@@ -1235,12 +1240,12 @@ mod tests {
         outcome: LookupOutcome,
     }
 
-    impl ChainStateAccessor for LookupOutcomeChain {
-        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    impl WalletChainAccess for LookupOutcomeChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(self.tip)
         }
 
-        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+        fn tip_height(&self) -> Result<u32, ergo_wallet_service::engine::ChainAccessError> {
             Ok(self.tip)
         }
 
@@ -1252,8 +1257,8 @@ mod tests {
             &self,
             _h: u32,
         ) -> Result<
-            Option<ergo_state::wallet::scan::RescanBlock>,
-            ergo_state::wallet::scan::RescanReadError,
+            Option<ergo_wallet_service::wallet::scan::RescanBlock>,
+            ergo_wallet_service::wallet::scan::RescanReadError,
         > {
             Ok(None)
         }
@@ -1261,15 +1266,15 @@ mod tests {
         fn lookup_utxo(
             &self,
             _box_id: &[u8; 32],
-        ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, crate::node::wallet_bridge::ChainStateError>
-        {
+        ) -> Result<
+            Option<ergo_ser::ergo_box::ErgoBox>,
+            ergo_wallet_service::engine::ChainAccessError,
+        > {
             match self.outcome {
                 LookupOutcome::Absent => Ok(None),
                 LookupOutcome::ReadFailure => {
-                    Err(crate::node::wallet_bridge::ChainStateError::State(
-                        ergo_state::store::StateError::Serialization(
-                            "injected UTXO read failure".to_string(),
-                        ),
+                    Err(ergo_wallet_service::engine::ChainAccessError::State(
+                        "injected UTXO read failure".to_string(),
                     ))
                 }
             }
@@ -1335,7 +1340,7 @@ mod tests {
     /// which would instead double-count the same box's value.
     #[test]
     fn select_boxes_rejects_duplicate_box_id_in_boxids_source() {
-        use ergo_api::wallet::native::dto as ndto;
+        use ergo_wallet_protocol::native::dto as ndto;
 
         let ws = ergo_wallet_service::state::WalletState::empty(false);
         let state = RwLock::new(ws);

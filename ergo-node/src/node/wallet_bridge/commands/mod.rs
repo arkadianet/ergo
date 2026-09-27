@@ -26,10 +26,11 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_service::engine::{
+    MempoolOverlay, RescanCoordinator, TxSubmitter, WalletChainAccess, WalletEngineConfig,
+};
 use ergo_wallet_service::runtime::WalletService;
 use ergo_wallet_service::state::WalletState;
-
-use super::{ChainStateAccessor, TxSubmitter, WriterConfig};
 
 // Re-export the `support::*` business-logic helpers the per-command
 // handlers call, so each handler file gets a single one-level
@@ -62,13 +63,15 @@ pub(super) mod send;
 pub(super) struct WriterContext<'a> {
     pub storage: &'a Arc<RwLock<SecretStorage>>,
     pub state: &'a Arc<RwLock<WalletState>>,
-    pub store: &'a Arc<dyn ergo_state::wallet::WalletStore>,
-    pub chain: &'a Arc<dyn ChainStateAccessor>,
-    pub cfg: &'a WriterConfig,
+    pub store: &'a Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    pub chain: &'a Arc<dyn WalletChainAccess>,
+    pub cfg: &'a WalletEngineConfig,
     pub submit_handle: &'a Arc<dyn TxSubmitter>,
     /// Snapshot-backed mempool view for the unconfirmed-balance overlay
     /// (`balances/withUnconfirmed`). Read-only; cheap per-call snapshot reads.
-    pub mempool: &'a Arc<dyn ergo_api::MempoolView>,
+    pub mempool: &'a Arc<dyn MempoolOverlay>,
     pub service: Option<&'a WalletService>,
+    /// The wallet's rescan coordinator (fence flags + transition lock).
+    pub rescan: &'a Arc<RescanCoordinator>,
     pub wallet_session_id: u64,
 }

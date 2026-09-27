@@ -5,9 +5,8 @@ use parking_lot::RwLock;
 
 use super::hints_codec::tx_hints_bag_to_dto;
 use super::sign_submit::decode_external_secret;
-use crate::node::wallet_bridge::{
-    map_chain_error, ChainSnapshot, ChainStateAccessor, WalletAdminError,
-};
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::engine::{map_chain_error, SigningView, WalletChainAccess};
 
 /// Collect all `SigmaBoolean` propositions the registry can prove.
 ///
@@ -19,7 +18,7 @@ use crate::node::wallet_bridge::{
 /// which leaves to generate commitments for.
 fn collect_generate_for(
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<Vec<ergo_ser::sigma_value::SigmaBoolean>, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
@@ -124,7 +123,7 @@ pub(crate) fn hex_pk_to_sigma_boolean(
 }
 
 fn lookup_snapshot_utxo(
-    snapshot: &ChainSnapshot,
+    snapshot: &dyn SigningView,
     box_id: &[u8; 32],
     label: &str,
 ) -> Result<ergo_ser::ergo_box::ErgoBox, WalletAdminError> {
@@ -139,7 +138,7 @@ fn lookup_snapshot_utxo(
 pub(crate) fn resolve_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
-    snapshot: &ChainSnapshot,
+    snapshot: &dyn SigningView,
     label: &str,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
@@ -173,7 +172,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
 pub(crate) fn resolve_data_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
-    snapshot: &ChainSnapshot,
+    snapshot: &dyn SigningView,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -206,7 +205,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
 pub(crate) fn resolve_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
-    snapshot: &ChainSnapshot,
+    snapshot: &dyn SigningView,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -237,7 +236,7 @@ pub(crate) fn resolve_inputs_for_signed(
 pub(crate) fn resolve_data_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
-    snapshot: &ChainSnapshot,
+    snapshot: &dyn SigningView,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -272,12 +271,12 @@ pub(crate) fn resolve_data_inputs_for_signed(
 /// secrets for (HD-derived + external), builds a signing context, and
 /// calls `generate_commitments_for_tx`.
 pub(crate) async fn generate_commitments_impl(
-    request: &ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
+    request: &ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
-) -> Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
-    use ergo_api::wallet::multi_sig::GenerateCommitmentsResponse;
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
+) -> Result<ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
+    use ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse;
 
     let unsigned_tx_bytes = hex::decode(&request.unsigned_tx).map_err(|_| {
         WalletAdminError::BadRequest("generateCommitments: unsigned_tx bad hex".into())
@@ -301,11 +300,18 @@ pub(crate) async fn generate_commitments_impl(
     let generate_for = collect_generate_for(&storage_guard, store, &externals)?;
     drop(storage_guard);
 
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
-    let boxes_to_spend =
-        resolve_inputs_for_unsigned(&unsigned_tx, request.inputs.as_deref(), &snapshot, "input")?;
-    let data_boxes =
-        resolve_data_inputs_for_unsigned(&unsigned_tx, request.data_inputs.as_deref(), &snapshot)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    let boxes_to_spend = resolve_inputs_for_unsigned(
+        &unsigned_tx,
+        request.inputs.as_deref(),
+        snapshot.as_ref(),
+        "input",
+    )?;
+    let data_boxes = resolve_data_inputs_for_unsigned(
+        &unsigned_tx,
+        request.data_inputs.as_deref(),
+        snapshot.as_ref(),
+    )?;
 
     let state_ctx = snapshot.state_context();
 
@@ -329,11 +335,11 @@ pub(crate) async fn generate_commitments_impl(
 /// Decodes the signed tx, parses the `real` / `simulated` pubkey lists,
 /// and calls `bag_for_transaction`.
 pub(crate) async fn extract_hints_impl(
-    request: &ergo_api::wallet::multi_sig::HintExtractionRequest,
+    request: &ergo_wallet_protocol::scala::multi_sig::HintExtractionRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    chain: &dyn ChainStateAccessor,
-) -> Result<ergo_api::wallet::multi_sig::HintExtractionResponse, WalletAdminError> {
-    use ergo_api::wallet::multi_sig::HintExtractionResponse;
+    chain: &dyn WalletChainAccess,
+) -> Result<ergo_wallet_protocol::scala::multi_sig::HintExtractionResponse, WalletAdminError> {
+    use ergo_wallet_protocol::scala::multi_sig::HintExtractionResponse;
 
     let tx_bytes = hex::decode(&request.tx)
         .map_err(|_| WalletAdminError::BadRequest("extractHints: tx bad hex".into()))?;
@@ -355,10 +361,11 @@ pub(crate) async fn extract_hints_impl(
         .map(|s| hex_pk_to_sigma_boolean(s))
         .collect::<Result<_, _>>()?;
 
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
-    let boxes_to_spend = resolve_inputs_for_signed(&tx, request.inputs.as_deref(), &snapshot)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
+    let boxes_to_spend =
+        resolve_inputs_for_signed(&tx, request.inputs.as_deref(), snapshot.as_ref())?;
     let data_boxes =
-        resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), &snapshot)?;
+        resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), snapshot.as_ref())?;
 
     let state_ctx = snapshot.state_context();
 

@@ -3,14 +3,15 @@
 
 use parking_lot::RwLock;
 
-use ergo_api::wallet::sending::{BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto};
+use ergo_wallet_protocol::scala::sending::{
+    BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto,
+};
 
 use super::hints_codec::tx_hints_bag_from_dto;
 use super::sign_submit::{decode_external_secret, serialize_signed_tx, sign_unsigned_tx};
 use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE};
-use crate::node::wallet_bridge::{
-    map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
-};
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::engine::{map_chain_error, SigningView, TxSubmitter, WalletChainAccess};
 
 /// `PaymentSend` + `TransactionSend` shared path: build, sign, self-verify, submit.
 ///
@@ -27,8 +28,8 @@ pub(crate) async fn payment_send_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<String, WalletAdminError> {
@@ -63,20 +64,20 @@ pub(crate) async fn payment_send_impl(
     // `payment_send_impl` is spawned on a multi-thread runtime where any
     // value live across an .await must be `Send`. An explicit `drop()`
     // does not shrink the future state machine's scope; a block does.
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
             store,
-            &snapshot,
+            snapshot.as_ref(),
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
         )?
     };
     chain
-        .ensure_snapshot_current(&snapshot)
+        .ensure_view_current(snapshot.as_ref())
         .map_err(map_chain_error)?;
     drop(snapshot);
 
@@ -108,8 +109,8 @@ pub(crate) async fn transaction_generate_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
     if storage.read().unlocked().is_none() {
@@ -137,12 +138,12 @@ pub(crate) async fn transaction_generate_impl(
     };
 
     let storage = storage.read();
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
     let signed_tx = sign_unsigned_tx(
         &unsigned_tx,
         &storage,
         store,
-        &snapshot,
+        snapshot.as_ref(),
         &[],
         &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
     )?;
@@ -161,8 +162,8 @@ pub(crate) async fn transaction_generate_unsigned_impl(
     fee_override: Option<u64>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<Vec<u8>, WalletAdminError> {
     // Require the wallet to be unlocked so change-address is available.
@@ -188,14 +189,14 @@ pub(crate) async fn transaction_generate_unsigned_impl(
 /// Works with external secrets even when the wallet is locked.
 pub(crate) async fn transaction_sign_impl(
     unsigned_tx_hex: &str,
-    external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
-    hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
+    external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
+    hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
 ) -> Result<Vec<u8>, WalletAdminError> {
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
     transaction_sign_impl_with_snapshot(
         unsigned_tx_hex,
         external_secret_dtos,
@@ -203,18 +204,18 @@ pub(crate) async fn transaction_sign_impl(
         storage,
         state,
         store,
-        &snapshot,
+        snapshot.as_ref(),
     )
 }
 
 pub(crate) fn transaction_sign_impl_with_snapshot(
     unsigned_tx_hex: &str,
-    external_secret_dtos: Option<&[ergo_api::wallet::sending::ExternalSecretDto]>,
-    hints: Option<&ergo_api::wallet::sending::TxHintsBagDto>,
+    external_secret_dtos: Option<&[ergo_wallet_protocol::scala::sending::ExternalSecretDto]>,
+    hints: Option<&ergo_wallet_protocol::scala::sending::TxHintsBagDto>,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    snapshot: &ChainSnapshot,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    snapshot: &dyn SigningView,
 ) -> Result<Vec<u8>, WalletAdminError> {
     let unsigned_tx_bytes = hex::decode(unsigned_tx_hex)
         .map_err(|_| WalletAdminError::BadRequest("unsigned_tx: bad hex".into()))?;
@@ -255,8 +256,8 @@ pub(crate) fn boxes_collect_impl(
     request: &BoxesCollectRequest,
     _storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     _state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
 ) -> Result<BoxesCollectResponse, WalletAdminError> {
     let _ = chain; // used for UTXO lookup in future phases
     let read = store

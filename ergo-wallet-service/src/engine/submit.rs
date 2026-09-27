@@ -38,3 +38,24 @@ pub fn map_submit_error(e: TxSubmitError) -> WalletAdminError {
         None => format!("submit rejected: {}", e.reason),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `duplicate` submit reason is handled as idempotent-accept upstream; any
+    /// other submit reason maps to a client `bad_request` carrying the typed reason.
+    #[test]
+    fn map_submit_error_carries_reason() {
+        let e = map_submit_error(TxSubmitError {
+            reason: "too_big".into(),
+            detail: Some("size 1234 > max".into()),
+        });
+        match e {
+            WalletAdminError::BadRequest(m) => {
+                assert!(m.contains("too_big") && m.contains("size 1234"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+}

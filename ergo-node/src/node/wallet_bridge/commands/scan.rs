@@ -16,20 +16,21 @@
 
 use tokio::sync::oneshot;
 
-use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
-use ergo_api::wallet::WalletAdminError;
-use ergo_state::wallet::store::WalletStoreError;
-use ergo_state::wallet::types::ScanBoxStatus;
+use ergo_wallet_protocol::scala::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::engine::{MempoolOverlay, RescanCoordinator};
+use ergo_wallet_service::wallet::store::WalletStoreError;
+use ergo_wallet_service::wallet::types::ScanBoxStatus;
 use thiserror::Error;
 
-#[cfg(test)]
-use ergo_state::wallet::tables::*;
-#[cfg(test)]
-use ergo_state::wallet::types::{ScanTrackedBox, ScanTxRecord};
 use ergo_wallet_service::scan::{
     Scan, ScanRegister, ScanRegistry, ScanRequest, ScanningPredicate, WalletInteraction,
     MAX_SCAN_NAME_LENGTH, MINING_SCAN_ID, PAYMENTS_SCAN_ID,
 };
+#[cfg(test)]
+use ergo_wallet_service::wallet::tables::*;
+#[cfg(test)]
+use ergo_wallet_service::wallet::types::{ScanTrackedBox, ScanTxRecord};
 #[cfg(test)]
 use redb::ReadableTable;
 
@@ -45,10 +46,9 @@ fn internal(e: impl std::fmt::Display) -> WalletAdminError {
 /// committed mid-rebuild (a new scan never backfilled, or a deregister/manual
 /// row resurrected by later replay) would leave the registry and scan tables
 /// out of sync. Reject for the rebuild window — the caller retries once it
-/// completes. (`Ordering::SeqCst` matches the rebuild's flag set in
-/// `admin.rs`.)
-fn reject_during_scan_rebuild() -> Result<(), WalletAdminError> {
-    if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
+/// completes.
+fn reject_during_scan_rebuild(rescan: &RescanCoordinator) -> Result<(), WalletAdminError> {
+    if rescan.scan_rebuild_in_progress() {
         return Err(WalletAdminError::BadRequest(
             "scan rebuild in progress (full /wallet/rescan); retry after it completes".to_string(),
         ));
@@ -78,7 +78,7 @@ pub(crate) fn empty_rescan_matcher() -> RescanScanMatcher {
     RescanScanMatcher { registry: None }
 }
 
-impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
+impl ergo_wallet_service::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
     fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
         let Some(registry) = &self.registry else {
             return Ok(vec![Vec::new(); boxes.len()]);
@@ -100,14 +100,14 @@ impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
 /// can clear only a genuinely corrupt registry.
 #[cfg(test)]
 pub(crate) fn build_rescan_matcher(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
     let registry = load_registry(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
 }
 
 pub(crate) fn build_rescan_matcher_from_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<Option<RescanScanMatcher>, ScanRegistryLoadError> {
     let registry = load_registry_from_store_classified(store)?;
     Ok(build_rescan_matcher_from_registry(registry))
@@ -146,13 +146,13 @@ fn dto_from_scan(scan: &Scan) -> Result<ScanDto, WalletAdminError> {
 /// `pub(crate)` so the block-apply hook (`WalletStateHook`) can load the
 /// registry to match each block's boxes.
 pub(crate) fn load_registry(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
     load_registry_from_store(store)
 }
 
 pub(crate) fn load_registry_from_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<ScanRegistry, WalletAdminError> {
     load_registry_from_store_classified(store)
         .map_err(|error| WalletAdminError::Internal(error.to_string()))
@@ -166,7 +166,7 @@ fn classify_registry_store_error(error: WalletStoreError) -> ScanRegistryLoadErr
 }
 
 fn load_registry_from_store_classified(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<ScanRegistry, ScanRegistryLoadError> {
     let read = store
         .read()
@@ -213,7 +213,7 @@ pub(crate) async fn register(
     request: ScanRequestDto,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -221,7 +221,7 @@ pub(crate) async fn register(
 }
 
 fn register_impl_with_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     request: ScanRequestDto,
 ) -> Result<u16, WalletAdminError> {
     let request = request_from_dto(request)?;
@@ -237,7 +237,7 @@ fn register_impl(db: &redb::Database, request: ScanRequestDto) -> Result<u16, Wa
 /// `/scan/register` (after DTO conversion) and `/scan/p2sRule` (which builds
 /// the request directly from an address).
 fn register_request(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     request: ScanRequest,
 ) -> Result<u16, WalletAdminError> {
     // Scala `ScanRequest.toScan` rejects an over-long scan name (> 255 UTF-8
@@ -278,7 +278,7 @@ fn register_request(
 /// is rejected (Scala registers the synthetic P2SH wrapper script — this
 /// build's address path refuses P2SH outright, same posture as the indexer).
 fn p2s_rule_impl_with_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     network: ergo_ser::address::NetworkPrefix,
     p2s: &str,
 ) -> Result<u16, WalletAdminError> {
@@ -325,7 +325,7 @@ pub(crate) async fn deregister(
     scan_id: u16,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -333,7 +333,7 @@ pub(crate) async fn deregister(
 }
 
 fn deregister_impl_with_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     scan_id: u16,
 ) -> Result<(), WalletAdminError> {
     let mut registry = load_registry(store)?;
@@ -370,7 +370,7 @@ pub(crate) async fn list(
 }
 
 fn list_impl(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
 ) -> Result<Vec<ScanDto>, WalletAdminError> {
     load_registry(store)?
         .list()
@@ -412,7 +412,7 @@ fn require_user_scan_id(scan_id: u16) -> Result<(), WalletAdminError> {
 /// "un-spends" for the scans that still track it, an upstream accident we
 /// don't replicate. Documented in the openapi header's scan note.
 fn stop_tracking_impl(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     scan_id: u16,
     box_id_hex: &str,
 ) -> Result<(), WalletAdminError> {
@@ -461,7 +461,7 @@ fn bad_request(e: impl std::fmt::Display) -> WalletAdminError {
 /// forever (ids never reused), and reserved ids (<= 10) address the wallet's
 /// own tables in this build, not the scan tables.
 fn add_box_impl_with_store(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     scan_ids: &[u16],
     box_json: &serde_json::Value,
 ) -> Result<String, WalletAdminError> {
@@ -539,7 +539,7 @@ pub(crate) async fn stop_tracking(
     box_id: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -552,7 +552,7 @@ pub(crate) async fn add_box(
     box_json: serde_json::Value,
     reply: oneshot::Sender<Result<String, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -568,7 +568,7 @@ pub(crate) async fn p2s_rule(
     p2s: String,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -594,10 +594,10 @@ fn p2s_rule_impl(
 /// Unregistered / deregistered user scans read as empty (hide-on-read, parity
 /// with the box endpoints).
 pub(crate) fn scan_transactions_impl(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     scan_id: u16,
-    page: ergo_api::wallet::types::Page,
-) -> Result<ergo_api::wallet::types::WalletTransactionsPage, WalletAdminError> {
+    page: ergo_wallet_protocol::scala::types::Page,
+) -> Result<ergo_wallet_protocol::scala::types::WalletTransactionsPage, WalletAdminError> {
     if scan_id == MINING_SCAN_ID || scan_id == PAYMENTS_SCAN_ID {
         return Ok(Default::default());
     }
@@ -622,7 +622,7 @@ pub(crate) fn scan_transactions_impl(
         let in_window = match_count >= offset && items.len() < limit;
         match_count += 1;
         if in_window {
-            items.push(ergo_api::wallet::types::WalletTransactionEntry {
+            items.push(ergo_wallet_protocol::scala::types::WalletTransactionEntry {
                 tx_id: hex::encode(rec.tx_id),
                 block_height: rec.block_height,
                 block_id: hex::encode(rec.block_id),
@@ -632,7 +632,7 @@ pub(crate) fn scan_transactions_impl(
             });
         }
     }
-    Ok(ergo_api::wallet::types::WalletTransactionsPage {
+    Ok(ergo_wallet_protocol::scala::types::WalletTransactionsPage {
         total: match_count as u32,
         items,
     })
@@ -687,12 +687,12 @@ pub(crate) async fn spent_boxes(
 /// `minConfirmations=0` would then hide). Tests pass `Some(height)` to drive
 /// confirmations deterministically without seeding chain-state meta.
 fn read_scan_boxes(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     tip_override: Option<u32>,
     scan_id: u16,
     want_spent: bool,
     filter: &ScanBoxFilter,
-    mempool: Option<&dyn ergo_api::MempoolView>,
+    mempool: Option<&dyn MempoolOverlay>,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
     // Reserved scan ids 9 (Mining) / 10 (Payments) surface the wallet's OWN
     // boxes, which live in WALLET_BOXES — the scan tables only hold user scans.
@@ -846,12 +846,12 @@ fn read_scan_boxes(
 /// `WalletBox.value` and `bytes` from the companion table (empty for boxes that
 /// predate it, until a `/wallet/rescan` backfills them).
 fn read_reserved_scan_boxes(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     tip_override: Option<u32>,
     mining: bool,
     want_spent: bool,
     filter: &ScanBoxFilter,
-    mempool: Option<&dyn ergo_api::MempoolView>,
+    mempool: Option<&dyn MempoolOverlay>,
 ) -> Result<Vec<ScanBoxEntry>, WalletAdminError> {
     let read = store.read().map_err(internal)?;
     let (current_height, boxes) = match tip_override {
@@ -965,8 +965,8 @@ fn read_reserved_scan_boxes(
 mod tests {
     use super::*;
     use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
-    use ergo_state::wallet::tables::wallet_tx_key;
-    use ergo_state::wallet::RedbWalletStore;
+    use ergo_wallet_service::wallet::tables::wallet_tx_key;
+    use ergo_wallet_service::wallet::RedbWalletStore;
     use std::sync::Arc;
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
@@ -1224,7 +1224,7 @@ mod tests {
             std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
         spent: std::collections::HashSet<ergo_primitives::digest::Digest32>,
     }
-    impl ergo_api::MempoolView for FakePool {
+    impl ergo_wallet_service::engine::MempoolOverlay for FakePool {
         fn is_spent_by_pool(&self, box_id: &ergo_primitives::digest::Digest32) -> bool {
             self.spent.contains(box_id)
         }
@@ -2053,7 +2053,7 @@ mod tests {
 
     #[test]
     fn rescan_matcher_routes_serialized_boxes_through_the_registry() {
-        use ergo_state::wallet::scan::ScanRescanMatcher;
+        use ergo_wallet_service::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap(); // scan 11: containsAsset [0x11;32]
 
@@ -2074,7 +2074,7 @@ mod tests {
 
     #[test]
     fn rescan_matcher_errors_on_unparseable_box() {
-        use ergo_state::wallet::scan::ScanRescanMatcher;
+        use ergo_wallet_service::wallet::scan::ScanRescanMatcher;
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap();
         let matcher = build_rescan_matcher(&db).unwrap().unwrap();
@@ -2194,14 +2194,12 @@ mod tests {
 
     #[test]
     fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
-        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
         // While a full rescan rebuilds the scan tables, the live block-apply
         // scan path must no-op so it doesn't race the rebuild's block-by-block
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
         // `registered_scan_count` (the load-bearing gate that skips
         // `apply_block_to_scans`) and `match_boxes` both honor the flag.
-        use ergo_state::wallet::WalletApplyHook;
-        use std::sync::atomic::Ordering;
+        use ergo_wallet_service::wallet::WalletApplyHook;
 
         let (_d, db) = temp_db();
         register_impl(&db, req("a", 0x11)).unwrap(); // 1 registered scan, token 0x11
@@ -2218,13 +2216,15 @@ mod tests {
         };
 
         let db = std::sync::Arc::new(db);
-        let store = std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db));
-        let hook = crate::node::wallet_bridge::WalletStateHook {
-            wallet: std::sync::Arc::new(parking_lot::RwLock::new(
+        let store = std::sync::Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(db));
+        let coordinator = std::sync::Arc::new(RescanCoordinator::new());
+        let hook = crate::node::wallet_bridge::WalletStateHook::new(
+            std::sync::Arc::new(parking_lot::RwLock::new(
                 ergo_wallet_service::state::WalletState::empty(false),
             )),
             store,
-        };
+            coordinator.clone(),
+        );
 
         // Baseline (flag clear): the scan is live and the box matches.
         assert_eq!(hook.registered_scan_count(), 1);
@@ -2235,10 +2235,10 @@ mod tests {
 
         // Flag set: both hook methods quiesce. Capture under the flag, then
         // reset BEFORE asserting so a failure can't leak the flag to siblings.
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
+        coordinator.set_scan_rebuild_for_test(true);
         let gated_count = hook.registered_scan_count();
         let gated_match = hook.match_boxes(std::slice::from_ref(&b));
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        coordinator.set_scan_rebuild_for_test(false);
 
         assert_eq!(gated_count, 0, "live scan count gated to 0 during rebuild");
         assert_eq!(
@@ -2253,17 +2253,16 @@ mod tests {
 
     #[test]
     fn scan_mutation_guard_rejects_during_rebuild() {
-        let _guard = crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD.blocking_lock();
-        use std::sync::atomic::Ordering;
+        let coordinator = RescanCoordinator::new();
         // Guard passes when no rebuild is in flight...
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
-        assert!(reject_during_scan_rebuild().is_ok());
+        coordinator.set_scan_rebuild_for_test(false);
+        assert!(reject_during_scan_rebuild(&coordinator).is_ok());
         // ...and rejects scan mutations while a rebuild snapshot is live.
         // Capture under the flag, then reset BEFORE asserting so a failure
         // can't leak the flag to sibling tests (same discipline as above).
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
-        let gated = reject_during_scan_rebuild();
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        coordinator.set_scan_rebuild_for_test(true);
+        let gated = reject_during_scan_rebuild(&coordinator);
+        coordinator.set_scan_rebuild_for_test(false);
         assert!(
             matches!(gated, Err(WalletAdminError::BadRequest(_))),
             "scan mutation must be rejected during rebuild, got {gated:?}"
@@ -2300,8 +2299,8 @@ mod tests {
         w.commit().unwrap();
     }
 
-    fn page(offset: u32, limit: u32) -> ergo_api::wallet::types::Page {
-        ergo_api::wallet::types::Page { offset, limit }
+    fn page(offset: u32, limit: u32) -> ergo_wallet_protocol::scala::types::Page {
+        ergo_wallet_protocol::scala::types::Page { offset, limit }
     }
 
     #[test]
@@ -2449,8 +2448,8 @@ mod tests {
 #[cfg(test)]
 mod reserved_scan_read_tests {
     use super::*;
-    use ergo_state::wallet::tables::{WALLET_BOXES, WALLET_BOX_BYTES};
-    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+    use ergo_wallet_service::wallet::tables::{WALLET_BOXES, WALLET_BOX_BYTES};
+    use ergo_wallet_service::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
     fn temp_db() -> (tempfile::TempDir, redb::Database) {
         let dir = tempfile::tempdir().unwrap();
@@ -2558,7 +2557,7 @@ mod reserved_scan_read_tests {
                 .is_empty()
         );
 
-        let page = ergo_api::wallet::types::Page {
+        let page = ergo_wallet_protocol::scala::types::Page {
             offset: 0,
             limit: 50,
         };
@@ -2585,7 +2584,7 @@ mod reserved_scan_read_tests {
         outputs:
             std::sync::Arc<std::collections::HashMap<ergo_primitives::digest::Digest32, ErgoBox>>,
     }
-    impl ergo_api::MempoolView for FakePool {
+    impl ergo_wallet_service::engine::MempoolOverlay for FakePool {
         fn is_spent_by_pool(&self, _box_id: &ergo_primitives::digest::Digest32) -> bool {
             false
         }
@@ -2628,8 +2627,8 @@ mod reserved_scan_read_tests {
     }
 
     fn track_pubkey(db: &redb::Database, idx: u64, pk: [u8; 33]) {
-        use ergo_state::wallet::tables::{tracked_pubkey_key, WALLET_TRACKED_PUBKEYS};
-        use ergo_state::wallet::types::TrackedPubkeyMeta;
+        use ergo_wallet_service::wallet::tables::{tracked_pubkey_key, WALLET_TRACKED_PUBKEYS};
+        use ergo_wallet_service::wallet::types::TrackedPubkeyMeta;
         let meta = TrackedPubkeyMeta {
             derivation_path: Vec::new(),
             derivation_path_label: String::new(),

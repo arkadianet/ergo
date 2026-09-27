@@ -19,7 +19,7 @@ use ergo_wallet_service::chain::{
     UtxoLookupRequest, GENESIS_CURSOR_ID,
 };
 
-use super::ChainStateAccessor;
+use ergo_wallet_service::engine::{ChainAccessError, WalletChainAccess};
 
 const MAX_BLOCKS_PER_RESPONSE: u32 = 1_024;
 const MAX_ANCESTOR_WALK: u32 = 4_096;
@@ -64,7 +64,7 @@ where
 
 pub struct InProcessChainClient {
     reader: ChainStoreReader,
-    state: Option<Arc<dyn ChainStateAccessor>>,
+    state: Option<Arc<dyn WalletChainAccess>>,
     submitter: Option<Arc<dyn ergo_api::NodeSubmit>>,
     reemission_inputs: Vec<ReemissionInput>,
     #[cfg(test)]
@@ -130,7 +130,7 @@ impl InProcessChainClient {
         Self::new(reader, submitter).with_state_accessor(state)
     }
 
-    pub fn with_state_accessor(mut self, state: Arc<dyn ChainStateAccessor>) -> Self {
+    pub fn with_state_accessor(mut self, state: Arc<dyn WalletChainAccess>) -> Self {
         self.state = Some(state);
         self
     }
@@ -174,9 +174,9 @@ impl InProcessChainClient {
         ChainClientError::Failure(format!("{context}: {error}"))
     }
 
-    fn chain_state_error(error: super::ChainStateError) -> ChainClientError {
+    fn chain_state_error(error: ChainAccessError) -> ChainClientError {
         match error {
-            super::ChainStateError::StaleTip {
+            ChainAccessError::StaleTip {
                 expected_height,
                 expected_id,
                 actual_height,
@@ -195,7 +195,7 @@ impl InProcessChainClient {
                     _ => ChainClientError::Failure("invalid stale-tip identity".to_string()),
                 }
             }
-            super::ChainStateError::NoCommittedState | super::ChainStateError::Unsupported => {
+            ChainAccessError::NoCommittedState | ChainAccessError::Unsupported => {
                 ChainClientError::Unsupported
             }
             other => Self::state_error("chain snapshot", other),
@@ -972,7 +972,7 @@ impl ChainClient for InProcessChainClient {
 
     fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
         let state = self.state.as_ref().ok_or(ChainClientError::Unsupported)?;
-        let snapshot = state.chain_snapshot().map_err(Self::chain_state_error)?;
+        let snapshot = state.signing_view().map_err(Self::chain_state_error)?;
         let tip = snapshot.tip();
         let headers = snapshot
             .headers()

@@ -1,61 +1,27 @@
 //! Production wallet boot orchestrator. Single unlock+hydrate+persist
-//! path shared by the production boot and integration tests.
+//! path shared by the production boot and integration tests, plus the
+//! node-runtime wallet session lifecycle (session ids, tracked wallet tasks,
+//! and routing a node shutdown to the session's rescan coordinator).
+//!
+//! The rescan fence flags themselves are per-wallet state owned by
+//! [`RescanCoordinator`]; this module only remembers which coordinator
+//! belongs to which session so shutdown can cancel that wallet's rescan.
 
-use ergo_state::wallet::tables::*;
-use ergo_state::wallet::types::TrackedPubkeyMeta;
+use std::sync::{Arc, Mutex};
+
 use ergo_wallet::error::WalletError;
 use ergo_wallet::storage::{LockState, SecretStorage};
+use ergo_wallet_service::engine::RescanCoordinator;
 use ergo_wallet_service::state::WalletState;
-use redb::WriteTransaction;
-use std::sync::{Mutex, MutexGuard};
+use ergo_wallet_service::wallet::types::TrackedPubkeyMeta;
 use tokio::task::{JoinError, JoinHandle};
 
-/// Rescan-in-progress flag. Set by `NodeWalletAdmin`'s Rescan dispatch;
-/// read by the chain-apply hook (via `WalletApplyHook` impl) and by
-/// rollback (via `ProdRescanGuard`). Cleared on normal completion; retained
-/// when rescan invalidation or outcome persistence fails closed.
-pub static RESCAN_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-/// Cancellation request set by rollback while an actual rescan task is active.
-/// The task observes this independently of the process-fence flag.
-pub static RESCAN_CANCEL_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-/// True only while a destructive rescan task is running. A boot or fail-closed
-/// fence sets `RESCAN_IN_PROGRESS` without setting this flag.
-pub static RESCAN_TASK_ACTIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Fail-closed latch for a rescan whose invalidation or outcome could not be
-/// persisted. It is distinct from normal full-rescan activity.
-pub static RESCAN_FAIL_CLOSED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Start height of the in-flight rescan, set alongside [`RESCAN_IN_PROGRESS`].
-/// Read by the native `/api/v1/wallet/status` handler to surface
-/// `rescan: {type:"running", fromHeight}`. Only meaningful while
-/// `RESCAN_IN_PROGRESS` is `true`.
-pub static RESCAN_FROM_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Scan-rebuild-in-progress flag. Set by the Rescan dispatch for a full
-/// rebuild (`fromHeight == 0`) that rebuilds the registered `/scan/*` tables;
-/// it is also forced on when a rescan fails closed. The chain-apply hook's scan
-/// path reads it (`registered_scan_count` / `match_boxes`) and no-ops while it
-/// is set. This quiesces live scan apply for the rebuild's duration: the
-/// rebuild clears and repopulates the scan tables block-by-block, so a
-/// concurrent live write would race it (miss a spend against the cleared
-/// reverse index, or stale that index).
-///
-/// A partial rescan normally does not set it, so live scan tracking continues;
-/// a persistence failure may force it on to prevent writes over incomplete
-/// state. Cleared on normal task completion (process-local; reads `false`
-/// after a restart).
-pub static SCAN_REBUILD_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-static RESCAN_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
 struct WalletTaskSession {
     closing: bool,
     handles: Vec<JoinHandle<()>>,
+    /// The session's rescan coordinator; a shutdown of this session cancels
+    /// its rescan through it.
+    rescan: Option<Arc<RescanCoordinator>>,
 }
 
 struct WalletTaskState {
@@ -65,40 +31,39 @@ struct WalletTaskState {
 static WALLET_TASKS: Mutex<WalletTaskState> = Mutex::new(WalletTaskState {
     sessions: Vec::new(),
 });
-static WALLET_SHUTDOWN_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 static WALLET_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn begin_wallet_session() -> u64 {
-    let _transition = rescan_transition_lock();
+fn wallet_tasks() -> std::sync::MutexGuard<'static, WalletTaskState> {
+    WALLET_TASKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Begin a new wallet session owned by `rescan`: allocate the session id,
+/// register the session, and clear the shutdown/cancel requests a previous
+/// session may have left on the coordinator.
+pub(crate) fn begin_wallet_session(rescan: Arc<RescanCoordinator>) -> u64 {
+    let mut tasks = wallet_tasks();
     let session_id = WALLET_SESSION_ID
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         .wrapping_add(1);
-    {
-        let mut tasks = WALLET_TASKS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !tasks.sessions.iter().any(|(id, _)| *id == session_id) {
-            tasks.sessions.push((
-                session_id,
-                WalletTaskSession {
-                    closing: false,
-                    handles: Vec::new(),
-                },
-            ));
-        }
+    match task_session_index(&tasks, session_id) {
+        Some(index) => tasks.sessions[index].1.rescan = Some(rescan.clone()),
+        None => tasks.sessions.push((
+            session_id,
+            WalletTaskSession {
+                closing: false,
+                handles: Vec::new(),
+                rescan: Some(rescan.clone()),
+            },
+        )),
     }
-    WALLET_SHUTDOWN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    rescan.begin_session();
     session_id
 }
 
 pub(crate) fn wallet_session_id() -> u64 {
     WALLET_SESSION_ID.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-pub(crate) fn wallet_shutdown_requested() -> bool {
-    WALLET_SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn task_session_index(state: &WalletTaskState, session_id: u64) -> Option<usize> {
@@ -110,9 +75,7 @@ pub(crate) async fn track_wallet_task(
     handle: JoinHandle<()>,
 ) -> Result<(), JoinError> {
     let late_handle = {
-        let mut tasks = WALLET_TASKS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tasks = wallet_tasks();
         let index = match task_session_index(&tasks, session_id) {
             Some(index) => index,
             None => {
@@ -121,6 +84,7 @@ pub(crate) async fn track_wallet_task(
                     WalletTaskSession {
                         closing: false,
                         handles: Vec::new(),
+                        rescan: None,
                     },
                 ));
                 tasks.sessions.len() - 1
@@ -163,9 +127,7 @@ async fn join_wallet_handles(handles: Vec<JoinHandle<()>>, first_error: &mut Opt
 
 pub(crate) async fn await_wallet_tasks(session_id: u64) -> Result<(), JoinError> {
     {
-        let mut tasks = WALLET_TASKS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tasks = wallet_tasks();
         let Some(index) = task_session_index(&tasks, session_id) else {
             return Ok(());
         };
@@ -174,18 +136,14 @@ pub(crate) async fn await_wallet_tasks(session_id: u64) -> Result<(), JoinError>
     let mut first_error = None;
     loop {
         let handles = {
-            let mut tasks = WALLET_TASKS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut tasks = wallet_tasks();
             let Some(index) = task_session_index(&tasks, session_id) else {
                 return first_error.map_or(Ok(()), Err);
             };
             std::mem::take(&mut tasks.sessions[index].1.handles)
         };
         join_wallet_handles(handles, &mut first_error).await;
-        let empty = WALLET_TASKS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let empty = wallet_tasks()
             .sessions
             .iter()
             .find(|(id, _)| *id == session_id)
@@ -197,128 +155,19 @@ pub(crate) async fn await_wallet_tasks(session_id: u64) -> Result<(), JoinError>
     }
 }
 
-fn rescan_transition_lock() -> MutexGuard<'static, ()> {
-    RESCAN_TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn latch_rescan_fail_closed_locked() {
-    RESCAN_FAIL_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-    SCAN_REBUILD_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-fn finish_rescan_task_locked() {
-    RESCAN_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_TASK_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-fn clear_rescan_state_locked() {
-    RESCAN_FAIL_CLOSED.store(false, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
-    SCAN_REBUILD_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-fn clear_rescan_guards_locked() {
-    clear_rescan_state_locked();
-    finish_rescan_task_locked();
-}
-
-pub(crate) fn latch_rescan_fail_closed() {
-    let _transition = rescan_transition_lock();
-    latch_rescan_fail_closed_locked();
-}
-
-pub(crate) fn clear_rescan_guards() {
-    let _transition = rescan_transition_lock();
-    clear_rescan_guards_locked();
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum BeginRescanError {
-    FullRescanRequired,
-    AlreadyInProgress,
-    Shutdown,
-    InvalidStart { requested: u32, cursor: Option<u32> },
-    Store(String),
-}
-
-pub(crate) fn begin_rescan_process(
-    start_h: u32,
-    store: &dyn ergo_state::wallet::WalletStore,
-    tip_height: u32,
-) -> Result<(), BeginRescanError> {
-    let _transition = rescan_transition_lock();
-    if wallet_shutdown_requested() {
-        return Err(BeginRescanError::Shutdown);
-    }
-    if start_h > 0 {
-        match ergo_state::wallet::scan::WalletScanService::validate_rescan_start(
-            store, start_h, tip_height,
-        ) {
-            Ok(()) => {}
-            Err(ergo_state::wallet::scan::RescanError::InvalidStart { requested, cursor }) => {
-                return Err(BeginRescanError::InvalidStart { requested, cursor })
-            }
-            Err(error) => return Err(BeginRescanError::Store(error.to_string())),
-        }
-    }
-    let was_fail_closed = RESCAN_FAIL_CLOSED.load(std::sync::atomic::Ordering::SeqCst);
-    if was_fail_closed && start_h != 0 {
-        return Err(BeginRescanError::FullRescanRequired);
-    }
-    if RESCAN_TASK_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err(BeginRescanError::AlreadyInProgress);
-    }
-    RESCAN_TASK_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-    let full_rebuild = start_h == 0;
-    if was_fail_closed {
-        RESCAN_FAIL_CLOSED.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-    RESCAN_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_FROM_HEIGHT.store(start_h, std::sync::atomic::Ordering::SeqCst);
-    SCAN_REBUILD_IN_PROGRESS.store(full_rebuild, std::sync::atomic::Ordering::SeqCst);
-    Ok(())
-}
-
-pub(crate) fn fail_rescan_start() {
-    let _transition = rescan_transition_lock();
-    latch_rescan_fail_closed_locked();
-    finish_rescan_task_locked();
-}
-
-fn request_rescan_shutdown_locked() {
-    WALLET_SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-    RESCAN_CANCEL_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-    if RESCAN_TASK_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-        latch_rescan_fail_closed_locked();
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn request_rescan_shutdown() {
-    let _transition = rescan_transition_lock();
-    request_rescan_shutdown_locked();
-}
-
+/// Node shutdown for `session_id`: when it is still the current session,
+/// ask its rescan coordinator to refuse new rescans, cancel the running
+/// one, and fail closed if a rescan task is active.
 pub(crate) fn request_rescan_shutdown_for(session_id: u64) {
-    let _transition = rescan_transition_lock();
+    let tasks = wallet_tasks();
     if wallet_session_id() != session_id {
         return;
     }
-    request_rescan_shutdown_locked();
-}
-
-pub(crate) fn finalize_rescan_guard(keep_blocked: bool, panicking: bool) {
-    let _transition = rescan_transition_lock();
-    if keep_blocked || panicking {
-        latch_rescan_fail_closed_locked();
-    } else {
-        clear_rescan_state_locked();
+    if let Some(rescan) = task_session_index(&tasks, session_id)
+        .and_then(|index| tasks.sessions[index].1.rescan.as_ref())
+    {
+        rescan.request_shutdown();
     }
-    finish_rescan_task_locked();
 }
 
 /// Test-only fault-injection flag for the atomic-commit test.
@@ -330,7 +179,8 @@ pub(crate) fn finalize_rescan_guard(keep_blocked: bool, panicking: bool) {
 #[cfg(test)]
 pub static FAULT_INJECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Serialize unit tests that mutate the process-wide wallet/rescan state.
+/// Serialize unit tests that touch the process-global [`FAULT_INJECT`] flag
+/// (directly, or through `auto_derive_and_persist`, which reads it).
 #[cfg(test)]
 pub(crate) static GLOBAL_RESCAN_TEST_GUARD: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
@@ -351,7 +201,7 @@ impl WalletBootService {
     pub fn unlock_and_sync(
         storage: &mut SecretStorage,
         state: &mut WalletState,
-        store: &dyn ergo_state::wallet::WalletStore,
+        store: &dyn ergo_wallet_service::wallet::WalletStore,
         network: ergo_ser::address::NetworkPrefix,
         password: &str,
     ) -> Result<(), WalletError> {
@@ -383,10 +233,11 @@ impl WalletBootService {
                 let read = store
                     .read()
                     .map_err(|e| WalletError::SecretFile(format!("wallet store read: {e}")))?;
-                let hydration = ergo_state::wallet::hydration::HydrationSnapshot::load(
-                    read.as_ref(),
-                )
-                .map_err(|e| WalletError::SecretFile(format!("wallet store hydration: {e}")))?;
+                let hydration =
+                    ergo_wallet_service::wallet::hydration::HydrationSnapshot::load(read.as_ref())
+                        .map_err(|e| {
+                            WalletError::SecretFile(format!("wallet store hydration: {e}"))
+                        })?;
 
                 if !hydration.is_empty() {
                     // Step 5a: hydrate only after all persisted data has been read successfully.
@@ -454,7 +305,7 @@ impl WalletBootService {
     fn auto_derive_and_persist(
         storage: &mut SecretStorage,
         state: &mut WalletState,
-        store: &dyn ergo_state::wallet::WalletStore,
+        store: &dyn ergo_wallet_service::wallet::WalletStore,
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), WalletError> {
         let unlocked = storage.unlocked().ok_or_else(|| {
@@ -522,7 +373,7 @@ impl WalletBootService {
     fn backfill_change_address(
         storage: &mut SecretStorage,
         state: &mut WalletState,
-        store: &dyn ergo_state::wallet::WalletStore,
+        store: &dyn ergo_wallet_service::wallet::WalletStore,
         network: ergo_ser::address::NetworkPrefix,
     ) -> Result<(), WalletError> {
         let unlocked = storage.unlocked().ok_or_else(|| {
@@ -554,70 +405,14 @@ impl WalletBootService {
     }
 }
 
-/// Production `RescanGuard` impl. Two methods with distinct semantics:
-///
-/// - `abort_in_progress`: called by `rollback_block_from_wallet` on
-///   every rollback (success or failure). Clears `RESCAN_IN_PROGRESS`
-///   only when the fail-closed latch is not set, and writes `WALLET_SCAN_INVALIDATED = true` ONLY if a rescan was
-///   actually running — successful rollback without an active rescan
-///   stays consistent with the rolled-back chain and does not need
-///   invalidation.
-/// - `force_invalidate`: called by `StateStore::rollback_to`'s
-///   failure branches (missing block section, block-section read
-///   error). Writes `WALLET_SCAN_INVALIDATED = true` and preserves
-///   fail-closed process guards when they are already set.
-///
-/// Operational notes:
-/// - `RESCAN_IN_PROGRESS` is a process-local atomic, not persisted;
-///   normal rollback clears it unless `RESCAN_FAIL_CLOSED` is
-///   holding the process closed after a persistence failure.
-/// - `WALLET_SCAN_INVALIDATED` is durable. The insert queues on the
-///   caller's `&WriteTransaction`, becoming effective only on
-///   commit. While set, live wallet apply no-ops; an operator-driven
-///   rescan completing successfully is the only path that clears it.
-pub struct ProdRescanGuard;
-
-impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
-    /// Abort an in-progress rescan if one is active. Conditional
-    /// invalidation matches the semantics
-    /// `rollback_block_from_wallet` needs on the success path:
-    /// a successful rollback without an active rescan keeps wallet
-    /// state consistent with the rolled-back chain (no
-    /// invalidation needed); a rollback that races with a rescan
-    /// invalidates because the rescan was working against a chain
-    /// state that's now gone.
-    fn abort_in_progress(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        if RESCAN_TASK_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-            RESCAN_CANCEL_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-            latch_rescan_fail_closed();
-            txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
-        }
-        Ok(())
-    }
-
-    /// Unconditionally invalidate. Called from
-    /// `StateStore::rollback_to`'s failure branches where wallet
-    /// history cannot be replayed — invalidation IS warranted
-    /// regardless of whether a rescan was active.
-    fn force_invalidate(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        if RESCAN_TASK_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-            RESCAN_CANCEL_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        latch_rescan_fail_closed();
-        txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_state::wallet::{
+    use ergo_wallet_service::wallet::{
         RedbWalletStore, WalletRead, WalletStore, WalletStoreError, WalletWrite,
     };
     use redb::ReadableTableMetadata;
     use std::sync::atomic::Ordering;
-    use std::sync::Arc;
 
     /// Serializes the tests in this module that touch the process-global
     /// `FAULT_INJECT` flag (directly, or indirectly via `auto_derive_and_persist`
@@ -629,7 +424,6 @@ mod tests {
     #[test]
     fn unlock_at_height_500_tracks_the_next_block_without_invalidation() {
         let _guard = FAULT_GUARD.blocking_lock();
-        clear_rescan_guards();
         let dir = tempfile::tempdir().unwrap();
         let chain = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
         let db = chain.db_arc();
@@ -682,7 +476,7 @@ mod tests {
             .apply_block(
                 501,
                 &[6; 32],
-                &ergo_state::wallet::WalletApplyPayload {
+                &ergo_wallet_service::wallet::WalletApplyPayload {
                     tracked_p2pk_trees: state.tracked_p2pk_trees().clone(),
                     cached_pubkeys: state.cached_pubkeys().clone(),
                     block_txs_owned: vec![],
@@ -697,22 +491,11 @@ mod tests {
         assert!(!read.scan_invalidated().unwrap());
         assert_eq!(
             read.scan_cursor().unwrap().unwrap(),
-            ergo_state::wallet::WalletScanCursor {
+            ergo_wallet_service::wallet::WalletScanCursor {
                 height: 501,
                 header_id: Some([6; 32]),
             }
         );
-    }
-
-    fn store_with_cursor_zero() -> (tempfile::TempDir, RedbWalletStore) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            redb::Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(0, None).unwrap();
-        write.commit().unwrap();
-        (dir, store)
     }
 
     struct FailingReadStore;
@@ -762,45 +545,6 @@ mod tests {
         assert!(first_error.is_some());
     }
 
-    #[test]
-    fn shutdown_requests_active_rescan_cancellation() {
-        let _guard = FAULT_GUARD.blocking_lock();
-        begin_wallet_session();
-        clear_rescan_guards();
-        let (_dir, store) = store_with_cursor_zero();
-        begin_rescan_process(1, &store, 1).unwrap();
-        request_rescan_shutdown();
-        assert!(RESCAN_CANCEL_REQUESTED.load(Ordering::SeqCst));
-        assert!(RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-        assert!(RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
-        assert!(wallet_shutdown_requested());
-        assert!(matches!(
-            begin_rescan_process(0, &store, 0),
-            Err(BeginRescanError::Shutdown)
-        ));
-        clear_rescan_guards();
-        begin_wallet_session();
-    }
-
-    #[test]
-    fn rollback_requests_cancellation_for_active_rescan() {
-        let _guard = FAULT_GUARD.blocking_lock();
-        begin_wallet_session();
-        clear_rescan_guards();
-        let (_cursor_dir, cursor_store) = store_with_cursor_zero();
-        begin_rescan_process(1, &cursor_store, 1).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
-        let txn = db.begin_write().unwrap();
-        ergo_state::wallet::RescanGuard::abort_in_progress(&ProdRescanGuard, &txn).unwrap();
-        txn.commit().unwrap();
-        assert!(RESCAN_CANCEL_REQUESTED.load(Ordering::SeqCst));
-        assert!(RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
-        assert!(RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
-        clear_rescan_guards();
-        begin_wallet_session();
-    }
-
     /// Exercises the `WalletBootService` write path under fault
     /// injection: `FAULT_INJECT` makes `unlock_and_sync` panic AFTER
     /// inserting into `WALLET_TRACKED_PUBKEYS` but BEFORE the
@@ -840,14 +584,15 @@ mod tests {
 
         // Verify BOTH tables are empty (write txn dropped without commit).
         let txn = db.begin_read().unwrap();
-        if let Ok(t) = txn.open_table(ergo_state::wallet::tables::WALLET_TRACKED_PUBKEYS) {
+        if let Ok(t) = txn.open_table(ergo_wallet_service::wallet::tables::WALLET_TRACKED_PUBKEYS) {
             assert_eq!(
                 t.len().unwrap(),
                 0,
                 "panic in unlock_and_sync must leave WALLET_TRACKED_PUBKEYS empty",
             );
         }
-        if let Ok(t) = txn.open_table(ergo_state::wallet::tables::WALLET_VISIBLE_ADDRESSES) {
+        if let Ok(t) = txn.open_table(ergo_wallet_service::wallet::tables::WALLET_VISIBLE_ADDRESSES)
+        {
             assert_eq!(t.len().unwrap(), 0);
         }
     }
@@ -891,7 +636,7 @@ mod tests {
             let wtxn = db.begin_write().unwrap();
             {
                 let mut tbl = wtxn
-                    .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
+                    .open_table(ergo_wallet_service::wallet::tables::WALLET_CHANGE_ADDRESS)
                     .unwrap();
                 tbl.remove(()).unwrap();
             }
@@ -922,7 +667,7 @@ mod tests {
         // And it must be durably persisted (survives the next restart).
         let rtxn = db.begin_read().unwrap();
         let tbl = rtxn
-            .open_table(ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS)
+            .open_table(ergo_wallet_service::wallet::tables::WALLET_CHANGE_ADDRESS)
             .unwrap();
         assert!(
             tbl.get(()).unwrap().is_some(),

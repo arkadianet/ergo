@@ -4,13 +4,13 @@
 
 use tokio::sync::oneshot;
 
-use ergo_api::wallet::sending::{
+use ergo_wallet_protocol::scala::sending::{
     BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto, TransactionGenerateRequest,
     TransactionGenerateResponse, TransactionGenerateUnsignedRequest,
     TransactionGenerateUnsignedResponse, TransactionSendRequest, TransactionSignRequest,
     TransactionSignResponse,
 };
-use ergo_api::wallet::WalletAdminError;
+use ergo_wallet_protocol::WalletAdminError;
 
 use super::WriterContext;
 
@@ -22,9 +22,9 @@ fn is_locked(ctx: &WriterContext<'_>) -> bool {
 
 pub(crate) async fn native_select_boxes(
     ctx: &WriterContext<'_>,
-    req: ergo_api::wallet::native::dto::BoxSelectRequest,
+    req: ergo_wallet_protocol::native::dto::BoxSelectRequest,
     reply: oneshot::Sender<
-        Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError>,
+        Result<ergo_wallet_protocol::native::dto::BoxSelectResponse, WalletAdminError>,
     >,
 ) {
     if is_locked(ctx) {
@@ -43,9 +43,9 @@ pub(crate) async fn native_select_boxes(
 
 pub(crate) async fn native_build_transaction(
     ctx: &WriterContext<'_>,
-    intent: ergo_api::wallet::native::dto::TxIntent,
+    intent: ergo_wallet_protocol::native::dto::TxIntent,
     reply: oneshot::Sender<
-        Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError>,
+        Result<ergo_wallet_protocol::native::dto::BuildTxResponse, WalletAdminError>,
     >,
 ) {
     if is_locked(ctx) {
@@ -65,8 +65,10 @@ pub(crate) async fn native_build_transaction(
 
 pub(crate) async fn native_sign_transaction(
     ctx: &WriterContext<'_>,
-    req: ergo_api::wallet::native::dto::SignTxRequest,
-    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>>,
+    req: ergo_wallet_protocol::native::dto::SignTxRequest,
+    reply: oneshot::Sender<
+        Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError>,
+    >,
 ) {
     // No `Locked` precondition: signing succeeds while locked when
     // external secrets cover every input; otherwise the prover's missing-secret
@@ -84,14 +86,16 @@ pub(crate) async fn native_sign_transaction(
 
 pub(crate) async fn native_send_transaction(
     ctx: &WriterContext<'_>,
-    req: ergo_api::wallet::native::dto::SendTxRequest,
-    reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>>,
+    req: ergo_wallet_protocol::native::dto::SendTxRequest,
+    reply: oneshot::Sender<
+        Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError>,
+    >,
 ) {
     // `intent` builds + signs with the wallet's own secrets → needs unlock;
     // `signed` submits caller-supplied bytes → no unlock needed.
     if matches!(
         req,
-        ergo_api::wallet::native::dto::SendTxRequest::Intent { .. }
+        ergo_wallet_protocol::native::dto::SendTxRequest::Intent { .. }
     ) && is_locked(ctx)
     {
         let _ = reply.send(Err(WalletAdminError::Locked));
@@ -133,9 +137,9 @@ pub(crate) async fn payment_send(
 
 pub(crate) async fn retrieve_rewards(
     ctx: &WriterContext<'_>,
-    req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
+    req: ergo_wallet_protocol::native::dto::RetrieveRewardsRequest,
     reply: oneshot::Sender<
-        Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
+        Result<ergo_wallet_protocol::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
     >,
 ) {
     // Fee arrives as a decimal nanoErg string (native amount convention) — parse
@@ -166,7 +170,7 @@ pub(crate) async fn retrieve_rewards(
     )
     .await
     .map(
-        |o| ergo_api::wallet::native::dto::RetrieveRewardsResultDto {
+        |o| ergo_wallet_protocol::native::dto::RetrieveRewardsResultDto {
             box_count: o.box_count,
             box_ids: o.box_ids,
             remaining: o.remaining,
@@ -177,10 +181,12 @@ pub(crate) async fn retrieve_rewards(
             other_tokens: o
                 .other_tokens
                 .into_iter()
-                .map(|(id, amt)| ergo_api::wallet::native::dto::SweptTokenDto {
-                    token_id: hex::encode(id),
-                    amount: amt.to_string(),
-                })
+                .map(
+                    |(id, amt)| ergo_wallet_protocol::native::dto::SweptTokenDto {
+                        token_id: hex::encode(id),
+                        amount: amt.to_string(),
+                    },
+                )
                 .collect(),
             destination: o.destination,
             tx_id: o.tx_id,
@@ -207,7 +213,7 @@ pub(crate) async fn transaction_generate(
     )
     .await;
     let _ = reply.send(result.map(|signed_tx_bytes| {
-        use ergo_api::wallet::sending::{SignedTxDto, TransactionGenerateResponse};
+        use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionGenerateResponse};
         TransactionGenerateResponse {
             transaction: SignedTxDto {
                 bytes: hex::encode(signed_tx_bytes),
@@ -234,7 +240,9 @@ pub(crate) async fn transaction_generate_unsigned(
     )
     .await;
     let _ = reply.send(result.map(|unsigned_tx_bytes| {
-        use ergo_api::wallet::sending::{TransactionGenerateUnsignedResponse, UnsignedTxDto};
+        use ergo_wallet_protocol::scala::sending::{
+            TransactionGenerateUnsignedResponse, UnsignedTxDto,
+        };
         TransactionGenerateUnsignedResponse {
             unsigned_tx: UnsignedTxDto {
                 bytes: hex::encode(unsigned_tx_bytes),
@@ -259,7 +267,7 @@ pub(crate) async fn transaction_sign(
     )
     .await;
     let _ = reply.send(result.map(|signed_tx_bytes| {
-        use ergo_api::wallet::sending::{SignedTxDto, TransactionSignResponse};
+        use ergo_wallet_protocol::scala::sending::{SignedTxDto, TransactionSignResponse};
         TransactionSignResponse {
             transaction: SignedTxDto {
                 bytes: hex::encode(signed_tx_bytes),

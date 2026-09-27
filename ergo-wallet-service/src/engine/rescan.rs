@@ -312,3 +312,51 @@ impl RescanGuard for WalletRescanGuard {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::RedbWalletStore;
+
+    fn store_with_cursor_zero() -> (tempfile::TempDir, RedbWalletStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RedbWalletStore::new(Arc::new(
+            redb::Database::create(dir.path().join("state.redb")).unwrap(),
+        ));
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(0, None).unwrap();
+        write.commit().unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn shutdown_requests_active_rescan_cancellation() {
+        let rescan = RescanCoordinator::new();
+        let (_dir, store) = store_with_cursor_zero();
+        rescan.begin_rescan(1, &store, 1).unwrap();
+        rescan.request_shutdown();
+        assert!(rescan.cancel_requested());
+        assert!(rescan.fail_closed());
+        assert!(rescan.task_active());
+        assert!(rescan.shutdown_requested());
+        assert!(matches!(
+            rescan.begin_rescan(0, &store, 0),
+            Err(BeginRescanError::Shutdown)
+        ));
+    }
+
+    #[test]
+    fn rollback_requests_cancellation_for_active_rescan() {
+        let rescan = Arc::new(RescanCoordinator::new());
+        let (_cursor_dir, cursor_store) = store_with_cursor_zero();
+        rescan.begin_rescan(1, &cursor_store, 1).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
+        let txn = db.begin_write().unwrap();
+        RescanGuard::abort_in_progress(&WalletRescanGuard::new(rescan.clone()), &txn).unwrap();
+        txn.commit().unwrap();
+        assert!(rescan.cancel_requested());
+        assert!(rescan.task_active());
+        assert!(rescan.in_progress());
+    }
+}

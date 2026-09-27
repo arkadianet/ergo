@@ -4,28 +4,37 @@
 //! them serially and sends the responses back via the per-command
 //! oneshot channel.
 
-use std::sync::atomic::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
-use ergo_api::wallet::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
-use ergo_api::wallet::sending::PaymentRequestDto;
-use ergo_api::wallet::sending::{
+use ergo_api::wallet::WalletAdmin;
+use ergo_primitives::digest::Digest32;
+use ergo_ser::ergo_box::ErgoBox;
+use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_protocol::scala::scan::{ScanBoxEntry, ScanBoxFilter, ScanDto, ScanRequestDto};
+use ergo_wallet_protocol::scala::sending::PaymentRequestDto;
+use ergo_wallet_protocol::scala::sending::{
     BoxesCollectRequest, BoxesCollectResponse, TransactionGenerateRequest,
     TransactionGenerateResponse, TransactionGenerateUnsignedRequest,
     TransactionGenerateUnsignedResponse, TransactionSendRequest, TransactionSignRequest,
     TransactionSignResponse,
 };
-use ergo_api::wallet::types::{
+use ergo_wallet_protocol::scala::types::{
     Page, WalletAddressList, WalletBalances, WalletBoxesPage, WalletStatus, WalletTransactionEntry,
     WalletTransactionsPage,
 };
-use ergo_api::wallet::{WalletAdmin, WalletAdminError};
-use ergo_wallet::storage::SecretStorage;
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::chain::CommittedTip;
+use ergo_wallet_service::engine::{
+    ChainAccessError, MempoolOverlay, RescanCoordinator, SigningView, TxSubmitError, TxSubmitter,
+    WalletChainAccess, WalletEngineConfig, WalletRescanGuard,
+};
 use ergo_wallet_service::state::WalletState;
+use ergo_wallet_service::wallet::scan::{RescanBlock, RescanReadError};
 
 pub mod chain_client;
 pub mod chain_snapshot;
@@ -33,27 +42,10 @@ pub use chain_client::{
     ChainClientAdapter, InProcessChainClient, IntoChainSubmitter, NodeChainClient,
     WalletChainAdapter,
 };
-pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
+use chain_snapshot::chain_state_read_failed;
+pub use chain_snapshot::ChainSnapshot;
 
-/// Abstracts the chain submit path so the wallet writer can submit a
-/// signed transaction without depending on the API crate's concrete
-/// `SubmitBridge`. Production impl wraps `NodeSubmit`; tests can
-/// inject a stub.
-#[async_trait]
-pub trait TxSubmitter: Send + Sync {
-    /// Submit signed tx bytes; returns the tx id on admission. The error is the
-    /// **typed** [`ergo_api::types::SubmitError`] `{reason, detail}` — NOT collapsed
-    /// to a string — so callers can distinguish a `duplicate` admission (map to an
-    /// idempotent success) from a real failure (map to 5xx) at their own boundary.
-    /// The native send path maps `duplicate` → `200 accepted`; the existing
-    /// compat callers map it to `WalletAdminError::Internal` exactly as before.
-    async fn submit_transaction(
-        &self,
-        tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError>;
-}
-
-/// Production `TxSubmitter` backed by the node's `NodeSubmit` bridge.
+/// Production [`TxSubmitter`] backed by the node's `NodeSubmit` bridge.
 pub struct NodeSubmitAdapter {
     inner: Arc<dyn ergo_api::traits::NodeSubmit>,
 }
@@ -66,15 +58,42 @@ impl NodeSubmitAdapter {
 
 #[async_trait]
 impl TxSubmitter for NodeSubmitAdapter {
-    async fn submit_transaction(
-        &self,
-        tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError> {
+    async fn submit_transaction(&self, tx_bytes: Vec<u8>) -> Result<String, TxSubmitError> {
         use ergo_api::types::SubmitMode;
         // Forward the typed SubmitError unmodified — each caller maps it intentionally.
         self.inner
             .submit_transaction(tx_bytes, SubmitMode::Broadcast)
             .await
+            .map_err(|error| TxSubmitError {
+                reason: error.reason,
+                detail: error.detail,
+            })
+    }
+}
+
+/// Adapts the API's snapshot-backed [`ergo_api::MempoolView`] to the wallet
+/// engine's [`MempoolOverlay`] seam (the three pool reads the wallet makes).
+pub struct MempoolViewOverlay {
+    inner: Arc<dyn ergo_api::MempoolView>,
+}
+
+impl MempoolViewOverlay {
+    pub fn new(inner: Arc<dyn ergo_api::MempoolView>) -> Self {
+        Self { inner }
+    }
+}
+
+impl MempoolOverlay for MempoolViewOverlay {
+    fn is_spent_by_pool(&self, box_id: &Digest32) -> bool {
+        self.inner.is_spent_by_pool(box_id)
+    }
+
+    fn pool_spending_tx(&self, box_id: &Digest32) -> Option<Digest32> {
+        self.inner.pool_spending_tx(box_id)
+    }
+
+    fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
+        self.inner.pool_outputs()
     }
 }
 
@@ -126,77 +145,79 @@ pub enum WalletCommand {
     NativeBalance {
         include_unconfirmed: bool,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::WalletBalanceDto, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/status`.
     NativeStatus {
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/addresses` (paged).
     NativeAddresses {
         offset: u32,
         limit: u32,
-        reply:
-            oneshot::Sender<Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError>>,
+        reply: oneshot::Sender<
+            Result<ergo_wallet_protocol::native::dto::AddressPage, WalletAdminError>,
+        >,
     },
     /// Native `/api/v1/wallet/boxes` (paged).
     NativeBoxes {
         offset: u32,
         limit: u32,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError>>,
+        reply:
+            oneshot::Sender<Result<ergo_wallet_protocol::native::dto::BoxPage, WalletAdminError>>,
     },
     /// Native `/api/v1/wallet/boxes/{boxId}`.
     NativeBoxById {
         box_id_hex: String,
         reply: oneshot::Sender<
-            Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError>,
+            Result<Option<ergo_wallet_protocol::native::dto::WalletBoxSummary>, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/transactions` (paged).
     NativeTransactions {
         offset: u32,
         limit: u32,
-        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError>>,
+        reply: oneshot::Sender<Result<ergo_wallet_protocol::native::dto::TxPage, WalletAdminError>>,
     },
     /// Native `/api/v1/wallet/transactions/{txId}`.
     NativeTransactionById {
         tx_id_hex: String,
         reply: oneshot::Sender<
             Result<
-                Option<ergo_api::wallet::native::dto::WalletTransactionSummary>,
+                Option<ergo_wallet_protocol::native::dto::WalletTransactionSummary>,
                 WalletAdminError,
             >,
         >,
     },
     /// Native `/api/v1/wallet/boxes/select` (burn-aware selection dry-run).
     NativeSelectBoxes {
-        req: Box<ergo_api::wallet::native::dto::BoxSelectRequest>,
+        req: Box<ergo_wallet_protocol::native::dto::BoxSelectRequest>,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::BoxSelectResponse, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/transactions/build` (burn-aware unsigned build).
     NativeBuildTransaction {
-        intent: Box<ergo_api::wallet::native::dto::TxIntent>,
+        intent: Box<ergo_wallet_protocol::native::dto::TxIntent>,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::BuildTxResponse, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/transactions/sign`.
     NativeSignTransaction {
-        req: Box<ergo_api::wallet::native::dto::SignTxRequest>,
+        req: Box<ergo_wallet_protocol::native::dto::SignTxRequest>,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError>,
         >,
     },
     /// Native `/api/v1/wallet/transactions/send`.
     NativeSendTransaction {
-        req: Box<ergo_api::wallet::native::dto::SendTxRequest>,
+        req: Box<ergo_wallet_protocol::native::dto::SendTxRequest>,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError>,
         >,
     },
     Addresses {
@@ -230,9 +251,9 @@ pub enum WalletCommand {
         reply: oneshot::Sender<Result<String, WalletAdminError>>,
     },
     RetrieveRewards {
-        req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
+        req: ergo_wallet_protocol::native::dto::RetrieveRewardsRequest,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
+            Result<ergo_wallet_protocol::native::dto::RetrieveRewardsResultDto, WalletAdminError>,
         >,
     },
     TransactionGenerate {
@@ -257,33 +278,48 @@ pub enum WalletCommand {
     },
     // --- multi-sig commands ---
     GenerateCommitments {
-        request: ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
+        request: ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsRequest,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError>,
+            Result<
+                ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse,
+                WalletAdminError,
+            >,
         >,
     },
     ExtractHints {
-        request: ergo_api::wallet::multi_sig::HintExtractionRequest,
+        request: ergo_wallet_protocol::scala::multi_sig::HintExtractionRequest,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::multi_sig::HintExtractionResponse, WalletAdminError>,
+            Result<
+                ergo_wallet_protocol::scala::multi_sig::HintExtractionResponse,
+                WalletAdminError,
+            >,
         >,
     },
     // --- advanced HD-key commands ---
     DeriveKey {
-        request: ergo_api::wallet::admin_advanced::DeriveKeyRequest,
+        request: ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError>,
+            Result<
+                ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse,
+                WalletAdminError,
+            >,
         >,
     },
     DeriveNextKey {
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError>,
+            Result<
+                ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse,
+                WalletAdminError,
+            >,
         >,
     },
     GetPrivateKey {
-        request: ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
+        request: ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyRequest,
         reply: oneshot::Sender<
-            Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError>,
+            Result<
+                ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyResponse,
+                WalletAdminError,
+            >,
         >,
     },
     // --- scan registry commands ---
@@ -405,16 +441,29 @@ impl WalletCommand {
 /// `Node::run` and handed to `ergo-api`'s router builder.
 pub struct NodeWalletAdmin {
     tx: mpsc::Sender<WalletCommand>,
+    /// The wallet's rescan coordinator: the pre-enqueue fence reads it.
+    rescan: Arc<RescanCoordinator>,
 }
 
 impl NodeWalletAdmin {
-    pub fn new(tx: mpsc::Sender<WalletCommand>) -> Self {
-        crate::wallet_boot::begin_wallet_session();
-        Self { tx }
+    /// Begin a new wallet session owned by `rescan` and wrap the command
+    /// channel of the writer task that shares the same coordinator.
+    pub fn new(tx: mpsc::Sender<WalletCommand>, rescan: Arc<RescanCoordinator>) -> Self {
+        crate::wallet_boot::begin_wallet_session(rescan.clone());
+        Self { tx, rescan }
     }
 
-    pub(super) fn with_session(tx: mpsc::Sender<WalletCommand>) -> Self {
-        Self { tx }
+    pub(super) fn with_session(
+        tx: mpsc::Sender<WalletCommand>,
+        rescan: Arc<RescanCoordinator>,
+    ) -> Self {
+        Self { tx, rescan }
+    }
+
+    /// The rescan coordinator this admin's pre-enqueue fence reads (shared
+    /// with its writer task and the chain-apply hook).
+    pub fn rescan_coordinator(&self) -> &Arc<RescanCoordinator> {
+        &self.rescan
     }
 
     async fn send_cmd<R, F>(&self, build: F) -> Result<R, WalletAdminError>
@@ -446,11 +495,7 @@ impl NodeWalletAdmin {
     where
         F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
     {
-        if !allow_during_rescan
-            && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
-                || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-                || crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst))
-        {
+        if !allow_during_rescan && self.rescan.operations_fenced() {
             return Err(WalletAdminError::RescanUnavailable(
                 "wallet recovery required: run rescan before using wallet operations".to_string(),
             ));
@@ -551,7 +596,7 @@ impl WalletAdmin for NodeWalletAdmin {
     async fn native_balance(
         &self,
         include_unconfirmed: bool,
-    ) -> Result<ergo_api::wallet::native::dto::WalletBalanceDto, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::native::dto::WalletBalanceDto, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeBalance {
             include_unconfirmed,
             reply,
@@ -561,7 +606,7 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn native_status(
         &self,
-    ) -> Result<ergo_api::wallet::native::dto::WalletStatusDto, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError> {
         self.send_control_cmd(|reply| WalletCommand::NativeStatus { reply })
             .await
     }
@@ -570,7 +615,7 @@ impl WalletAdmin for NodeWalletAdmin {
         &self,
         offset: u32,
         limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::AddressPage, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::native::dto::AddressPage, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeAddresses {
             offset,
             limit,
@@ -583,7 +628,7 @@ impl WalletAdmin for NodeWalletAdmin {
         &self,
         offset: u32,
         limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::BoxPage, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::native::dto::BoxPage, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeBoxes {
             offset,
             limit,
@@ -595,7 +640,7 @@ impl WalletAdmin for NodeWalletAdmin {
     async fn native_box_by_id(
         &self,
         box_id_hex: String,
-    ) -> Result<Option<ergo_api::wallet::native::dto::WalletBoxSummary>, WalletAdminError> {
+    ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletBoxSummary>, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeBoxById { box_id_hex, reply })
             .await
     }
@@ -604,7 +649,7 @@ impl WalletAdmin for NodeWalletAdmin {
         &self,
         offset: u32,
         limit: u32,
-    ) -> Result<ergo_api::wallet::native::dto::TxPage, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::native::dto::TxPage, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeTransactions {
             offset,
             limit,
@@ -616,7 +661,7 @@ impl WalletAdmin for NodeWalletAdmin {
     async fn native_transaction_by_id(
         &self,
         tx_id_hex: String,
-    ) -> Result<Option<ergo_api::wallet::native::dto::WalletTransactionSummary>, WalletAdminError>
+    ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletTransactionSummary>, WalletAdminError>
     {
         self.send_cmd(move |reply| WalletCommand::NativeTransactionById { tx_id_hex, reply })
             .await
@@ -624,8 +669,8 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn select_boxes(
         &self,
-        req: ergo_api::wallet::native::dto::BoxSelectRequest,
-    ) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
+        req: ergo_wallet_protocol::native::dto::BoxSelectRequest,
+    ) -> Result<ergo_wallet_protocol::native::dto::BoxSelectResponse, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeSelectBoxes {
             req: Box::new(req),
             reply,
@@ -635,8 +680,8 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn build_transaction(
         &self,
-        intent: ergo_api::wallet::native::dto::TxIntent,
-    ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
+        intent: ergo_wallet_protocol::native::dto::TxIntent,
+    ) -> Result<ergo_wallet_protocol::native::dto::BuildTxResponse, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeBuildTransaction {
             intent: Box::new(intent),
             reply,
@@ -646,8 +691,8 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn sign_transaction(
         &self,
-        req: ergo_api::wallet::native::dto::SignTxRequest,
-    ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
+        req: ergo_wallet_protocol::native::dto::SignTxRequest,
+    ) -> Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeSignTransaction {
             req: Box::new(req),
             reply,
@@ -657,8 +702,8 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn send_transaction(
         &self,
-        req: ergo_api::wallet::native::dto::SendTxRequest,
-    ) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
+        req: ergo_wallet_protocol::native::dto::SendTxRequest,
+    ) -> Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::NativeSendTransaction {
             req: Box::new(req),
             reply,
@@ -717,8 +762,8 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn retrieve_rewards(
         &self,
-        req: ergo_api::wallet::native::dto::RetrieveRewardsRequest,
-    ) -> Result<ergo_api::wallet::native::dto::RetrieveRewardsResultDto, WalletAdminError> {
+        req: ergo_wallet_protocol::native::dto::RetrieveRewardsRequest,
+    ) -> Result<ergo_wallet_protocol::native::dto::RetrieveRewardsResultDto, WalletAdminError> {
         self.send_cmd(move |reply| WalletCommand::RetrieveRewards { req, reply })
             .await
     }
@@ -765,39 +810,44 @@ impl WalletAdmin for NodeWalletAdmin {
 
     async fn generate_commitments(
         &self,
-        request: ergo_api::wallet::multi_sig::GenerateCommitmentsRequest,
-    ) -> Result<ergo_api::wallet::multi_sig::GenerateCommitmentsResponse, WalletAdminError> {
+        request: ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsRequest,
+    ) -> Result<ergo_wallet_protocol::scala::multi_sig::GenerateCommitmentsResponse, WalletAdminError>
+    {
         self.send_cmd(move |reply| WalletCommand::GenerateCommitments { request, reply })
             .await
     }
 
     async fn extract_hints(
         &self,
-        request: ergo_api::wallet::multi_sig::HintExtractionRequest,
-    ) -> Result<ergo_api::wallet::multi_sig::HintExtractionResponse, WalletAdminError> {
+        request: ergo_wallet_protocol::scala::multi_sig::HintExtractionRequest,
+    ) -> Result<ergo_wallet_protocol::scala::multi_sig::HintExtractionResponse, WalletAdminError>
+    {
         self.send_cmd(move |reply| WalletCommand::ExtractHints { request, reply })
             .await
     }
 
     async fn derive_key(
         &self,
-        request: ergo_api::wallet::admin_advanced::DeriveKeyRequest,
-    ) -> Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError> {
+        request: ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest,
+    ) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse, WalletAdminError>
+    {
         self.send_cmd(move |reply| WalletCommand::DeriveKey { request, reply })
             .await
     }
 
     async fn derive_next_key(
         &self,
-    ) -> Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
+    ) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse, WalletAdminError>
+    {
         self.send_cmd(|reply| WalletCommand::DeriveNextKey { reply })
             .await
     }
 
     async fn get_private_key(
         &self,
-        request: ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
-    ) -> Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
+        request: ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyRequest,
+    ) -> Result<ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyResponse, WalletAdminError>
+    {
         self.send_cmd(move |reply| WalletCommand::GetPrivateKey { request, reply })
             .await
     }
@@ -875,120 +925,7 @@ impl WalletAdmin for NodeWalletAdmin {
     }
 }
 
-/// Read-only access to the chain state. The writer task uses this
-/// for: (a) `walletHeight` in `/wallet/status`, (b) pruning check
-/// in `/wallet/restore`, (c) block fetch during `/wallet/rescan`,
-/// and (d) signing-context + UTXO lookup for send routes.
-pub trait ChainStateAccessor: Send + Sync {
-    /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError>;
-    /// Best full-block tip height. Used as the rescan upper bound.
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError>;
-    /// True if the node is configured with `blocks_to_keep != -1`.
-    /// `/wallet/restore` refuses on pruned nodes per Scala parity.
-    fn is_pruned(&self) -> bool;
-    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27 nets,
-    /// e.g. testnet). Built at boot from the chain spec — the same source the
-    /// block/mempool validator uses. The wallet's burn-aware builder and the
-    /// self-verify EIP-27 gate read it here so a built spend can never violate
-    /// consensus. Default `None` (test stubs / non-EIP-27 backends).
-    fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
-        None
-    }
-    /// Fetch the block at `height` for rescan replay. `Ok(None)` means the
-    /// requested block is unavailable (pruned or not yet downloaded).
-    fn read_block_at(
-        &self,
-        height: u32,
-    ) -> Result<
-        Option<ergo_state::wallet::scan::RescanBlock>,
-        ergo_state::wallet::scan::RescanReadError,
-    >;
-    /// True when `read_block_at` can return real block data. Distinct from
-    /// `is_pruned()` (which gates `/wallet/restore`) — this gates
-    /// `/wallet/rescan`. When false, rescan is refused before touching any
-    /// wallet state, preventing the destructive clear-then-skip sequence.
-    /// Default impl treats a genesis-only tip as supported; otherwise it
-    /// probes height one. Overrides may avoid the probe for efficiency.
-    fn read_block_at_supported(&self) -> Result<bool, ergo_state::wallet::scan::RescanReadError> {
-        match self.tip_height() {
-            Ok(0) => Ok(true),
-            Ok(_) => Ok(self.read_block_at(1)?.is_some()),
-            Err(error) => Err(ergo_state::wallet::scan::RescanReadError::Storage {
-                height: 0,
-                source: ergo_state::wallet::WalletStoreError::decode(error.to_string()),
-            }),
-        }
-    }
-
-    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    fn ensure_snapshot_current(&self, snapshot: &ChainSnapshot) -> Result<(), ChainStateError> {
-        let actual = self
-            .committed_tip()?
-            .ok_or(ChainStateError::NoCommittedState)?;
-        if actual == snapshot.tip() {
-            return Ok(());
-        }
-        Err(ChainStateError::StaleTip {
-            expected_height: snapshot.tip().height,
-            expected_id: hex::encode(snapshot.tip().header_id),
-            actual_height: actual.height,
-            actual_id: hex::encode(actual.header_id),
-        })
-    }
-
-    /// Build the blockchain state context needed for signing: last ≤10
-    /// applied headers + candidate pre-header + previous state digest.
-    /// Returns `Err` if the chain tip is below 10 blocks (still syncing).
-    fn build_signing_context(
-        &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Build per-block cost parameters from the active protocol parameters
-    /// at the tip.
-    fn build_signing_params(
-        &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Structural protocol parameters at the tip (min-value-per-byte,
-    /// box/collection caps) for pre-submit structural validation. Mirrors
-    /// the consensus validator's `ProtocolParams`; the wallet runs
-    /// `ergo_validation::validate_structural` against these so it never
-    /// submits a tx the node would reject (e.g. a dust output).
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-
-    /// Look up a full `ErgoBox` from the UTXO set by its 32-byte box ID.
-    /// Returns `None` if the box is not present (spent or unknown).
-    fn lookup_utxo(
-        &self,
-        _box_id: &[u8; 32],
-    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainStateError> {
-        Err(ChainStateError::Unsupported)
-    }
-}
-
-pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
-    let detail = error.to_string();
-    match error {
-        ChainStateError::StaleTip { .. } => WalletAdminError::StaleChainTip(detail),
-        _ => WalletAdminError::Internal(detail),
-    }
-}
-
-/// Production `ChainStateAccessor` backed by the shared redb `Database`
+/// Production [`WalletChainAccess`] backed by the shared redb `Database`
 /// and a snapshot of the tip height + pruning flag captured at boot.
 ///
 /// The wallet writer task reads these values for:
@@ -1003,23 +940,23 @@ pub(crate) fn map_chain_error(error: ChainStateError) -> WalletAdminError {
 ///   `WalletScanService::rescan_full_rebuild`).
 /// - `is_pruned`: static from config (archive-only today).
 /// - `read_block_at`: delegates to `block_txs_for_wallet_at_height`.
-/// - `build_signing_context` / `build_signing_params` / `lookup_utxo`:
-///   use the `ChainStoreReader` to read from committed state without
-///   acquiring the action-loop's mutable `StateStore`.
+/// - `signing_view` / `build_signing_context` / `build_signing_params` /
+///   `lookup_utxo`: use the `ChainStoreReader` to read from committed state
+///   without acquiring the action-loop's mutable `StateStore`.
 pub struct ChainStateAccessorImpl {
     /// Lock-free reader for chain state (headers, UTXO, active params).
     reader: ergo_state::reader::ChainStoreReader,
-    wallet_store: Option<Arc<dyn ergo_state::wallet::WalletStore>>,
+    wallet_store: Option<Arc<dyn ergo_wallet_service::wallet::WalletStore>>,
     is_pruned: bool,
     /// EIP-27 re-emission rules (mainnet) or `None` (testnet). See
-    /// [`ChainStateAccessor::reemission_rules`].
+    /// [`WalletChainAccess::reemission_rules`].
     reemission: Option<ergo_validation::ReemissionRuleInputs>,
 }
 
 impl ChainStateAccessorImpl {
     pub fn new(
         reader: ergo_state::reader::ChainStoreReader,
-        wallet_store: Arc<dyn ergo_state::wallet::WalletStore>,
+        wallet_store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
         is_pruned: bool,
         reemission: Option<ergo_validation::ReemissionRuleInputs>,
     ) -> Self {
@@ -1043,10 +980,20 @@ impl ChainStateAccessorImpl {
             reemission,
         }
     }
-}
 
-impl ChainStateAccessor for ChainStateAccessorImpl {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    /// The concrete committed [`ChainSnapshot`] behind
+    /// [`WalletChainAccess::signing_view`].
+    pub fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainAccessError> {
+        let committed = self
+            .reader
+            .committed_snapshot()
+            .map_err(chain_state_read_failed)?
+            .ok_or(ChainAccessError::NoCommittedState)?;
+        ChainSnapshot::from_committed(committed, self.reemission.as_ref())
+            .map_err(chain_state_read_failed)
+    }
+
+    fn wallet_scan_height_state(&self) -> Result<u32, ergo_state::store::StateError> {
         let wallet_store =
             self.wallet_store
                 .as_ref()
@@ -1062,11 +1009,19 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
             .map(|cursor| cursor.height)
             .unwrap_or(0))
     }
+}
 
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for ChainStateAccessorImpl {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
+        self.wallet_scan_height_state()
+            .map_err(|error| ChainAccessError::State(error.to_string()))
+    }
+
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self
             .reader
-            .committed_tip()?
+            .committed_tip()
+            .map_err(|error| ChainAccessError::State(error.to_string()))?
             .map(|(height, _)| height)
             .unwrap_or(0))
     }
@@ -1079,14 +1034,9 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         self.reemission.as_ref()
     }
 
-    fn read_block_at(
-        &self,
-        height: u32,
-    ) -> Result<
-        Option<ergo_state::wallet::scan::RescanBlock>,
-        ergo_state::wallet::scan::RescanReadError,
-    > {
-        use ergo_state::wallet::scan::{OwnedBlockOutput, RescanBlock, RescanTx};
+    fn read_block_at(&self, height: u32) -> Result<Option<RescanBlock>, RescanReadError> {
+        use ergo_wallet_service::wallet::scan::RescanTx;
+        use ergo_wallet_service::wallet::OwnedBlockOutput;
 
         let (block_id, owned) = match self.reader.wallet_block_txs_at_height(height)? {
             Some(pair) => pair,
@@ -1118,36 +1068,33 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         Ok(Some(RescanBlock { block_id, txs }))
     }
 
-    fn chain_snapshot(&self) -> Result<ChainSnapshot, ChainStateError> {
-        let committed = self
-            .reader
-            .committed_snapshot()?
-            .ok_or(ChainStateError::NoCommittedState)?;
-        ChainSnapshot::from_committed(committed, self.reemission.as_ref()).map_err(Into::into)
+    fn signing_view(&self) -> Result<Box<dyn SigningView>, ChainAccessError> {
+        Ok(Box::new(self.chain_snapshot()?))
     }
 
-    fn committed_tip(&self) -> Result<Option<ChainTip>, ChainStateError> {
+    fn committed_tip(&self) -> Result<Option<CommittedTip>, ChainAccessError> {
         Ok(self
             .reader
-            .committed_tip()?
-            .map(|(height, header_id)| ChainTip { height, header_id }))
+            .committed_tip()
+            .map_err(chain_state_read_failed)?
+            .map(|(height, header_id)| CommittedTip { height, header_id }))
     }
 
     fn build_signing_context(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainStateError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainStateContext, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.state_context().clone())
     }
 
     fn build_signing_params(
         &self,
-    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainStateError> {
+    ) -> Result<ergo_wallet::tx_context::BlockchainParameters, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.signing_params().clone())
     }
 
-    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainStateError> {
+    fn build_protocol_params(&self) -> Result<ergo_validation::ProtocolParams, ChainAccessError> {
         self.chain_snapshot()
             .map(|snapshot| snapshot.protocol_params().clone())
     }
@@ -1155,17 +1102,17 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
     fn lookup_utxo(
         &self,
         box_id: &[u8; 32],
-    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainStateError> {
+    ) -> Result<Option<ergo_ser::ergo_box::ErgoBox>, ChainAccessError> {
         let Some(bytes) = self
             .reader
             .lookup_box(box_id)
-            .map_err(ChainStateError::from)?
+            .map_err(chain_state_read_failed)?
         else {
             return Ok(None);
         };
         chain_snapshot::decode_utxo_box(box_id, &bytes)
             .map(Some)
-            .map_err(Into::into)
+            .map_err(chain_state_read_failed)
     }
 }
 
@@ -1183,16 +1130,50 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// much slower than even a slow PBKDF2 (sub-second), so the worst case is a
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
-    pub wallet: Arc<RwLock<ergo_wallet_service::state::WalletState>>,
+    wallet: Arc<RwLock<WalletState>>,
     /// Shared wallet store used for block-apply matching and invalidation.
-    pub store: Arc<dyn ergo_state::wallet::WalletStore>,
+    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    /// The wallet's rollback guard; its coordinator also drives this hook's
+    /// full-rescan quiesce gates.
+    rescan_guard: WalletRescanGuard,
 }
 
-impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
+impl WalletStateHook {
+    pub fn new(
+        wallet: Arc<RwLock<WalletState>>,
+        store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+        rescan: Arc<RescanCoordinator>,
+    ) -> Self {
+        Self {
+            wallet,
+            store,
+            rescan_guard: WalletRescanGuard::new(rescan),
+        }
+    }
+
+    /// The chain-rollback guard sharing this hook's rescan coordinator.
+    pub fn rescan_guard(&self) -> &WalletRescanGuard {
+        &self.rescan_guard
+    }
+
+    /// The hook + rollback guard pair threaded through chain apply/rollback.
+    pub fn wiring(&self) -> ergo_wallet_service::wallet::WalletWiring<'_> {
+        ergo_wallet_service::wallet::WalletWiring {
+            hook: self,
+            rescan_guard: &self.rescan_guard,
+        }
+    }
+
+    fn rescan(&self) -> &RescanCoordinator {
+        self.rescan_guard.coordinator()
+    }
+}
+
+impl ergo_wallet_service::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
         // Full rescans and fail-closed recovery suppress wallet payloads;
         // partial rescans leave live wallet apply enabled.
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan().scan_rebuild_in_progress() {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1200,7 +1181,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan().scan_rebuild_in_progress() {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
@@ -1213,7 +1194,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         std::collections::BTreeSet<Vec<u8>>,
         std::collections::BTreeMap<u64, [u8; 33]>,
     ) {
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan().scan_rebuild_in_progress() {
             return (Default::default(), Default::default());
         }
         let state = self.wallet.read();
@@ -1224,8 +1205,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn allow_non_contiguous_wallet_apply(&self) -> bool {
-        crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-            && !crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst)
+        self.rescan().in_progress() && !self.rescan().scan_rebuild_in_progress()
     }
 
     fn registered_scan_count(&self) -> usize {
@@ -1236,7 +1216,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // the full-rescan gate on the pubkey path. A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan().scan_rebuild_in_progress() {
             return 0;
         }
         // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
@@ -1251,7 +1231,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
             Ok(n) => n,
             Err(e) => {
                 tracing::error!(error = %e, "scan apply: wallet store scan count read failed; skipping this block");
-                mark_scan_invalidated(self.store.as_ref());
+                mark_scan_invalidated(self.store.as_ref(), self.rescan());
                 0
             }
         }
@@ -1261,7 +1241,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // Quiesced during a scan rebuild (see `registered_scan_count`). The
         // count gate already returns 0 then, so this is defense in depth —
         // mirrors the pubkey path gating both of its hook methods.
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan().scan_rebuild_in_progress() {
             return vec![Vec::new(); boxes.len()];
         }
         // Load the registry once for the whole block, then match each box.
@@ -1272,7 +1252,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
                 .collect(),
             Err(e) => {
                 tracing::error!(error = %e, "scan apply: registry load failed; no matches this block");
-                mark_scan_invalidated(self.store.as_ref());
+                mark_scan_invalidated(self.store.as_ref(), self.rescan());
                 vec![Vec::new(); boxes.len()]
             }
         }
@@ -1281,11 +1261,14 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
 
 /// Flip `WALLET_SCAN_INVALIDATED` after a scan-registry read failure so
 /// `/wallet/status` surfaces the condition and the operator can rescan. The
-/// process guards are latched before the write attempt, regardless of whether
+/// rescan guards are latched before the write attempt, regardless of whether
 /// the durable flag write succeeds; the flag remains the recovery signal.
-fn mark_scan_invalidated(store: &dyn ergo_state::wallet::WalletStore) {
+fn mark_scan_invalidated(
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    rescan: &RescanCoordinator,
+) {
     const RETRIES: usize = 3;
-    crate::wallet_boot::latch_rescan_fail_closed();
+    rescan.latch_fail_closed();
     let mut last_error = None;
     for attempt in 0..RETRIES {
         match try_mark_scan_invalidated(store) {
@@ -1304,49 +1287,27 @@ fn mark_scan_invalidated(store: &dyn ergo_state::wallet::WalletStore) {
 }
 
 fn try_mark_scan_invalidated(
-    store: &dyn ergo_state::wallet::WalletStore,
-) -> Result<(), ergo_state::wallet::WalletStoreError> {
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+) -> Result<(), ergo_wallet_service::wallet::WalletStoreError> {
     store.persist_scan_invalidation(true)
-}
-
-/// Network + operator-flag + EIP-27 config supplied at boot.
-pub struct WriterConfig {
-    pub network: ergo_ser::address::NetworkPrefix,
-    /// `[wallet] expose_private_keys`: gates `POST /wallet/getPrivateKey`.
-    /// `false` (default) returns 403 Forbidden; `true` allows the
-    /// route to return the derived secret scalar.
-    pub expose_private_keys: bool,
-    /// EIP-27 re-emission rule inputs for this network (`None` off EIP-27
-    /// nets, e.g. testnet, where `ChainSpec::reemission` is `None`). Built at
-    /// boot from `build_reemission_rules(&config.chain_spec)` — the same source
-    /// the block/mempool validator uses, so the wallet's re-emission reserve
-    /// estimate and burn-aware builder share one trigger/token-id/floor with
-    /// consensus. When `None`, the wallet surfaces no re-emission reserve.
-    pub reemission: Option<ergo_validation::ReemissionRuleInputs>,
-    /// `[mempool] min_relay_fee_nano_erg` — the local relay-fee floor. A tx built
-    /// below it is rejected by submit before validation, so fee defaults derive
-    /// from `max(MIN_FEE, this)` and overrides below it are rejected (keeps the
-    /// reward-sweep preview/execute contract honest under non-default configs).
-    pub min_relay_fee_nano_erg: u64,
-    /// `[mempool] max_tx_size_bytes` — the local admission tx-size cap. The
-    /// reward sweep bounds its built tx against this so a preview can't approve a
-    /// sweep the submit path rejects as `too_big` under a lowered config.
-    pub max_tx_size_bytes: usize,
 }
 
 /// Writer-task loop. Runs in a dedicated tokio task; receives commands and
 /// dispatches against owned `storage` + `state` + wallet store + `chain`
-/// accessor. Each command's reply is sent back via its oneshot.
+/// accessor. Each command's reply is sent back via its oneshot. `rescan` is
+/// the wallet's rescan coordinator, shared with the [`NodeWalletAdmin`] fence
+/// and the chain-apply [`WalletStateHook`].
 #[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
 pub async fn run_wallet_writer(
     rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_state::wallet::WalletStore>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
+    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    chain: Arc<dyn WalletChainAccess>,
+    cfg: WalletEngineConfig,
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<RescanCoordinator>,
 ) {
     let session_id = crate::wallet_boot::wallet_session_id();
     run_wallet_writer_with_session(
@@ -1358,6 +1319,7 @@ pub async fn run_wallet_writer(
         cfg,
         submit_handle,
         mempool,
+        rescan,
         session_id,
     )
     .await
@@ -1368,11 +1330,12 @@ pub(super) async fn run_wallet_writer_with_session(
     rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_state::wallet::WalletStore>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
+    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    chain: Arc<dyn WalletChainAccess>,
+    cfg: WalletEngineConfig,
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<RescanCoordinator>,
     wallet_session_id: u64,
 ) {
     run_wallet_writer_inner(
@@ -1384,6 +1347,7 @@ pub(super) async fn run_wallet_writer_with_session(
         cfg,
         submit_handle,
         mempool,
+        rescan,
         wallet_session_id,
         None,
     )
@@ -1395,11 +1359,12 @@ pub(super) async fn run_wallet_writer_with_service(
     rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_state::wallet::WalletStore>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
+    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    chain: Arc<dyn WalletChainAccess>,
+    cfg: WalletEngineConfig,
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<RescanCoordinator>,
     wallet_session_id: u64,
     service: Arc<ergo_wallet_service::runtime::WalletService>,
 ) {
@@ -1412,6 +1377,7 @@ pub(super) async fn run_wallet_writer_with_service(
         cfg,
         submit_handle,
         mempool,
+        rescan,
         wallet_session_id,
         Some(service),
     )
@@ -1423,14 +1389,16 @@ async fn run_wallet_writer_inner(
     mut rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
-    store: Arc<dyn ergo_state::wallet::WalletStore>,
-    chain: Arc<dyn ChainStateAccessor>,
-    cfg: WriterConfig,
+    store: Arc<dyn ergo_wallet_service::wallet::WalletStore>,
+    chain: Arc<dyn WalletChainAccess>,
+    cfg: WalletEngineConfig,
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<RescanCoordinator>,
     wallet_session_id: u64,
     service: Option<Arc<ergo_wallet_service::runtime::WalletService>>,
 ) {
+    let mempool: Arc<dyn MempoolOverlay> = Arc::new(MempoolViewOverlay::new(mempool));
     let ctx = commands::WriterContext {
         storage: &storage,
         state: &state,
@@ -1440,6 +1408,7 @@ async fn run_wallet_writer_inner(
         submit_handle: &submit_handle,
         mempool: &mempool,
         service: service.as_deref(),
+        rescan: &rescan,
         wallet_session_id,
     };
     // Sensitive-op failed-attempt budgets, owned by this loop (the single
@@ -1448,11 +1417,7 @@ async fn run_wallet_writer_inner(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     while let Some(cmd) = rx.recv().await {
-        if !cmd.is_rescan_control()
-            && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
-                || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-                || crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst))
-        {
+        if !cmd.is_rescan_control() && rescan.operations_fenced() {
             cmd.reject_during_rescan();
             continue;
         }
@@ -1629,16 +1594,14 @@ mod support;
 #[cfg(test)]
 mod command_fencing_tests {
     use super::*;
-    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as GUARD;
-    use ergo_api::wallet::WalletAdmin;
-    use ergo_state::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
+    use ergo_wallet_service::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
 
     #[tokio::test]
     async fn normal_commands_are_fenced_but_rescan_is_allowed() {
-        let _guard = GUARD.lock().await;
-        crate::wallet_boot::latch_rescan_fail_closed();
+        let coordinator = Arc::new(RescanCoordinator::new());
+        coordinator.latch_fail_closed();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let normal = admin.balances().await;
         let queued = rx.try_recv();
         assert!(matches!(
@@ -1648,7 +1611,7 @@ mod command_fencing_tests {
         assert!(queued.is_err());
 
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let rescan = tokio::spawn(async move { admin.rescan(0).await });
         drop(rx);
         let rescan = rescan.await.unwrap();
@@ -1656,31 +1619,28 @@ mod command_fencing_tests {
             rescan,
             Err(WalletAdminError::RescanUnavailable(_))
         ));
-        crate::wallet_boot::clear_rescan_guards();
     }
 
     #[tokio::test]
     async fn normal_commands_are_fenced_during_rescan() {
-        let _guard = GUARD.lock().await;
-        crate::wallet_boot::clear_rescan_guards();
-        crate::wallet_boot::RESCAN_IN_PROGRESS.store(true, Ordering::SeqCst);
+        let coordinator = Arc::new(RescanCoordinator::new());
+        coordinator.set_in_progress_for_test(true);
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let result = admin.balances().await;
         assert!(matches!(
             result,
             Err(WalletAdminError::RescanUnavailable(_))
         ));
         assert!(rx.try_recv().is_err());
-        crate::wallet_boot::clear_rescan_guards();
     }
 
     #[tokio::test]
     async fn control_commands_bypass_pre_enqueue_fence() {
-        let _guard = GUARD.lock().await;
-        crate::wallet_boot::latch_rescan_fail_closed();
+        let coordinator = Arc::new(RescanCoordinator::new());
+        coordinator.latch_fail_closed();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let status = tokio::spawn(async move { admin.status().await });
         match rx.recv().await.unwrap() {
             WalletCommand::Status { reply } => {
@@ -1696,7 +1656,7 @@ mod command_fencing_tests {
         ));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let lock = tokio::spawn(async move { admin.lock().await });
         match rx.recv().await.unwrap() {
             WalletCommand::Lock { reply } => {
@@ -1710,7 +1670,7 @@ mod command_fencing_tests {
         ));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let admin = NodeWalletAdmin::new(tx);
+        let admin = NodeWalletAdmin::new(tx, coordinator.clone());
         let native_status = tokio::spawn(async move { admin.native_status().await });
         match rx.recv().await.unwrap() {
             WalletCommand::NativeStatus { reply } => {
@@ -1724,7 +1684,6 @@ mod command_fencing_tests {
             native_status.await.unwrap(),
             Err(WalletAdminError::Internal(message)) if message == "native status reached"
         ));
-        crate::wallet_boot::clear_rescan_guards();
     }
 
     #[tokio::test]
@@ -1751,24 +1710,21 @@ mod command_fencing_tests {
 
     #[tokio::test]
     async fn invalidation_write_failure_latches_fail_closed_guards() {
-        let _guard = GUARD.lock().await;
-        crate::wallet_boot::clear_rescan_guards();
+        let coordinator = RescanCoordinator::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::mark_scan_invalidated(&FailingInvalidationStore)
+            super::mark_scan_invalidated(&FailingInvalidationStore, &coordinator)
         }));
         assert!(result.is_ok());
-        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
-        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
-        crate::wallet_boot::clear_rescan_guards();
+        assert!(coordinator.fail_closed());
+        assert!(coordinator.in_progress());
+        assert!(coordinator.scan_rebuild_in_progress());
     }
 }
 
 #[cfg(test)]
 mod scan_invalidation_tests {
     use super::*;
-    use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as INVALIDATION_GUARD;
-    use ergo_state::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
+    use ergo_wallet_service::wallet::tables::{WALLET_SCANS, WALLET_SCAN_INVALIDATED};
 
     fn temp_db() -> (tempfile::TempDir, Arc<redb::Database>) {
         let dir = tempfile::tempdir().unwrap();
@@ -1786,24 +1742,21 @@ mod scan_invalidation_tests {
 
     #[test]
     fn mark_scan_invalidated_sets_the_flag() {
-        let _guard = INVALIDATION_GUARD.blocking_lock();
-        crate::wallet_boot::clear_rescan_guards();
+        let coordinator = RescanCoordinator::new();
         let (_d, db) = temp_db();
         assert!(!flag_set(&db), "flag starts clear");
-        let store: Arc<dyn ergo_state::wallet::WalletStore> =
-            Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
-        mark_scan_invalidated(store.as_ref());
+        let store: Arc<dyn ergo_wallet_service::wallet::WalletStore> = Arc::new(
+            ergo_wallet_service::wallet::RedbWalletStore::new(db.clone()),
+        );
+        mark_scan_invalidated(store.as_ref(), &coordinator);
         assert!(flag_set(&db), "flag set after mark");
-        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
-        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
-        crate::wallet_boot::clear_rescan_guards();
+        assert!(coordinator.fail_closed());
+        assert!(coordinator.in_progress());
+        assert!(coordinator.scan_rebuild_in_progress());
     }
 
     #[test]
     fn wallet_state_hook_snapshots_trees_and_pubkeys_together() {
-        let _guard = INVALIDATION_GUARD.blocking_lock();
-        crate::wallet_boot::clear_rescan_guards();
         let state = Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
             false,
         )));
@@ -1812,19 +1765,19 @@ mod scan_invalidation_tests {
             .insert_tracked_pubkey(0, [2; 33], ergo_ser::address::NetworkPrefix::Mainnet)
             .unwrap();
         let (_dir, db) = temp_db();
-        let hook = WalletStateHook {
-            wallet: state,
-            store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db)),
-        };
-        let (trees, pubkeys) = ergo_state::wallet::WalletApplyHook::wallet_state_snapshot(&hook);
+        let hook = WalletStateHook::new(
+            state,
+            Arc::new(ergo_wallet_service::wallet::RedbWalletStore::new(db)),
+            Arc::new(RescanCoordinator::new()),
+        );
+        let (trees, pubkeys) =
+            ergo_wallet_service::wallet::WalletApplyHook::wallet_state_snapshot(&hook);
         assert!(!trees.is_empty());
         assert!(!pubkeys.is_empty());
     }
 
     #[test]
     fn match_boxes_registry_load_failure_invalidates_for_rescan() {
-        let _guard = INVALIDATION_GUARD.blocking_lock();
-        crate::wallet_boot::clear_rescan_guards();
         let (_d, db) = temp_db();
         // A corrupt WALLET_SCANS row (not valid Scan JSON) makes load_registry
         // fail when match_boxes loads it for the block.
@@ -1836,22 +1789,23 @@ mod scan_invalidation_tests {
                 .unwrap();
             w.commit().unwrap();
         }
-        let store: Arc<dyn ergo_state::wallet::WalletStore> =
-            Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
-        let hook = WalletStateHook {
-            wallet: Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
+        let store: Arc<dyn ergo_wallet_service::wallet::WalletStore> = Arc::new(
+            ergo_wallet_service::wallet::RedbWalletStore::new(db.clone()),
+        );
+        let hook = WalletStateHook::new(
+            Arc::new(RwLock::new(ergo_wallet_service::state::WalletState::empty(
                 false,
             ))),
             store,
-        };
+            Arc::new(RescanCoordinator::new()),
+        );
         // match_boxes loads the registry first (regardless of the box slice), so
         // the corrupt row trips the Err branch even with no boxes.
-        let out = ergo_state::wallet::WalletApplyHook::match_boxes(&hook, &[]);
+        let out = ergo_wallet_service::wallet::WalletApplyHook::match_boxes(&hook, &[]);
         assert!(out.is_empty());
         assert!(
             flag_set(&db),
             "a registry load failure must set WALLET_SCAN_INVALIDATED for rescan"
         );
-        crate::wallet_boot::clear_rescan_guards();
     }
 }

@@ -4,15 +4,15 @@
 
 use tokio::sync::oneshot;
 
-use ergo_api::wallet::admin_advanced::{
+use ergo_wallet_protocol::scala::admin_advanced::{
     DeriveKeyRequest, DeriveKeyResponse, DeriveNextKeyResponse, GetPrivateKeyRequest,
     GetPrivateKeyResponse,
 };
-use ergo_api::wallet::multi_sig::{
+use ergo_wallet_protocol::scala::multi_sig::{
     GenerateCommitmentsRequest, GenerateCommitmentsResponse, HintExtractionRequest,
     HintExtractionResponse,
 };
-use ergo_api::wallet::WalletAdminError;
+use ergo_wallet_protocol::WalletAdminError;
 
 use super::WriterContext;
 

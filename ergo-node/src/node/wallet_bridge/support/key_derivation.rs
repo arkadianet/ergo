@@ -2,7 +2,8 @@
 
 use parking_lot::RwLock;
 
-use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError, WriterConfig};
+use ergo_wallet_protocol::WalletAdminError;
+use ergo_wallet_service::engine::{WalletChainAccess, WalletEngineConfig};
 
 /// Render a BIP32 path (raw u32 component slice) as a `m/...` string.
 /// Mirrors `DerivationPath::Display` without constructing the struct.
@@ -42,10 +43,10 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 /// except the hidden master (path_idx == 0, derivation_path == []).
 /// Matches `wallet_boot.rs`'s equivalent rebuild step.
 pub(crate) fn persist_tracked_pubkey(
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
     path_idx: u64,
     pubkey: &[u8; 33],
-    meta: &ergo_state::wallet::types::TrackedPubkeyMeta,
+    meta: &ergo_wallet_service::wallet::types::TrackedPubkeyMeta,
     new_derivation_head: Option<u64>,
 ) -> Result<(), WalletAdminError> {
     let mut write = store
@@ -69,15 +70,15 @@ pub(crate) fn persist_tracked_pubkey(
 
 /// `POST /wallet/deriveKey` writer-task implementation.
 pub(crate) async fn derive_key_impl(
-    request: &ergo_api::wallet::admin_advanced::DeriveKeyRequest,
+    request: &ergo_wallet_protocol::scala::admin_advanced::DeriveKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<ergo_api::wallet::admin_advanced::DeriveKeyResponse, WalletAdminError> {
-    use ergo_api::wallet::admin_advanced::DeriveKeyResponse;
+) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse, WalletAdminError> {
     use ergo_wallet::derivation::DerivationPath;
+    use ergo_wallet_protocol::scala::admin_advanced::DeriveKeyResponse;
 
     // Require unlocked.
     let storage_guard = storage.read();
@@ -125,7 +126,7 @@ pub(crate) async fn derive_key_impl(
     drop(read);
 
     // Build metadata.
-    let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+    let meta = ergo_wallet_service::wallet::types::TrackedPubkeyMeta {
         derivation_path: path.components().to_vec(),
         derivation_path_label: String::new(),
         added_at_height: chain
@@ -162,12 +163,12 @@ pub(crate) async fn derive_key_impl(
 pub(crate) async fn derive_next_key_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<ergo_api::wallet::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
-    use ergo_api::wallet::admin_advanced::DeriveNextKeyResponse;
+) -> Result<ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse, WalletAdminError> {
     use ergo_wallet::derivation::{DerivationPath, HARDENED_OFFSET};
+    use ergo_wallet_protocol::scala::admin_advanced::DeriveNextKeyResponse;
 
     // Require unlocked.
     let storage_guard = storage.read();
@@ -221,7 +222,7 @@ pub(crate) async fn derive_next_key_impl(
 
     drop(read);
 
-    let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+    let meta = ergo_wallet_service::wallet::types::TrackedPubkeyMeta {
         derivation_path: path.components().to_vec(),
         derivation_path_label: String::new(),
         added_at_height: chain
@@ -258,13 +259,13 @@ pub(crate) async fn derive_next_key_impl(
 /// for the requested address and returns it as 32-byte big-endian
 /// hex.
 pub(crate) async fn get_private_key_impl(
-    request: &ergo_api::wallet::admin_advanced::GetPrivateKeyRequest,
+    request: &ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    cfg: &WriterConfig,
-) -> Result<ergo_api::wallet::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
-    use ergo_api::wallet::admin_advanced::GetPrivateKeyResponse;
+    store: &dyn ergo_wallet_service::wallet::WalletStore,
+    cfg: &WalletEngineConfig,
+) -> Result<ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyResponse, WalletAdminError> {
     use ergo_wallet::derivation::DerivationPath;
+    use ergo_wallet_protocol::scala::admin_advanced::GetPrivateKeyResponse;
 
     if !cfg.expose_private_keys {
         return Err(WalletAdminError::Forbidden(
@@ -318,7 +319,7 @@ pub(crate) async fn get_private_key_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ergo_state::wallet::{RedbWalletStore, WalletStore};
+    use ergo_wallet_service::wallet::{RedbWalletStore, WalletStore};
     use std::sync::Arc;
 
     use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as TEST_GUARD;
@@ -330,7 +331,7 @@ mod tests {
         let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store = RedbWalletStore::new(db);
         let pubkey = [7u8; 33];
-        let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+        let meta = ergo_wallet_service::wallet::types::TrackedPubkeyMeta {
             derivation_path: vec![44, 0],
             derivation_path_label: String::new(),
             added_at_height: 0,

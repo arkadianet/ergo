@@ -60,6 +60,9 @@ ergo-sigma         = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 tempfile           = { workspace = true }
+# `test-support` exposes the `RescanCoordinator` flag setters the command-fence
+# and scan-rebuild tests use.
+ergo-wallet-service = { workspace = true, features = ["test-support"] }
 ergo-api           = { workspace = true }
 ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }

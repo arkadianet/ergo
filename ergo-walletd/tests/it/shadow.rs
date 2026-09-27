@@ -1529,7 +1529,7 @@ impl EmbeddedSide {
     }
 
     /// The production rollback seam: `rollback_to` with the real wallet hook
-    /// and ergo-node's real `ProdRescanGuard`, so the wallet tables rewind
+    /// and the hook's real `WalletRescanGuard`, so the wallet tables rewind
     /// inside the same redb transaction as the UTXO.
     fn rollback_to(&mut self, height: u32) {
         // Rewind the synthetic cursor with the chain, before anything can read
@@ -1548,11 +1548,7 @@ impl EmbeddedSide {
         let files = self.files_mut();
         files
             .store
-            .rollback_to(
-                height,
-                Some(&files.hook),
-                Some(&ergo_node::wallet_boot::ProdRescanGuard),
-            )
+            .rollback_to(height, Some(&files.hook), Some(files.hook.rescan_guard()))
             .unwrap_or_else(|error| panic!("embedded rollback to {height} failed: {error}"));
         assert_eq!(
             files.store.height(),
@@ -1573,10 +1569,11 @@ fn build_hook(store: &Arc<RedbWalletStore>) -> ergo_node::node::wallet_bridge::W
     state
         .hydrate_from_reader(&hydration, ergo_ser::address::NetworkPrefix::Mainnet)
         .expect("hook hydration from the tracked-pubkey table");
-    ergo_node::node::wallet_bridge::WalletStateHook {
-        wallet: Arc::new(parking_lot::RwLock::new(state)),
-        store: Arc::new(store.as_ref().clone()),
-    }
+    ergo_node::node::wallet_bridge::WalletStateHook::new(
+        Arc::new(parking_lot::RwLock::new(state)),
+        Arc::new(store.as_ref().clone()),
+        Arc::new(ergo_wallet_service::engine::RescanCoordinator::new()),
+    )
 }
 
 /// The synthetic chain's genesis box: a P2PK box to the tracked key carrying
@@ -2538,7 +2535,7 @@ fn shadow_reorg_rewinds_and_reapplies_on_both_sides() {
         .expect("the original chain has a committed tip at the reorg height");
 
     // The node reorgs: real `rollback_to` with the real hook and the real
-    // `ProdRescanGuard`, so the wallet tables rewind atomically with the UTXO.
+    // `WalletRescanGuard`, so the wallet tables rewind atomically with the UTXO.
     // The daemon is deliberately *not* told — it still believes it is at the
     // old tip, which is exactly the production situation.
     shadow.embedded.rollback_to(ANCESTOR);
