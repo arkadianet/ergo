@@ -1242,7 +1242,7 @@ async fn run_wallet_writer_inner(
     wallet_session_id: u64,
     service: Option<Arc<ergo_wallet_service::runtime::WalletService>>,
 ) {
-    let engine = WalletEngine::new(WalletEngineParts {
+    let mut engine = WalletEngine::new(WalletEngineParts {
         storage,
         state,
         store,
@@ -1258,13 +1258,14 @@ async fn run_wallet_writer_inner(
             cmd.reject_during_rescan();
             continue;
         }
-        dispatch(&engine, wallet_session_id, cmd).await;
+        dispatch(&mut engine, wallet_session_id, cmd).await;
     }
 }
 
 /// Run one command against the engine and send its reply. Commands run one
-/// at a time, in arrival order: this is the wallet's single writer.
-async fn dispatch(engine: &WalletEngine, wallet_session_id: u64, cmd: WalletCommand) {
+/// at a time, in arrival order: this is the wallet's single writer, and the
+/// only holder of the engine's `&mut`.
+async fn dispatch(engine: &mut WalletEngine, wallet_session_id: u64, cmd: WalletCommand) {
     match cmd {
         WalletCommand::Status { reply } => {
             let _ = reply.send(engine.status());
@@ -1465,7 +1466,7 @@ async fn dispatch(engine: &WalletEngine, wallet_session_id: u64, cmd: WalletComm
 /// waits for it), and the reply is sent once the task is registered — the
 /// RPC never waits for the replay itself.
 async fn rescan(
-    engine: &WalletEngine,
+    engine: &mut WalletEngine,
     wallet_session_id: u64,
     from_height: u32,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,

@@ -489,7 +489,7 @@ impl WalletEngine {
     /// state row that cannot be persisted — is returned here, before any job
     /// exists.
     #[allow(clippy::result_large_err)]
-    pub fn prepare_rescan(&self, from_height: u32) -> Result<RescanJob, WalletAdminError> {
+    pub fn prepare_rescan(&mut self, from_height: u32) -> Result<RescanJob, WalletAdminError> {
         let tip_h = rescan_tip(self.chain.as_ref())?;
         if let Some(service) = self.service.as_deref() {
             return self.prepare_service_rescan(service, from_height.min(tip_h), tip_h);

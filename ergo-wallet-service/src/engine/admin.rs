@@ -22,17 +22,12 @@ use super::WalletEngine;
 /// constructed (audit finding M-4: unlimited online password guessing
 /// against `/wallet/unlock`, each guess still costing a PBKDF2 run).
 ///
-/// Instances live in the [`WalletEngine`] (one per wallet writer, the single
-/// logical owner); the inner state sits behind a mutex only because the
-/// engine is shared by reference across the writer's await points, which
-/// requires `Sync`. Time is injected (`*_at(now)`) so tests can drive the
-/// clock without sleeping.
-pub(crate) struct AttemptLimiter {
-    inner: std::sync::Mutex<AttemptLimiterState>,
-}
-
+/// Instances live in the [`WalletEngine`] and change only through its
+/// `&mut self` commands (`unlock`, `check`), so the borrow checker keeps
+/// every update on the engine's single writer. Time is injected
+/// (`*_at(now)`) so tests can drive the clock without sleeping.
 #[derive(Default)]
-struct AttemptLimiterState {
+pub(crate) struct AttemptLimiter {
     window_start: Option<std::time::Instant>,
     failures: u32,
     locked_until: Option<std::time::Instant>,
@@ -45,46 +40,41 @@ impl AttemptLimiter {
 
     pub(crate) const fn new() -> Self {
         Self {
-            inner: std::sync::Mutex::new(AttemptLimiterState {
-                window_start: None,
-                failures: 0,
-                locked_until: None,
-            }),
+            window_start: None,
+            failures: 0,
+            locked_until: None,
         }
     }
 
     /// `Ok(())` when the operation may proceed; `Err(())` while locked out.
-    pub(crate) fn gate_at(&self, now: std::time::Instant) -> Result<(), ()> {
-        let mut st = self.inner.lock().expect("attempt limiter poisoned");
-        if let Some(until) = st.locked_until {
+    pub(crate) fn gate_at(&mut self, now: std::time::Instant) -> Result<(), ()> {
+        if let Some(until) = self.locked_until {
             if now < until {
                 return Err(());
             }
             // Lockout expired — start fresh.
-            *st = AttemptLimiterState::default();
+            *self = Self::default();
         }
         Ok(())
     }
 
-    pub(crate) fn record_failure_at(&self, now: std::time::Instant) {
-        let mut st = self.inner.lock().expect("attempt limiter poisoned");
-        let in_window = match st.window_start {
+    pub(crate) fn record_failure_at(&mut self, now: std::time::Instant) {
+        let in_window = match self.window_start {
             Some(start) => now.duration_since(start) <= Self::WINDOW,
             None => false,
         };
         if !in_window {
-            st.window_start = Some(now);
-            st.failures = 0;
+            self.window_start = Some(now);
+            self.failures = 0;
         }
-        st.failures += 1;
-        if st.failures >= Self::MAX_FAILURES {
-            st.locked_until = Some(now + Self::LOCKOUT);
+        self.failures += 1;
+        if self.failures >= Self::MAX_FAILURES {
+            self.locked_until = Some(now + Self::LOCKOUT);
         }
     }
 
-    pub(crate) fn record_success(&self) {
-        let mut st = self.inner.lock().expect("attempt limiter poisoned");
-        *st = AttemptLimiterState::default();
+    pub(crate) fn record_success(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -134,7 +124,7 @@ impl WalletEngine {
     }
 
     pub fn init(
-        &self,
+        &mut self,
         pass: String,
         mnemonic_pass: String,
         strength: u8,
@@ -172,7 +162,7 @@ impl WalletEngine {
     }
 
     pub fn restore(
-        &self,
+        &mut self,
         mnemonic: String,
         mnemonic_pass: String,
         pass: String,
@@ -199,7 +189,7 @@ impl WalletEngine {
             })
     }
 
-    pub fn unlock(&self, pass: String) -> Result<(), WalletAdminError> {
+    pub fn unlock(&mut self, pass: String) -> Result<(), WalletAdminError> {
         if self
             .unlock_limiter
             .gate_at(std::time::Instant::now())
@@ -244,7 +234,7 @@ impl WalletEngine {
         result
     }
 
-    pub fn lock(&self) -> Result<(), WalletAdminError> {
+    pub fn lock(&mut self) -> Result<(), WalletAdminError> {
         let mut storage = self.storage.write();
         let mut state = self.state.write();
         storage.lock();
@@ -253,7 +243,11 @@ impl WalletEngine {
         Ok(())
     }
 
-    pub fn check(&self, mnemonic: String, mnemonic_pass: String) -> Result<bool, WalletAdminError> {
+    pub fn check(
+        &mut self,
+        mnemonic: String,
+        mnemonic_pass: String,
+    ) -> Result<bool, WalletAdminError> {
         // `check` is a yes/no oracle over the recovery phrase — the same
         // brute-force surface as unlock, so it shares the failed-attempt
         // budget (a mismatch counts as a failure; a match resets it).
@@ -278,7 +272,7 @@ impl WalletEngine {
         Ok(matched)
     }
 
-    pub fn update_change_address(&self, address: String) -> Result<(), WalletAdminError> {
+    pub fn update_change_address(&mut self, address: String) -> Result<(), WalletAdminError> {
         if self.storage.read().unlocked().is_none() {
             return Err(WalletAdminError::Locked);
         }
@@ -355,7 +349,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn allows_below_budget_and_locks_at_max_failures() {
-        let limiter = AttemptLimiter::new();
+        let mut limiter = AttemptLimiter::new();
         let t0 = Instant::now();
         for i in 0..AttemptLimiter::MAX_FAILURES {
             assert!(
@@ -370,7 +364,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn lockout_expires_and_state_resets() {
-        let limiter = AttemptLimiter::new();
+        let mut limiter = AttemptLimiter::new();
         let t0 = Instant::now();
         for i in 0..AttemptLimiter::MAX_FAILURES {
             limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
@@ -389,7 +383,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn success_resets_the_window() {
-        let limiter = AttemptLimiter::new();
+        let mut limiter = AttemptLimiter::new();
         let t0 = Instant::now();
         for i in 0..(AttemptLimiter::MAX_FAILURES - 1) {
             limiter.record_failure_at(t0 + Duration::from_secs(i.into()));
@@ -404,7 +398,7 @@ mod attempt_limiter_tests {
 
     #[test]
     fn failures_outside_the_window_do_not_accumulate() {
-        let limiter = AttemptLimiter::new();
+        let mut limiter = AttemptLimiter::new();
         let t0 = Instant::now();
         for i in 0..(AttemptLimiter::MAX_FAILURES - 1) {
             limiter.record_failure_at(t0 + Duration::from_secs(i.into()));

@@ -97,7 +97,8 @@ transitional `ergo-state -> ergo-wallet-service` integration
   orchestration core and its construction. Methods return
   `Result<_, WalletAdminError>`; they are synchronous except the three that
   await submission (`payment_send` / `transaction_send`,
-  `native_send_transaction`, `retrieve_rewards`).
+  `native_send_transaction`, `retrieve_rewards`). Commands that change wallet
+  state take `&mut self`; read-only ones take `&self`.
 - `WalletChainAccess`, `SigningView`, `ChainAccessError` — the engine's chain
   seam. Deliberately separate from `ChainClient` (the daemon's HTTP chain
   contract); the embedded node implements it over committed `ergo-state`.
@@ -130,11 +131,16 @@ transitional `ergo-state -> ergo-wallet-service` integration
 
 ## Invariants & contracts
 - **The engine is the wallet.** Every wallet command's logic lives in
-  `WalletEngine`; an embedder only moves commands and replies. Callers must
-  serialize commands (the node's single writer task does): the engine takes
-  its locks at each command's historical granularity and relies on that
-  single-writer ordering for read-then-write sequences (scan registry,
-  derivation head).
+  `WalletEngine`; an embedder only moves commands and replies.
+- **Single writer, compiler-enforced.** Every command that writes the secret
+  storage, the in-memory state or the wallet store, claims a rescan, or
+  updates a failed-attempt budget (`init`, `restore`, `unlock`, `lock`,
+  `check`, `update_change_address`, `derive_key`, `derive_next_key`, the
+  `/scan/*` mutations, `prepare_rescan`) takes `&mut self`, so it never runs
+  alongside another command on the same engine; read-only commands take
+  `&self`. The engine relies on that ordering for read-then-write sequences
+  (scan registry, derivation head) and takes its locks at each command's
+  historical granularity. The node's writer task owns its engine by value.
 - **No process-global wallet state.** Rescan fences, cancellation, the
   shutdown request, and the transition lock live in one `RescanCoordinator`
   per wallet, shared by `Arc` between the engine, the `WalletStateHook` and

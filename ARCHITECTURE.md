@@ -117,11 +117,13 @@ one `ergo_wallet_service::engine::WalletEngine` — which in turn owns the
 embedded `SecretStorage`, the `WalletState` lock, the wallet store and the
 service-level seams — and receives `WalletCommand`s from the API's
 `NodeWalletAdmin` over a channel. It runs them one at a time, calls the
-engine method for each, and replies on the command's oneshot; it only adds
-the rescan fences and control policy, spawns a rescan's `RescanJob` on a
-blocking thread tracked with the wallet session, and implements the seams
-over `ergo-state` (`WalletChainAccess` / `SigningView`), the admission bridge
-(`TxSubmitter`) and the API mempool view (`MempoolOverlay`). One
+engine method for each (state-changing engine methods take `&mut self`, so
+the compiler enforces the single writer), and replies on the command's
+oneshot; it only adds the rescan fences and control policy, spawns a
+rescan's `RescanJob` on a blocking thread tracked with the wallet session,
+and implements the seams over `ergo-state` (`WalletChainAccess` /
+`SigningView`), the admission bridge (`TxSubmitter`) and the API mempool
+view (`MempoolOverlay`). One
 `RescanCoordinator` per wallet session replaces any process-global rescan
 state and is shared by the engine, the admin fence and the chain-apply
 `WalletStateHook`. During block apply, a service-owned `WalletApplyPayload`

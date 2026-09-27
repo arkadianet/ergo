@@ -54,12 +54,12 @@ fn reject_during_scan_rebuild(rescan: &RescanCoordinator) -> Result<(), WalletAd
 }
 
 impl WalletEngine {
-    pub fn register_scan(&self, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
+    pub fn register_scan(&mut self, request: ScanRequestDto) -> Result<u16, WalletAdminError> {
         reject_during_scan_rebuild(&self.rescan)?;
         register_impl_with_store(self.store.as_ref(), request)
     }
 
-    pub fn deregister_scan(&self, scan_id: u16) -> Result<(), WalletAdminError> {
+    pub fn deregister_scan(&mut self, scan_id: u16) -> Result<(), WalletAdminError> {
         reject_during_scan_rebuild(&self.rescan)?;
         deregister_impl_with_store(self.store.as_ref(), scan_id)
     }
@@ -103,7 +103,11 @@ impl WalletEngine {
         )
     }
 
-    pub fn scan_stop_tracking(&self, scan_id: u16, box_id: String) -> Result<(), WalletAdminError> {
+    pub fn scan_stop_tracking(
+        &mut self,
+        scan_id: u16,
+        box_id: String,
+    ) -> Result<(), WalletAdminError> {
         reject_during_scan_rebuild(&self.rescan)?;
         stop_tracking_impl(self.store.as_ref(), scan_id, &box_id)
     }
@@ -112,7 +116,7 @@ impl WalletEngine {
     /// embedding transport owns its wire shape); it runs only after the scan
     /// ids are validated, so an invalid id is reported before a malformed box.
     pub fn scan_add_box<F>(
-        &self,
+        &mut self,
         scan_ids: &[u16],
         decode_box: F,
     ) -> Result<String, WalletAdminError>
@@ -123,7 +127,7 @@ impl WalletEngine {
         add_box_impl_with_store(self.store.as_ref(), scan_ids, decode_box)
     }
 
-    pub fn scan_p2s_rule(&self, p2s: String) -> Result<u16, WalletAdminError> {
+    pub fn scan_p2s_rule(&mut self, p2s: String) -> Result<u16, WalletAdminError> {
         reject_during_scan_rebuild(&self.rescan)?;
         p2s_rule_impl_with_store(self.store.as_ref(), self.config.network, &p2s)
     }

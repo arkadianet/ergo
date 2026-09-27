@@ -6,9 +6,10 @@
 //! (lifecycle, reads, build / sign / send, reward sweep, multi-sig, key
 //! derivation, `/scan/*`, rescan). Every method returns
 //! `Result<_, WalletAdminError>`; methods are synchronous except the ones
-//! that await submission. The embedding process owns transport and task
-//! scheduling: the node's single writer task calls these methods in command
-//! order, and spawns a [`RescanJob`] on a blocking thread.
+//! that await submission, and the ones that change wallet state take
+//! `&mut self`. The embedding process owns transport and task scheduling:
+//! the node's single writer task owns the engine, calls these methods in
+//! command order, and spawns a [`RescanJob`] on a blocking thread.
 //!
 //! The engine depends only on service-level seams, never on a node runtime:
 //!
@@ -109,10 +110,13 @@ pub struct WalletEngineParts {
 
 /// The wallet orchestration core: one method per wallet command.
 ///
-/// The engine is not internally serialized: callers must issue commands one
-/// at a time (the node's single writer task does), exactly as the node's
-/// writer loop ran its handlers. Locks are taken at the granularity each
-/// command always used.
+/// Single writer, enforced by the borrow checker: every command that writes
+/// the secret storage, the in-memory state or the wallet store, claims a
+/// rescan, or updates a failed-attempt budget takes `&mut self`, so it never
+/// runs alongside any other command on the same engine. Read-only commands
+/// take `&self`. The node's writer task owns its engine by value and runs
+/// commands one at a time in arrival order. Locks are taken at the
+/// granularity each command always used.
 pub struct WalletEngine {
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,

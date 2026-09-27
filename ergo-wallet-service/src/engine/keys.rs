@@ -328,7 +328,7 @@ pub(crate) fn get_private_key_impl(
 
 impl WalletEngine {
     pub fn derive_key(
-        &self,
+        &mut self,
         request: DeriveKeyRequest,
     ) -> Result<DeriveKeyResponse, WalletAdminError> {
         super::keys::derive_key_impl(
@@ -341,7 +341,7 @@ impl WalletEngine {
         )
     }
 
-    pub fn derive_next_key(&self) -> Result<DeriveNextKeyResponse, WalletAdminError> {
+    pub fn derive_next_key(&mut self) -> Result<DeriveNextKeyResponse, WalletAdminError> {
         super::keys::derive_next_key_impl(
             &self.storage,
             &self.state,
