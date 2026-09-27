@@ -243,6 +243,12 @@ pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAd
 }
 
 pub(super) fn flush_actions(state: &mut NodeState, mut actions: Vec<Action>) {
+    for id in state.executor.take_failed_transactions() {
+        let evictions = state
+            .mempool
+            .invalidate(ergo_mempool::TxId::from_bytes(id), Instant::now());
+        actions.extend(super::admission::route_mempool_actions(state, evictions));
+    }
     actions.extend(super::block_relay::applied_block_announcements(state, None));
     let now = Instant::now();
     // Fold any first-deliverer observations the coordinator accumulated

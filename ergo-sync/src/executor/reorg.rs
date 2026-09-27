@@ -438,6 +438,7 @@ impl SyncExecutor {
                 Err(e) => {
                     guard.failure();
                     super::block_apply::report_block_process_failure(store, &header_id, &e);
+                    self.record_failed_transaction(&e);
                     self.record_block_apply_error(header_id, next, e.to_string());
                     self.invalidate_or_session_mark(store, coordinator, header_id, next, &e);
                     break;
