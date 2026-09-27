@@ -201,7 +201,6 @@ pub mod test_helpers {
                 checked,
                 None,
                 None,
-                crate::wallet::wallet_apply_generation(),
             )
         }
 
@@ -217,11 +216,9 @@ pub mod test_helpers {
             checked: &[CheckedTransaction],
             wallet_hook: &dyn crate::wallet::WalletApplyHook,
         ) -> Result<(), StateError> {
-            let apply_generation = crate::wallet::wallet_apply_generation();
             let (trees, pubkeys) = wallet_hook.wallet_state_snapshot();
             let owned = crate::store::build_wallet_block_txs_checked(checked, height)?;
             let payload = crate::wallet::WalletApplyPayload {
-                apply_generation,
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,
                 block_txs_owned: owned,
@@ -236,7 +233,6 @@ pub mod test_helpers {
                 checked,
                 None,
                 Some(&payload),
-                apply_generation,
             )
         }
 
