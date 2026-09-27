@@ -2697,6 +2697,60 @@ def _self_test():
     assert _no_tip_gaps(list(enumerate([tipped(0.0, True), tipped(1.0, True)])),
                         'rust_tip') == []
 
+    # ----- round 6: progress-based maturity wait (rm-A-steady-armB-5) -----
+
+    assert _maturity_wait_stalled(599, 0) is False   # under the floor
+    assert _maturity_wait_stalled(601, 0) is True    # over the floor, no blocks yet
+    assert _maturity_wait_stalled(601, 150) is False  # under 5x the mean interval (750)
+    assert _maturity_wait_stalled(749, 150) is False  # 5x the mean interval (750) is now the bar
+    assert _maturity_wait_stalled(751, 150) is True   # over 5x the (larger) mean interval
+
+    class _FakeRun:
+        def __init__(self, deadline):
+            self.deadline = deadline
+
+    def scripted_wait(schedule, matures_at, deadline=1e9, stall_step=3600.0):
+        """`schedule` is `[(elapsed_s, height), ...]`, absolute elapsed
+        seconds, in order. Each `idle()` call advances the fake clock to
+        the schedule's next entry; once the schedule is exhausted, time
+        keeps jumping forward by `stall_step` with the height unchanged —
+        exactly what "the miner produced nothing more" looks like to this
+        function, however coarsely simulated. Balance turns positive the
+        first time height >= `matures_at`."""
+        clock, idx, height = [0.0], [0], [None]
+
+        def read_balance():
+            return 1 if height[0] is not None and height[0] >= matures_at else 0
+
+        def idle():
+            if idx[0] < len(schedule):
+                clock[0], height[0] = schedule[idx[0]]
+                idx[0] += 1
+            else:
+                clock[0] += stall_step
+        return _wait_for_spendable_balance(
+            _FakeRun(deadline), now=lambda: clock[0], read_height=lambda: height[0],
+            read_balance=read_balance, idle=idle)
+
+    # A chain that never stops advancing, just slowly (85s/block, matching
+    # armB-5's own measured pace): reaches height 11 at 935s, well past
+    # the OLD flat 900s budget. Must PASS — nothing here ever stalled.
+    slow_schedule = [(85.0 * h, h) for h in range(1, 12)]
+    balance, ev = scripted_wait(slow_schedule, matures_at=11)
+    assert balance == 1, ev
+    assert ev['stalled'] is None, ev
+    assert ev['wait_seconds'] == 935.0, ev
+    assert ev['height_reached'] == 11, ev
+
+    # A chain that advances a few times and then genuinely stops: must
+    # fail as a STALL (a real absence of progress), not as "no spendable
+    # coin" — the two are different findings and read differently.
+    stalled_schedule = [(85.0 * h, h) for h in range(1, 4)]  # stops at height 3
+    balance, ev = scripted_wait(stalled_schedule, matures_at=11)
+    assert balance == 0, ev
+    assert ev['stalled'] is not None and 'no new ordering block' in ev['stalled'], ev
+    assert ev['height_reached'] == 3, ev
+
     # ----- fix round 1: the REAL sampler, not a copy of its conditional -
 
     def sampler_over(sweeps, interval=0.0):
@@ -4099,6 +4153,85 @@ def resolve_rust_chain(heights, tip_height, tip_header, parent_cache):
     return chain, parent_cache
 
 
+MATURITY_STALL_FLOOR_S = 600.0
+MATURITY_STALL_MULTIPLIER = 5
+
+
+def _maturity_wait_stalled(since_progress, mean_interval):
+    """True once no new ordering block has arrived for longer than
+    `max(600s, 5x the mean block interval observed so far in this wait)`
+    (round 6, rm-A-steady-armB-5). A flat 900s budget failed a run that
+    was still advancing normally, just slower than usual under host load
+    (939s to height 11 at ~85s/block) — the miner had not stalled, the
+    budget was merely too tight for that run's own pace. `mean_interval`
+    of 0 (no block seen yet) reads as the floor alone: pure, so
+    `--self-test` drives it directly."""
+    return since_progress > max(MATURITY_STALL_FLOOR_S,
+                                MATURITY_STALL_MULTIPLIER * mean_interval)
+
+
+def _wait_for_spendable_balance(run, now=None, read_height=None,
+                                read_balance=None, idle=None):
+    """Progress-based wait for a spendable miner reward.
+
+    Keeps waiting exactly as long as the miner's height keeps advancing,
+    however slowly; only gives up as a STALL (no spendable coin ever
+    will appear this way) once `_maturity_wait_stalled` says no new
+    ordering block has arrived in too long, or the scenario's own
+    deadline (`run.deadline`) arrives first — never merely because a
+    fixed number of seconds passed while the chain was still moving.
+
+    `now`/`read_height`/`read_balance`/`idle` default to the real clock,
+    `scala_height`, `/wallet/balances` and `run.idle(1)`; `--self-test`
+    injects a scripted clock and chain instead, so the real decision
+    logic runs with no sleeping and no live nodes.
+
+    Returns `(balance, evidence)`. `evidence['stalled']` is the stall
+    reason, or `None` if a balance appeared or the scenario deadline
+    simply arrived first (still recorded, distinctly, in `evidence`).
+    """
+    now = now or time.monotonic
+    read_height = read_height or (lambda: scala_height(run))
+    read_balance = read_balance or (
+        lambda: (api('scala', '/wallet/balances') or {}).get('balance') or 0)
+    idle = idle or (lambda: run.idle(1))
+    start = now()
+    last_height, last_change, intervals = None, start, []
+    balance = 0
+    while now() < run.deadline:
+        # Height before balance: a balance found positive this same tick
+        # is still credited against the height that produced it, not the
+        # PREVIOUS reading — `height_reached` in the evidence means "the
+        # height the moment it became spendable", not "one behind it".
+        current = now()
+        try:
+            height = read_height()
+        except Unavailable:
+            height = None
+        if height is not None and (last_height is None or height > last_height):
+            if last_height is not None:
+                intervals.append(current - last_change)
+            last_height, last_change = height, current
+        try:
+            balance = read_balance()
+        except Unavailable:
+            balance = 0
+        if balance > 0:
+            break
+        mean_interval = sum(intervals) / len(intervals) if intervals else 0.0
+        if _maturity_wait_stalled(current - last_change, mean_interval):
+            return balance, {
+                'wait_seconds': round(current - start, 1), 'height_reached': last_height,
+                'mean_block_interval_s': round(mean_interval, 1),
+                'stalled': f'no new ordering block for {current - last_change:.0f}s '
+                          f'(threshold {max(MATURITY_STALL_FLOOR_S, MATURITY_STALL_MULTIPLIER * mean_interval):.0f}s)'}
+        idle()
+    return balance, {'wait_seconds': round(now() - start, 1), 'height_reached': last_height,
+                     'mean_block_interval_s': round(
+                         sum(intervals) / len(intervals) if intervals else 0.0, 1),
+                     'stalled': None}
+
+
 def assertion_6_mempool(run, evidence, count):
     """Funded workload: `count` accepted submissions, each located inside
     a Rust input block, each gone from Rust's pool at the first sample
@@ -4106,22 +4239,17 @@ def assertion_6_mempool(run, evidence, count):
     agreement with every Scala-only residue attributed to D1 or F6."""
     result = {'requested': count, 'submitted': [], 'submit_failures': []}
     evidence['6_mempool'] = result
-    # A miner reward matures at ordering block 11, and the recipe's
-    # target is ~55 s per ordering block, so the wait is minutes.
-    deadline = min(run.deadline, time.monotonic() + 900)
-
-    balance = 0
-    while time.monotonic() < deadline:
-        try:
-            balance = (api('scala', '/wallet/balances') or {}).get('balance') or 0
-        except Unavailable:
-            balance = 0
-        if balance > 0:
-            break
-        run.idle(1)
+    # A miner reward matures at ordering block 11. Progress-based, not a
+    # flat budget (rm-A-steady-armB-5): see _wait_for_spendable_balance.
+    balance, wait_evidence = _wait_for_spendable_balance(run)
     result['balance_nano'] = balance
+    result['maturity_wait'] = wait_evidence
     if not balance:
-        run.fail('6_mempool', 'no spendable coin on the Scala wallet within budget')
+        reason = wait_evidence.get('stalled') or (
+            'the scenario deadline arrived first, still at height '
+            f"{wait_evidence.get('height_reached')}")
+        run.fail('6_mempool', f'no spendable coin on the Scala wallet: {reason}',
+                 wait_evidence)
         result['result'] = 'FAIL'
         return
     try:
