@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask};
+use ergo_indexer::{IndexerHandle, IndexerQuery, IndexerTask, IndexerWorker};
 use ergo_mempool::weight;
 use ergo_primitives::digest::blake2b256;
 use ergo_primitives::reader::VlqReader;
@@ -117,7 +117,7 @@ pub(super) struct SyncSetup {
     pub coordinator: SyncCoordinator,
     pub executor: SyncExecutor,
     pub indexer_handle: Option<IndexerHandle>,
-    pub indexer_task_handle: Option<JoinHandle<()>>,
+    pub indexer_task_handle: Option<IndexerWorker>,
     pub indexer_cancel: Arc<AtomicBool>,
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
     pub shadow_task_handle: Option<JoinHandle<()>>,
@@ -357,7 +357,7 @@ pub(super) fn setup(
     // signal it on shutdown regardless of whether a task was actually
     // spawned. `indexer_task_handle` is `Some` only when a task is live.
     let indexer_cancel = Arc::new(AtomicBool::new(false));
-    let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<JoinHandle<()>>) =
+    let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<IndexerWorker>) =
         match IndexerHandle::boot(&config.indexer_config, &config.data_dir) {
             Some(handle) if handle.store().is_some() => {
                 info!(
@@ -369,7 +369,7 @@ pub(super) fn setup(
                 let task = IndexerTask::new(handle.clone(), chain);
                 let cancel_for_task = indexer_cancel.clone();
                 let poll_idle = Duration::from_millis(config.indexer_config.poll_idle_ms);
-                let task_handle = tokio::spawn(task.run(cancel_for_task, poll_idle));
+                let task_handle = task.spawn(cancel_for_task, poll_idle)?;
                 (Some(handle), Some(task_handle))
             }
             Some(handle) => {

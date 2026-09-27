@@ -110,16 +110,37 @@ pub fn apply_block(
     apply_block_with_scratch(store, meta, block, &mut scratch)
 }
 
-/// Scratch-reuse variant of `apply_block`. Identical semantics; the
-/// caller-owned `BlockApplyScratch` is fully cleared at entry, so any
-/// state left by a prior aborted apply is wiped before this call's work
-/// begins.
+/// Scratch-reuse variant of `apply_block`. Identical semantics; scratch is
+/// cleared before touching any tables, including after an aborted batch.
 pub fn apply_block_with_scratch(
     store: &IndexerStore,
     meta: &IndexerMeta,
     block: &IndexerBlock<'_>,
     scratch: &mut BlockApplyScratch,
 ) -> Result<IndexerMeta, IndexerError> {
+    let mut write_txn = store.begin_write()?;
+    write_txn.set_durability(redb::Durability::Eventual);
+    let applied =
+        apply_block_in_transaction(&write_txn, store.rollback_window(), meta, block, scratch)?;
+    write_txn.commit()?;
+    Ok(applied.meta)
+}
+
+pub(crate) struct AppliedBlock {
+    pub meta: IndexerMeta,
+    pub secondary_repair_pending: bool,
+    pub serialized_bytes: u64,
+}
+
+/// Apply one complete block, including its undo and metadata, in the caller's
+/// transaction. Nothing is externally visible until that transaction commits.
+pub(crate) fn apply_block_in_transaction(
+    write_txn: &redb::WriteTransaction,
+    rollback_window: u64,
+    meta: &IndexerMeta,
+    block: &IndexerBlock<'_>,
+    scratch: &mut BlockApplyScratch,
+) -> Result<AppliedBlock, IndexerError> {
     let expected_next = meta.indexed_height + 1;
     if (block.height as u64) != expected_next {
         return Err(IndexerError::HeightMismatch {
@@ -148,18 +169,11 @@ pub fn apply_block_with_scratch(
     // unchanged across the apply / rollback paths.
     let no_token_removals: HashSet<TokenId> = HashSet::new();
 
-    let mut write_txn = store.begin_write()?;
     // Set when any secondary (template/token) sign-flip is skipped on a drift
     // this block; flushed to the sticky repair marker before commit so the task
     // rebuilds the degraded segments before next serving (atomic with apply).
     let mut secondary_skipped = false;
-    // `indexer.redb` holds derived state — every row is reproducible by
-    // replaying blocks from `state.redb`, which itself commits durably.
-    // `Eventual` keeps the per-block redb txn atomic (meta + per-row writes
-    // + undo + prune still all-or-nothing) but defers the fsync, letting
-    // catchup amortize the syscall cost across many commits. Crash window:
-    // OS-pagecache flush cadence; recovery: replay from chain tip.
-    write_txn.set_durability(redb::Durability::Eventual);
+    let mut serialized_bytes = 0_u64;
 
     {
         let mut box_table = write_txn.open_table(INDEXED_BOX)?;
@@ -190,7 +204,7 @@ pub fn apply_block_with_scratch(
                     source: e,
                 })?
                 .as_digest();
-            let tx_size = serialized_tx_size(tx)?;
+            let tx_size = serialized_tx_size(&mut scratch.writer, tx)?;
 
             // Step 1: spend inputs (skip on genesis).
             if block_height > 1 {
@@ -363,6 +377,14 @@ pub fn apply_block_with_scratch(
                         source: e,
                     }
                 })?;
+                // box_id_with leaves the canonical box bytes in the writer.
+                // Capture their length before the indexed-row encoder reuses it.
+                let box_bytes_len = i32::try_from(scratch.writer.len()).map_err(|_| {
+                    IndexerError::LengthExceedsI32 {
+                        context: "serialized_box",
+                        len: scratch.writer.len(),
+                    }
+                })?;
                 let global = next.global_box_index as i64;
                 let indexed = IndexedErgoBox {
                     inclusion_height: block_height,
@@ -393,17 +415,6 @@ pub fn apply_block_with_scratch(
                 // If the same block later spends this box, the
                 // matching `remove_unspent` fires when the input is
                 // processed by a subsequent transaction.
-                let sealed_bytes = ergo_ser::ergo_box::serialize_ergo_box(&indexed.box_data)
-                    .map_err(|e| IndexerError::Serialize {
-                        context: "serialize_ergo_box for storage_rent",
-                        source: e,
-                    })?;
-                let box_bytes_len: i32 = i32::try_from(sealed_bytes.len()).map_err(|_| {
-                    IndexerError::LengthExceedsI32 {
-                        context: "serialized_box",
-                        len: sealed_bytes.len(),
-                    }
-                })?;
                 storage_rent_insert(
                     &mut storage_rent_table,
                     candidate.creation_height,
@@ -550,6 +561,7 @@ pub fn apply_block_with_scratch(
             let num_key = next.global_tx_index.to_be_bytes();
             num_tx_table.insert(num_key.as_slice(), tx_id.as_bytes().as_slice())?;
             next.global_tx_index += 1;
+            serialized_bytes += tx_size as u64;
 
             // Per-touched-address tx-segment append. Iterate by index to
             // avoid holding an immutable borrow on `scratch.tx_touched_order`
@@ -597,28 +609,31 @@ pub fn apply_block_with_scratch(
     next.indexed_height = block_height_u64;
     next.indexed_header_id = Some(block.header_id);
 
-    meta_io::write_meta(&write_txn, &next)?;
+    meta_io::write_meta(write_txn, &next)?;
     // A skipped secondary flip means the template/token index is now degraded;
     // persist the sticky repair marker in the SAME txn so it is durable iff this
     // block commits (and survives reorg meta-restore — see meta.rs).
     if secondary_skipped {
-        meta_io::set_secondary_repair_pending(&write_txn)?;
+        meta_io::set_secondary_repair_pending(write_txn)?;
     }
-    undo_io::write_undo(&write_txn, block_height_u64, &undo)?;
-    undo_io::prune_below_window(&write_txn, block_height_u64, store.rollback_window())?;
+    undo_io::write_undo(write_txn, block_height_u64, &undo)?;
+    undo_io::prune_below_window(write_txn, block_height_u64, rollback_window)?;
 
-    write_txn.commit()?;
-
-    Ok(next)
+    Ok(AppliedBlock {
+        meta: next,
+        secondary_repair_pending: secondary_skipped,
+        serialized_bytes,
+    })
 }
 
-fn serialized_tx_size(tx: &Transaction) -> Result<i32, IndexerError> {
-    let mut w = VlqWriter::new();
-    write_transaction(&mut w, tx).map_err(|e| IndexerError::Serialize {
+fn serialized_tx_size(w: &mut VlqWriter, tx: &Transaction) -> Result<i32, IndexerError> {
+    // Transaction IDs use bytes-to-sign, whereas the stored size includes proofs.
+    w.clear();
+    write_transaction(w, tx).map_err(|e| IndexerError::Serialize {
         context: "tx serialize",
         source: e,
     })?;
-    let len = w.result().len();
+    let len = w.len();
     i32::try_from(len).map_err(|_| IndexerError::LengthExceedsI32 { context: "tx", len })
 }
 
@@ -793,6 +808,41 @@ mod tests {
         }
         .box_id()
         .unwrap()
+    }
+
+    #[test]
+    fn transaction_size_reuses_writer_without_stale_bytes_and_includes_proofs() {
+        let mut writer = VlqWriter::new();
+        // Alternate large and small transactions to catch stale buffer tails.
+        for proof_len in [4096, 4, 8192, 0] {
+            let tx = Transaction {
+                inputs: vec![Input {
+                    box_id: BoxId::from_bytes([0xAA; 32]),
+                    spending_proof: SpendingProof::new(
+                        vec![0xBB; proof_len],
+                        ContextExtension::empty(),
+                    )
+                    .unwrap(),
+                }],
+                data_inputs: vec![],
+                output_candidates: vec![cand_with(1_000_000, tree_true(), 1, vec![])],
+            };
+            let mut expected = VlqWriter::new();
+            write_transaction(&mut expected, &tx).unwrap();
+            transaction_id_with(&mut writer, &tx).unwrap();
+            let unsigned_len = writer.len();
+            assert_eq!(
+                serialized_tx_size(&mut writer, &tx).unwrap() as usize,
+                expected.len()
+            );
+            assert_eq!(writer.as_slice(), expected.as_slice());
+            if proof_len > 0 {
+                assert!(
+                    writer.len() > unsigned_len,
+                    "size must include spending proofs"
+                );
+            }
+        }
     }
 
     /// If `scratch.input_tokens` bleeds from tx-0 to tx-1 of the same

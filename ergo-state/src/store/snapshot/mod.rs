@@ -12,12 +12,13 @@
 //! for its lifetime and sources everything from it, giving a frozen,
 //! MVCC-consistent view immune to commits that land after it opened.
 //!
-//! Consensus parity: [`CommittedSnapshot::candidate_dry_run`] hydrates a
-//! throwaway `BatchAVLProver` from this transaction's `AVL_NODES` (no
-//! copy-on-write, no persistent tree — the spec forbids both) and then
-//! runs the exact same `apply_change_set_to_prover` sequence the on-loop
-//! [`StateStore::candidate_dry_run`] uses, so for the same parent and
-//! change-set the two produce byte-identical results.
+//! Consensus parity: [`CommittedSnapshot::candidate_dry_run`] expands only
+//! authenticated operation paths from this transaction's `AVL_NODES`, runs
+//! the same canonical prover operation sequence as the on-loop builder, and
+//! self-verifies the resulting proof. No node graph survives a build. Full
+//! hydration remains available as an oracle and for the opt-in base cache.
+
+mod lazy;
 
 use std::sync::Arc;
 
@@ -477,19 +478,14 @@ impl CommittedSnapshot {
     /// return `(new_state_root, raw_ad_proof_bytes, snapshot_tip_id)` —
     /// the off-loop twin of [`StateStore::candidate_dry_run`]. Byte-for-
     /// byte identical to the on-loop result for the same parent + txs.
+    /// Loads authenticated AVL paths on demand; never retains a full-tree base.
     pub fn candidate_dry_run(
         &self,
         checked: &[CheckedTransaction],
     ) -> Result<(ADDigest, Vec<u8>, [u8; 32]), StateError> {
         let (to_remove, to_insert) = StateStore::build_utxo_changes_checked(checked)?;
         let to_lookup = StateStore::build_data_input_lookups_checked(checked);
-        let mut prover = self.hydrate_prover()?;
-        let (new_root, proof) = super::dry_run::apply_change_set_to_prover(
-            &mut prover,
-            &to_lookup,
-            &to_remove,
-            &to_insert,
-        )?;
+        let (new_root, proof, nodes_read) = lazy::prove(self, &to_lookup, &to_remove, &to_insert)?;
         // Pre-broadcast self-check (see self_check_candidate_proof).
         super::dry_run::self_check_candidate_proof(
             &self.state_root(),
@@ -499,6 +495,7 @@ impl CommittedSnapshot {
             &proof,
             &new_root,
         )?;
+        tracing::debug!(nodes_read, "candidate proof loaded committed AVL paths");
         Ok((new_root, proof, self.chain_state.best_full_block_id))
     }
 

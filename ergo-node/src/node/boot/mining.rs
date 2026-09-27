@@ -145,21 +145,10 @@ pub(super) fn spawn_engine(
     // graph is an operator-facing deployment change). Captured by the
     // worker thread's `move` closure below.
     let use_base_cache = config.mining_config.candidate_base_cache;
-    // Discoverability nudge: this branch only runs with mining enabled
-    // (which requires `state_type = "utxo"`). With the cache off, every
-    // candidate build re-hydrates the full UTXO AVL tree — seconds when the
-    // pages are warm, minutes under memory pressure — and a same-tip rebuild
-    // on each mempool change re-pays it, which starves an external miner
-    // (`GET /mining/candidate` 503s) once a build exceeds the block
-    // interval. Left opt-in deliberately (the resident graph is multi-GB),
-    // but surfaced loudly so the operator knows the lever exists.
     if !use_base_cache {
-        tracing::warn!(
-            "mining: [mining] candidate_base_cache is off — every candidate build \
-             re-hydrates the full UTXO AVL tree (seconds warm, minutes under memory \
-             pressure), and every same-tip rebuild (each mempool change) re-pays it. \
-             Set `[mining] candidate_base_cache = true` to keep the tree resident \
-             (multi-GB RAM) so rebuilds reuse it and are near-instant."
+        tracing::info!(
+            "mining: candidate proofs use authenticated on-demand AVL reads; \
+             no full-tree base is retained"
         );
     }
     let (intent_tx, intent_rx) =
