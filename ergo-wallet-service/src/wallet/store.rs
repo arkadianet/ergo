@@ -825,6 +825,25 @@ impl WalletWrite for RedbWalletWrite<'_> {
         pubkey: [u8; 33],
         meta: &TrackedPubkeyMeta,
     ) -> Result<(), WalletStoreError> {
+        if read_wallet_cursor(self.txn())?.is_none()
+            && self
+                .txn()
+                .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)?
+                .is_empty()?
+        {
+            let tip = {
+                let table = self
+                    .txn()
+                    .open_table(crate::wallet::tables::CHAIN_STATE_META)?;
+                let row = table.get("chain_state")?;
+                row.map(|row| crate::wallet::reader::decode_committed_tip(row.value()))
+                    .transpose()
+                    .map_err(|error| WalletStoreError::Decode(error.to_string()))?
+            };
+            let height = tip.as_ref().map_or(0, |tip| tip.0);
+            let id = tip.as_ref().filter(|_| height > 0).map(|tip| &tip.1);
+            set_scan_cursor(self.txn(), height, id)?;
+        }
         let meta_bytes = bincode::serialize(meta).map_err(|error| {
             WalletStoreError::Decode(format!("tracked pubkey metadata encode: {error}"))
         })?;
@@ -1025,46 +1044,19 @@ impl WalletWrite for RedbWalletWrite<'_> {
         }
         let height = start_height.saturating_sub(1);
         let header_id = if height == 0 {
-            if let Some(cursor) = read_wallet_cursor(self.txn())? {
-                if cursor.height != 0 || cursor.header_id.is_some() {
-                    return Err(WalletStoreError::Decode(
-                        "rescan boundary cursor 0 is not the genesis sentinel".to_string(),
-                    ));
-                }
-            }
             None
         } else {
-            let cursor = read_wallet_cursor(self.txn())?.ok_or_else(|| {
-                WalletStoreError::Decode(format!("rescan boundary cursor {height} is missing"))
-            })?;
-            if cursor.height != height {
-                return Err(WalletStoreError::Decode(format!(
-                    "rescan boundary cursor height {} does not match {height}",
-                    cursor.height
-                )));
-            }
-            let cursor_id = cursor.header_id.ok_or_else(|| {
-                WalletStoreError::Decode(format!(
-                    "rescan boundary cursor {height} has no header identity"
-                ))
-            })?;
-            let table = self.txn().open_table(crate::wallet::tables::CHAIN_INDEX)?;
-            let bytes = table.get(height as u64)?.ok_or_else(|| {
+            let indexed_id = read_chain_index_header(self.txn(), height)?.ok_or_else(|| {
                 WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
             })?;
-            if bytes.value().len() != 32 {
-                return Err(WalletStoreError::Decode(format!(
-                    "chain index row at {height} is not 32 bytes"
-                )));
+            if let Some(cursor) = read_wallet_cursor(self.txn())? {
+                if cursor.height == height && cursor.header_id != Some(indexed_id) {
+                    return Err(WalletStoreError::Decode(format!(
+                        "rescan boundary cursor identity changed at {height}"
+                    )));
+                }
             }
-            let mut indexed_id = [0; 32];
-            indexed_id.copy_from_slice(bytes.value());
-            if indexed_id != cursor_id {
-                return Err(WalletStoreError::Decode(format!(
-                    "rescan boundary cursor identity changed at {height}"
-                )));
-            }
-            Some(cursor_id)
+            Some(indexed_id)
         };
         set_scan_cursor(self.txn(), height, header_id.as_ref())?;
         Ok(())
@@ -1134,11 +1126,6 @@ impl WalletWrite for RedbWalletWrite<'_> {
         header_id: &[u8; 32],
         payload: &WalletApplyPayload,
     ) -> Result<(), WalletStoreError> {
-        if payload.apply_generation != crate::wallet::wallet_apply_generation()
-            || crate::wallet::wallet_apply_fenced()
-        {
-            return Ok(());
-        }
         let bound = owned_to_block_txs(&payload.block_txs_owned);
         let txs = bound.as_block_txs();
         let apply_wallet = if payload.has_wallet_tracking() {
@@ -1147,7 +1134,6 @@ impl WalletWrite for RedbWalletWrite<'_> {
                 WalletCursorContinuity::Gap if payload.allow_non_contiguous_wallet => false,
                 WalletCursorContinuity::Gap => {
                     self.set_scan_invalidated(true)?;
-                    crate::wallet::fence_wallet_apply();
                     if payload.has_registered_scans {
                         apply_block_to_scans_rescan(
                             self.txn(),
@@ -1161,7 +1147,6 @@ impl WalletWrite for RedbWalletWrite<'_> {
                 }
                 WalletCursorContinuity::HeaderMismatch => {
                     self.set_scan_invalidated(true)?;
-                    crate::wallet::fence_wallet_apply();
                     return Ok(());
                 }
             }
@@ -1250,7 +1235,6 @@ mod tests {
             }],
         }];
         let payload = WalletApplyPayload {
-            apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: BTreeSet::from([vec![3]]),
             cached_pubkeys: BTreeMap::new(),
             block_txs_owned: txs.clone(),
@@ -1262,49 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_generation_skips_wallet_apply() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        let (mut payload, _) = payload();
-        payload.apply_generation = payload.apply_generation.wrapping_sub(1);
-        let mut write = store.begin_write().unwrap();
-        write.apply_block(1, &[4; 32], &payload).unwrap();
-        write.commit().unwrap();
-        let read = store.read().unwrap();
-        assert!(read.scan_cursor().unwrap().is_none());
-        assert!(read.all_boxes().unwrap().is_empty());
-    }
-
-    #[test]
-    fn fenced_generation_skips_wallet_apply() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let store = RedbWalletStore::new(Arc::new(
-            Database::create(dir.path().join("state.redb")).unwrap(),
-        ));
-        crate::wallet::fence_wallet_apply();
-        let (payload, _) = payload();
-        let mut write = store.begin_write().unwrap();
-        write.apply_block(1, &[4; 32], &payload).unwrap();
-        write.commit().unwrap();
-        crate::wallet::unfence_wallet_apply();
-        let read = store.read().unwrap();
-        assert!(read.scan_cursor().unwrap().is_none());
-        assert!(read.all_boxes().unwrap().is_empty());
-    }
-
-    #[test]
     fn redb_store_applies_and_rolls_back_wallet_payload() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let header_id = [4; 32];
@@ -1336,9 +1278,6 @@ mod tests {
 
     #[test]
     fn duplicate_wallet_payload_does_not_advance_cursor() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let header_id = [4; 32];
@@ -1383,9 +1322,6 @@ mod tests {
 
     #[test]
     fn partial_rescan_gap_keeps_scan_rows() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let header_id = [4; 32];
@@ -1415,9 +1351,6 @@ mod tests {
 
     #[test]
     fn ahead_wallet_payload_does_not_rewind_cursor() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         seed_chain_index(db.as_ref(), &[(3, [6; 32])]);
@@ -1437,9 +1370,6 @@ mod tests {
 
     #[test]
     fn non_contiguous_wallet_payload_commits_invalidation_and_scan_rows() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let header_id = [4; 32];
@@ -1464,14 +1394,10 @@ mod tests {
         assert!(read.scan_invalidated().unwrap());
         assert_eq!(read.scan_cursor().unwrap().unwrap().height, 1);
         assert_eq!(read.scan_boxes(11).unwrap().len(), 1);
-        crate::wallet::unfence_wallet_apply();
     }
 
     #[test]
     fn header_mismatch_does_not_apply_wallet_payload() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         seed_chain_index(db.as_ref(), &[(1, [9; 32])]);
@@ -1484,14 +1410,10 @@ mod tests {
         assert!(read.scan_invalidated().unwrap());
         assert!(read.scan_cursor().unwrap().is_none());
         assert!(read.all_boxes().unwrap().is_empty());
-        crate::wallet::unfence_wallet_apply();
     }
 
     #[test]
     fn scan_only_payload_is_not_gated_by_wallet_cursor() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let store = RedbWalletStore::new(Arc::new(
             Database::create(dir.path().join("state.redb")).unwrap(),
@@ -1517,9 +1439,6 @@ mod tests {
 
     #[test]
     fn rollback_block_with_invalidate_sets_scan_invalidated() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let header_id = [4; 32];

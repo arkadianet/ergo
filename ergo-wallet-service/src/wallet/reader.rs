@@ -76,6 +76,10 @@ pub(crate) fn committed_tip_in(
         Some(value) => value.value().to_vec(),
         None => return Ok(None),
     };
+    decode_committed_tip(&bytes).map(Some)
+}
+
+pub(crate) fn decode_committed_tip(bytes: &[u8]) -> Result<(u32, [u8; 32]), WalletStoreError> {
     if bytes.len() < 40 + 32 + 4 {
         return Err(WalletStoreError::decode(
             "chain_state row is shorter than the required full-block fields",
@@ -96,7 +100,7 @@ pub(crate) fn committed_tip_in(
     let mut id = [0u8; 32];
     id.copy_from_slice(&bytes[full_id_start..height_start]);
     let height = u32::from_be_bytes(bytes[height_start..height_start + 4].try_into().unwrap());
-    Ok(Some((height, id)))
+    Ok((height, id))
 }
 
 impl<'tx> WalletReader<'tx> {
