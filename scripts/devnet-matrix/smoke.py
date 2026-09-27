@@ -1544,15 +1544,42 @@ def _coverage_violations(kept, lags, what):
     return out
 
 
-# The Scala miner's own log line for an input block it mined
-# (`CandidateGenerator`: "Input-block <id> mined @ height <h>!").
-MINED_INPUT_BLOCK = re.compile(r'Input-block ([0-9a-f]{64}) mined')
+# The Scala miner's own log line for an input block it mined. Two
+# formats across builds, same event: the base build's `CandidateGenerator`
+# "Input-block <id> mined @ height <h>!", and the soak build's (feb78d675,
+# "retained-work") "New input block <id> w. nonce <n>" — that commit
+# dropped the first line and renamed the event. The second alternative
+# requires "New INPUT block", never "New ORDERING block" (the miner logs
+# that too, at the same call site, one line apart).
+MINED_INPUT_BLOCK = re.compile(
+    r'Input-block ([0-9a-f]{64}) mined|New input block ([0-9a-f]{64}) w\. nonce')
 
 
 def mined_input_blocks(lines):
     """Every input block a Scala miner's log says it mined. Pure."""
-    return {match.group(1) for match in map(MINED_INPUT_BLOCK.search, lines)
-            if match}
+    out = set()
+    for line in lines:
+        match = MINED_INPUT_BLOCK.search(line)
+        if match:
+            out.add(match.group(1) or match.group(2))
+    return out
+
+
+def mined_log_plausible(mined, series):
+    """False when the miner log parsed to zero mined blocks while the
+    series shows input blocks moving on either chain — a silent
+    `mined_input_blocks` miss (a log-format change outrunning the
+    regex again, as it did for the soak build until this fix) rather
+    than a miner that genuinely mined nothing. Pure.
+
+    Callers must report this loudly, not fold it into a quiet empty
+    set: everything downstream that leans on `mined` (the lead-by-log
+    allowance, the settle-read's mined-log fallback) silently stops
+    granting any allowance it should when this is False.
+    """
+    if mined:
+        return True
+    return not any(s.get('scala_chain') or s.get('rust_chain') for s in series)
 
 
 def rust_lead_mined(scala_chain, rust_chain, mined):
@@ -1676,20 +1703,27 @@ def evaluate_tip_consistency(samples, mined=None):
 
 
 def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
-                               settle_absent=None, settle_unreachable=None):
+                               settle_absent=None, settle_unreachable=None,
+                               settle_inconclusive=None):
     """Assertion 3, as amended by the controller after round 1.
 
-    `settle_grace_s`, `settle_absent`, `settle_unreachable` (round 5,
-    rm-A-steady-armB-2): an ahead-by-one Rust tip that the IN-SERIES read
-    never confirmed is not automatically a violation any more. A live
-    settle read (`settle_unconfirmed_chain_tips`, run after the window
-    closes and before teardown) gives the miner a real chance to catch
-    up; its outcome per `(ordering, tip)` overrides everything below:
-    `settle_absent` (checked live, still absent) stands as a violation
-    regardless of the grace window, and `settle_unreachable` (the miner
-    stopped answering mid-check) is never a violation. Absent a settle
-    read at all — every already-recorded run, and any candidate the live
-    read did not reach — a tip still unconfirmed when the series has
+    `settle_grace_s`, `settle_absent`, `settle_unreachable`,
+    `settle_inconclusive` (round 5, rm-A-steady-armB-2; round 6,
+    rm-C-steady-soak-1/rm-C-fork-soak-1): an ahead-by-one Rust tip that
+    the IN-SERIES read never confirmed is not automatically a violation
+    any more. A live settle read (`settle_unconfirmed_chain_tips`, run
+    after the window closes and before teardown) gives the miner a real
+    chance to catch up; its outcome per `(ordering, tip)` overrides
+    everything below: `settle_absent` (checked live or via committed
+    data, definitively absent either way) stands as a violation
+    regardless of the grace window; `settle_unreachable` (the miner
+    stopped answering mid-check) and `settle_inconclusive` (the ordering
+    moved on before a live poll could check it, and the committed chain
+    after it does not reach `ordering`'s own child within the walk
+    bound) are never violations — both are unknowable, not wrong, just
+    for different reasons. Absent a settle read at all — every
+    already-recorded run, and any candidate the live read did not reach
+    — a tip still unconfirmed when the series has
     fewer than `settle_grace_s` seconds left to run is unknowable, not
     wrong: the series simply ended before the miner's read window (the
     same window a confirmed allowance elsewhere in THIS series measures)
@@ -1741,6 +1775,7 @@ def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
     last_at = kept[-1][1].get('at') if kept else None
     settle_absent = settle_absent or set()
     settle_unreachable = settle_unreachable or set()
+    settle_inconclusive = settle_inconclusive or set()
 
     compared, violation_count, violations, depths = 0, 0, [], []
     allowed_by_one, allowed_samples = 0, []
@@ -1785,6 +1820,16 @@ def evaluate_chain_consistency(samples, mined=None, settle_grace_s=None,
                     not_measured_samples.append({
                         'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
                         'why': 'settle read: the miner stopped answering'})
+                continue
+            if key in settle_inconclusive:
+                not_measured_count += 1
+                if len(not_measured_samples) < 10:
+                    not_measured_samples.append({
+                        'sample': i, 'ordering': s['ordering'], 'rust_only_tip': tip,
+                        'why': ('settle read: the ordering moved on before a live '
+                                "poll could check it, and the committed chain "
+                                "after it never reached ordering's own child "
+                                "within the walk bound")})
                 continue
             if key not in settle_absent and settle_grace_s is not None \
                     and last_at is not None and s.get('at') is not None \
@@ -2145,6 +2190,29 @@ def _self_test():
         'INFO org.ergoplatform.mining.CandidateGenerator - Input-block '
         + 'ab' * 32 + ' mined @ height 12!',
         'INFO x - Processing valid sub-block ' + 'cd' * 32]) == {'ab' * 32}
+    # The soak build (feb78d675) logs the same event under a different
+    # phrase, and logs an unrelated ORDERING-block line one call apart
+    # that must NOT match.
+    assert mined_input_blocks([
+        'INFO org.ergoplatform.mining.CandidateGenerator - New ordering '
+        'block ' + 'ff' * 32 + ' w. nonce 3148',
+        'INFO org.ergoplatform.mining.CandidateGenerator - New input '
+        'block ' + 'cd' * 32 + ' w. nonce 294']) == {'cd' * 32}
+    # Both formats in the same log (a run straddling a build change, or
+    # just belt-and-braces): both are collected.
+    assert mined_input_blocks([
+        'INFO x - Input-block ' + 'ab' * 32 + ' mined @ height 12!',
+        'INFO x - New input block ' + 'cd' * 32 + ' w. nonce 7']) == {
+        'ab' * 32, 'cd' * 32}
+    # The guard: zero mined blocks is plausible only when the series
+    # never shows an input block either — never when it did (the
+    # rm-C-steady-soak-1 / rm-C-fork-soak-1 bug, where the soak-format
+    # log yielded an empty `mined` while both chains carried blocks).
+    _plausible_series = [{'scala_chain': ['x'], 'rust_chain': ['x']}]
+    assert mined_log_plausible(set(), []) is True
+    assert mined_log_plausible(set(), _plausible_series) is False
+    assert mined_log_plausible({'ab' * 32}, _plausible_series) is True
+    assert mined_log_plausible(set(), [{'scala_chain': [], 'rust_chain': []}]) is True
     # Rust's tip is read after its chain: at the series' last sample the
     # tip can be a block its own chain read did not list yet, and no
     # later sample lists it. The miner's log confirms it; nothing else.
@@ -2557,6 +2625,15 @@ def _self_test():
         far_from_tail, settle_grace_s=22.0, settle_unreachable={('O', 'b2')})
     assert settled_unreachable['prefix_violation_count'] == 0, settled_unreachable
     assert settled_unreachable['not_measured_tail_count'] == 1, settled_unreachable
+
+    # A settle read whose ordering moved on before a live poll could
+    # check it, and whose committed-data walk never reached ordering's
+    # own child (round 6, rm-C-steady-soak-1 / rm-C-fork-soak-1): also
+    # unknowable, also never a violation, even far from the tail.
+    settled_inconclusive = evaluate_chain_consistency(
+        far_from_tail, settle_grace_s=22.0, settle_inconclusive={('O', 'b2')})
+    assert settled_inconclusive['prefix_violation_count'] == 0, settled_inconclusive
+    assert settled_inconclusive['not_measured_tail_count'] == 1, settled_inconclusive
 
     # No `settle_grace_s` at all (the pre-round-5 call shape, and every
     # caller that has not been updated) is unchanged: still a hard
@@ -3292,8 +3369,139 @@ def _self_test():
                for m, _ in rebuilt_twice['failures']), rebuilt_twice
 
     _self_test_pending_and_restart()
+    _self_test_settle_via_committed_extension()
 
     print('self-test OK: evaluators behave as the round-5 definitions require')
+
+
+def _self_test_settle_via_committed_extension():
+    """`_confirm_via_committed_tip`, `_walk_ordering_chain_back`, and
+    `settle_unconfirmed_chain_tips`'s use of them when the ordering moves
+    on before a live poll can check a candidate (round 6,
+    rm-C-steady-soak-1 / rm-C-fork-soak-1: the prior code recorded
+    `absent` unconditionally on a single early poll, which is what made
+    a harness artifact read as a chain divergence)."""
+    # ----- the pure classifier -----
+    ordering, tip = 'O', 'T'
+    child_confirms = [{'id': 'C', 'parent': ordering, 'named_input_tip': tip}]
+    assert _confirm_via_committed_tip(child_confirms, ordering, tip) == 'confirmed'
+    child_denies = [{'id': 'C', 'parent': ordering, 'named_input_tip': 'other'}]
+    assert _confirm_via_committed_tip(child_denies, ordering, tip) == 'not_named'
+    child_names_nothing = [{'id': 'C', 'parent': ordering, 'named_input_tip': None}]
+    assert _confirm_via_committed_tip(child_names_nothing, ordering, tip) == 'not_named'
+    still_climbing = [{'id': 'D', 'parent': 'E', 'named_input_tip': 'x'},
+                      {'id': 'E', 'parent': 'F', 'named_input_tip': 'y'}]
+    assert _confirm_via_committed_tip(still_climbing, ordering, tip) == 'inconclusive'
+    assert _confirm_via_committed_tip([], ordering, tip) == 'inconclusive'
+    # `ordering`'s child is found by PARENT, not by walk position: a
+    # walk that passes unrelated blocks first still finds it.
+    with_prefix = [{'id': 'D', 'parent': 'E', 'named_input_tip': 'x'},
+                   {'id': 'C', 'parent': ordering, 'named_input_tip': tip}]
+    assert _confirm_via_committed_tip(with_prefix, ordering, tip) == 'confirmed'
+
+    # ----- the walk against a fake transport -----
+    blocks = {
+        'C': {'header': {'parentId': ordering},
+              'extension': {'fields': [['0302', tip]]}},
+        'D': {'header': {'parentId': 'C'}, 'extension': {'fields': []}},
+        'Z': {'header': {}, 'extension': {'fields': []}},
+    }
+
+    def fake_api(node, path, data=None, timeout=15):
+        assert node == 'scala'
+        return blocks.get(path.rsplit('/', 1)[-1], {})
+
+    real_api, globals()['api'] = api, fake_api
+    try:
+        walk = _walk_ordering_chain_back('scala', 'D', ordering)
+        assert [b['id'] for b in walk] == ['D', 'C'], walk
+        assert _confirm_via_committed_tip(walk, ordering, tip) == 'confirmed', walk
+        # Starting AT the child: a one-block walk still finds it.
+        walk_from_child = _walk_ordering_chain_back('scala', 'C', ordering)
+        assert [b['id'] for b in walk_from_child] == ['C'], walk_from_child
+        # A block with no parent stops the walk instead of looping.
+        walk_orphan = _walk_ordering_chain_back('scala', 'Z', ordering)
+        assert [b['id'] for b in walk_orphan] == ['Z'], walk_orphan
+
+        def flaky_api(node, path, data=None, timeout=15):
+            raise Unavailable('scala down mid-walk')
+
+        globals()['api'] = flaky_api
+        # An unreadable block stops the walk (transport failure), never
+        # an infinite retry.
+        assert _walk_ordering_chain_back('scala', 'D', ordering) == []
+    finally:
+        globals()['api'] = real_api
+
+    # ----- end to end through settle_unconfirmed_chain_tips -----
+    def make_run(series):
+        r = Run.__new__(Run)
+        Run.__init__(r, deadline=time.monotonic() + 30)
+        r._series_file = None
+        r.series = series
+        r.propagation_lags = []
+        return r
+
+    # rust_chain newest-first, as the sampler stores it; the candidate's
+    # tip is 'T' under ordering 'O', which Scala's live chain never
+    # listed before the window closed.
+    unsettled_series = [{'ordering': ordering, 'scala_chain': [],
+                         'rust_chain': [tip], 'at': 0.0}]
+
+    def api_moved_on_confirms(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'NEXT', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'NEXT':
+            return {'header': {'parentId': ordering},
+                    'extension': {'fields': [['0302', tip]]}}
+        return {}
+
+    real_api, globals()['api'] = api, api_moved_on_confirms
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 1, result
+        assert result['absent'] == set(), result
+        assert result['moved_on_inconclusive'] == set(), result
+        assert any(s.get('settle_read_via') == 'committed_extension'
+                  for s in r.series), r.series
+    finally:
+        globals()['api'] = real_api
+
+    def api_moved_on_denies(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'NEXT', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'NEXT':
+            return {'header': {'parentId': ordering},
+                    'extension': {'fields': [['0302', 'someone-else']]}}
+        return {}
+
+    real_api, globals()['api'] = api, api_moved_on_denies
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 0, result
+        assert result['absent'] == {(ordering, tip)}, result
+        assert result['moved_on_inconclusive'] == set(), result
+    finally:
+        globals()['api'] = real_api
+
+    def api_moved_on_still_climbing(node, path, data=None, timeout=15):
+        if path == '/blocks/bestInputChain':
+            return {'bestOrdering': 'FAR', 'bestInputBlocks': []}
+        if path.rsplit('/', 1)[-1] == 'FAR':
+            return {'header': {'parentId': 'UNRELATED'}, 'extension': {'fields': []}}
+        return {}  # 'UNRELATED': parentId None, so the walk stops there
+
+    real_api, globals()['api'] = api, api_moved_on_still_climbing
+    try:
+        r = make_run(list(unsettled_series))
+        result = settle_unconfirmed_chain_tips(r, set())
+        assert result['confirmed'] == 0, result
+        assert result['absent'] == set(), result
+        assert result['moved_on_inconclusive'] == {(ordering, tip)}, result
+    finally:
+        globals()['api'] = real_api
 
 
 def _self_test_pending_and_restart():
@@ -3562,6 +3770,69 @@ def check_sampler(run, evidence):
         run.fail('sampler', reason)
 
 
+# The extension key under which an ordering block names the input block
+# its PARENT's committed input chain ended at (weak-blocks
+# `Extension.PrevInputBlockIdKey`, `InputBlocksDataPrefix` 0x03 then
+# 0x02 — see `ordering_blocks_between` in scenarios/common.py, which
+# reads the same key for a different purpose). Duplicated here rather
+# than imported: smoke.py and scenarios/common.py are independent
+# entry points with no shared import today.
+NAMED_INPUT_TIP_KEY = '0302'
+
+
+def _walk_ordering_chain_back(node, start, ordering, max_depth=64):
+    """Ordering blocks read back from `start` towards `ordering`,
+    nearest-to-`start` first, stopping as soon as a block naming
+    `ordering` as its own parent is found (that block is `ordering`'s
+    child — the one whose extension names what was committed while
+    `ordering` was still the tip), at `max_depth` blocks, at a block
+    with no parent, or when a block cannot be read. Each entry:
+    `{'id', 'parent', 'named_input_tip'}`. Impure (real API calls);
+    `_confirm_via_committed_tip` below is the pure part this feeds.
+    """
+    chain = []
+    block_id = start
+    for _ in range(max_depth):
+        try:
+            block = api(node, f'/blocks/{block_id}') or {}
+        except Unavailable:
+            break
+        header = block.get('header') or {}
+        parent = header.get('parentId')
+        fields = {k: v for k, v in
+                  (block.get('extension') or {}).get('fields') or []}
+        chain.append({'id': block_id, 'parent': parent,
+                      'named_input_tip': fields.get(NAMED_INPUT_TIP_KEY)})
+        if parent == ordering or not parent:
+            break
+        block_id = parent
+    return chain
+
+
+def _confirm_via_committed_tip(chain_walk, ordering, tip):
+    """Decide a settle-read confirmation from a walk of ordering blocks
+    back from the new best ordering towards `ordering`
+    (`_walk_ordering_chain_back`). Pure.
+
+    The block mined immediately after `ordering` — its child — names,
+    in its own extension, the input tip that was actually committed
+    while `ordering` was still the tip. If that child is in the walk:
+    its named tip settles the question outright, both ways — `tip`
+    confirms it, anything else (including "names nothing") answers
+    NOT confirmed, just as definitively. If the walk never reaches a
+    child of `ordering` at all (still climbing past several ordering
+    blocks within `max_depth`, or `ordering` was never this chain's
+    ancestor — a different fork), the walk is inconclusive: neither
+    answer is available, which is not the same as "absent".
+
+    Returns 'confirmed', 'not_named', or 'inconclusive'.
+    """
+    child = next((b for b in chain_walk if b.get('parent') == ordering), None)
+    if child is None:
+        return 'inconclusive'
+    return 'confirmed' if child.get('named_input_tip') == tip else 'not_named'
+
+
 def settle_unconfirmed_chain_tips(run, mined):
     """Give every still-unconfirmed 'Scala ahead-by-one' candidate a real
     chance to catch up, live, instead of judging it from wherever the
@@ -3577,14 +3848,25 @@ def settle_unconfirmed_chain_tips(run, mined):
     then picks it up with no further change. Still absent while the
     miner keeps answering is `absent` (a real violation, not excused by
     the grace window). The miner going unreachable mid-check is
-    `unreachable` (unknowable, never a violation). Ordering moving past
-    the candidate's own id closes its window the same as a timeout: nothing
-    then distinguishes "would have confirmed" from "would not have".
+    `unreachable` (unknowable, never a violation).
+
+    Ordering moving past the candidate's own id closes the LIVE window,
+    but not the question: `ordering`'s own committed data survives it.
+    `_walk_ordering_chain_back` + `_confirm_via_committed_tip` check the
+    committed extension of the block mined right after `ordering`
+    (rm-C-steady-soak-1, rm-C-fork-soak-1 — the prior version recorded
+    `absent` here unconditionally, on the strength of a single poll,
+    which is what made a harness artifact read as a chain divergence).
+    A confirmation from committed data is recorded exactly like a live
+    one; a definite "not named" is `absent`, same as before; a walk that
+    cannot reach `ordering`'s child at all is its own outcome,
+    `moved_on_inconclusive` — not `absent`, because nothing was actually
+    checked.
     """
     trial = evaluate_chain_consistency(run.series, mined)
     candidates = [v for v in trial['prefix_violations_sample'] if v.get('ahead_by_one')]
     result = {'checked': len(candidates), 'confirmed': 0, 'absent': set(),
-             'unreachable': set()}
+             'unreachable': set(), 'moved_on_inconclusive': set()}
     if not candidates:
         return result
     grace = max(30.0, max(run.propagation_lags, default=0.0))
@@ -3616,7 +3898,22 @@ def settle_unconfirmed_chain_tips(run, mined):
                     outcome = 'confirmed'
                     break
             elif chain_now.get('bestOrdering'):
-                break  # ordering moved on; the window is closed either way
+                walk = _walk_ordering_chain_back(
+                    'scala', chain_now['bestOrdering'], ordering)
+                verdict = _confirm_via_committed_tip(walk, ordering, tip)
+                if verdict == 'confirmed':
+                    run.series.append({
+                        'ordering': ordering, 'scala_chain': None,
+                        'rust_chain': v.get('rust_chain'), 'scala_tip': tip,
+                        'rust_tip': (v.get('rust_chain') or [None])[0],
+                        'at': time.time(), 'settle_read': True,
+                        'settle_read_via': 'committed_extension'})
+                    outcome = 'confirmed'
+                elif verdict == 'not_named':
+                    outcome = 'absent'
+                else:
+                    outcome = 'moved_on_inconclusive'
+                break  # ordering moved on; the live window is closed either way
             if time.monotonic() >= deadline:
                 break
             time.sleep(1.0)
@@ -3624,6 +3921,8 @@ def settle_unconfirmed_chain_tips(run, mined):
             result['confirmed'] += 1
         elif outcome == 'unreachable':
             result['unreachable'].add(key)
+        elif outcome == 'moved_on_inconclusive':
+            result['moved_on_inconclusive'].add(key)
         else:
             result['absent'].add(key)
     return result
@@ -3639,12 +3938,24 @@ def finalize_agreement(run, evidence):
     # The miner's own record of what it mined, for leads the in-sweep
     # read order produces (`rust_lead_mined`).
     mined = mined_input_blocks(scala_log_lines('scala'))
+    if not mined_log_plausible(mined, run.series):
+        print('WARNING: mined_input_blocks() parsed ZERO mined input blocks '
+              "from the scala miner's log, but the series recorded input "
+              'blocks on a chain — the log format probably changed again; '
+              'every allowance downstream that depends on the miner log '
+              '(allowed_ahead_by_miner_log, the settle-read mined-log '
+              'fallback) is NOT MEASURED for this run, not zero.')
+        evidence['mined_log_unmeasured'] = (
+            'mined_input_blocks() returned an empty set while the series '
+            "shows input blocks on a chain; treat this run's miner-log-"
+            'derived allowances as unmeasured, not proof of a violation')
     settle = settle_unconfirmed_chain_tips(run, mined)
     tip = evaluate_tip_consistency(run.series, mined)
     lags = [round(v, 3) for v in run.propagation_lags]
     chain = evaluate_chain_consistency(
         run.series, mined, settle_grace_s=max(30.0, max(lags) if lags else 0.0),
-        settle_absent=settle['absent'], settle_unreachable=settle['unreachable'])
+        settle_absent=settle['absent'], settle_unreachable=settle['unreachable'],
+        settle_inconclusive=settle.get('moved_on_inconclusive'))
     evidence['chain_consistency_settle'] = {
         k: (sorted(v) if isinstance(v, set) else v) for k, v in settle.items()}
     evidence['2_best_input_block'] = {
