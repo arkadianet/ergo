@@ -4885,6 +4885,14 @@ mod block_relay {
         );
     }
 
+    /// Let the production clock advance so a same-parent build has a distinct header.
+    fn publish_candidate_after(state: &NodeState, handle: &MiningHandle, timestamp: u64) {
+        while wall_clock_ms() <= timestamp {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        publish_candidate(state, handle);
+    }
+
     /// Build the next candidate with the production candidate builder, let
     /// `tamper` alter it, recommit its PoW message to the altered header,
     /// and publish it. Every header check still passes.
@@ -5464,6 +5472,23 @@ mod block_relay {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn locally_mined_block_same_parent_templates_without_recovery_accepts_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let older = solve(&state, &handle, 0);
+        publish_candidate_after(&state, &handle, older.header.timestamp);
+        let newer = solve(&state, &handle, 0);
+        assert_eq!(older.nonce, newer.nonce);
+        assert_ne!(older.id, newer.id);
+        assert_eq!(older.header.parent_id, newer.header.parent_id);
+        let result = submit_solution(&mut state, &handle, older.nonce);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, newer.id);
+    }
 
     #[test]
     fn remote_block_fresh_announces_each_id_to_every_handshaked_peer() {
@@ -6450,12 +6475,67 @@ mod block_relay {
     }
 
     #[test]
-    fn locally_mined_block_section_write_failure_keeps_template_resubmission_applies() {
-        // A section write failing after the header is stored is a persist
-        // failure, not an apply failure, so nothing is withdrawn and no
-        // rebuild is requested: the recovery is the same solution resubmitted
-        // against the same template. A serving window above the mined height
-        // stands in for the storage fault until it clears.
+    fn locally_mined_block_stored_sections_then_tip_build_accepts_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        let window = state.store.read_minimal_full_block_height().unwrap();
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .write_minimal_full_block_height(3)
+            .unwrap();
+        publish_candidate(&state, &handle);
+        let older = solve(&state, &handle, 0);
+        let failed = submit_solution(&mut state, &handle, older.nonce);
+        assert!(
+            matches!(failed, Err(ergo_api::MiningApiError::Internal(ref reason))
+            if reason.starts_with("persist:") && reason.contains("sentinel")),
+            "{failed:?}"
+        );
+        let store = state.store.as_utxo().unwrap();
+        store
+            .test_force_set_minimal_full_block_height_unsafe(window)
+            .unwrap();
+        let solution = ergo_mining::work_message::MinerSolution {
+            nonce: older.nonce,
+            pk: None,
+        };
+        let ergo_mining::solution::SolutionOutcome::Accepted(block) =
+            handle.verify_solution(&solution, store).unwrap()
+        else {
+            panic!("accepted")
+        };
+        let mined = ergo_mining::submit::prepare_mined_block(store, block).unwrap();
+        ergo_mining::submit::store_mined_sections(store, &mined).unwrap();
+        assert!(mined.sections_stored(store).unwrap());
+        publish_candidate_after(&state, &handle, older.header.timestamp);
+        let newer = solve(&state, &handle, 0);
+        assert_eq!(older.nonce, newer.nonce);
+        assert_ne!(older.id, newer.id);
+        let result = submit_solution(&mut state, &handle, newer.nonce);
+        assert!(
+            matches!(&result, Err(ergo_api::MiningApiError::Internal(reason))
+            if reason.starts_with("block apply failed (stored as a fork")),
+            "{result:?}"
+        );
+        assert!(
+            state
+                .store
+                .as_utxo()
+                .unwrap()
+                .get_header(&newer.id)
+                .unwrap()
+                .is_some(),
+            "a complete older block does not take the newer solution"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_section_write_failure_then_tip_build_recovers_original() {
+        // A serving window above the mined height stands in for a section
+        // storage fault. The original template remains offered for recovery.
         use super::super::mining_dispatch::{
             decide_mining_signal, MiningProducerState, MiningSignalIntervals, MiningTipSnapshot,
         };
@@ -6507,17 +6587,7 @@ mod block_relay {
         flush_actions(&mut state, vec![]);
         assert!(drain(&queue).is_empty(), "nothing is announced");
 
-        // The best header moved, so the action loop's next decision is a tip
-        // build. The template is still offered on the parent, so the engine
-        // builds an enriched template on the same parent, not a clean job
-        // since the full tip did not move. The resubmission below arrives
-        // before that template publishes. After it, the newer template is
-        // tried first: a nonce it rejects falls through to this one
-        // (ergo-mining's
-        // `verify_solution_offered_template_behind_same_parent_rebuild_accepts_its_solution`),
-        // but at the devnet's difficulty one every nonce meets it, so the
-        // resubmission makes a different block on it, which ties this header
-        // and is stored as a fork.
+        // The stored header triggers a Tip build on the unchanged full parent.
         let now = Instant::now();
         let reason = decide_mining_signal(
             &MiningProducerState {
@@ -6539,6 +6609,15 @@ mod block_relay {
         );
         assert_eq!(reason, Some(BuildReason::Tip));
 
+        publish_candidate_after(&state, &handle, mined.header.timestamp);
+        let newer = solve(&state, &handle, 0);
+        assert_eq!(newer.nonce, mined.nonce, "both templates accept the nonce");
+        assert_ne!(
+            newer.id, mined.id,
+            "the Tip build publishes a different header"
+        );
+        assert_eq!(newer.header.parent_id, mined.header.parent_id);
+
         // The fault clears, and the miner resubmits the same solution.
         state
             .store
@@ -6546,6 +6625,30 @@ mod block_relay {
             .unwrap()
             .test_force_set_minimal_full_block_height_unsafe(window)
             .unwrap();
+        // A different solution for the newer work does not reconstruct the
+        // stored header, so it still selects the newer template. Its fork
+        // cannot apply while the best header is bodyless.
+        let different = solve(&state, &handle, 1);
+        assert_ne!(different.nonce, mined.nonce);
+        let fork = submit(&mut state, &handle, different.nonce);
+        assert!(
+            matches!(&fork.result, Err(ergo_api::MiningApiError::Internal(reason))
+            if reason.starts_with("block apply failed (stored as a fork")),
+            "{:?}",
+            fork.result
+        );
+        assert!(!fork.rebuild);
+        assert!(state
+            .store
+            .as_utxo()
+            .unwrap()
+            .get_header(&different.id)
+            .unwrap()
+            .is_some());
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, parent);
+        flush_actions(&mut state, vec![]);
+        assert!(drain(&queue).is_empty());
+
         let recovered = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
         assert!(
             recovered.result.is_ok(),
