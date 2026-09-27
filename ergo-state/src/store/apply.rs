@@ -190,10 +190,6 @@ impl StateStore {
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
     ) -> Result<(), StateError> {
-        let wallet_apply_generation = crate::wallet::wallet_apply_generation();
-        let synchronous = self.persist_pipeline.is_none();
-        let _chain_apply_guard =
-            synchronous.then(crate::wallet::chain_apply_guard_after_wallet_finalization);
         let header = block.header();
         let height = header.height();
         let header_id = *header.header_id();
@@ -218,7 +214,6 @@ impl StateStore {
                     Vec::new()
                 };
                 Some(crate::store::WalletApplyPayload {
-                    apply_generation: wallet_apply_generation,
                     tracked_p2pk_trees: trees,
                     cached_pubkeys: pubkeys,
                     block_txs_owned: owned,
@@ -244,7 +239,6 @@ impl StateStore {
             block.transactions(),
             voted_params_row,
             payload.as_ref(),
-            wallet_apply_generation,
         )?;
 
         // M5 final-slice: pipeline-path wallet writes now travel
@@ -269,7 +263,6 @@ impl StateStore {
         checked: &[CheckedTransaction],
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&crate::store::WalletApplyPayload>,
-        wallet_apply_generation: u64,
     ) -> Result<(), StateError> {
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
@@ -309,7 +302,6 @@ impl StateStore {
             (to_remove, to_insert, emission),
             voted_params_row,
             wallet_payload,
-            wallet_apply_generation,
         )
     }
 
@@ -338,10 +330,6 @@ impl StateStore {
         expected_state_root: &ADDigest,
         transactions: &[Transaction],
     ) -> Result<(), StateError> {
-        let wallet_apply_generation = crate::wallet::wallet_apply_generation();
-        let synchronous = self.persist_pipeline.is_none();
-        let _chain_apply_guard =
-            synchronous.then(crate::wallet::chain_apply_guard_after_wallet_finalization);
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
                 what: "apply_block called before initialize_genesis",
@@ -370,7 +358,6 @@ impl StateStore {
             (to_remove, to_insert, emission),
             None,
             None,
-            wallet_apply_generation,
         )
     }
 
@@ -395,11 +382,9 @@ impl StateStore {
             height,
             transactions.iter(),
         )?;
-        let apply_generation = crate::wallet::wallet_apply_generation();
         let wallet_payload = wallet_hook.map(|hook| {
             let (trees, pubkeys) = hook.wallet_state_snapshot();
             crate::store::WalletApplyPayload {
-                apply_generation,
                 tracked_p2pk_trees: trees,
                 cached_pubkeys: pubkeys,
                 block_txs_owned: Vec::new(),
@@ -415,7 +400,6 @@ impl StateStore {
             (to_remove, to_insert, emission),
             None,
             wallet_payload.as_ref(),
-            apply_generation,
         )
     }
 
@@ -433,7 +417,6 @@ impl StateStore {
         transactions: &[Transaction],
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
     ) -> Result<(), StateError> {
-        let wallet_apply_generation = crate::wallet::wallet_apply_generation();
         if !self.genesis_committed {
             return Err(StateError::InvalidPrecondition {
                 what: "apply_block called before initialize_genesis",
@@ -453,7 +436,6 @@ impl StateStore {
             (to_remove, to_insert, emission),
             voted_params_row,
             None,
-            wallet_apply_generation,
         )
     }
 
@@ -629,7 +611,6 @@ impl StateStore {
         ),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&crate::store::WalletApplyPayload>,
-        wallet_apply_generation: u64,
     ) -> Result<(), StateError> {
         let (to_remove, to_insert, emission) = changes;
         let digest_before = self.tree.root_digest();
@@ -645,7 +626,6 @@ impl StateStore {
             to_insert: &to_insert,
             voted_params_row,
             wallet_payload,
-            wallet_apply_generation,
         });
         match result {
             Ok(durability) => {
@@ -740,7 +720,6 @@ impl StateStore {
             to_insert,
             voted_params_row,
             wallet_payload,
-            wallet_apply_generation,
         } = mutation;
 
         let root_id_before = self.tree.root_id();
@@ -820,7 +799,6 @@ impl StateStore {
             (&undo, &emission),
             voted_params_row,
             wallet_payload,
-            wallet_apply_generation,
         );
         let t_persist = t0.elapsed();
 

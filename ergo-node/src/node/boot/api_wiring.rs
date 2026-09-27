@@ -281,20 +281,23 @@ pub(super) async fn bind(
                 }
             };
             let mut state = ergo_wallet::state::WalletState::empty(use_pre_1627);
-            let read = wallet_store.read().map_err(|error| {
-                tracing::warn!(%error, "wallet boot: could not open wallet store read");
-                NodeError::from(format!("wallet boot: wallet store read failed: {error}"))
-            })?;
-            let hydration = ergo_state::wallet::hydration::HydrationSnapshot::load(read.as_ref())
-                .map_err(|error| {
-                NodeError::from(format!("wallet boot: hydration read failed: {error}"))
-            })?;
-            state
-                .hydrate_from_reader(&hydration, network_prefix)
-                .map_err(|error| {
-                    tracing::warn!(%error, "wallet boot: hydration from wallet store failed");
-                    NodeError::from(format!("wallet boot: wallet hydration failed: {error}"))
-                })?;
+            let hydration = (|| -> Result<(), String> {
+                let read = wallet_store.read().map_err(|error| error.to_string())?;
+                let snapshot =
+                    ergo_state::wallet::hydration::HydrationSnapshot::load(read.as_ref())
+                        .map_err(|error| error.to_string())?;
+                state
+                    .hydrate_from_reader(&snapshot, network_prefix)
+                    .map_err(|error| error.to_string())
+            })();
+            if let Err(error) = hydration {
+                tracing::warn!(%error, "wallet boot: hydration failed; continuing with empty wallet caches");
+                state = ergo_wallet::state::WalletState::empty(use_pre_1627);
+                crate::wallet_boot::latch_rescan_fail_closed();
+                if let Err(error) = wallet_store.persist_scan_invalidation(true) {
+                    tracing::error!(%error, "wallet boot: could not persist wallet invalidation");
+                }
+            }
             Arc::new(parking_lot::RwLock::new(state))
         };
         let wallet_state_for_hook = Arc::clone(&wallet_state);
@@ -687,6 +690,19 @@ mod tests {
             )
             .unwrap();
         write.commit().unwrap();
+
+        // Simulate a legacy/corrupt wallet: normal key persistence now seeds a cursor.
+        let db = chain.db_arc();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_HEIGHT)
+            .unwrap()
+            .remove(())
+            .unwrap();
+        txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_HEADER_ID)
+            .unwrap()
+            .remove(())
+            .unwrap();
+        txn.commit().unwrap();
 
         recover_interrupted_rescan(&store).unwrap();
         assert!(matches!(

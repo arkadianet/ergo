@@ -3,7 +3,6 @@
 //! See `super::mod` for the WriterContext design and grouping rationale.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -219,7 +218,7 @@ fn begin_rescan_process(
     start_h: u32,
     store: &dyn ergo_state::wallet::WalletStore,
     tip_height: u32,
-) -> Result<crate::wallet_boot::RescanProcessStart, WalletAdminError> {
+) -> Result<(), WalletAdminError> {
     match crate::wallet_boot::begin_rescan_process(start_h, store, tip_height) {
         Ok(rescan_start) => Ok(rescan_start),
         Err(crate::wallet_boot::BeginRescanError::FullRescanRequired) => {
@@ -230,11 +229,6 @@ fn begin_rescan_process(
         Err(crate::wallet_boot::BeginRescanError::AlreadyInProgress) => Err(
             WalletAdminError::RescanUnavailable("rescan already in progress".to_string()),
         ),
-        Err(crate::wallet_boot::BeginRescanError::FinalizationInProgress) => {
-            Err(WalletAdminError::RescanUnavailable(
-                "wallet rescan finalization in progress".to_string(),
-            ))
-        }
         Err(crate::wallet_boot::BeginRescanError::Shutdown) => Err(
             WalletAdminError::RescanUnavailable("wallet is shutting down".to_string()),
         ),
@@ -284,7 +278,7 @@ pub(crate) async fn rescan(
             return;
         }
     };
-    let start_h = from_height;
+    let start_h = from_height.min(tip_h);
     let mut registry_recovered = false;
     let scan_matcher = if start_h == 0 {
         match super::scan::build_rescan_matcher_from_store(ctx.store.as_ref()) {
@@ -313,7 +307,7 @@ pub(crate) async fn rescan(
     } else {
         None
     };
-    let rescan_start = match begin_rescan_process(start_h, ctx.store.as_ref(), tip_h) {
+    match begin_rescan_process(start_h, ctx.store.as_ref(), tip_h) {
         Ok(rescan_start) => rescan_start,
         Err(error) => {
             if registry_recovered {
@@ -323,7 +317,6 @@ pub(crate) async fn rescan(
             return;
         }
     };
-    let rescan_generation = ergo_state::wallet::wallet_apply_generation();
     if let Err(error) = persist_rescan_state(
         ctx.store.as_ref(),
         &ergo_state::wallet::RescanState::Running {
@@ -348,11 +341,7 @@ pub(crate) async fn rescan(
     let reached_for_block = reached_height.clone();
     let reached_for_tip = reached_height.clone();
     let task = tokio::task::spawn_blocking(move || {
-        let mut flags = RescanFlagsGuard::new(
-            rescan_generation,
-            rescan_start.fenced_wallet_apply,
-            store.clone(),
-        );
+        let mut flags = RescanFlagsGuard::new();
         let result = ergo_state::wallet::scan::WalletScanService::rescan_full_rebuild_store(
             store.as_ref(),
             trees,
@@ -387,30 +376,15 @@ pub(crate) async fn rescan(
             Err(error) => rescan_failure_state(start_h, error),
         };
         let state_result = persist_rescan_state(store.as_ref(), &state);
-        let generation_changed = ergo_state::wallet::wallet_apply_generation() != rescan_generation;
-        let reassert_result = if generation_changed {
-            store.persist_scan_invalidation(true)
+        let scan_invalidated = if state_result.is_ok() {
+            store
+                .read()
+                .and_then(|read| read.scan_invalidated())
+                .unwrap_or(true)
         } else {
-            Ok(())
+            true
         };
-        if let Err(error) = &reassert_result {
-            tracing::error!(%error, "failed to reassert scan invalidation after rescan generation change");
-        }
-        let scan_invalidated =
-            if state_result.is_ok() && reassert_result.is_ok() && !generation_changed {
-                store
-                    .read()
-                    .and_then(|read| read.scan_invalidated())
-                    .unwrap_or(true)
-            } else {
-                true
-            };
-        if rescan_should_stay_blocked(
-            &result,
-            state_result.is_ok(),
-            scan_invalidated,
-            generation_changed,
-        ) {
+        if rescan_should_stay_blocked(&result, state_result.is_ok(), scan_invalidated) {
             flags.block();
         }
         if let Err(error) = state_result {
@@ -490,28 +464,17 @@ fn rescan_should_stay_blocked(
     result: &Result<u32, ergo_state::wallet::scan::RescanError>,
     outcome_persisted: bool,
     scan_invalidated: bool,
-    generation_changed: bool,
 ) -> bool {
-    result.is_err() || !outcome_persisted || scan_invalidated || generation_changed
+    result.is_err() || !outcome_persisted || scan_invalidated
 }
 
 struct RescanFlagsGuard {
-    start_generation: u64,
-    fenced_wallet_apply: bool,
-    store: Arc<dyn ergo_state::wallet::WalletStore>,
     keep_blocked: bool,
 }
 
 impl RescanFlagsGuard {
-    fn new(
-        start_generation: u64,
-        fenced_wallet_apply: bool,
-        store: Arc<dyn ergo_state::wallet::WalletStore>,
-    ) -> Self {
+    fn new() -> Self {
         Self {
-            start_generation,
-            fenced_wallet_apply,
-            store,
             keep_blocked: false,
         }
     }
@@ -524,13 +487,7 @@ impl RescanFlagsGuard {
 
 impl Drop for RescanFlagsGuard {
     fn drop(&mut self) {
-        crate::wallet_boot::finalize_rescan_guard(
-            self.start_generation,
-            self.fenced_wallet_apply,
-            self.store.as_ref(),
-            self.keep_blocked,
-            std::thread::panicking(),
-        );
+        crate::wallet_boot::finalize_rescan_guard(self.keep_blocked, std::thread::panicking());
     }
 }
 
@@ -1614,7 +1571,7 @@ mod tests {
 #[cfg(test)]
 mod attempt_limiter_tests {
     use super::AttemptLimiter;
-    use ergo_state::wallet::{RedbWalletStore, WalletStore};
+    use ergo_state::wallet::RedbWalletStore;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1699,38 +1656,11 @@ mod attempt_limiter_tests {
             })
             .unwrap();
         assert!(super::begin_rescan_process(5, &store, 5).is_err());
-        let rescan_start = super::begin_rescan_process(0, &store, 0).unwrap();
-        assert!(rescan_start.fenced_wallet_apply);
+        super::begin_rescan_process(0, &store, 0).unwrap();
+        assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
         assert!(!crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
         assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
         assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
-        crate::wallet_boot::clear_rescan_guards();
-        crate::wallet_boot::begin_wallet_session();
-    }
-
-    #[test]
-    fn partial_rescan_does_not_fence_wallet_apply_generation() {
-        let _guard = RESCAN_GUARD.blocking_lock();
-        crate::wallet_boot::begin_wallet_session();
-        crate::wallet_boot::clear_rescan_guards();
-        let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
-        let store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(db));
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(0, None).unwrap();
-        write.commit().unwrap();
-        let generation_before = ergo_state::wallet::wallet_apply_generation();
-        let start = (0..1000)
-            .find_map(|_| {
-                crate::wallet_boot::clear_rescan_guards();
-                super::begin_rescan_process(1, store.as_ref(), 1).ok()
-            })
-            .expect("partial rescan start should be available");
-        assert!(!start.fenced_wallet_apply);
-        let generation = ergo_state::wallet::wallet_apply_generation();
-        assert!(generation > generation_before);
-        let guard = super::RescanFlagsGuard::new(generation, false, store);
-        drop(guard);
         crate::wallet_boot::clear_rescan_guards();
         crate::wallet_boot::begin_wallet_session();
     }
@@ -1745,50 +1675,15 @@ mod attempt_limiter_tests {
             state,
             ergo_state::wallet::RescanState::Failed { height: 17, .. }
         ));
-        assert!(super::rescan_should_stay_blocked(
-            &Err(error),
-            true,
-            false,
-            false
-        ));
-        assert!(!super::rescan_should_stay_blocked(
-            &Ok(0),
-            true,
-            false,
-            false
-        ));
-        assert!(super::rescan_should_stay_blocked(
-            &Ok(0),
-            false,
-            false,
-            false
-        ));
+        assert!(super::rescan_should_stay_blocked(&Err(error), true, false));
+        assert!(!super::rescan_should_stay_blocked(&Ok(0), true, false));
+        assert!(super::rescan_should_stay_blocked(&Ok(0), false, false));
         assert!(super::rescan_should_stay_blocked(
             &Err(ergo_state::wallet::scan::RescanError::Cancelled { height: 1 }),
             true,
             false,
-            false,
         ));
-        assert!(super::rescan_should_stay_blocked(&Ok(0), true, true, false));
-        assert!(super::rescan_should_stay_blocked(&Ok(0), true, false, true));
-    }
-
-    #[test]
-    fn rescan_generation_change_latches_and_reasserts_invalidation() {
-        let _guard = RESCAN_GUARD.blocking_lock();
-        crate::wallet_boot::clear_rescan_guards();
-        let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
-        let store: Arc<dyn WalletStore> = Arc::new(RedbWalletStore::new(db));
-        let start_generation = ergo_state::wallet::wallet_apply_generation();
-        let guard = super::RescanFlagsGuard::new(start_generation, true, store.clone());
-        ergo_state::wallet::advance_wallet_apply_generation();
-        drop(guard);
-
-        assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-        assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
-        assert!(store.read().unwrap().scan_invalidated().unwrap());
-        crate::wallet_boot::clear_rescan_guards();
+        assert!(super::rescan_should_stay_blocked(&Ok(0), true, true));
     }
 
     #[test]

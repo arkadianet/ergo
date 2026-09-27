@@ -126,61 +126,12 @@ impl WalletScanService {
     pub fn validate_rescan_start(
         store: &dyn WalletStore,
         requested: u32,
-        tip_height: u32,
+        _tip_height: u32,
     ) -> Result<(), RescanError> {
-        if requested == 0 {
-            return Ok(());
-        }
-        let read = store.read()?;
-        let cursor = match read.scan_cursor() {
-            Ok(cursor) => cursor,
-            Err(_) => {
-                return Err(RescanError::InvalidStart {
-                    requested,
-                    cursor: None,
-                })
-            }
-        };
-        let Some(cursor) = cursor else {
+        if requested > 0 && store.read()?.scan_invalidated()? {
             return Err(RescanError::InvalidStart {
                 requested,
-                cursor: None,
-            });
-        };
-        if cursor.height > tip_height
-            || (cursor.height == 0 && cursor.header_id.is_some())
-            || (cursor.height > 0 && cursor.header_id.is_none())
-        {
-            return Err(RescanError::InvalidStart {
-                requested,
-                cursor: Some(cursor.height),
-            });
-        }
-        if read.scan_invalidated()? {
-            return Err(RescanError::InvalidStart {
-                requested,
-                cursor: Some(cursor.height),
-            });
-        }
-        if cursor.height > 0
-            && read.chain_index_header(cursor.height).ok().flatten() != cursor.header_id
-        {
-            return Err(RescanError::InvalidStart {
-                requested,
-                cursor: Some(cursor.height),
-            });
-        }
-        let expected = cursor
-            .height
-            .checked_add(1)
-            .ok_or(RescanError::InvalidStart {
-                requested,
-                cursor: Some(cursor.height),
-            })?;
-        if requested != expected || requested > tip_height {
-            return Err(RescanError::InvalidStart {
-                requested,
-                cursor: Some(cursor.height),
+                cursor: store.read()?.scan_cursor()?.map(|cursor| cursor.height),
             });
         }
         Ok(())
@@ -263,6 +214,7 @@ impl WalletScanService {
         T: FnMut() -> Result<u32, RescanReadError>,
         C: FnMut() -> bool,
     {
+        let start_height = start_height.min(tip_height);
         Self::validate_rescan_start(store, start_height, tip_height)?;
         if start_height > 0 && read_block(start_height)?.is_none() {
             return Err(RescanError::Read(RescanReadError::Missing {
@@ -424,22 +376,18 @@ impl WalletScanService {
                 });
             }
 
-            let finalization_guard = crate::wallet::chain_apply_write_guard();
             if is_cancelled() {
-                drop(finalization_guard);
                 return Err(RescanError::Cancelled {
                     height: current_target,
                 });
             }
             let new_target = read_tip()?;
             if new_target < current_target {
-                drop(finalization_guard);
                 return Err(RescanError::Cancelled {
                     height: current_target,
                 });
             }
             if new_target > current_target {
-                drop(finalization_guard);
                 current_start = current_target + 1;
                 current_target = new_target;
                 continue;
@@ -448,12 +396,6 @@ impl WalletScanService {
             let mut write = WalletStore::begin_write(store)?;
             write.finish_rescan(start_height)?;
             write.commit()?;
-            let owned = crate::wallet::wallet_finalization_owned();
-            crate::wallet::set_wallet_finalization_in_progress(true);
-            if !owned {
-                crate::wallet::set_wallet_finalization_in_progress(false);
-            }
-            drop(finalization_guard);
             return Ok(processed);
         }
     }
@@ -515,9 +457,7 @@ mod tests {
         RedbWalletStore, WalletRead, WalletStore, WalletStoreError, WalletWrite,
     };
     use redb::Database;
-    use std::sync::mpsc;
     use std::sync::Arc;
-    use std::thread;
 
     struct FailingInvalidationStore {
         inner: RedbWalletStore,
@@ -538,47 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn rescan_finalization_holds_chain_write_lock_during_tip_read() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
-        let store = Arc::new(RedbWalletStore::new(db));
-        let (tip_entered_tx, tip_entered_rx) = mpsc::sync_channel(0);
-        let (release_tx, release_rx) = mpsc::sync_channel(0);
-        let worker_store = store.clone();
-        let worker = thread::spawn(move || {
-            WalletScanService::rescan_full_rebuild_store(
-                worker_store.as_ref(),
-                BTreeSet::new(),
-                BTreeMap::new(),
-                0,
-                0,
-                |_height| Ok(None),
-                || {
-                    tip_entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                    Ok(0)
-                },
-                || false,
-                None,
-            )
-        });
-
-        tip_entered_rx.recv().unwrap();
-        let read_was_blocked = crate::wallet::CHAIN_APPLY_FINALIZATION_LOCK
-            .try_read()
-            .is_err();
-        release_tx.send(()).unwrap();
-        let result = worker.join().unwrap();
-        assert!(read_was_blocked);
-        assert_eq!(result.unwrap(), 0);
-        crate::wallet::set_wallet_finalization_in_progress(false);
-        assert!(!store.read().unwrap().scan_invalidated().unwrap());
-    }
-
-    #[test]
     fn rescan_replays_a_tip_observed_during_finalization() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let store = RedbWalletStore::new(db);
@@ -602,7 +502,6 @@ mod tests {
             || false,
             None,
         );
-        crate::wallet::set_wallet_finalization_in_progress(false);
         assert_eq!(result.unwrap(), 1);
         assert_eq!(tip_reads, 2);
         assert_eq!(
@@ -614,7 +513,6 @@ mod tests {
 
     #[test]
     fn rescan_rejects_tip_regression_during_finalization() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
         let store = RedbWalletStore::new(db);
@@ -639,86 +537,48 @@ mod tests {
     }
 
     #[test]
-    fn positive_rescan_requires_existing_contiguous_cursor() {
+    fn partial_rescan_from_tip_minus_two_replays_exactly_three_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
-        let store = RedbWalletStore::new(db.clone());
-        assert!(matches!(
-            WalletScanService::validate_rescan_start(&store, 1, 1),
-            Err(RescanError::InvalidStart { cursor: None, .. })
-        ));
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(0, None).unwrap();
-        write.commit().unwrap();
-        assert!(WalletScanService::validate_rescan_start(&store, 1, 1).is_ok());
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(1, Some(&[4; 32])).unwrap();
-        write.commit().unwrap();
-        {
-            let txn = db.begin_write().unwrap();
+        let txn = db.begin_write().unwrap();
+        for height in 1..=5u32 {
             txn.open_table(crate::store::CHAIN_INDEX)
                 .unwrap()
-                .insert(1u64, &[4u8; 32][..])
+                .insert(height as u64, [height as u8; 32].as_slice())
                 .unwrap();
-            txn.commit().unwrap();
         }
-        assert!(WalletScanService::validate_rescan_start(&store, 2, 2).is_ok());
-        assert!(matches!(
-            WalletScanService::validate_rescan_start(&store, 3, 3),
-            Err(RescanError::InvalidStart {
-                cursor: Some(1),
-                ..
-            })
-        ));
-        let result = WalletScanService::rescan_full_rebuild_store(
+        txn.commit().unwrap();
+        let store = RedbWalletStore::new(db);
+        let mut write = store.begin_write().unwrap();
+        write.set_scan_cursor(5, Some(&[5; 32])).unwrap();
+        write.commit().unwrap();
+        let mut replayed = Vec::new();
+        let count = WalletScanService::rescan_full_rebuild_store(
             &store,
             BTreeSet::new(),
             BTreeMap::new(),
             3,
-            3,
-            |_height| Ok(None),
-            || Ok(3),
+            5,
+            |height| {
+                replayed.push(height);
+                Ok(Some(RescanBlock {
+                    block_id: [height as u8; 32],
+                    txs: vec![],
+                }))
+            },
+            || Ok(5),
             || false,
             None,
+        )
+        .unwrap();
+        assert_eq!(count, 3);
+        // The first read checks availability before mutating wallet state.
+        assert_eq!(replayed, vec![3, 3, 4, 5]);
+        assert_eq!(
+            store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+            5
         );
-        assert!(matches!(result, Err(RescanError::InvalidStart { .. })));
-    }
-
-    #[test]
-    fn positive_rescan_rejects_invalidated_or_mismatched_boundary() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(Database::create(dir.path().join("state.redb")).unwrap());
-        let store = RedbWalletStore::new(db.clone());
-        {
-            let txn = db.begin_write().unwrap();
-            txn.open_table(crate::store::CHAIN_INDEX)
-                .unwrap()
-                .insert(1u64, &[4u8; 32][..])
-                .unwrap();
-            txn.commit().unwrap();
-        }
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(1, Some(&[5; 32])).unwrap();
-        write.commit().unwrap();
-        assert!(matches!(
-            WalletScanService::validate_rescan_start(&store, 2, 2),
-            Err(RescanError::InvalidStart {
-                cursor: Some(1),
-                ..
-            })
-        ));
-
-        let mut write = store.begin_write().unwrap();
-        write.set_scan_cursor(0, None).unwrap();
-        write.set_scan_invalidated(true).unwrap();
-        write.commit().unwrap();
-        assert!(matches!(
-            WalletScanService::validate_rescan_start(&store, 1, 1),
-            Err(RescanError::InvalidStart {
-                cursor: Some(0),
-                ..
-            })
-        ));
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
     }
 
     #[test]

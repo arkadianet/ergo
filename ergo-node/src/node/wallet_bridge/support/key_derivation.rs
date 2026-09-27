@@ -63,11 +63,6 @@ pub(crate) fn persist_tracked_pubkey(
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     }
     write
-        .set_scan_invalidated(true)
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    ergo_state::wallet::advance_wallet_apply_generation();
-    ergo_state::wallet::fence_wallet_apply();
-    write
         .commit()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))
 }
@@ -329,13 +324,11 @@ mod tests {
     use crate::wallet_boot::GLOBAL_RESCAN_TEST_GUARD as TEST_GUARD;
 
     #[test]
-    fn tracked_key_mutation_advances_generation_and_invalidates() {
+    fn tracked_key_mutation_tracks_forward_without_invalidating() {
         let _guard = TEST_GUARD.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store = RedbWalletStore::new(db);
-        let was_fenced = ergo_state::wallet::wallet_apply_fenced();
-        let before = ergo_state::wallet::wallet_apply_generation();
         let pubkey = [7u8; 33];
         let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
             derivation_path: vec![44, 0],
@@ -345,11 +338,7 @@ mod tests {
 
         persist_tracked_pubkey(&store, 0, &pubkey, &meta, Some(1)).unwrap();
 
-        assert!(ergo_state::wallet::wallet_apply_generation() > before);
-        assert!(store.read().unwrap().scan_invalidated().unwrap());
-        if !was_fenced {
-            ergo_state::wallet::unfence_wallet_apply();
-        }
+        assert!(!store.read().unwrap().scan_invalidated().unwrap());
         store.persist_scan_invalidation(false).unwrap();
     }
 }

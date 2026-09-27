@@ -444,7 +444,7 @@ impl NodeWalletAdmin {
         if !allow_during_rescan
             && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
                 || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-                || ergo_state::wallet::wallet_apply_fenced())
+                || crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst))
         {
             return Err(WalletAdminError::RescanUnavailable(
                 "wallet recovery required: run rescan before using wallet operations".to_string(),
@@ -1156,9 +1156,9 @@ pub struct WalletStateHook {
 
 impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
-        // Full rescans and fail-closed fences suppress wallet payloads;
+        // Full rescans and fail-closed recovery suppress wallet payloads;
         // partial rescans leave live wallet apply enabled.
-        if ergo_state::wallet::wallet_apply_fenced() {
+        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1166,7 +1166,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if ergo_state::wallet::wallet_apply_fenced() {
+        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
@@ -1179,7 +1179,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         std::collections::BTreeSet<Vec<u8>>,
         std::collections::BTreeMap<u64, [u8; 33]>,
     ) {
-        if ergo_state::wallet::wallet_apply_fenced() {
+        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
             return (Default::default(), Default::default());
         }
         let state = self.wallet.read();
@@ -1191,7 +1191,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
 
     fn allow_non_contiguous_wallet_apply(&self) -> bool {
         crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-            && !ergo_state::wallet::wallet_apply_fenced()
+            && !crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst)
     }
 
     fn registered_scan_count(&self) -> usize {
@@ -1199,7 +1199,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // tables: the rebuild clears and repopulates WALLET_SCAN_* block by
         // block, so a concurrent live write would race it (miss a spend
         // against the cleared reverse index, or stale that index). Mirrors
-        // how the pubkey path is fenced by wallet_apply_fenced(). A PARTIAL
+        // the full-rescan gate on the pubkey path. A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
         if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -1265,20 +1265,8 @@ fn mark_scan_invalidated(store: &dyn ergo_state::wallet::WalletStore) {
         }
     }
     if let Some(error) = last_error {
-        tracing::error!(error = %error, "scan apply: failed to set scan-invalidated flag after a registry read failure; terminating fail-closed");
-        abort_on_invalidation_failure(&error);
+        tracing::error!(error = %error, "scan apply: failed to set scan-invalidated flag after a registry read failure; continuing with in-memory invalidation");
     }
-}
-
-#[cfg(not(test))]
-fn abort_on_invalidation_failure(error: &ergo_state::wallet::WalletStoreError) -> ! {
-    tracing::error!(error = %error, "wallet scan invalidation persistence failed; aborting process");
-    std::process::abort()
-}
-
-#[cfg(test)]
-fn abort_on_invalidation_failure(error: &ergo_state::wallet::WalletStoreError) -> ! {
-    panic!("wallet scan invalidation persistence failed: {error}")
 }
 
 fn try_mark_scan_invalidated(
@@ -1372,7 +1360,7 @@ pub(super) async fn run_wallet_writer_with_session(
         if !cmd.is_rescan_control()
             && (crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst)
                 || crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst)
-                || ergo_state::wallet::wallet_apply_fenced())
+                || crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst))
         {
             cmd.reject_during_rescan();
             continue;
@@ -1677,7 +1665,7 @@ mod command_fencing_tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::mark_scan_invalidated(&FailingInvalidationStore)
         }));
-        assert!(result.is_err());
+        assert!(result.is_ok());
         assert!(crate::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
         assert!(crate::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
         assert!(crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));

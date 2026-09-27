@@ -90,7 +90,6 @@ pub(crate) fn begin_wallet_session() -> u64 {
     }
     WALLET_SHUTDOWN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
     RESCAN_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-    ergo_state::wallet::set_wallet_finalization_owned(false);
     session_id
 }
 
@@ -205,8 +204,6 @@ fn rescan_transition_lock() -> MutexGuard<'static, ()> {
 }
 
 fn latch_rescan_fail_closed_locked() {
-    ergo_state::wallet::advance_wallet_apply_generation();
-    ergo_state::wallet::fence_wallet_apply();
     RESCAN_FAIL_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
     RESCAN_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     SCAN_REBUILD_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -217,18 +214,14 @@ fn finish_rescan_task_locked() {
     RESCAN_TASK_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn clear_rescan_state_locked(fenced_wallet_apply: bool) {
-    if fenced_wallet_apply {
-        ergo_state::wallet::advance_wallet_apply_generation();
-        ergo_state::wallet::unfence_wallet_apply();
-    }
+fn clear_rescan_state_locked() {
     RESCAN_FAIL_CLOSED.store(false, std::sync::atomic::Ordering::SeqCst);
     RESCAN_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
     SCAN_REBUILD_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-fn clear_rescan_guards_locked(fenced_wallet_apply: bool) {
-    clear_rescan_state_locked(fenced_wallet_apply);
+fn clear_rescan_guards_locked() {
+    clear_rescan_state_locked();
     finish_rescan_task_locked();
 }
 
@@ -239,36 +232,26 @@ pub(crate) fn latch_rescan_fail_closed() {
 
 pub(crate) fn clear_rescan_guards() {
     let _transition = rescan_transition_lock();
-    clear_rescan_guards_locked(true);
+    clear_rescan_guards_locked();
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum BeginRescanError {
     FullRescanRequired,
     AlreadyInProgress,
-    FinalizationInProgress,
     Shutdown,
     InvalidStart { requested: u32, cursor: Option<u32> },
     Store(String),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RescanProcessStart {
-    pub fenced_wallet_apply: bool,
 }
 
 pub(crate) fn begin_rescan_process(
     start_h: u32,
     store: &dyn ergo_state::wallet::WalletStore,
     tip_height: u32,
-) -> Result<RescanProcessStart, BeginRescanError> {
-    let _chain_apply_guard = ergo_state::wallet::chain_apply_read_guard();
+) -> Result<(), BeginRescanError> {
     let _transition = rescan_transition_lock();
     if wallet_shutdown_requested() {
         return Err(BeginRescanError::Shutdown);
-    }
-    if ergo_state::wallet::wallet_finalization_in_progress() {
-        return Err(BeginRescanError::FinalizationInProgress);
     }
     if start_h > 0 {
         match ergo_state::wallet::scan::WalletScanService::validate_rescan_start(
@@ -289,29 +272,21 @@ pub(crate) fn begin_rescan_process(
         return Err(BeginRescanError::AlreadyInProgress);
     }
     RESCAN_TASK_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-    ergo_state::wallet::set_wallet_finalization_owned(true);
-    let fenced_wallet_apply = start_h == 0;
-    ergo_state::wallet::advance_wallet_apply_generation();
-    if fenced_wallet_apply {
-        ergo_state::wallet::fence_wallet_apply();
-    }
+    let full_rebuild = start_h == 0;
     if was_fail_closed {
         RESCAN_FAIL_CLOSED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
     RESCAN_CANCEL_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
     RESCAN_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     RESCAN_FROM_HEIGHT.store(start_h, std::sync::atomic::Ordering::SeqCst);
-    SCAN_REBUILD_IN_PROGRESS.store(fenced_wallet_apply, std::sync::atomic::Ordering::SeqCst);
-    Ok(RescanProcessStart {
-        fenced_wallet_apply,
-    })
+    SCAN_REBUILD_IN_PROGRESS.store(full_rebuild, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 pub(crate) fn fail_rescan_start() {
     let _transition = rescan_transition_lock();
     latch_rescan_fail_closed_locked();
     finish_rescan_task_locked();
-    ergo_state::wallet::set_wallet_finalization_owned(false);
 }
 
 fn request_rescan_shutdown_locked() {
@@ -336,39 +311,13 @@ pub(crate) fn request_rescan_shutdown_for(session_id: u64) {
     request_rescan_shutdown_locked();
 }
 
-pub(crate) fn finalize_rescan_guard(
-    start_generation: u64,
-    fenced_wallet_apply: bool,
-    store: &dyn ergo_state::wallet::WalletStore,
-    keep_blocked: bool,
-    panicking: bool,
-) {
-    // Serialize generation validation and unfencing with chain persistence's
-    // timeout handoff. A late finalizer must not clear a newer invalidation.
-    let _chain_apply_guard = ergo_state::wallet::chain_apply_write_guard();
-    let generation_changed = {
-        let _transition = rescan_transition_lock();
-        let changed = ergo_state::wallet::wallet_apply_generation() != start_generation;
-        if !changed {
-            if keep_blocked || panicking {
-                latch_rescan_fail_closed_locked();
-            } else {
-                clear_rescan_state_locked(fenced_wallet_apply);
-            }
-        }
-        changed
-    };
-
-    if generation_changed {
-        if let Err(error) = store.persist_scan_invalidation(true) {
-            tracing::error!(%error, "failed to reassert scan invalidation during rescan finalization");
-        }
-        let _transition = rescan_transition_lock();
-        latch_rescan_fail_closed_locked();
-    }
+pub(crate) fn finalize_rescan_guard(keep_blocked: bool, panicking: bool) {
     let _transition = rescan_transition_lock();
-    ergo_state::wallet::set_wallet_finalization_in_progress(false);
-    ergo_state::wallet::set_wallet_finalization_owned(false);
+    if keep_blocked || panicking {
+        latch_rescan_fail_closed_locked();
+    } else {
+        clear_rescan_state_locked();
+    }
     finish_rescan_task_locked();
 }
 
@@ -677,6 +626,84 @@ mod tests {
     /// auto-derive and make it panic spuriously.
     use super::GLOBAL_RESCAN_TEST_GUARD as FAULT_GUARD;
 
+    #[test]
+    fn unlock_at_height_500_tracks_the_next_block_without_invalidation() {
+        let _guard = FAULT_GUARD.blocking_lock();
+        clear_rescan_guards();
+        let dir = tempfile::tempdir().unwrap();
+        let chain = ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+        let db = chain.db_arc();
+        let meta = ergo_state::chain::ChainStateMeta {
+            best_header_id: [5; 32],
+            best_header_height: 500,
+            best_header_score: vec![],
+            best_full_block_id: [5; 32],
+            best_full_block_height: 500,
+            header_availability: ergo_state::chain::HeaderAvailability::Dense,
+        };
+        let txn = db.begin_write().unwrap();
+        txn.open_table(redb::TableDefinition::<&str, &[u8]>::new(
+            "chain_state_meta",
+        ))
+        .unwrap()
+        .insert("chain_state", meta.serialize().as_slice())
+        .unwrap();
+        txn.open_table(redb::TableDefinition::<u64, &[u8]>::new("chain_index"))
+            .unwrap()
+            .insert(500, [5u8; 32].as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        let store = RedbWalletStore::new(db.clone());
+        let mut storage = SecretStorage::open(dir.path().join("wallet"));
+        storage
+            .init(ergo_wallet::mnemonic::MnemonicStrength::Words12, "pw", "")
+            .unwrap();
+        let mut state = WalletState::empty(false);
+        WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &store,
+            ergo_ser::address::NetworkPrefix::Mainnet,
+            "pw",
+        )
+        .unwrap();
+        assert_eq!(
+            store.read().unwrap().scan_cursor().unwrap().unwrap().height,
+            500
+        );
+        let txn = db.begin_write().unwrap();
+        txn.open_table(redb::TableDefinition::<u64, &[u8]>::new("chain_index"))
+            .unwrap()
+            .insert(501, [6u8; 32].as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        write
+            .apply_block(
+                501,
+                &[6; 32],
+                &ergo_state::store::WalletApplyPayload {
+                    tracked_p2pk_trees: state.tracked_p2pk_trees().clone(),
+                    cached_pubkeys: state.cached_pubkeys().clone(),
+                    block_txs_owned: vec![],
+                    scan_matches: vec![],
+                    has_registered_scans: false,
+                    allow_non_contiguous_wallet: false,
+                },
+            )
+            .unwrap();
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(
+            read.scan_cursor().unwrap().unwrap(),
+            ergo_state::wallet::WalletScanCursor {
+                height: 501,
+                header_id: Some([6; 32]),
+            }
+        );
+    }
+
     fn store_with_cursor_zero() -> (tempfile::TempDir, RedbWalletStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = RedbWalletStore::new(Arc::new(
@@ -741,7 +768,7 @@ mod tests {
         begin_wallet_session();
         clear_rescan_guards();
         let (_dir, store) = store_with_cursor_zero();
-        let _ = begin_rescan_process(1, &store, 1).unwrap();
+        begin_rescan_process(1, &store, 1).unwrap();
         request_rescan_shutdown();
         assert!(RESCAN_CANCEL_REQUESTED.load(Ordering::SeqCst));
         assert!(RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
@@ -756,60 +783,12 @@ mod tests {
     }
 
     #[test]
-    fn finalization_blocks_successor_until_ownership_clears() {
-        let _guard = FAULT_GUARD.blocking_lock();
-        begin_wallet_session();
-        clear_rescan_guards();
-        let (_dir, store) = store_with_cursor_zero();
-        ergo_state::wallet::set_wallet_finalization_in_progress(true);
-        ergo_state::wallet::set_wallet_finalization_owned(true);
-        RESCAN_TASK_ACTIVE.store(true, Ordering::SeqCst);
-
-        assert!(matches!(
-            begin_rescan_process(0, &store, 0),
-            Err(BeginRescanError::FinalizationInProgress)
-        ));
-        finalize_rescan_guard(
-            ergo_state::wallet::wallet_apply_generation(),
-            true,
-            &store,
-            false,
-            false,
-        );
-        assert!(!ergo_state::wallet::wallet_finalization_in_progress());
-        assert!(!ergo_state::wallet::wallet_finalization_owned());
-        assert!(!RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
-        begin_wallet_session();
-    }
-
-    #[test]
-    fn late_finalizer_preserves_invalidation_after_chain_timeout() {
-        let _guard = FAULT_GUARD.blocking_lock();
-        begin_wallet_session();
-        clear_rescan_guards();
-        let (_dir, store) = store_with_cursor_zero();
-        let _ = begin_rescan_process(0, &store, 0).unwrap();
-        let generation = ergo_state::wallet::wallet_apply_generation();
-        ergo_state::wallet::set_wallet_finalization_in_progress(true);
-        let chain_guard = ergo_state::wallet::chain_apply_guard_after_wallet_finalization();
-        store.persist_scan_invalidation(true).unwrap();
-        drop(chain_guard);
-        finalize_rescan_guard(generation, true, &store, false, false);
-        assert!(store.read().unwrap().scan_invalidated().unwrap());
-        assert!(ergo_state::wallet::wallet_apply_fenced());
-        assert!(RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-        assert!(!RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
-        assert!(!ergo_state::wallet::wallet_finalization_in_progress());
-        clear_rescan_guards();
-    }
-
-    #[test]
     fn rollback_requests_cancellation_for_active_rescan() {
         let _guard = FAULT_GUARD.blocking_lock();
         begin_wallet_session();
         clear_rescan_guards();
         let (_cursor_dir, cursor_store) = store_with_cursor_zero();
-        let _ = begin_rescan_process(1, &cursor_store, 1).unwrap();
+        begin_rescan_process(1, &cursor_store, 1).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
         let txn = db.begin_write().unwrap();

@@ -163,7 +163,6 @@ fn partial_rescan_removes_stale_spent_when_spend_disappears_on_replay() {
         None,
     )
     .unwrap();
-    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     // Expected: box is back to Confirmed (rewind un-spent it; replay didn't re-spend).
     let wb = read_box(&db, box_id).expect("box must survive");
@@ -245,7 +244,6 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             None,
         )
         .unwrap();
-        ergo_state::wallet::set_wallet_finalization_in_progress(false);
     }
     let wb = read_box(&db, box_id).expect("box must exist after STEP A");
     match wb.status {
@@ -288,7 +286,6 @@ fn partial_rescan_downgrades_matured_reward_when_maturity_above_n() {
             None,
         )
         .unwrap();
-        ergo_state::wallet::set_wallet_finalization_in_progress(false);
     }
     let wb = read_box(&db, box_id).expect("box must exist after STEP B");
     assert!(
@@ -379,7 +376,6 @@ fn partial_rescan_restores_spend_when_replay_includes_it() {
         None,
     )
     .unwrap();
-    ergo_state::wallet::set_wallet_finalization_in_progress(false);
 
     // Expected: box is Spent again (rewind un-spent; replay re-spent).
     let wb = read_box(&db, box_id).expect("box must exist");
