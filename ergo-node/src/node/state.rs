@@ -270,6 +270,7 @@ pub(crate) struct NodeState {
     /// at boot so the first eligible tick fires immediately. Distinct
     /// from the 1 s outer sync_tick (timeouts / HOL / heartbeat).
     pub(super) last_sync_broadcast: Instant,
+    pub(super) sync_refresh: super::sync_refresh::SyncRefresh,
     /// Live `best_header_height` cursor handed to the anchor builder
     /// so it can scan frontier-first (start each pass at the current
     /// tip rather than at h=0). Updated by the heartbeat tick. The

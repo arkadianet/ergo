@@ -70,6 +70,7 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
 
 /// Drive one sync cycle using a single supplied monotonic timestamp.
 pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
+    super::sync_refresh::fire_due(state, now);
     maybe_emit_gauges(state, now);
 
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the

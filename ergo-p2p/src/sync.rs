@@ -384,6 +384,11 @@ impl SyncState {
             .is_some_and(|t| now.duration_since(*t) > CLEAR_THRESHOLD)
     }
 
+    /// Time of the most recent SyncInfo dispatch to this peer.
+    pub fn last_sync_sent(&self, peer: PeerId) -> Option<Instant> {
+        self.last_sync_sent.get(&peer).copied()
+    }
+
     /// Record that a SyncInfo message was successfully **dispatched** to
     /// `peer` (the transport accepted the frame). This is dispatch success,
     /// not peer receipt — no acknowledgment exists at this layer. Callers

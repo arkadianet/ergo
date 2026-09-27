@@ -137,6 +137,8 @@ type OrphanHeaderEntry = (PeerId, header_proc::PreValidatedHeader, Vec<u8>);
 
 /// The sync executor. Owns the mutable state needed to drive the pipeline.
 pub struct SyncExecutor {
+    /// Set only after successful full-block application, consumed by the node loop.
+    full_block_applied: bool,
     params: ProtocolParams,
     chain_config: DifficultyParams,
     /// Recent validated headers + raw bytes (newest first, max 50).
@@ -247,6 +249,7 @@ impl SyncExecutor {
             chain_config,
             last_headers: VecDeque::with_capacity(LAST_HEADERS_WINDOW),
             block_context_headers: Vec::with_capacity(10),
+            full_block_applied: false,
             recently_installed: HashSet::new(),
             orphan_headers: HashMap::new(),
             orphan_headers_len: 0,
@@ -338,8 +341,14 @@ impl SyncExecutor {
         self.recovery_done = false;
     }
 
+    /// Consume full-block progress since the last action-loop drain.
+    pub fn take_full_block_applied(&mut self) -> bool {
+        std::mem::take(&mut self.full_block_applied)
+    }
+
     /// Update the block-context cache after a successful block apply.
     fn update_block_context_cache(&mut self, processed: &block_proc::ProcessedBlock) {
+        self.full_block_applied = true;
         if let Some(ref checked) = processed.checked_header {
             self.block_context_headers.insert(0, checked.clone());
             self.block_context_headers.truncate(10);

@@ -117,6 +117,7 @@ fn make_state_with_backend(
     let (event_tx, _rx) = mpsc::channel::<PeerEvent>(4);
     let mempool = Mempool::new(mempool_cfg, weight::from_config("cost").unwrap());
     NodeState {
+        sync_refresh: super::sync_refresh::SyncRefresh::new(Vec::new()),
         store: backend,
         shadow: None,
         last_reorg_enrichment: None,

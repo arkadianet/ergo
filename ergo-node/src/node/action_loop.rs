@@ -128,6 +128,7 @@ pub(super) async fn action_loop(
     }
 
     loop {
+        let refresh_deadline = state.sync_refresh.deadline();
         tokio::select! {
             biased;
             // Shutdown ordering matches the pre-refactor signal arms:
@@ -136,6 +137,10 @@ pub(super) async fn action_loop(
             _ = &mut shutdown_rx => {
                 shutdown_log!("[node] shutdown requested, exiting loop...");
                 break;
+            }
+            _ = tokio::time::sleep_until(refresh_deadline.unwrap_or_else(Instant::now).into()),
+                if refresh_deadline.is_some() => {
+                super::sync_refresh::fire_due(&mut state, Instant::now());
             }
             _ = sync_tick.tick() => {
                 handle_sync_tick(&mut state);
