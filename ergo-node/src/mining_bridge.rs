@@ -80,10 +80,12 @@ pub enum MiningRequest {
     },
     /// `POST /mining/solution` — main loop runs the API-side pre-check
     /// via [`ergo_mining::handle::MiningHandle::verify_solution`], then
-    /// (on Accepted) drives the apply path: persist sections via
-    /// [`ergo_mining::submit::apply_mined_block`], advance the header
-    /// chain via `header_proc::process_header`, validate + apply via
-    /// `block_proc::process_block`, then notify the coordinator.
+    /// (on Accepted) drives the apply path: recheck the parent and
+    /// serialize via [`ergo_mining::submit::prepare_mined_block`], advance
+    /// the header chain via `header_proc::process_header_cfg_with_genesis`,
+    /// persist sections via [`ergo_mining::submit::store_mined_sections`],
+    /// announce a new best header, then validate + apply via the executor's
+    /// `Action::AssembleBlock`.
     SubmitSolution {
         solution: AutolykosSolutionJson,
         reply: oneshot::Sender<Result<(), MiningApiError>>,

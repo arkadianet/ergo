@@ -4942,10 +4942,67 @@ mod block_relay {
         mined.id
     }
 
+    /// Mine the next block on the applied tip with the production engine
+    /// through the real mining handler, and check that it applies, is
+    /// announced once before apply with its header and all three sections,
+    /// is not announced again by apply, and has every announced id served.
+    /// Returns its id.
+    fn mine_announced_before_apply(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+        queue: &SharedQueue,
+    ) -> [u8; 32] {
+        let height = state.store.chain_state_meta().best_full_block_height + 1;
+        publish_candidate(state, handle);
+        let mined = solve(state, handle, 0);
+        let probed = submit_probing_apply(state, handle, mined.nonce, queue);
+        assert!(
+            probed.result.is_ok(),
+            "height {height}: {:?}: {:?}",
+            probed.result,
+            state.executor.last_block_apply_error()
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_full_block_id, chain.best_full_block_height),
+            (mined.id, height)
+        );
+        assert_eq!(
+            probed.before_apply,
+            stored_inventory(state, mined.id),
+            "height {height}: the header and every section are announced before apply"
+        );
+        assert!(
+            probed.after_apply.is_empty(),
+            "height {height}: apply must not announce it again: {:?}",
+            probed.after_apply
+        );
+        assert_announced_ids_served(state, &probed.before_apply);
+        mined.id
+    }
+
+    /// The ids of `inventory` that the store at `image` does not hold.
+    fn missing_from(image: &StateStore, inventory: &[(u8, Vec<[u8; 32]>)]) -> Vec<[u8; 32]> {
+        inventory
+            .iter()
+            .flat_map(|(kind, ids)| ids.iter().map(move |id| (*kind, *id)))
+            .filter(|(kind, id)| {
+                let stored = if *kind == ModifierTypeId::Header.as_byte() {
+                    image.get_header(id).unwrap()
+                } else {
+                    image.get_block_section(id).unwrap()
+                };
+                stored.is_none()
+            })
+            .map(|(_, id)| id)
+            .collect()
+    }
+
     /// While armed on a thread, drains the peer's queued frames when the
     /// executor starts applying a block there (the `handle_assemble_block`
     /// span is created), so a test can tell inventories queued before apply
-    /// from those queued after it.
+    /// from those queued after it. Armed for a crash image instead, it copies
+    /// the state database file at that moment.
     ///
     /// It is this test binary's process-wide default subscriber, installed
     /// once, not a scoped one: tracing caches a callsite's interest when the
@@ -4964,6 +5021,10 @@ mod block_relay {
 
     thread_local! {
         static ARMED_PROBE: std::cell::RefCell<Option<ArmedProbe>> =
+            const { std::cell::RefCell::new(None) };
+        /// The state database file and the path to copy it to when apply next
+        /// starts on this thread.
+        static ARMED_CRASH_IMAGE: std::cell::RefCell<Option<(std::path::PathBuf, std::path::PathBuf)>> =
             const { std::cell::RefCell::new(None) };
     }
 
@@ -5005,6 +5066,11 @@ mod block_relay {
                     if probe.before_apply.is_none() {
                         probe.before_apply = Some(drain(&probe.queue));
                     }
+                }
+            });
+            ARMED_CRASH_IMAGE.with(|armed| {
+                if let Some((database, image)) = armed.borrow_mut().take() {
+                    std::fs::copy(database, image).expect("copy the state database");
                 }
             });
         }
@@ -5077,6 +5143,30 @@ mod block_relay {
             before_apply,
             after_apply: drain(queue),
         }
+    }
+
+    /// Run `submit` and copy the state database file when apply starts: what
+    /// a process killed at that moment leaves on disk, since redb holds a
+    /// commit made with `Durability::None` in memory until a durable commit
+    /// follows. Returns the copy, opened as a store.
+    fn crash_image_at_apply(
+        state: &mut NodeState,
+        dir: &Path,
+        submit: impl FnOnce(&mut NodeState),
+    ) -> StateStore {
+        install_apply_entry_probe();
+        let image = dir.join("crash-image.redb");
+        let database = state.store.database_path().to_path_buf();
+        ARMED_CRASH_IMAGE.with(|armed| *armed.borrow_mut() = Some((database, image.clone())));
+        submit(state);
+        assert!(
+            ARMED_CRASH_IMAGE
+                .with(|armed| armed.borrow_mut().take())
+                .is_none(),
+            "the handler never started apply: {:?}",
+            state.executor.last_block_apply_error()
+        );
+        StateStore::open(&image).unwrap()
     }
 
     /// A solved header on `parent`, one height up, at difficulty one.
@@ -5509,6 +5599,181 @@ mod block_relay {
         // An archive UTXO node serves every section; the ADProofs served now
         // is the proof apply regenerated and re-stored.
         assert_announced_ids_served(&mut state, &probed.before_apply);
+    }
+
+    #[test]
+    fn locally_mined_block_pruned_utxo_node_announces_once_before_apply() {
+        // Keeping two blocks, every apply from height three on advances the
+        // serving window and evicts the sections below it, so the blocks
+        // below are mined while the window starts above height one.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        state.store.as_utxo_mut().unwrap().set_blocks_to_keep(2);
+        let first = mine_and_apply(&mut state, &handle);
+        for _ in 2..=3 {
+            mine_and_apply(&mut state, &handle);
+        }
+        let queue = register_shared_peer(&mut state);
+        for height in 4..=8 {
+            assert_eq!(
+                state.store.read_minimal_full_block_height().unwrap(),
+                height - 2,
+                "pruning keeps the last two applied blocks"
+            );
+            mine_announced_before_apply(&mut state, &handle, &queue);
+        }
+        assert_eq!(state.store.chain_state_meta().best_full_block_height, 8);
+        assert_eq!(state.store.read_minimal_full_block_height().unwrap(), 7);
+        let first_sections = &stored_inventory(&state, first)[1..];
+        assert_eq!(
+            missing_from(state.store.as_utxo().unwrap(), first_sections).len(),
+            3,
+            "pruning evicted the first block's sections"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(
+            drain(&queue).is_empty(),
+            "nothing is left for a later flush"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_bootstrapped_utxo_node_announces_once_before_apply() {
+        // A UTXO-snapshot or NiPoPoW bootstrap without pruning keeps every
+        // block from its start height on: blocks_to_keep stays -1 while the
+        // window starts above height one. It starts at the snapshot height
+        // plus one, and the first candidate needs its parent's extension, so
+        // production mines only above the window's first height; mining at
+        // that height is the prune guard's boundary.
+        const SENTINEL: u32 = 3;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        for _ in 1..SENTINEL {
+            mine_and_apply(&mut state, &handle);
+        }
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .write_minimal_full_block_height(SENTINEL)
+            .unwrap();
+        let queue = register_shared_peer(&mut state);
+        for _ in SENTINEL..=SENTINEL + 1 {
+            mine_announced_before_apply(&mut state, &handle, &queue);
+        }
+        assert_eq!(
+            state.store.read_minimal_full_block_height().unwrap(),
+            SENTINEL,
+            "the window does not move without pruning"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(
+            drain(&queue).is_empty(),
+            "nothing is left for a later flush"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_crash_image_at_apply_holds_sections() {
+        // No peer holds a mined block's sections before this node serves
+        // them, so they must be on disk before apply starts: a node killed
+        // during apply would otherwise restart with the header as its best
+        // header and no body for it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        let image = crash_image_at_apply(&mut state, dir.path(), |state| {
+            assert!(submit_solution(state, &handle, mined.nonce).is_ok());
+        });
+        assert_eq!(
+            missing_from(&image, &stored_inventory(&state, mined.id)),
+            Vec::<[u8; 32]>::new(),
+            "the header and every section are durable when apply starts"
+        );
+    }
+
+    #[test]
+    fn posted_block_crash_image_at_apply_holds_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, root) = genesis_state(dir.path());
+        let block = solved_block([0; 32], 1, wall_clock_ms(), root);
+        let image = crash_image_at_apply(&mut state, dir.path(), |state| {
+            assert!(post_block(state, &block));
+        });
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, block.id);
+        assert_eq!(
+            missing_from(&image, &full_inventory(&block)),
+            Vec::<[u8; 32]>::new(),
+            "the header and every section are durable when apply starts"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_known_header_without_sections_resubmission_applies() {
+        // The state a section write failing after the header leaves: the
+        // mined header is the best header and none of its sections is
+        // stored. Resubmitting the solution stores them and applies it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        process_header(&mut state, &serialize_header(&mined.header).unwrap().0);
+        assert_eq!(state.store.chain_state_meta().best_header_id, mined.id);
+        let queue = register_shared_peer(&mut state);
+        let probed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(
+            probed.result.is_ok(),
+            "{:?}: {:?}",
+            probed.result,
+            state.executor.last_block_apply_error()
+        );
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, mined.id);
+        assert_eq!(
+            probed.before_apply,
+            stored_inventory(&state, mined.id),
+            "announced once its sections are stored, before apply"
+        );
+        assert!(probed.after_apply.is_empty(), "{:?}", probed.after_apply);
+        assert_announced_ids_served(&mut state, &probed.before_apply);
+    }
+
+    #[test]
+    fn locally_mined_block_tying_bodyless_best_header_is_stored_as_fork() {
+        // A block on the full tip ties the score of a best header one height
+        // up, so it is stored as a fork, and only the best header chain is
+        // applied. While that header's sections are missing, as after a
+        // section write failing behind it, no other block at that height
+        // applies here.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let bodyless = solve(&state, &handle, 0);
+        process_header(&mut state, &serialize_header(&bodyless.header).unwrap().0);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        let sibling = solve(&state, &handle, 1);
+        let result = submit_solution(&mut state, &handle, sibling.nonce);
+        assert!(
+            matches!(
+                &result,
+                Err(ergo_api::MiningApiError::Internal(reason))
+                    if reason.starts_with("block apply failed")
+                        && reason.contains(&hex::encode(bodyless.id))
+                        && reason.contains("sections are not all stored")
+            ),
+            "the reply names the bodyless best header: {result:?}"
+        );
+        assert!(state.store.get_header(&sibling.id).unwrap().is_some());
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_height),
+            (bodyless.id, 1)
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut rx).is_empty());
     }
 
     #[test]
@@ -5977,21 +6242,18 @@ mod block_relay {
     // ----- error paths -----
 
     #[test]
-    fn locally_mined_block_pruned_utxo_node_fails_at_section_persist() {
-        // Mining needs a UTXO backend (config rejects digest mining and the
-        // handler requires the UTXO store), so besides archive UTXO the only
-        // storage mode left is a serving window above height one: pruned, or
-        // bootstrapped from a UTXO snapshot or NiPoPoW proof. This pins a
-        // known step-2 ordering bug there, not servability: the mined
-        // sections are persisted before their header creates the
-        // SECTION_HEIGHT_INDEX rows, so the pruning guard refuses them and
-        // the submission fails before anything is stored or announced.
+    fn locally_mined_block_header_rejected_stores_no_sections() {
+        // The header pipeline runs before any section is written, so a mined
+        // block whose header it refuses leaves no section behind.
         let dir = tempfile::tempdir().unwrap();
         let (mut state, handle) = devnet_node(dir.path());
         mine_and_apply(&mut state, &handle);
-        let store = state.store.as_utxo_mut().unwrap();
-        store.set_blocks_to_keep(1000);
-        store.write_minimal_full_block_height(2).unwrap();
+        state
+            .executor
+            .set_header_checkpoint(Some(ergo_sync::header_proc::HeaderCheckpoint {
+                height: 2,
+                block_id: [0xAB; 32],
+            }));
         let mut rx = register_connected_peer(&mut state, test_peer());
         publish_candidate(&state, &handle);
         let mined = solve(&state, &handle, 0);
@@ -5999,12 +6261,75 @@ mod block_relay {
         assert!(
             matches!(
                 &result,
-                Err(ergo_api::MiningApiError::Internal(reason))
-                    if reason.starts_with("persist:") && reason.contains("PrunedSection")
+                Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("process_header:")
             ),
             "{result:?}"
         );
         assert!(state.store.get_header(&mined.id).unwrap().is_none());
+        let sections = ExpectedSections::from_header(
+            &mined.id,
+            mined.header.transactions_root.as_bytes(),
+            mined.header.extension_root.as_bytes(),
+            mined.header.ad_proofs_root.as_bytes(),
+        );
+        for id in [
+            sections.transactions_id,
+            sections.extension_id,
+            sections.ad_proofs_id,
+        ] {
+            assert!(
+                state.store.get_block_section(&id).unwrap().is_none(),
+                "section {} was stored for a refused header",
+                hex::encode(id)
+            );
+        }
+        assert!(inventories(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn locally_mined_block_section_store_failure_after_header_sends_no_inventory() {
+        // The header is stored before the sections. Starting the serving
+        // window above the mined height makes the prune guard refuse the
+        // section write that follows, which production reaches only on a
+        // storage failure: the header stays stored without its sections, and
+        // nothing is announced.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .write_minimal_full_block_height(3)
+            .unwrap();
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        let persist_failed = |result: &Result<(), ergo_api::MiningApiError>| {
+            matches!(
+                result,
+                Err(ergo_api::MiningApiError::Internal(reason))
+                    if reason.starts_with("persist:") && reason.contains("sentinel")
+            )
+        };
+        let (storage_errors, _) = ergo_state::storage_observability::storage_error_totals();
+        let result = submit_solution(&mut state, &handle, mined.nonce);
+        assert!(persist_failed(&result), "{result:?}");
+        assert!(
+            ergo_state::storage_observability::storage_error_totals().0 > storage_errors,
+            "the failure is reported to storage health"
+        );
+        // The best header now has no body.
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_height),
+            (mined.id, 1)
+        );
+        // Resubmitting the solution retries the section write, which the
+        // guard refuses again.
+        let resubmitted = submit_solution(&mut state, &handle, mined.nonce);
+        assert!(persist_failed(&resubmitted), "{resubmitted:?}");
+        flush_actions(&mut state, vec![]);
         assert!(inventories(&mut rx).is_empty());
     }
 
@@ -6030,8 +6355,8 @@ mod block_relay {
         );
         assert_announced_ids_served(&mut state, &announced);
         flush_actions(&mut state, vec![]);
-        // The miner resubmitting the same solution stops at the known-header
-        // check.
+        // Its sections are stored, so the miner resubmitting the same
+        // solution stops at the known-header check.
         let resubmitted = submit_solution(&mut state, &handle, block.nonce);
         assert!(
             matches!(

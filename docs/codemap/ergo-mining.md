@@ -21,9 +21,9 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 - `src/engine.rs` — the off-loop build driver (`build_and_publish`, `BestTip`,
   `BuildIntent`, `BuildOutcome`); explains the commit-visibility/CAS-publish
   consensus-safety story.
-- `verify_solution` + `apply_mined_block` (`src/solution.rs:83`,
-  `src/submit.rs:81`) — the two-stage solution acceptance path (API pre-check,
-  then executor-side authoritative apply).
+- `verify_solution` + `prepare_mined_block` / `store_mined_sections`
+  (`src/solution.rs:83`, `src/submit.rs:118,223`) — the two-stage solution
+  acceptance path (API pre-check, then executor-side authoritative apply).
 - `CandidateStateView` (`src/state_view.rs:46`) — the read trait that lets the
   same builder run on-loop (`StateStore`) or off-loop (`CommittedSnapshot`).
 
@@ -68,8 +68,9 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 - `src/work_message.rs` — typed `WorkMessage` / `MinerSolution` (JSON-free).
 - `src/solution.rs` — API-side solution pre-check (`verify_solution`,
   `SolutionOutcome`, `SubmittedBlock`).
-- `src/submit.rs` — executor-side block-section persistence + authoritative
-  parent recheck (`apply_mined_block`, `MiningSubmitRequest`).
+- `src/submit.rs` — executor-side authoritative parent recheck and
+  block-section persistence (`prepare_mined_block`, `store_mined_sections`,
+  `MiningSubmitRequest`).
 
 ## Key types, traits & functions
 - `generate_candidate` (fn) — assemble the next candidate from a
@@ -105,8 +106,11 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   `MinerSolution::from_hex` — `src/work_message.rs:15,31`
 - `verify_solution` (fn) → `SolutionOutcome` (Accepted/InvalidPow/StaleParent),
   `SubmittedBlock` — `src/solution.rs:83,43,62`
-- `apply_mined_block` (fn) — persist sections + authoritative parent recheck;
-  `MiningSubmitRequest`, `MiningSubmitError` — `src/submit.rs:81,29,39`
+- `prepare_mined_block` (fn) — authoritative parent recheck + serialization,
+  no writes; `store_mined_sections` (fn) — persist the sections in one durable
+  transaction once the header pipeline has stored the header; `MinedBlock`
+  (`sections_stored` for a resubmitted known header), `MiningSubmitRequest`,
+  `MiningSubmitError` — `src/submit.rs:118,223,65,31,41`
 - `reward_output_script` / `reward_output_script_from_hex` (fns) — canonical
   reward ErgoTree bytes; `REWARD_SCRIPT_LEN = 54` — `src/reward_script.rs:82,93`
 - `emission_at_height` / `miners_reward_at_height` (fns) — emission curve;
@@ -152,9 +156,10 @@ ergo-crypto, ergo-validation, ergo-state, ergo-mempool
   (`handle.rs::publish_if_current` / `cached_work_if_synced`).
 - **Two-stage solution acceptance.** `verify_solution` runs the PoW pre-check
   (`hit_for_v2 <= target`) and a fast-fail parent-id check off the loop;
-  `apply_mined_block` re-checks parent-id under the action-loop lock as the
-  authoritative TOCTOU close before persisting sections (`solution.rs`,
-  `submit.rs`).
+  `prepare_mined_block` re-checks parent-id under the action-loop lock as the
+  authoritative TOCTOU close; the node stores the header before
+  `store_mined_sections` persists the sections durably, ahead of announce and
+  apply (`solution.rs`, `submit.rs`).
 - **Block order + budget.** Block tx order is `[emission, (rent), ...user txs,
   fee]`. The pinned coinbase+rent prefix and mempool selection are bounded by
   the voted `max_block_cost`/`max_block_size` (the AVL dry-run checks neither);

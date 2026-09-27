@@ -216,6 +216,12 @@ impl crate::backend::HeaderSectionStore for DigestStateStore {
         self.headers
             .store_block_section_typed(modifier_id, section_bytes, section_type)
     }
+    fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        self.headers.store_block_sections_durable(sections)
+    }
     fn begin_header_batch(&mut self) {
         self.headers.begin_header_batch()
     }

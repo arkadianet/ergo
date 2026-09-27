@@ -7,8 +7,9 @@
 //! Wire-up at the node level: hold a
 //! `mpsc::Sender<MiningSubmitRequest>` on the API task side, drain it
 //! once per tick in the main loop just like `submit_rx` for
-//! `SubmitRequest`, and call [`apply_mined_block`] inside the drain
-//! arm.
+//! `SubmitRequest`, and inside the drain arm call
+//! [`prepare_mined_block`], run the header pipeline on its header, then
+//! call [`store_mined_sections`].
 
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::block_transactions::{write_block_transactions_with_version, BlockTransactions};
@@ -17,14 +18,15 @@ use ergo_ser::header::serialize_header;
 use ergo_ser::modifier_id::{
     compute_section_id, TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION,
 };
-use ergo_state::store::StateStore;
+use ergo_state::store::{StateError, StateStore};
 use thiserror::Error;
 use tokio::sync::oneshot;
 
 use crate::solution::SubmittedBlock;
 
 /// Request shipped from the API task to the main loop. The main loop
-/// drains it, calls [`apply_mined_block`], and replies through `reply`.
+/// drains it, stores the block through [`prepare_mined_block`], the header
+/// pipeline and [`store_mined_sections`], and replies through `reply`.
 #[derive(Debug)]
 pub struct MiningSubmitRequest {
     /// Block-application payload, packaged by the API-side pre-check.
@@ -47,41 +49,76 @@ pub enum MiningSubmitError {
     /// ad-proofs).
     #[error("serialize section: {0}")]
     SerializeSection(String),
-    /// Section persistence failed (redb write or wrong type).
+    /// Section persistence failed: the store refused or could not commit
+    /// the write.
     #[error("persist section: {0}")]
-    PersistSection(String),
+    PersistSection(#[source] StateError),
     /// Block validation or apply failed downstream.
     #[error("apply block: {0}")]
     Apply(String),
 }
 
-/// Persist the three block-sections of an accepted mining solution
-/// under their canonical modifier ids and type bytes. Performs the
-/// authoritative `parent_id` recheck (v12 §6 step 6, the consensus-
-/// bearing TOCTOU close) before writing anything.
+/// An accepted mining solution in its stored form: the canonical header
+/// the caller drives through the header pipeline, and the three sections
+/// [`store_mined_sections`] writes once that header is stored.
+#[derive(Debug)]
+pub struct MinedBlock {
+    /// `blake2b256` of [`MinedBlock::header_bytes`].
+    pub header_id: [u8; 32],
+    /// Canonical header bytes.
+    pub header_bytes: Vec<u8>,
+    /// The block's height: the applied tip's plus one.
+    pub height: u32,
+    sections: [MinedSection; 3],
+}
+
+/// One serialized section under its canonical modifier id.
+#[derive(Debug)]
+struct MinedSection {
+    id: [u8; 32],
+    type_id: u8,
+    bytes: Vec<u8>,
+}
+
+impl MinedBlock {
+    /// Whether every section of the block is in `state`. When a resubmitted
+    /// solution's header is already stored, missing sections are what a
+    /// failed [`store_mined_sections`] leaves, and the caller writes them.
+    pub fn sections_stored(&self, state: &StateStore) -> Result<bool, StateError> {
+        for section in &self.sections {
+            if state.get_block_section(&section.id)?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Recheck an accepted solution's parent and serialize the block, writing
+/// nothing. The parent recheck (v12 §6 step 6) is the consensus-bearing
+/// TOCTOU close: the block must still extend the applied tip.
 ///
-/// Header persistence + HEADER_META + HEADER_CHAIN_INDEX advancement
-/// is **not** done here — the integrator drives the mined header
-/// through `ergo_sync::header_proc::process_header` after this returns,
-/// then calls `block_proc::process_block` to validate + apply. That
-/// keeps the mining path on the same persistence flow as peer-received
-/// blocks (PoW verify in `process_header`, validation + state apply in
-/// `process_block`).
-///
-/// Returns the canonical header bytes + header_id the caller hands to
-/// `process_header`. The caller's main loop runs roughly:
+/// The caller then drives [`MinedBlock::header_bytes`] through
+/// `ergo_sync::header_proc` (PoW re-verify, chain linkage, difficulty,
+/// persistence into HEADERS + HEADER_META + SECTION_HEIGHT_INDEX) and only
+/// after it is stored calls [`store_mined_sections`], then validates and
+/// applies the block through the executor. Header before sections is the
+/// order every block reaches this store in: peers only deliver sections
+/// of known headers, and Scala's `CandidateGenerator.sendToNodeView` hands
+/// the header to its view holder before the sections.
 ///
 /// ```ignore
-/// let (header_bytes, header_id) = apply_mined_block(&mut store, block)?;
-/// let _processed_header = header_proc::process_header(&mut store, &header_bytes)?;
-/// let _processed_block  = block_proc::process_block(&mut store, &header_id, ...)?;
-/// coordinator.on_block_applied(header_id, height);
-/// executor.try_apply_next_blocks(...);
+/// let mined = prepare_mined_block(&store, block)?;
+/// let processed = header_proc::process_header_cfg_with_genesis(&mut store, &mined.header_bytes, ..)?;
+/// store_mined_sections(&store, &mined)?;
+/// // A resubmission whose header is known stores the sections only when
+/// // `mined.sections_stored(&store)?` is false.
+/// executor.execute(Action::AssembleBlock { header_id: mined.header_id }, ..);
 /// ```
-pub fn apply_mined_block(
-    state: &mut StateStore,
+pub fn prepare_mined_block(
+    state: &StateStore,
     block: SubmittedBlock,
-) -> Result<([u8; 32], Vec<u8>), MiningSubmitError> {
+) -> Result<MinedBlock, MiningSubmitError> {
     // 1. Authoritative parent-id recheck.
     let live_parent = state.chain_state().best_full_block_id;
     if live_parent != block.parent_id {
@@ -91,15 +128,15 @@ pub fn apply_mined_block(
         });
     }
 
-    // 2. Serialize header (caller drives process_header next).
+    // 2. Serialize the header.
     let (header_bytes, header_id) = serialize_header(&block.header)
         .map_err(|e| MiningSubmitError::SerializeSection(format!("header: {e:?}")))?;
     let header_id_bytes: [u8; 32] = *header_id.as_bytes();
 
-    // 3. Persist BT section.
+    // 3. BlockTransactions.
     let bt = BlockTransactions {
         header_id,
-        transactions: block.transactions.clone(),
+        transactions: block.transactions,
     };
     let bt_bytes = serialize_bt(&bt, block.header.version)?;
     let bt_id = compute_section_id(
@@ -107,25 +144,17 @@ pub fn apply_mined_block(
         &header_id_bytes,
         block.header.transactions_root.as_bytes(),
     );
-    state
-        .store_block_section_typed(&bt_id, &bt_bytes, TYPE_BLOCK_TRANSACTIONS)
-        .map_err(|e| MiningSubmitError::PersistSection(format!("BT: {e:?}")))?;
 
-    // 4. Persist Extension section.
+    // 4. Extension.
     let mut ext_fields = Vec::with_capacity(block.extension_fields.len());
-    for (k, v) in &block.extension_fields {
-        if k.len() != 2 {
-            return Err(MiningSubmitError::SerializeSection(format!(
+    for (k, v) in block.extension_fields {
+        let key: [u8; 2] = k.as_slice().try_into().map_err(|_| {
+            MiningSubmitError::SerializeSection(format!(
                 "extension key must be 2 bytes, got {}",
                 k.len()
-            )));
-        }
-        let mut key_arr = [0u8; 2];
-        key_arr.copy_from_slice(k);
-        ext_fields.push(ExtensionField {
-            key: key_arr,
-            value: v.clone(),
-        });
+            ))
+        })?;
+        ext_fields.push(ExtensionField { key, value: v });
     }
     let ext = Extension {
         header_id,
@@ -137,11 +166,8 @@ pub fn apply_mined_block(
         &header_id_bytes,
         block.header.extension_root.as_bytes(),
     );
-    state
-        .store_block_section_typed(&ext_id, &ext_bytes, TYPE_EXTENSION)
-        .map_err(|e| MiningSubmitError::PersistSection(format!("Extension: {e:?}")))?;
 
-    // 5. Persist ADProofs section.
+    // 5. ADProofs.
     //    Wire: [32 bytes header_id] [VLQ u32 proof_len] [proof bytes]
     let mut adp_bytes = Vec::with_capacity(32 + 4 + block.ad_proof_bytes.len());
     adp_bytes.extend_from_slice(&header_id_bytes);
@@ -154,11 +180,57 @@ pub fn apply_mined_block(
         &header_id_bytes,
         block.header.ad_proofs_root.as_bytes(),
     );
-    state
-        .store_block_section_typed(&adp_id, &adp_bytes, TYPE_AD_PROOFS)
-        .map_err(|e| MiningSubmitError::PersistSection(format!("ADProofs: {e:?}")))?;
 
-    Ok((header_id_bytes, header_bytes))
+    Ok(MinedBlock {
+        header_id: header_id_bytes,
+        header_bytes,
+        height: block.header.height,
+        sections: [
+            MinedSection {
+                id: bt_id,
+                type_id: TYPE_BLOCK_TRANSACTIONS,
+                bytes: bt_bytes,
+            },
+            MinedSection {
+                id: ext_id,
+                type_id: TYPE_EXTENSION,
+                bytes: ext_bytes,
+            },
+            MinedSection {
+                id: adp_id,
+                type_id: TYPE_AD_PROOFS,
+                bytes: adp_bytes,
+            },
+        ],
+    })
+}
+
+/// Persist the three sections of a [`MinedBlock`] under their canonical
+/// modifier ids and type bytes (BlockTransactions, Extension, ADProofs) in
+/// one durable transaction: all three are on disk when this returns `Ok`,
+/// and none is written when it returns `Err`.
+///
+/// Call only once the header pipeline has stored the block's header. The
+/// store's prune guard admits a section only when the header's
+/// SECTION_HEIGHT_INDEX row puts it at or above the minimal full-block
+/// height, so on a store whose serving window starts above height one
+/// (pruned, or bootstrapped from a UTXO snapshot or NiPoPoW proof) a
+/// section written before its header is refused. No peer holds these
+/// sections until this node serves them, so they are committed durably
+/// before the block is announced or applied: a node killed in between
+/// would otherwise restart with the header, possibly as its best header,
+/// and no body for it anywhere.
+pub fn store_mined_sections(
+    state: &StateStore,
+    mined: &MinedBlock,
+) -> Result<(), MiningSubmitError> {
+    let sections = mined
+        .sections
+        .each_ref()
+        .map(|section| (&section.id, section.bytes.as_slice(), section.type_id));
+    state
+        .store_block_sections_durable(&sections)
+        .map_err(MiningSubmitError::PersistSection)
 }
 
 fn serialize_bt(bt: &BlockTransactions, block_version: u8) -> Result<Vec<u8>, MiningSubmitError> {
@@ -187,8 +259,7 @@ mod tests {
         // We can't construct a fully-valid SubmittedBlock without going
         // through the orchestrator. This test only exercises the
         // parent-id pre-check failure path by feeding a synthetic
-        // mismatched parent_id. Anything past step 1 of
-        // apply_mined_block would fail too, but step 1 fails first.
+        // mismatched parent_id.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.redb");
         let mut state = StateStore::open(&path).unwrap();
@@ -200,7 +271,7 @@ mod tests {
         // synthesize a SubmittedBlock with parent_id = [0xFF; 32] (won't match)
         let block = synth_block_with_parent([0xFFu8; 32]);
         assert_ne!(live, [0xFFu8; 32]);
-        let err = apply_mined_block(&mut state, block).expect_err("must err");
+        let err = prepare_mined_block(&state, block).expect_err("must err");
         match err {
             MiningSubmitError::StaleParent { .. } => {}
             other => panic!("expected StaleParent, got {other:?}"),

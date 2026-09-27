@@ -209,10 +209,10 @@ impl HeaderSectionTables {
     /// (resurrection attempt via a delayed peer delivery, a
     /// rogue peer pushing directly, or an executor bug that
     /// bypassed receive gating). `SECTION_HEIGHT_INDEX` provides
-    /// the height lookup that was stamped at header-store time —
-    /// sections whose parent we never indexed
-    /// are passed through (no height to compare against; the
-    /// serve gate will catch them on read if needed).
+    /// the height lookup that was stamped at header-store time.
+    /// While the sentinel is above one, a section with no
+    /// `SECTION_HEIGHT_INDEX` row (its header is not stored) is
+    /// refused too.
     pub(crate) fn store_block_section_typed(
         &self,
         modifier_id: &[u8; 32],
@@ -221,80 +221,30 @@ impl HeaderSectionTables {
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
         write_txn.set_durability(redb::Durability::None);
-        // Sentinel guard — read sentinel + section-height INSIDE
-        // the write_txn so a concurrent persist worker that's
-        // advancing the sentinel can't race the check-then-write.
-        // Gate fires whenever `sentinel > 1` (sentinel-based, not
-        // `blocks_to_keep > 0`): the sentinel is also written by
-        // `install_snapshot_state` and `apply_popow_proof`, so a
-        // Mode 2 / NiPoPoW-bootstrapped archive node also needs
-        // the resurrection guard. A fresh archive-from-genesis
-        // store reads sentinel = 1 (default) and the gate is
-        // inert.
-        let sentinel: u32 = {
-            let meta = write_txn.open_table(STATE_META)?;
-            let bytes_opt = meta
-                .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
-                .map(|g| g.value().to_vec());
-            drop(meta);
-            match bytes_opt {
-                Some(bytes) => {
-                    if bytes.len() != 4 {
-                        return Err(StateError::DbCorruption {
-                            table: "state_meta",
-                            key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
-                            reason: format!(
-                                "minimal_full_block_height payload has unexpected length: {}",
-                                bytes.len()
-                            ),
-                        });
-                    }
-                    let mut buf = [0u8; 4];
-                    buf.copy_from_slice(&bytes);
-                    u32::from_le_bytes(buf)
-                }
-                None => 1,
-            }
-        };
-        if sentinel > 1 {
-            // Section height — tombstone-retained by eviction so
-            // sub-sentinel resurrection attempts are detected
-            // post-eviction (see delete_block_sections_at_height_in_txn).
-            // Fail-CLOSED on Ok(None): the boot backfill gate
-            // makes SECTION_HEIGHT_INDEX complete
-            // when sentinel > 1, so an unindexed section is
-            // either an orphan or an attacker direct-write
-            // attempt — either way, reject.
-            let section_height: Option<u32> = match write_txn.open_table(SECTION_HEIGHT_INDEX) {
-                Ok(t) => t.get(modifier_id.as_slice())?.map(|g| g.value()),
-                Err(redb::TableError::TableDoesNotExist(_)) => None,
-                Err(e) => return Err(e.into()),
-            };
-            match section_height {
-                Some(height) if height >= sentinel => {}
-                Some(height) => {
-                    return Err(StateError::PrunedSection {
-                        section_id: hex::encode(modifier_id),
-                        section_height: height,
-                        sentinel,
-                    });
-                }
-                None => {
-                    return Err(StateError::PrunedSection {
-                        section_id: hex::encode(modifier_id),
-                        section_height: 0,
-                        sentinel,
-                    });
-                }
-            }
-        }
-        {
-            let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
-            table.insert(modifier_id.as_slice(), section_bytes)?;
-        }
-        {
-            let mut idx = write_txn.open_table(MODIFIER_TYPE_INDEX)?;
-            idx.insert(modifier_id.as_slice(), section_type)?;
+        insert_block_section_in_txn(&write_txn, modifier_id, section_bytes, section_type)?;
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Store several typed block sections in one transaction that
+    /// commits with the default `Durability::Immediate`: when this
+    /// returns `Ok`, every section is on disk, and when it returns
+    /// `Err`, none was written. Each section passes the same prune
+    /// guard as [`Self::store_block_section_typed`].
+    ///
+    /// For the sections of a block this node mined or was handed
+    /// whole (`POST /blocks`): no peer holds them yet, so the
+    /// redownload that recovers a lost `Durability::None` section
+    /// cannot recover these. Their header is stored first, durably,
+    /// and without them it can stand as the best header with a body
+    /// no node can serve.
+    pub(crate) fn store_block_sections_durable(
+        &self,
+        sections: &[(&[u8; 32], &[u8], u8)],
+    ) -> Result<(), StateError> {
+        let write_txn = crate::begin_write_qr(&self.db)?;
+        for &(modifier_id, section_bytes, section_type) in sections {
+            insert_block_section_in_txn(&write_txn, modifier_id, section_bytes, section_type)?;
         }
         write_txn.commit()?;
         Ok(())
@@ -869,4 +819,93 @@ impl HeaderSectionTables {
         }
         Ok(())
     }
+}
+
+/// The prune-guarded insert behind every typed section write: the section
+/// bytes into `BLOCK_SECTIONS` and its type into `MODIFIER_TYPE_INDEX`,
+/// unless the sentinel is above one and the section's
+/// `SECTION_HEIGHT_INDEX` height is missing or below it
+/// ([`StateError::PrunedSection`]).
+fn insert_block_section_in_txn(
+    write_txn: &redb::WriteTransaction,
+    modifier_id: &[u8; 32],
+    section_bytes: &[u8],
+    section_type: u8,
+) -> Result<(), StateError> {
+    // Sentinel guard — read sentinel + section-height INSIDE
+    // the write_txn so a concurrent persist worker that's
+    // advancing the sentinel can't race the check-then-write.
+    // Gate fires whenever `sentinel > 1` (sentinel-based, not
+    // `blocks_to_keep > 0`): the sentinel is also written by
+    // `install_snapshot_state` and `apply_popow_proof`, so a
+    // Mode 2 / NiPoPoW-bootstrapped archive node also needs
+    // the resurrection guard. A fresh archive-from-genesis
+    // store reads sentinel = 1 (default) and the gate is
+    // inert.
+    let sentinel: u32 = {
+        let meta = write_txn.open_table(STATE_META)?;
+        let bytes_opt = meta
+            .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
+            .map(|g| g.value().to_vec());
+        drop(meta);
+        match bytes_opt {
+            Some(bytes) => {
+                if bytes.len() != 4 {
+                    return Err(StateError::DbCorruption {
+                        table: "state_meta",
+                        key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
+                        reason: format!(
+                            "minimal_full_block_height payload has unexpected length: {}",
+                            bytes.len()
+                        ),
+                    });
+                }
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&bytes);
+                u32::from_le_bytes(buf)
+            }
+            None => 1,
+        }
+    };
+    if sentinel > 1 {
+        // Section height — tombstone-retained by eviction so
+        // sub-sentinel resurrection attempts are detected
+        // post-eviction (see delete_block_sections_at_height_in_txn).
+        // Fail-CLOSED on Ok(None): the boot backfill gate
+        // makes SECTION_HEIGHT_INDEX complete
+        // when sentinel > 1, so an unindexed section is
+        // either an orphan or an attacker direct-write
+        // attempt — either way, reject.
+        let section_height: Option<u32> = match write_txn.open_table(SECTION_HEIGHT_INDEX) {
+            Ok(t) => t.get(modifier_id.as_slice())?.map(|g| g.value()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(e.into()),
+        };
+        match section_height {
+            Some(height) if height >= sentinel => {}
+            Some(height) => {
+                return Err(StateError::PrunedSection {
+                    section_id: hex::encode(modifier_id),
+                    section_height: height,
+                    sentinel,
+                });
+            }
+            None => {
+                return Err(StateError::PrunedSection {
+                    section_id: hex::encode(modifier_id),
+                    section_height: 0,
+                    sentinel,
+                });
+            }
+        }
+    }
+    {
+        let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
+        table.insert(modifier_id.as_slice(), section_bytes)?;
+    }
+    {
+        let mut idx = write_txn.open_table(MODIFIER_TYPE_INDEX)?;
+        idx.insert(modifier_id.as_slice(), section_type)?;
+    }
+    Ok(())
 }
