@@ -717,6 +717,7 @@ fn build_app_with_mempool(indexer: IndexerHandle, mempool: Arc<dyn MempoolView>)
         read: Arc::new(StubReadState { full_height: 1234 }),
         compat: Some(empty_chain()),
         submit: None,
+        wallet_chain: None,
         indexer: Some(Arc::new(indexer)),
         mempool,
         network: ergo_ser::address::NetworkPrefix::Mainnet,

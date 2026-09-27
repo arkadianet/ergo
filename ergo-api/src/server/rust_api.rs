@@ -194,6 +194,7 @@ pub(super) fn wallet_router(
 pub(super) struct ProductRouterState {
     pub script: crate::v1::script::ScriptState,
     pub api: crate::v1::V1State,
+    pub wallet_chain: Option<Arc<dyn crate::traits::WalletChain>>,
     pub operator: crate::v1::OperatorState,
     pub accounts: crate::v1::AccountsState,
     pub webhooks: crate::v1::WebhooksState,
@@ -204,6 +205,11 @@ pub(super) struct ProductRouterState {
 
 pub(super) fn product_router(state: ProductRouterState) -> FamilyRouter {
     let router = Router::new()
+        .merge(crate::v1::wallet_chain_router(
+            crate::v1::WalletChainState::new(state.wallet_chain),
+            state.governor.clone(),
+            state.auth.clone(),
+        ))
         .merge(crate::v1::script::script_router(
             state.script,
             state.governor.clone(),

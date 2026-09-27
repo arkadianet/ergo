@@ -62,6 +62,7 @@ fn app(indexer: Option<Arc<dyn IndexerQuery>>) -> Router {
         chain: None,
         indexer,
         submit: None,
+        wallet_chain: None,
         tx_builder: None,
         mempool,
         mempool_depth: Arc::new(ergo_api::v1::MempoolDepthRing::new()),

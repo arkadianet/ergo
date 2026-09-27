@@ -27,8 +27,10 @@ pub(crate) mod stats;
 pub(crate) mod tokens;
 pub(crate) mod transactions;
 pub(crate) mod tx_intel;
+pub mod wallet_chain;
 
 pub use batch::batch_router;
+pub use wallet_chain::{wallet_chain_router, V1ChainState, WalletChainState};
 
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -69,6 +71,7 @@ pub struct V1State {
     /// answers the honest `route_unavailable` rather than fabricating a coin
     /// selection.
     pub tx_builder: Option<Arc<dyn NodeTxBuilder>>,
+    pub wallet_chain: Option<Arc<dyn crate::traits::WalletChain>>,
     /// Mempool overlay — the unconfirmed side of `transactions/{tx_id}`.
     pub mempool: Arc<dyn MempoolView>,
     /// Shared mempool-depth sample ring — the source for

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub const CHAIN_API_VERSION: u16 = 1;
 pub const CHAIN_WIRE_VERSION: u16 = CHAIN_API_VERSION;
@@ -41,6 +41,28 @@ pub fn validate_snapshot_id(value: &str) -> Result<(), String> {
         return Err("snapshot_id is reserved".to_string());
     }
     Ok(())
+}
+
+fn serialize_decimal_u64<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_decimal_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(value) => value.parse::<u64>().map_err(serde::de::Error::custom),
+        serde_json::Value::Number(value) => value
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("amount must be an unsigned decimal integer")),
+        _ => Err(serde::de::Error::custom(
+            "amount must be a decimal string or unsigned integer",
+        )),
+    }
 }
 
 fn deserialize_id32<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -105,18 +127,25 @@ where
     Ok(value)
 }
 
-fn deserialize_id32_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+fn deserialize_optional_id32_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let values = Vec::<String>::deserialize(deserializer)?;
-    values
-        .into_iter()
-        .map(|value| {
-            validate_id32(&value, "id").map_err(serde::de::Error::custom)?;
-            Ok(value)
+    Option::<Vec<String>>::deserialize(deserializer)?
+        .map(|values| {
+            values
+                .into_iter()
+                .map(|value| {
+                    validate_id32(&value, "id").map_err(serde::de::Error::custom)?;
+                    Ok(value)
+                })
+                .collect()
         })
-        .collect()
+        .transpose()
+}
+
+fn box_ids_are_empty(box_ids: &Option<Vec<String>>) -> bool {
+    box_ids.as_ref().is_none_or(Vec::is_empty)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -277,10 +306,10 @@ pub struct ReemissionInput {
     pub amount: String,
     #[serde(
         default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "deserialize_id32_vec"
+        skip_serializing_if = "box_ids_are_empty",
+        deserialize_with = "deserialize_optional_id32_vec"
     )]
-    pub box_ids: Vec<String>,
+    pub box_ids: Option<Vec<String>>,
 }
 
 pub type Reemission = ReemissionInput;
@@ -327,6 +356,10 @@ pub struct ChainBox {
         deserialize_with = "deserialize_hex_bytes"
     )]
     pub bytes: String,
+    #[serde(
+        serialize_with = "serialize_decimal_u64",
+        deserialize_with = "deserialize_decimal_u64"
+    )]
     pub value: u64,
     pub assets: Vec<ChainAsset>,
     #[serde(deserialize_with = "deserialize_id32")]
@@ -489,12 +522,12 @@ pub enum SubmitError {
 pub enum SubmitResponse {
     Accepted {
         tip: ChainTip,
-        #[serde(deserialize_with = "deserialize_id32")]
+        #[serde(rename = "txId", deserialize_with = "deserialize_id32")]
         tx_id: String,
     },
     Duplicate {
         tip: ChainTip,
-        #[serde(deserialize_with = "deserialize_id32")]
+        #[serde(rename = "txId", deserialize_with = "deserialize_id32")]
         tx_id: String,
     },
     Rejected {
@@ -646,6 +679,63 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SubmitRequest>(&json).unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn box_value_uses_a_decimal_string_on_the_wire() {
+        let value = ChainBox {
+            box_id: id('a'),
+            bytes: "00ff".to_string(),
+            value: 123,
+            assets: Vec::new(),
+            creation_tx_id: id('b'),
+            creation_output_index: 0,
+            creation_height: 1,
+        };
+        let json = serde_json::to_value(&value).unwrap();
+        assert_eq!(json["value"], "123");
+        assert_eq!(serde_json::from_value::<ChainBox>(json).unwrap(), value);
+    }
+
+    #[test]
+    fn reemission_box_ids_are_optional_and_omitted_when_empty() {
+        let absent = ReemissionInput {
+            token_id: id('a'),
+            amount: "1".to_string(),
+            box_ids: None,
+        };
+        let value = serde_json::to_value(&absent).unwrap();
+        assert!(value.get("boxIds").is_none());
+        assert_eq!(
+            serde_json::from_value::<ReemissionInput>(value).unwrap(),
+            absent
+        );
+
+        let empty = ReemissionInput {
+            token_id: id('a'),
+            amount: "1".to_string(),
+            box_ids: Some(Vec::new()),
+        };
+        let value = serde_json::to_value(&empty).unwrap();
+        assert!(value.get("boxIds").is_none());
+        assert_eq!(
+            serde_json::from_value::<ReemissionInput>(value)
+                .unwrap()
+                .box_ids,
+            None
+        );
+
+        let populated = ReemissionInput {
+            token_id: id('a'),
+            amount: "1".to_string(),
+            box_ids: Some(vec![id('b')]),
+        };
+        let value = serde_json::to_value(&populated).unwrap();
+        assert_eq!(value["boxIds"][0], id('b'));
+        assert_eq!(
+            serde_json::from_value::<ReemissionInput>(value).unwrap(),
+            populated
         );
     }
 

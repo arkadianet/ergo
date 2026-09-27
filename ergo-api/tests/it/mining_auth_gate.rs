@@ -75,6 +75,7 @@ fn app() -> axum::Router {
         read: Arc::new(UnusedReadState),
         compat: None,
         submit: None,
+        wallet_chain: None,
         indexer: None,
         mempool: Arc::new(NoopMempoolView::new()),
         network: NetworkPrefix::Mainnet,

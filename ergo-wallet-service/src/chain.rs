@@ -207,6 +207,12 @@ pub enum SubmitResponse {
 pub enum ChainClientError {
     #[error("unsupported chain operation")]
     Unsupported,
+    #[error("chain client overloaded: {0}")]
+    Overloaded(String),
+    #[error("chain client shutting down: {0}")]
+    ShuttingDown(String),
+    #[error("chain client submission timed out: {0}")]
+    Timeout(String),
     #[error(
         "stale chain tip: expected ({expected_height}, {expected_id}), actual ({actual_height}, {actual_id})",
         expected_height = expected.height,

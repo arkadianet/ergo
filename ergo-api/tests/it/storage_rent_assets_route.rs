@@ -131,6 +131,7 @@ fn build_app_with_params(
         read: Arc::new(StubReadState),
         compat: None,
         submit: None,
+        wallet_chain: None,
         indexer: Some(Arc::new(indexer) as Arc<dyn IndexerQuery>),
         mempool: Arc::new(NoopMempoolView::new()),
         network: ergo_ser::address::NetworkPrefix::Mainnet,

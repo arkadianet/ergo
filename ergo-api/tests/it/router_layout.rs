@@ -2204,6 +2204,7 @@ fn build_compat_app_digest_backend() -> axum::Router {
             read,
             compat: Some(compat),
             submit: None,
+            wallet_chain: None,
             indexer: None,
             mempool: Arc::new(ergo_api::NoopMempoolView::new()),
             network: ergo_ser::address::NetworkPrefix::Mainnet,

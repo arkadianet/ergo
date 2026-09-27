@@ -44,7 +44,8 @@ pub use server::{
     serve_on_with_mempool_and_wallet_and_security_and_hosts_and_wallet_moved, ServerCtx,
 };
 pub use traits::{
-    ChainParamsView, MempoolView, NodeAdmin, NodeReadState, NodeSubmit, NoopMempoolView,
-    NoopNodeAdmin, PoolTxDetail, VotingControlError,
+    ChainParamsView, DefaultWalletChain, MempoolView, NodeAdmin, NodeReadState, NodeSubmit,
+    NoopMempoolView, NoopNodeAdmin, NoopWalletChain, PoolTxDetail, VotingControlError, WalletChain,
+    WalletChainError,
 };
 pub use types::*;
