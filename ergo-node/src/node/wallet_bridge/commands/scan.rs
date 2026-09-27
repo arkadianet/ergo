@@ -63,18 +63,13 @@ pub(crate) struct RescanScanMatcher {
 }
 
 impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
-    #[allow(clippy::result_large_err)]
-    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, redb::Error> {
+    fn match_boxes(&self, boxes: &[&[u8]]) -> Result<Vec<Vec<u16>>, String> {
         boxes
             .iter()
             .map(|bytes| {
                 let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-                let b = ergo_ser::ergo_box::read_ergo_box(&mut r).map_err(|e| {
-                    redb::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("scan rescan output box parse failed: {e}"),
-                    ))
-                })?;
+                let b = ergo_ser::ergo_box::read_ergo_box(&mut r)
+                    .map_err(|e| format!("output box parse failed: {e}"))?;
                 Ok(self.registry.matching_scan_ids(&b))
             })
             .collect()
@@ -90,14 +85,26 @@ impl ergo_state::wallet::scan::ScanRescanMatcher for RescanScanMatcher {
 /// it can't read — treating the error as "no scans" would clear the flag and
 /// falsely report a healthy wallet while the registry is still corrupt and the
 /// dropped block's scan matches were never rebuilt.
+#[cfg(test)]
 pub(crate) fn build_rescan_matcher(
     db: &redb::Database,
 ) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
     let registry = load_registry(db)?;
+    Ok(build_rescan_matcher_from_registry(registry))
+}
+
+pub(crate) fn build_rescan_matcher_from_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<Option<RescanScanMatcher>, WalletAdminError> {
+    let registry = load_registry_from_store(store)?;
+    Ok(build_rescan_matcher_from_registry(registry))
+}
+
+fn build_rescan_matcher_from_registry(registry: ScanRegistry) -> Option<RescanScanMatcher> {
     if registry.list().is_empty() {
-        Ok(None)
+        None
     } else {
-        Ok(Some(RescanScanMatcher { registry }))
+        Some(RescanScanMatcher { registry })
     }
 }
 
@@ -151,6 +158,22 @@ pub(crate) fn load_registry(db: &redb::Database) -> Result<ScanRegistry, WalletA
     };
 
     Ok(ScanRegistry::from_persisted(scans, last_used))
+}
+
+pub(crate) fn load_registry_from_store(
+    store: &dyn ergo_state::wallet::WalletStore,
+) -> Result<ScanRegistry, WalletAdminError> {
+    let read = store.begin_read().map_err(internal)?;
+    let snapshot = read.scan_registry().map_err(internal)?;
+    let scans = snapshot
+        .scans
+        .into_iter()
+        .map(|scan| serde_json::from_slice::<Scan>(&scan.json).map_err(internal))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ScanRegistry::from_persisted(
+        scans,
+        snapshot.last_used_id.unwrap_or(PAYMENTS_SCAN_ID),
+    ))
 }
 
 pub(crate) async fn register(
@@ -2139,7 +2162,21 @@ mod tests {
         assert_eq!(out, vec![vec![11u16], vec![]]);
     }
 
-    #[allow(clippy::result_large_err)]
+    #[test]
+    fn rescan_matcher_errors_on_unparseable_box() {
+        use ergo_state::wallet::scan::ScanRescanMatcher;
+        let (_d, db) = temp_db();
+        register_impl(&db, req("a", 0x11)).unwrap();
+        let matcher = build_rescan_matcher(&db).unwrap().unwrap();
+
+        // Garbage bytes can't be a box: abort the rescan rather than silently
+        // dropping a scan match.
+        let good = serialize_box_json(&box_json_with_asset(0x11));
+        let bad: &[u8] = &[0xFF, 0xFF, 0xFF];
+        let out = matcher.match_boxes(&[bad, good.as_slice()]);
+        assert!(out.is_err());
+    }
+
     #[test]
     fn rescan_matcher_rejects_unparseable_box_and_invalidates_rescan() {
         use ergo_state::wallet::scan::{
@@ -2171,9 +2208,10 @@ mod tests {
             }],
         };
         let db = Arc::new(db);
-        let read_block = move |h: u32| -> Result<Option<RescanBlock>, redb::Error> {
-            Ok((h == 1).then_some(block.clone()))
-        };
+        let read_block = move |h: u32| -> Result<
+            Option<RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > { Ok((h == 1).then_some(block.clone())) };
 
         let result = WalletScanService::rescan_full_rebuild(
             &db,
@@ -2182,7 +2220,7 @@ mod tests {
             0,
             1,
             read_block,
-            || -> Result<u32, redb::Error> { Ok(1) },
+            || Ok(1),
             || false,
             Some(&matcher),
         );
@@ -2226,6 +2264,7 @@ mod tests {
 
     #[test]
     fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
+        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
         // While a full rescan rebuilds the scan tables, the live block-apply
         // scan path must no-op so it doesn't race the rebuild's block-by-block
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
@@ -2248,11 +2287,13 @@ mod tests {
             index: parsed.index,
         };
 
+        let db = std::sync::Arc::new(db);
         let hook = crate::node::wallet_bridge::WalletStateHook {
             wallet: std::sync::Arc::new(parking_lot::RwLock::new(
                 ergo_wallet::state::WalletState::empty(false),
             )),
-            db: std::sync::Arc::new(db),
+            db: db.clone(),
+            store: std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db)),
         };
 
         // Baseline (flag clear): the scan is live and the box matches.
@@ -2282,6 +2323,7 @@ mod tests {
 
     #[test]
     fn scan_mutation_guard_rejects_during_rebuild() {
+        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
         use std::sync::atomic::Ordering;
         // Guard passes when no rebuild is in flight...
         crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);

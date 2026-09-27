@@ -198,8 +198,8 @@ enum KeyOutcome {
 fn no_key_configured() -> Response {
     v1_error(
         Reason::Unauthorized,
-        "no api_key is configured; operator/admin routes are closed",
-        "set [api] api_key_hash to enable authenticated v1 routes, or bind to loopback only",
+        crate::auth::API_KEY_NOT_CONFIGURED,
+        "Configure [api.security] api_key_hash, then restart (see docs/configuration.md)",
     )
 }
 
@@ -271,13 +271,13 @@ pub fn warn_startup_posture(security: Option<&ApiSecurity>, bind: SocketAddr) {
             %bind,
             "the API is network-reachable with NO api_key configured — T1 (operator) \
              and T2 (admin) routes FAIL CLOSED (`no_key_configured`, unusable) until \
-             [api] api_key_hash is set or the bind moves to loopback."
+             [api.security] api_key_hash is set."
         ),
         Some(InsecurePosture::WeakDefaultKey) => warn!(
             target: "ergo_api::v1::auth",
             %bind,
             "INSECURE: the API is configured with a weak/default api_key (e.g. the \
-             shipped \"hello\" template value) — reachable by any local process, \
+             legacy \"hello\" template value) — reachable by any local process, \
              and by the network too if the bind is not loopback. Rotate \
              api_key_hash immediately."
         ),
@@ -400,6 +400,11 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["reason"], "unauthorized");
+        assert_eq!(v["error"]["message"], crate::auth::API_KEY_NOT_CONFIGURED);
+        assert_eq!(
+            v["error"]["detail"],
+            "Configure [api.security] api_key_hash, then restart (see docs/configuration.md)"
+        );
     }
 
     #[tokio::test]
@@ -416,6 +421,11 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["reason"], "unauthorized");
+        assert_eq!(v["error"]["message"], crate::auth::API_KEY_NOT_CONFIGURED);
+        assert_eq!(
+            v["error"]["detail"],
+            "Configure [api.security] api_key_hash, then restart (see docs/configuration.md)"
+        );
     }
 
     #[tokio::test]
@@ -436,6 +446,17 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["reason"], "sensitive_op_disabled");
+    }
+
+    #[tokio::test]
+    async fn admin_declared_proxy_default_policy_allows_valid_key() {
+        let cfg = V1AuthConfig::new(Some(security_for(b"secretkey")))
+            .with_local_reverse_proxy(true)
+            .into_shared();
+        assert_eq!(
+            status(&cfg, Tier::Admin, request(Some("secretkey"), Some(LOCAL))).await,
+            200
+        );
     }
 
     #[tokio::test]

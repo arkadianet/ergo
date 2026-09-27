@@ -13,6 +13,7 @@ mod mempool_tests;
 mod pool_fee_stats;
 
 use super::*;
+use ergo_api::compat::ChainReadError;
 use ergo_ser::difficulty::decode_compact_bits;
 
 /// Boot-time, immutable inputs to the Scala-compat surface. The values
@@ -23,6 +24,7 @@ pub struct ScalaCompatStatic {
     pub name: String,
     pub app_version: String,
     pub network: String,
+    pub voting_length: u32,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
     /// The same configured admission floor used by the mempool.
@@ -184,69 +186,73 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn votes_history(&self) -> ergo_api::types::ApiVotesHistory {
-        let snap = self.handle.load();
-        let current_height = snap.tip.best_full_block.height;
-        // Epoch length is network-fixed; surfaced so the UI can explain that
-        // changes only land on `voting_length`-block boundaries.
-        let epoch_length = match self.static_cfg.network.as_str() {
-            "mainnet" => ergo_chain_spec::VotingParams::mainnet().voting_length,
-            "testnet" => ergo_chain_spec::VotingParams::testnet().voting_length,
-            _ => 0,
-        };
-        match self.store_reader.voted_params_history() {
-            Ok(rows) => build_votes_history(&rows, epoch_length, current_height),
-            Err(e) => {
-                warn!(handler = "votes_history", error = %e, "scala-compat handler failed");
-                ergo_api::types::ApiVotesHistory {
-                    epoch_length,
-                    current_height,
-                    changes: Vec::new(),
-                }
-            }
-        }
+        // Legacy best-effort: a failed read still answers with an empty history.
+        self.try_votes_history()
+            .unwrap_or_else(|_| ergo_api::types::ApiVotesHistory {
+                epoch_length: self.static_cfg.voting_length,
+                current_height: self.handle.load().tip.best_full_block.height,
+                changes: Vec::new(),
+            })
+    }
+
+    fn try_votes_history(&self) -> Result<ergo_api::types::ApiVotesHistory, ChainReadError> {
+        let current_height = self.handle.load().tip.best_full_block.height;
+        let rows = self.store_reader.voted_params_history().map_err(|e| {
+            warn!(handler = "votes_history", error = %e, "voted-params store read failed");
+            ChainReadError::from(super::error::BridgeError::from(e))
+        })?;
+        Ok(build_votes_history(
+            &rows,
+            self.static_cfg.voting_length,
+            current_height,
+        ))
     }
 
     fn header_ids_at_height(&self, height: u32) -> Vec<String> {
-        // Reads HEADERS_BY_HEIGHT (the multi-id index), which mirrors
-        // Scala's `heightIdsKey` row from
-        // `HeadersProcessor.scala:264-276`. First entry is always the
-        // best-header-chain id at `height`; subsequent entries are
-        // orphans (validated headers at this height that aren't on
-        // the best chain). DB errors degrade to an empty vec —
-        // handlers must never panic.
-        match self.store_reader.header_ids_at_height_all(height) {
-            Ok(ids) => ids.into_iter().map(hex::encode).collect(),
-            Err(e) => {
+        self.try_header_ids_at_height(height).unwrap_or_default()
+    }
+
+    fn try_header_ids_at_height(&self, height: u32) -> Result<Vec<String>, ChainReadError> {
+        // HEADERS_BY_HEIGHT lists the best-header-chain id first, followed
+        // by validated orphans at this height, matching Scala's heightIdsKey.
+        self.store_reader.header_ids_at_height_all(height)
+            .map(|ids| ids.into_iter().map(hex::encode).collect())
+            .map_err(|e| {
                 warn!(handler = "header_ids_at_height_all", height, error = %e, "scala-compat handler failed");
-                Vec::new()
-            }
-        }
+                ChainReadError::from(BridgeError::from(e))
+            })
     }
 
     fn full_block_by_id(&self, header_id_hex: &str) -> Option<ScalaFullBlock> {
         self.try_full_block_by_id(header_id_hex).ok().flatten()
     }
 
-    fn try_full_block_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaFullBlock>, String> {
+    fn try_full_block_by_id(
+        &self,
+        header_id_hex: &str,
+    ) -> Result<Option<ScalaFullBlock>, ChainReadError> {
         // A malformed id names no block at all — absent, not a failure.
         let Some(header_id) = parse_header_id(header_id_hex) else {
             return Ok(None);
         };
         assemble_full_block(&self.store_reader, &header_id).map_err(|e| {
             warn!(handler = "full_block_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
-            e.to_string()
+            ChainReadError::from(e)
         })
     }
 
     fn header_by_id(&self, header_id_hex: &str) -> Option<ScalaHeader> {
-        let header_id = parse_header_id(header_id_hex)?;
-        match load_and_encode_header(&self.store_reader, &header_id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(handler = "header_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
-                None
-            }
-        }
+        self.try_header_by_id(header_id_hex).ok().flatten()
+    }
+
+    fn try_header_by_id(&self, header_id_hex: &str) -> Result<Option<ScalaHeader>, ChainReadError> {
+        let Some(header_id) = parse_header_id(header_id_hex) else {
+            return Ok(None);
+        };
+        load_and_encode_header(&self.store_reader, &header_id).map_err(|e| {
+            warn!(handler = "header_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
+            ChainReadError::from(e)
+        })
     }
 
     fn block_transactions_by_id(&self, header_id_hex: &str) -> Option<ScalaBlockTransactions> {
@@ -258,13 +264,13 @@ impl NodeChainQuery for ScalaCompatBridge {
     fn try_block_transactions_by_id(
         &self,
         header_id_hex: &str,
-    ) -> Result<Option<ScalaBlockTransactions>, String> {
+    ) -> Result<Option<ScalaBlockTransactions>, ChainReadError> {
         let Some(header_id) = parse_header_id(header_id_hex) else {
             return Ok(None);
         };
         load_and_encode_block_transactions(&self.store_reader, &header_id).map_err(|e| {
             warn!(handler = "block_transactions_by_id", header_id = %header_id_hex, error = %e, "scala-compat handler failed");
-            e.to_string()
+            ChainReadError::from(e)
         })
     }
 
@@ -311,6 +317,20 @@ impl NodeChainQuery for ScalaCompatBridge {
         }
     }
 
+    fn try_nipopow_header_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<ergo_rest_json::types::ScalaPopowHeader>, ChainReadError> {
+        let ph = self.store_reader.popow_header_at_height(height).map_err(|e| {
+            warn!(handler = "try_nipopow_header_at_height", height, error = %e, "v1 store read failed");
+            ChainReadError::from(super::error::BridgeError::from(e))
+        })?;
+        ph.as_ref()
+            .map(super::nipopow::encode_popow_header)
+            .transpose()
+            .map_err(ChainReadError::from)
+    }
+
     fn nipopow_proof(
         &self,
         m: u32,
@@ -352,26 +372,42 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn proof_for_tx(&self, header_id_hex: &str, tx_id_hex: &str) -> Option<ScalaMerkleProof> {
-        let header_id = parse_header_id(header_id_hex)?;
-        let tx_id = parse_header_id(tx_id_hex)?;
-        match build_proof_for_tx(&self.store_reader, &header_id, &tx_id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(handler = "proof_for_tx", header_id = %header_id_hex, tx_id = %tx_id_hex, error = %e, "scala-compat handler failed");
-                None
-            }
-        }
+        self.try_proof_for_tx(header_id_hex, tx_id_hex)
+            .ok()
+            .flatten()
+    }
+
+    fn try_proof_for_tx(
+        &self,
+        header_id_hex: &str,
+        tx_id_hex: &str,
+    ) -> Result<Option<ScalaMerkleProof>, ChainReadError> {
+        let (Some(header_id), Some(tx_id)) =
+            (parse_header_id(header_id_hex), parse_header_id(tx_id_hex))
+        else {
+            return Ok(None);
+        };
+        build_proof_for_tx(&self.store_reader, &header_id, &tx_id).map_err(|e| {
+            warn!(handler = "proof_for_tx", header_id = %header_id_hex, tx_id = %tx_id_hex, error = %e, "scala-compat handler failed");
+            ChainReadError::from(e)
+        })
     }
 
     fn modifier_by_id(&self, modifier_id_hex: &str) -> Option<ScalaBlockSection> {
-        let id = parse_header_id(modifier_id_hex)?;
-        match load_and_encode_modifier_by_id(&self.store_reader, &id) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!(handler = "modifier_by_id", modifier_id = %modifier_id_hex, error = %e, "scala-compat handler failed");
-                None
-            }
-        }
+        self.try_modifier_by_id(modifier_id_hex).ok().flatten()
+    }
+
+    fn try_modifier_by_id(
+        &self,
+        modifier_id_hex: &str,
+    ) -> Result<Option<ScalaBlockSection>, ChainReadError> {
+        let Some(id) = parse_header_id(modifier_id_hex) else {
+            return Ok(None);
+        };
+        load_and_encode_modifier_by_id(&self.store_reader, &id).map_err(|e| {
+            warn!(handler = "modifier_by_id", modifier_id = %modifier_id_hex, error = %e, "scala-compat handler failed");
+            ChainReadError::from(e)
+        })
     }
 
     fn last_headers(&self, count: u32) -> Vec<ScalaHeader> {
@@ -419,6 +455,49 @@ impl NodeChainQuery for ScalaCompatBridge {
             raw_lo.max(cap_lo).max(1)
         };
         load_headers_in_range(&self.store_reader, lo, top)
+    }
+
+    fn try_last_headers(&self, count: u32) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let tip = self.handle.load().tip.best_header.height;
+        let lo = tip.saturating_sub(count - 1).max(1);
+        super::block_reassembly::try_load_headers_in_range(&self.store_reader, lo, tip)
+            .map_err(ChainReadError::from)
+    }
+
+    fn try_chain_slice(
+        &self,
+        from_height: u32,
+        to_height: u32,
+    ) -> Result<Vec<ScalaHeader>, ChainReadError> {
+        let tip = self.handle.load().tip.best_header.height;
+        if tip == 0 {
+            return Ok(Vec::new());
+        }
+        let top = match self
+            .store_reader
+            .get_header_id_at_height(to_height)
+            .map_err(|e| ChainReadError::from(super::error::BridgeError::from(e)))?
+        {
+            Some(_) => to_height,
+            None => tip,
+        };
+        if top == 0 {
+            return Ok(Vec::new());
+        }
+        // Preserve chain_slice's exclusive lower bound and trailing-header cap.
+        const MAX_HEADERS: u32 = 16_384;
+        let lo = if top <= from_height.saturating_add(1) {
+            top
+        } else {
+            let raw_lo = from_height.saturating_add(1);
+            let cap_lo = top.saturating_sub(MAX_HEADERS - 1);
+            raw_lo.max(cap_lo).max(1)
+        };
+        super::block_reassembly::try_load_headers_in_range(&self.store_reader, lo, top)
+            .map_err(ChainReadError::from)
     }
 
     fn peers_all(&self) -> Vec<ScalaPeer> {
@@ -1141,8 +1220,58 @@ fn with_pool_cost(
 
 #[cfg(test)]
 mod votes_history_tests {
-    use super::build_votes_history;
+    use super::{build_votes_history, ScalaCompatBridge, ScalaCompatStatic};
+    use ergo_api::types::{ApiInfo, ApiVotesHistory, ApiWeightFunction};
+    use ergo_api::NodeChainQuery;
+    use ergo_chain_spec::{ChainSpec, Network};
     use ergo_validation::scala_launch;
+    use std::sync::Arc;
+
+    // ----- helpers -----
+
+    fn votes_history_for_network(network: Network) -> ApiVotesHistory {
+        let spec = ChainSpec::for_network(network);
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
+        let snap = crate::snapshot::NodeSnapshot::empty(
+            ApiInfo {
+                agent_name: "test".into(),
+                node_name: "test".into(),
+                network: network.as_str().into(),
+                version: "test".into(),
+                started_at_unix_ms: 0,
+                uptime_seconds: 0,
+                target_block_interval_ms: spec.block_timing.desired_interval_ms,
+                best_input_block_id: None,
+            },
+            ApiWeightFunction::Cost,
+        );
+        let bridge = ScalaCompatBridge::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(snap)),
+            ScalaCompatStatic {
+                name: "test".into(),
+                app_version: "test".into(),
+                network: network.as_str().into(),
+                launch_time_unix_ms: 0,
+                voting_length: spec.voting.voting_length,
+                rest_api_url: None,
+                min_relay_fee_nano_erg: 0,
+            },
+            store.reader_handle(),
+            spec.difficulty,
+        );
+        bridge.votes_history()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn votes_history_devnet_epoch_length_matches_chain_spec() {
+        assert_eq!(
+            votes_history_for_network(Network::Devnet).epoch_length,
+            33_554_432
+        );
+    }
 
     /// Only boundaries where a parameter actually changed appear, each decoded
     /// (id/name/description) with the correct from→to, ascending by height.
@@ -1195,5 +1324,25 @@ mod votes_history_tests {
     fn build_votes_history_empty_when_only_genesis() {
         let h = build_votes_history(&[scala_launch()], 1024, 0);
         assert!(h.changes.is_empty());
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn votes_history_mainnet_epoch_length_is_1024() {
+        // Scala ergo-scala/src/main/resources/application.conf:239 (mainnet default).
+        assert_eq!(
+            votes_history_for_network(Network::Mainnet).epoch_length,
+            1024
+        );
+    }
+
+    #[test]
+    fn votes_history_testnet_epoch_length_is_128() {
+        // Scala ergo-scala/src/main/resources/testnet.conf:46.
+        assert_eq!(
+            votes_history_for_network(Network::Testnet).epoch_length,
+            128
+        );
     }
 }

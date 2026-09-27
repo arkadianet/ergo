@@ -244,7 +244,9 @@ pub enum ValidationError {
         /// Evaluator error message.
         reason: String,
     },
-    /// Script reduced cleanly but the spending proof did not verify.
+    /// Input verification returned false: the script reduced but the proof
+    /// did not verify, or a storage-rent claim failed `checkExpiredBox`
+    /// (Scala `Success((false, _))`, rule 119).
     #[error("input {index}: spending proof verification failed")]
     ProofFailed {
         /// Failing input index.

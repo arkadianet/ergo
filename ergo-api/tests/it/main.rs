@@ -29,6 +29,7 @@ mod host_schema;
 mod identity_schema;
 mod indexer_status_endpoint;
 mod input_block_routes;
+mod local_reverse_proxy;
 mod mempool_overlay_oracle;
 mod mempool_source_schema;
 mod metrics_gauges;
@@ -68,3 +69,7 @@ mod wallet_stubs;
 mod wallet_ui_auth_scope;
 mod wallet_ui_headers;
 mod wallet_ui_two_step_unlock;
+
+mod optional_api_key;
+mod v1_blocking_reads;
+mod v1_remaining_read_errors;

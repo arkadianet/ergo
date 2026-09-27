@@ -55,6 +55,8 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 /// of a bare 404 — v1 mounts unconditionally and gates *inside* the handler.
 #[derive(Clone)]
 pub struct V1State {
+    /// Shared per-node capacity for blocking chain reads.
+    pub blocking: crate::v1::BlockingReads,
     /// Snapshot reader (tip heights for cursor walks + confirmation math).
     pub read: Arc<dyn NodeReadState>,
     /// Live-store chain reader — the hook for every `chain/*` route.
@@ -578,4 +580,17 @@ pub fn v1_router(state: V1State, governor: Arc<Governor>) -> Router {
         .merge(compute)
         .merge(realtime)
         .with_state(state)
+}
+
+/// An indexer store read failed. `IndexerReadError` does not distinguish a
+/// transient read failure from a corrupt record and v1 has no dedicated
+/// indexer-unavailable reason, so this is `internal_error`; the store text is
+/// logged, never returned.
+pub(crate) fn indexer_read_failed(error: ergo_indexer_types::IndexerReadError) -> Response {
+    tracing::warn!(%error, "v1 indexer read failed");
+    v1_error(
+        Reason::InternalError,
+        "the indexer store could not be read",
+        "the node logged the store error; check its indexer storage",
+    )
 }

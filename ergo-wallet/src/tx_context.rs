@@ -18,6 +18,7 @@ use indexmap::IndexMap;
 /// Populated by `ChainStateAccessor::build_signing_context` in the wallet
 /// writer task. Carries only the fields the per-input evaluator needs;
 /// chain-apply state stays in `StateStore`.
+#[derive(Clone)]
 pub struct BlockchainStateContext {
     /// Last ≤10 applied headers, tip-first. `sigma_last_headers[0]` is
     /// the parent of the candidate block.
@@ -30,6 +31,7 @@ pub struct BlockchainStateContext {
 }
 
 /// Per-block parameters used by the prover for cost accounting.
+#[derive(Clone)]
 pub struct BlockchainParameters {
     /// Maximum aggregate JIT cost the block is allowed to accumulate.
     pub max_block_cost: u64,

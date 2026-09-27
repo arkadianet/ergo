@@ -46,6 +46,7 @@ mod shadow_watch;
 mod snapshot_emit;
 mod snapshot_state;
 mod state;
+pub(crate) mod storage_probe;
 mod sync_helpers;
 mod sync_tick;
 pub(crate) mod telemetry;
@@ -65,8 +66,8 @@ pub(in crate::node) use self::peer_actions::{
 pub(crate) use self::shadow_watch::ShadowConfig;
 pub(in crate::node) use self::state::{NodeState, PeerRuntime};
 pub(in crate::node) use self::sync_helpers::{
-    hedge_request_modifiers, maybe_exit_ibd, register_expectation, tracked_request_modifier,
-    try_send_anchor_sync_info, TrackedRequest,
+    hedge_request_modifiers, maybe_exit_ibd, register_expectation, send_post_header_sync_info,
+    tracked_request_modifier, TrackedRequest,
 };
 
 /// Type alias used across the node runtime. `Send + Sync` is

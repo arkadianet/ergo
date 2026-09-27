@@ -12,7 +12,7 @@
 // unloads the document. Server-supplied strings are written via textContent
 // only — never innerHTML.
 import { api } from './api-client.js';
-import { subscribe, promptAuthorize } from './auth.js';
+import { subscribe, promptAuthorize, CONFIGURE_API_KEY } from './auth.js';
 import { erg, num, truncMiddle, nanoErgFromDecimal } from './format.js';
 import { copyBtn } from './table.js';
 import { fetchTokenMeta, tokenName, tokenAmt, getDecimals, decimalize, maxDecimalString, parseTokenAmount } from './token-meta.js';
@@ -180,7 +180,9 @@ export function canLeave() {
 // ── auth gate + secret scrub ─────────────────────────────────────────────────
 function renderAuthGate(s) {
   if (!root) return;
-  const blocked = s === 'none' || s === 'invalid';
+  const blocked = s === 'none' || s === 'invalid' || s === 'unconfigured';
+  q('[data-wallet-prompt] span').textContent = s === 'unconfigured'
+    ? CONFIGURE_API_KEY : 'Authorize with the operator api_key to use the wallet.';
   q('[data-wallet-prompt]').hidden = !blocked;
   q('[data-wallet-preauth]').hidden = !blocked;
   q('[data-wallet-app]').hidden = blocked;

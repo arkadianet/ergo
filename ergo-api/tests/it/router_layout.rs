@@ -2214,6 +2214,7 @@ fn build_compat_app_digest_backend() -> axum::Router {
             emission: None,
             emission_scripts: None,
             utxo_reads_supported: false,
+            local_reverse_proxy: false,
         },
         None,
     )

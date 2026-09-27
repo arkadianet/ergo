@@ -7,6 +7,13 @@
 //! Sibling of `mod.rs`; pure impl relocation.
 
 use super::{ScanMatchRecord, StateError, BLOCK_SECTIONS, CHAIN_INDEX, HEADERS};
+use crate::wallet::scan::RescanReadError;
+
+pub(crate) enum WalletBlockSections {
+    MissingHeader,
+    MissingBlockTransactions,
+    Found(Vec<OwnedBlockTxData>),
+}
 
 // ---- wallet integration helpers ----
 
@@ -204,6 +211,20 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
     read_txn: &redb::ReadTransaction,
     header_id: &[u8; 32],
 ) -> Result<Option<Vec<OwnedBlockTxData>>, StateError> {
+    Ok(
+        match build_wallet_block_txs_from_read_txn_classified(read_txn, header_id)? {
+            WalletBlockSections::MissingHeader | WalletBlockSections::MissingBlockTransactions => {
+                None
+            }
+            WalletBlockSections::Found(txs) => Some(txs),
+        },
+    )
+}
+
+pub(crate) fn build_wallet_block_txs_from_read_txn_classified(
+    read_txn: &redb::ReadTransaction,
+    header_id: &[u8; 32],
+) -> Result<WalletBlockSections, StateError> {
     use ergo_primitives::reader::VlqReader;
     use ergo_ser::block_transactions::read_stored_block_transactions;
     use ergo_ser::header::read_header;
@@ -214,9 +235,11 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
     let header_bytes = match read_txn.open_table(HEADERS) {
         Ok(t) => match t.get(header_id.as_slice())? {
             Some(g) => g.value().to_vec(),
-            None => return Ok(None),
+            None => return Ok(WalletBlockSections::MissingHeader),
         },
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+            return Ok(WalletBlockSections::MissingHeader);
+        }
         Err(e) => return Err(e.into()),
     };
     let mut r = VlqReader::new(&header_bytes);
@@ -235,9 +258,11 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
     let bt_bytes = match read_txn.open_table(BLOCK_SECTIONS) {
         Ok(t) => match t.get(bt_id.as_slice())? {
             Some(g) => g.value().to_vec(),
-            None => return Ok(None), // section pruned / not yet stored
+            None => return Ok(WalletBlockSections::MissingBlockTransactions),
         },
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+            return Ok(WalletBlockSections::MissingBlockTransactions);
+        }
         Err(e) => return Err(e.into()),
     };
 
@@ -309,7 +334,7 @@ pub(crate) fn build_wallet_block_txs_from_read_txn(
         })
         .collect::<Result<Vec<_>, StateError>>()?;
 
-    Ok(Some(owned))
+    Ok(WalletBlockSections::Found(owned))
 }
 
 /// Intermediate binding that keeps per-tx `BlockOutput` vecs alive long
@@ -383,38 +408,54 @@ pub fn owned_to_block_txs(owned: &[OwnedBlockTxData]) -> BoundBlockTxs<'_> {
 pub fn block_txs_for_wallet_at_height(
     db: &redb::Database,
     height: u32,
-) -> Result<Option<([u8; 32], Vec<OwnedBlockTxData>)>, StateError> {
-    let read_txn = db.begin_read()?;
+) -> Result<Option<([u8; 32], Vec<OwnedBlockTxData>)>, RescanReadError> {
+    let read_txn = db
+        .begin_read()
+        .map_err(|e| RescanReadError::from_state(height, e.into()))?;
 
     // Read from CHAIN_INDEX (full-block applied chain).
-    let header_id: [u8; 32] = match read_txn.open_table(CHAIN_INDEX) {
-        Ok(t) => match t.get(height as u64)? {
-            Some(g) => {
-                let bytes = g.value();
-                if bytes.len() != 32 {
-                    return Err(StateError::DbCorruption {
+    let chain_table = match read_txn.open_table(CHAIN_INDEX) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(RescanReadError::from_state(height, e.into())),
+    };
+    let header_id: [u8; 32] = match chain_table.get(height as u64) {
+        Ok(Some(g)) => {
+            let bytes = g.value();
+            if bytes.len() != 32 {
+                return Err(RescanReadError::Corrupt {
+                    height,
+                    source: StateError::DbCorruption {
                         table: "chain_index",
                         key: hex::encode((height as u64).to_be_bytes()),
                         reason: format!("row has len {} (expected 32)", bytes.len()),
-                    });
-                }
-                let mut id = [0u8; 32];
-                id.copy_from_slice(bytes);
-                id
+                    },
+                });
             }
-            None => return Ok(None),
-        },
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(e) => return Err(e.into()),
+            let mut id = [0u8; 32];
+            id.copy_from_slice(bytes);
+            id
+        }
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(RescanReadError::from_state(height, e.into())),
     };
 
     // Reuse the SAME read transaction for the section reads so the height's
     // header_id and the block txs are read from one consistent snapshot — a
     // reorg between two separate transactions could pair the height with a
     // different block's transactions.
-    match build_wallet_block_txs_from_read_txn(&read_txn, &header_id)? {
-        Some(txs) => Ok(Some((header_id, txs))),
-        None => Ok(None),
+    match build_wallet_block_txs_from_read_txn_classified(&read_txn, &header_id) {
+        Ok(WalletBlockSections::Found(txs)) => Ok(Some((header_id, txs))),
+        Ok(WalletBlockSections::MissingBlockTransactions) => Ok(None),
+        Ok(WalletBlockSections::MissingHeader) => Err(RescanReadError::Corrupt {
+            height,
+            source: StateError::DbCorruption {
+                table: "headers",
+                key: hex::encode(header_id),
+                reason: "applied-chain header missing during rescan".to_string(),
+            },
+        }),
+        Err(e) => Err(RescanReadError::from_state(height, e)),
     }
 }
 

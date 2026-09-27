@@ -171,10 +171,8 @@ pub struct NodeConfig {
     /// Default: `127.0.0.1:9099`.
     pub api_bind: Option<SocketAddr>,
     /// `[api.security].api_key_hash` — lowercase Base16 (hex) of the
-    /// Blake2b-256 of the operator's secret API key. Always required
-    /// when the API is enabled (`api_bind = Some(_)`), mirroring the
-    /// Scala node's `ErgoApp.scala:40-43`
-    /// `require(apiKeyHash.isDefined, "API key hash must be set")`.
+    /// Blake2b-256 of the operator's secret API key. Optional: absence
+    /// keeps public routes available and privileged routes closed.
     /// Validated at load: 64 chars, lowercase hex only. Used by
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
@@ -188,6 +186,9 @@ pub struct NodeConfig {
     /// may include a port (`"example.com:9099"`) to pin it, or omit one
     /// to match any port.
     pub api_allowed_hosts: Vec<String>,
+    /// `[api] local_reverse_proxy` — withdraw loopback trust when a reverse
+    /// proxy terminates on loopback. Default `false`.
+    pub api_local_reverse_proxy: bool,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.

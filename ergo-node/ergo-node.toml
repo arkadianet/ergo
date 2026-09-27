@@ -30,23 +30,33 @@ max_connections = 384
 # The bundled mainnet seed peers are merged in automatically; add your own here.
 
 [api]
+# Dashboard, swagger, public reads and transaction submission work without a key.
+# Privileged routes stay locked: /wallet/*, /scan/*, /api/v1/wallet/*,
+# /node/shutdown, /api/v1/node/shutdown, /peers/connect, POST /api/v1/votes,
+# POST /blocks, /mining/* and v1 Operator/Admin routes (accounts, webhooks, operator controls).
+# To unlock them, generate a random secret and its Blake2b-256 hash:
+#   secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1
+# Save the secret for the api_key header; set the hash in [api.security]
+# below, then restart. See docs/configuration.md.
+disabled = false
 bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
                                  # `public_bind = true` (and read the note below).
+# local_reverse_proxy = false  # set true when a proxy connects to this loopback API.
+# All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
+# bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator
+# access also loses its exemption. Rate-limit per client at the proxy; raising
+# governor limits currently requires a code change (no TOML setting).
+# The realtime cap is 16 sockets TOTAL per peer IP across proxied and direct
+# local clients, regardless of this flag. Budget WebSocket concurrency.
+# With this flag, ALL API tx submissions use the public mempool global budget,
+# including direct local submissions; they cannot use the local reserve.
+# Admin requests with a valid key warn-and-allow; this does not enable hard deny.
+# This flag does not authenticate clients. X-Forwarded-For is never trusted. See docs/configuration.md for details.
 # allowed_hosts = ["my-node.example.com"]  # extra Host headers to accept, guarding
                                  # against DNS rebinding (default []; loopback binds
                                  # always accept localhost/127.0.0.1/::1/the bind IP).
-
-[api.security]
-# Lowercase Blake2b-256 of your secret api_key. The `api_key` request header
-# is required to reach /wallet/* and /node/shutdown (read routes stay open).
-# The value below is blake2b256("hello") — the same dev key the Scala node
-# documents. It is a WEAK/DEFAULT key: the node logs a loud boot-warning
-# for it on every start, loopback included, because anything with local
-# shell access already has it — CHANGE IT before relying on the API for
-# anything, not just before `public_bind`.
-# Generate your own from a random secret:
-#   secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256
-api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+# [api.security]
+# api_key_hash = "<64 lowercase hex characters>"
 
 [indexer]
 enabled = true                   # /blockchain/* extra-index (boxes, tokens,

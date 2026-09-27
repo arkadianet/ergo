@@ -23,6 +23,7 @@ use super::{offset_from_cursor, offset_page, parse_id32, parse_sort, GiCursor, V
 use crate::blockchain::{
     address_to_tree_hash, pool_unspent_for_template, pool_unspent_for_token, pool_unspent_for_tree,
 };
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
 
@@ -164,7 +165,7 @@ fn project_boxes(
     rows: Vec<IndexedErgoBox>,
     decode: bool,
 ) -> Result<Vec<V1Box>, String> {
-    let best = state.read.status().best_full_block_height;
+    let best = state.read.sync().best_full_block_height;
     rows.iter()
         .map(|b| v1box_from_indexed_box(state.network, b, best, decode))
         .collect()
@@ -172,13 +173,13 @@ fn project_boxes(
 
 /// A cursor-paginated box collection over an offset-aliased reader
 /// (`by-address`, `by-ergo-tree`, `by-template`, `by-token`).
-fn render_box_page(
+async fn render_box_page(
     state: &V1State,
     limit: Option<u32>,
     cursor: Option<&str>,
     sort: Option<&str>,
     decode: bool,
-    fetch: impl FnOnce(IdxPage, SortDir) -> Vec<IndexedErgoBox>,
+    fetch: impl FnOnce(IdxPage, SortDir) -> Vec<IndexedErgoBox> + Send + 'static,
 ) -> Response {
     let dir = match parse_sort(sort) {
         Ok(d) => d,
@@ -189,20 +190,27 @@ fn render_box_page(
         Err(e) => return *e,
     };
     let limit = clamp_limit(limit, DEFAULT_LIMIT, MAX_LIMIT);
-    let rows = fetch(
-        IdxPage {
-            offset: start,
-            limit: limit + 1,
-        },
-        dir,
-    );
-    match project_boxes(state, rows, decode) {
-        Ok(items) => {
-            let (items, page) = offset_page(items, start, limit);
-            Json(Collection { items, page }).into_response()
-        }
-        Err(d) => assemble_failed(d),
-    }
+    let state = state.clone();
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let rows = fetch(
+                IdxPage {
+                    offset: start,
+                    limit: limit + 1,
+                },
+                dir,
+            );
+            match project_boxes(&state, rows, decode) {
+                Ok(items) => {
+                    let (items, page) = offset_page(items, start, limit);
+                    Json(Collection { items, page }).into_response()
+                }
+                Err(d) => assemble_failed(d),
+            }
+        })
+        .await
 }
 
 /// Two-axis resume cursor for the unspent listings with the pool overlay:
@@ -242,9 +250,9 @@ fn confirmed_survivors<T>(
     start: u32,
     limit: u32,
     dir: SortDir,
-    fetch: impl Fn(IdxPage, SortDir) -> Vec<T>,
+    fetch: impl Fn(IdxPage, SortDir) -> Result<Vec<T>, ergo_indexer_types::IndexerReadError>,
     keep: impl Fn(&T) -> bool,
-) -> Vec<(T, u32)> {
+) -> Result<Vec<(T, u32)>, ergo_indexer_types::IndexerReadError> {
     let target = limit as usize + 1;
     let mut survivors: Vec<(T, u32)> = Vec::with_capacity(target);
     let mut read_off = start;
@@ -255,7 +263,7 @@ fn confirmed_survivors<T>(
                 limit: target as u32,
             },
             dir,
-        );
+        )?;
         let batch_len = batch.len() as u32;
         if batch_len == 0 {
             break;
@@ -265,7 +273,7 @@ fn confirmed_survivors<T>(
                 let off_after = read_off.saturating_add(i as u32).saturating_add(1);
                 survivors.push((b, off_after));
                 if survivors.len() >= target {
-                    return survivors;
+                    return Ok(survivors);
                 }
             }
         }
@@ -274,7 +282,7 @@ fn confirmed_survivors<T>(
             break; // reader exhausted
         }
     }
-    survivors
+    Ok(survivors)
 }
 
 /// The unspent variants: confirmed page (overfetched to fill past
@@ -285,11 +293,13 @@ fn confirmed_survivors<T>(
 /// exactly the rows the page emitted — no repeats when the overlay fills a
 /// page, no confirmed skips when it pushes rows out; the overlay axis is an
 /// offset into the volatile pool snapshot (documented drift, §1.5).
-fn render_unspent_page(
+async fn render_unspent_page(
     state: &V1State,
     q: &UnspentQuery,
-    fetch_confirmed: impl Fn(IdxPage, SortDir) -> Vec<IndexedErgoBox>,
-    pool: impl FnOnce(bool) -> Vec<IndexedErgoBox>,
+    fetch_confirmed: impl Fn(IdxPage, SortDir) -> Result<Vec<IndexedErgoBox>, ergo_indexer_types::IndexerReadError>
+        + Send
+        + 'static,
+    pool: impl FnOnce(bool) -> Vec<IndexedErgoBox> + Send + 'static,
 ) -> Response {
     let dir = match parse_sort(q.sort.as_deref()) {
         Ok(d) => d,
@@ -305,73 +315,84 @@ fn render_unspent_page(
     let include_unconfirmed = q.include_unconfirmed.unwrap_or(false);
     let exclude_spent = q.exclude_mempool_spent.unwrap_or(false);
 
-    let confirmed = confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
-        match b.box_data.box_id() {
-            // Short-circuits when `exclude_spent` is false: every row is kept
-            // and `is_spent_by_pool` is never consulted.
-            Ok(id) => !exclude_spent || !state.mempool.is_spent_by_pool(&id),
-            // Keep an un-canonicalizable row so the downstream projection
-            // surfaces the same 500 rather than silently dropping it.
-            Err(_) => true,
-        }
-    });
-    // The overlay resumes past the `p` rows earlier pages already emitted, so
-    // an overlay bigger than one page pages THROUGH rather than repeating.
-    let pool_rows: Vec<IndexedErgoBox> = if include_unconfirmed {
-        pool(exclude_spent)
-            .into_iter()
-            .skip(p_start as usize)
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // How many of each side the re-capped page actually emits — the cursor
-    // advances EXACTLY past those rows on both axes (no skips, no repeats).
-    let total = pool_rows.len() + confirmed.len();
-    let has_more = total > limit_us;
-    let emitted_total = total.min(limit_us);
-    let (pool_emitted, confirmed_emitted) = match dir {
-        // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
-        SortDir::Desc => {
-            let pe = pool_rows.len().min(limit_us);
-            (pe, emitted_total - pe)
-        }
-        SortDir::Asc => {
-            let ce = confirmed.len().min(limit_us);
-            (emitted_total - ce, ce)
-        }
-    };
-    let next_c = confirmed_emitted
-        .checked_sub(1)
-        .and_then(|i| confirmed.get(i))
-        .map(|(_, off_after)| *off_after)
-        .unwrap_or(c_start);
-    let next_p = p_start.saturating_add(pool_emitted as u32);
-
-    let confirmed_rows = confirmed.into_iter().map(|(b, _)| b);
-    let mut merged: Vec<IndexedErgoBox> = match dir {
-        SortDir::Desc => pool_rows.into_iter().chain(confirmed_rows).collect(),
-        SortDir::Asc => confirmed_rows.chain(pool_rows).collect(),
-    };
-    merged.truncate(limit_us);
-    match project_boxes(state, merged, q.decode.unwrap_or(false)) {
-        Ok(items) => {
-            let next_cursor = has_more.then(|| {
-                encode_cursor(&UnspentCursor {
-                    c: next_c,
-                    p: next_p,
-                })
-            });
-            let page = Page {
-                limit,
-                has_more: next_cursor.is_some(),
-                next_cursor,
+    let decode = q.decode.unwrap_or(false);
+    let state = state.clone();
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let confirmed = match confirmed_survivors(c_start, limit, dir, fetch_confirmed, |b| {
+                match b.box_data.box_id() {
+                    // Short-circuits when `exclude_spent` is false: every row is kept
+                    // and `is_spent_by_pool` is never consulted.
+                    Ok(id) => !exclude_spent || !state.mempool.is_spent_by_pool(&id),
+                    // Keep an un-canonicalizable row so the downstream projection
+                    // surfaces the same 500 rather than silently dropping it.
+                    Err(_) => true,
+                }
+            }) {
+                Ok(confirmed) => confirmed,
+                Err(error) => return super::indexer_read_failed(error),
             };
-            Json(Collection { items, page }).into_response()
-        }
-        Err(d) => assemble_failed(d),
-    }
+            // The overlay resumes past the `p` rows earlier pages already emitted, so
+            // an overlay bigger than one page pages THROUGH rather than repeating.
+            let pool_rows: Vec<IndexedErgoBox> = if include_unconfirmed {
+                pool(exclude_spent)
+                    .into_iter()
+                    .skip(p_start as usize)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // How many of each side the re-capped page actually emits — the cursor
+            // advances EXACTLY past those rows on both axes (no skips, no repeats).
+            let total = pool_rows.len() + confirmed.len();
+            let has_more = total > limit_us;
+            let emitted_total = total.min(limit_us);
+            let (pool_emitted, confirmed_emitted) = match dir {
+                // Scala parity: DESC → unconfirmed first; ASC → confirmed first.
+                SortDir::Desc => {
+                    let pe = pool_rows.len().min(limit_us);
+                    (pe, emitted_total - pe)
+                }
+                SortDir::Asc => {
+                    let ce = confirmed.len().min(limit_us);
+                    (emitted_total - ce, ce)
+                }
+            };
+            let next_c = confirmed_emitted
+                .checked_sub(1)
+                .and_then(|i| confirmed.get(i))
+                .map(|(_, off_after)| *off_after)
+                .unwrap_or(c_start);
+            let next_p = p_start.saturating_add(pool_emitted as u32);
+
+            let confirmed_rows = confirmed.into_iter().map(|(b, _)| b);
+            let mut merged: Vec<IndexedErgoBox> = match dir {
+                SortDir::Desc => pool_rows.into_iter().chain(confirmed_rows).collect(),
+                SortDir::Asc => confirmed_rows.chain(pool_rows).collect(),
+            };
+            merged.truncate(limit_us);
+            match project_boxes(&state, merged, decode) {
+                Ok(items) => {
+                    let next_cursor = has_more.then(|| {
+                        encode_cursor(&UnspentCursor {
+                            c: next_c,
+                            p: next_p,
+                        })
+                    });
+                    let page = Page {
+                        limit,
+                        has_more: next_cursor.is_some(),
+                        next_cursor,
+                    };
+                    Json(Collection { items, page }).into_response()
+                }
+                Err(d) => assemble_failed(d),
+            }
+        })
+        .await
 }
 
 // ----- boxes/{box_id} (cheap) ---------------------------------------------
@@ -389,8 +410,9 @@ fn render_unspent_page(
         (status = 400, description = "Malformed box id", body = V1Error),
         (status = 404, description = "No box with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 500, description = "Failed to assemble the box response", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 500, description = "Failed to assemble the box response; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn box_by_id(
@@ -399,23 +421,28 @@ pub async fn box_by_id(
     V1Query(q): V1Query<SingleBoxQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&box_id_hex) else {
         return invalid_box_id();
     };
     let box_id = BoxId::from_bytes(raw);
-    match idx.box_by_id(&box_id) {
-        Some(b) => {
-            let best = state.read.status().best_full_block_height;
-            match v1box_from_indexed_box(state.network, &b, best, q.decode.unwrap_or(false)) {
-                Ok(v) => Json(v).into_response(),
-                Err(d) => assemble_failed(d),
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || match idx.try_box_by_id(&box_id) {
+            Err(error) => super::indexer_read_failed(error),
+            Ok(Some(b)) => {
+                let best = state.read.sync().best_full_block_height;
+                match v1box_from_indexed_box(state.network, &b, best, q.decode.unwrap_or(false)) {
+                    Ok(v) => Json(v).into_response(),
+                    Err(d) => assemble_failed(d),
+                }
             }
-        }
-        None => box_not_found(),
-    }
+            Ok(None) => box_not_found(),
+        })
+        .await
 }
 
 // ----- boxes/by-address (+ unspent), dual-mounted at addresses/* ----------
@@ -436,7 +463,9 @@ pub async fn box_by_id(
         (status = 200, description = "Boxes at this address (full history)", body = Collection<V1Box>),
         (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_by_address(
@@ -445,7 +474,7 @@ pub async fn boxes_by_address(
     V1Query(q): V1Query<BoxListQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match address_to_tree_hash(&address, state.network) {
@@ -458,8 +487,9 @@ pub async fn boxes_by_address(
         q.cursor.as_deref(),
         q.sort.as_deref(),
         q.decode.unwrap_or(false),
-        |page, dir| idx.address_boxes_paged(&tree_hash, page, dir),
+        move |page, dir| idx.address_boxes_paged(&tree_hash, page, dir),
     )
+    .await
 }
 
 /// `GET /api/v1/boxes/unspent/by-address/{address}` (also mounted at
@@ -479,7 +509,9 @@ pub async fn boxes_by_address(
         (status = 200, description = "Unspent boxes at this address", body = Collection<V1Box>),
         (status = 400, description = "Invalid address/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_unspent_by_address(
@@ -488,19 +520,21 @@ pub async fn boxes_unspent_by_address(
     V1Query(q): V1Query<UnspentQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match address_to_tree_hash(&address, state.network) {
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
+    let mempool = state.mempool.clone();
     render_unspent_page(
         &state,
         &q,
-        |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
-        |excl| pool_unspent_for_tree(state.mempool.as_ref(), &tree_hash, excl),
+        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
+        move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
+    .await
 }
 
 // ----- boxes/by-ergo-tree (+ unspent) -------------------------------------
@@ -519,7 +553,9 @@ pub async fn boxes_unspent_by_address(
         (status = 200, description = "Boxes for this ErgoTree (full history)", body = Collection<V1Box>),
         (status = 400, description = "Invalid ergo_tree/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_by_ergo_tree(
@@ -528,7 +564,7 @@ pub async fn boxes_by_ergo_tree(
     V1Json(body): V1Json<ErgoTreeBody>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match decode_ergo_tree(&body.ergo_tree) {
@@ -541,8 +577,9 @@ pub async fn boxes_by_ergo_tree(
         q.cursor.as_deref(),
         q.sort.as_deref(),
         q.decode.unwrap_or(false),
-        |page, dir| idx.address_boxes_paged(&tree_hash, page, dir),
+        move |page, dir| idx.address_boxes_paged(&tree_hash, page, dir),
     )
+    .await
 }
 
 /// `POST /api/v1/boxes/unspent/by-ergo-tree`.
@@ -561,7 +598,9 @@ pub async fn boxes_by_ergo_tree(
         (status = 200, description = "Unspent boxes for this ErgoTree", body = Collection<V1Box>),
         (status = 400, description = "Invalid ergo_tree/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_unspent_by_ergo_tree(
@@ -570,19 +609,21 @@ pub async fn boxes_unspent_by_ergo_tree(
     V1Json(body): V1Json<ErgoTreeBody>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let tree_hash = match decode_ergo_tree(&body.ergo_tree) {
         Ok(h) => h,
         Err(e) => return *e,
     };
+    let mempool = state.mempool.clone();
     render_unspent_page(
         &state,
         &q,
-        |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
-        |excl| pool_unspent_for_tree(state.mempool.as_ref(), &tree_hash, excl),
+        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
+        move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
+    .await
 }
 
 // ----- boxes/by-template (+ unspent) --------------------------------------
@@ -602,7 +643,9 @@ pub async fn boxes_unspent_by_ergo_tree(
         (status = 200, description = "Boxes matching this template (empty page if unknown)", body = Collection<V1Box>),
         (status = 400, description = "Invalid template_hash/cursor, or sort=asc (unsupported)", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_by_template(
@@ -611,7 +654,7 @@ pub async fn boxes_by_template(
     V1Query(q): V1Query<BoxListQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&hash_hex) else {
@@ -629,8 +672,9 @@ pub async fn boxes_by_template(
         q.cursor.as_deref(),
         q.sort.as_deref(),
         q.decode.unwrap_or(false),
-        |page, _dir| idx.template_boxes_paged(&th, page),
+        move |page, _dir| idx.template_boxes_paged(&th, page),
     )
+    .await
 }
 
 /// `GET /api/v1/boxes/unspent/by-template/{template_hash}`.
@@ -649,7 +693,9 @@ pub async fn boxes_by_template(
         (status = 200, description = "Unspent boxes matching this template (empty page if unknown)", body = Collection<V1Box>),
         (status = 400, description = "Invalid template_hash/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_unspent_by_template(
@@ -658,19 +704,21 @@ pub async fn boxes_unspent_by_template(
     V1Query(q): V1Query<UnspentQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&hash_hex) else {
         return invalid_template_hash();
     };
     let th = TemplateHash::from_bytes(raw);
+    let mempool = state.mempool.clone();
     render_unspent_page(
         &state,
         &q,
-        |page, dir| idx.template_unspent_paged(&th, page, dir),
-        |excl| pool_unspent_for_template(state.mempool.as_ref(), &th, excl),
+        move |page, dir| idx.try_template_unspent_paged(&th, page, dir),
+        move |excl| pool_unspent_for_template(mempool.as_ref(), &th, excl),
     )
+    .await
 }
 
 // ----- boxes/by-token (+ unspent) -----------------------------------------
@@ -689,7 +737,9 @@ pub async fn boxes_unspent_by_template(
         (status = 200, description = "Boxes carrying this token (empty page if unknown)", body = Collection<V1Box>),
         (status = 400, description = "Invalid token_id/cursor, or sort=asc (unsupported)", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_by_token(
@@ -698,7 +748,7 @@ pub async fn boxes_by_token(
     V1Query(q): V1Query<BoxListQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&token_hex) else {
@@ -715,8 +765,9 @@ pub async fn boxes_by_token(
         q.cursor.as_deref(),
         q.sort.as_deref(),
         q.decode.unwrap_or(false),
-        |page, _dir| idx.token_boxes_paged(&tid, page),
+        move |page, _dir| idx.token_boxes_paged(&tid, page),
     )
+    .await
 }
 
 /// `GET /api/v1/boxes/unspent/by-token/{token_id}`.
@@ -735,7 +786,9 @@ pub async fn boxes_by_token(
         (status = 200, description = "Unspent boxes carrying this token (empty page if unknown)", body = Collection<V1Box>),
         (status = 400, description = "Invalid token_id/sort/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn boxes_unspent_by_token(
@@ -744,19 +797,21 @@ pub async fn boxes_unspent_by_token(
     V1Query(q): V1Query<UnspentQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&token_hex) else {
         return invalid_token_id();
     };
     let tid = TokenId::from_bytes(raw);
+    let mempool = state.mempool.clone();
     render_unspent_page(
         &state,
         &q,
-        |page, dir| idx.token_unspent_paged(&tid, page, dir),
-        |excl| pool_unspent_for_token(state.mempool.as_ref(), &tid, excl),
+        move |page, dir| Ok(idx.token_unspent_paged(&tid, page, dir)),
+        move |excl| pool_unspent_for_token(mempool.as_ref(), &tid, excl),
     )
+    .await
 }
 
 // ----- boxes/range --------------------------------------------------------
@@ -773,12 +828,14 @@ pub async fn boxes_unspent_by_token(
         (status = 200, description = "Box ids in global-index order", body = Collection<String>),
         (status = 400, description = "Invalid cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn box_range(State(state): State<V1State>, V1Query(q): V1Query<RangeQuery>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let start_gi = match decode_opt_cursor::<GiCursor>(q.cursor.as_deref()) {
@@ -788,23 +845,29 @@ pub async fn box_range(State(state): State<V1State>, V1Query(q): V1Query<RangeQu
     let limit = clamp_limit(q.limit, RANGE_DEFAULT_LIMIT, RANGE_MAX_LIMIT);
     let lo = start_gi;
     let hi = lo.saturating_add(u64::from(limit) + 1);
-    let boxes = idx.boxes_by_global_range(lo, hi);
-    let rows: Result<Vec<(String, u64)>, String> = boxes
-        .iter()
-        .map(|b| {
-            b.box_data
-                .box_id()
-                .map(|id| (hex::encode(id.as_bytes()), b.global_index as u64))
-                .map_err(|e| format!("box_id derivation failed: {e}"))
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let boxes = idx.boxes_by_global_range(lo, hi);
+            let rows: Result<Vec<(String, u64)>, String> = boxes
+                .iter()
+                .map(|b| {
+                    b.box_data
+                        .box_id()
+                        .map(|id| (hex::encode(id.as_bytes()), b.global_index as u64))
+                        .map_err(|e| format!("box_id derivation failed: {e}"))
+                })
+                .collect();
+            let rows = match rows {
+                Ok(r) => r,
+                Err(d) => return assemble_failed(d),
+            };
+            let (rows, page) = Page::from_overfetch(rows, limit, |row| GiCursor { gi: row.1 + 1 });
+            let items: Vec<String> = rows.into_iter().map(|(id, _)| id).collect();
+            Json(Collection { items, page }).into_response()
         })
-        .collect();
-    let rows = match rows {
-        Ok(r) => r,
-        Err(d) => return assemble_failed(d),
-    };
-    let (rows, page) = Page::from_overfetch(rows, limit, |row| GiCursor { gi: row.1 + 1 });
-    let items: Vec<String> = rows.into_iter().map(|(id, _)| id).collect();
-    Json(Collection { items, page }).into_response()
+        .await
 }
 
 #[cfg(test)]
@@ -815,11 +878,14 @@ mod tests {
 
     /// A `fetch` closure over a fixed backing slice `0..n`, honoring the page
     /// window (ASC only — enough to exercise the overfetch loop).
-    fn windowed_reader(n: u32) -> impl Fn(IdxPage, SortDir) -> Vec<u32> {
-        move |page: IdxPage, _dir: SortDir| {
-            (page.offset..n)
+    fn windowed_reader(
+        n: u32,
+    ) -> impl Fn(IdxPage, SortDir) -> Result<Vec<u32>, ergo_indexer_types::IndexerReadError> {
+        move |page: IdxPage, dir: SortDir| {
+            assert_eq!(dir, SortDir::Asc);
+            Ok((page.offset..n)
                 .take(page.limit as usize)
-                .collect::<Vec<u32>>()
+                .collect::<Vec<u32>>())
         }
     }
 
@@ -833,7 +899,7 @@ mod tests {
     fn confirmed_survivors_no_filter_reads_one_overfetch_window() {
         // limit=3, no filter: exactly limit+1 survivors, each carrying the
         // reader offset just past it.
-        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true);
+        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), |_| true).unwrap();
         assert_eq!(rows_of(&rows), vec![0, 1, 2, 3]);
         // The limit-th (3rd) survivor sat at reader offset 2 → resumes at 3.
         assert_eq!(rows[2].1, 3);
@@ -841,7 +907,8 @@ mod tests {
 
     #[test]
     fn confirmed_survivors_start_offset_advances_by_limit() {
-        let rows = confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true);
+        let rows =
+            confirmed_survivors(10, 2, SortDir::Asc, windowed_reader(100), |_| true).unwrap();
         assert_eq!(rows_of(&rows), vec![10, 11, 12]);
         assert_eq!(rows[1].1, 12);
     }
@@ -855,7 +922,8 @@ mod tests {
         // limit+1 survivors exist, each with the offset PAST the rows read to
         // reach it (no dupes, no underfill).
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let rows = confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even);
+        let rows =
+            confirmed_survivors(0, 3, SortDir::Asc, windowed_reader(100), keep_even).unwrap();
         // limit+1 = 4 survivors: 0,2,4,6.
         assert_eq!(rows_of(&rows), vec![0, 2, 4, 6]);
         // 3rd survivor (value 4) sat at reader offset 4 → resumes at offset 5.
@@ -871,7 +939,7 @@ mod tests {
         // Only 3 evens in 0..5 — short of limit+1; every survivor still
         // carries its own resume offset.
         let keep_even = |v: &u32| v.is_multiple_of(2);
-        let rows = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even);
+        let rows = confirmed_survivors(0, 10, SortDir::Asc, windowed_reader(5), keep_even).unwrap();
         assert_eq!(rows_of(&rows), vec![0, 2, 4]);
         assert_eq!(rows[2].1, 5);
     }

@@ -56,6 +56,8 @@ use crate::v1::governor::{governor_mw, Governor, RouteClass};
 /// unconditionally and gates *inside* each handler, mirroring [`crate::v1::V1State`].
 #[derive(Clone)]
 pub struct OperatorState {
+    /// Shared per-node capacity for blocking chain reads.
+    pub blocking: crate::v1::BlockingReads,
     /// Snapshot reader — every `node/*` read, `network/peers[/connected]`, and
     /// the `voting/*` reads project off this.
     pub read: Arc<dyn NodeReadState>,
@@ -121,18 +123,14 @@ pub(crate) struct ListQuery {
     pub cursor: Option<String>,
 }
 
-/// Opaque offset cursor for the bounded operator collections (peers, blacklist,
-/// sync-info, operator-votes). These lists are node-bounded (well under a few
-/// hundred entries), so an offset alias is stable enough; opaque to clients so a
-/// keyset seek can replace it without a wire break.
+/// Opaque offset cursor for the bounded, ordered operator-votes collection.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct OffsetCursor {
     off: u32,
 }
 
 /// Build a `{items, page}` collection envelope from a fully-materialized
-/// bounded list via offset pagination + overfetch-by-one. Used by every
-/// operator list endpoint (all are node-bounded snapshot reads).
+/// bounded list via offset pagination + overfetch-by-one.
 pub(super) fn offset_collection<T: Serialize>(
     all: Vec<T>,
     q: &ListQuery,
@@ -164,6 +162,50 @@ pub(super) fn offset_collection<T: Serialize>(
         "page": Page { limit, next_cursor, has_more },
     }))
     .into_response()
+}
+
+/// Scoped address key for the bounded network collections.
+#[derive(Serialize, Deserialize)]
+struct AddrCursor {
+    s: String,
+    a: String,
+}
+
+/// Sort a bounded snapshot by its unique wire address keys and resume strictly
+/// after the last served key, independent of snapshot iteration order or churn.
+pub(super) fn keyed_collection<T: Serialize>(
+    mut all: Vec<T>,
+    scope: &'static str,
+    key: impl Fn(&T) -> &str,
+    q: &ListQuery,
+    default_limit: u32,
+    max_limit: u32,
+) -> Response {
+    let limit = clamp_limit(q.limit, default_limit, max_limit);
+    let after = match decode_opt_cursor::<AddrCursor>(q.cursor.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return *e,
+    };
+    if let Some(cur) = after.as_ref() {
+        if cur.s != scope {
+            return v1_error(
+                Reason::InvalidCursor,
+                "pagination cursor was issued for a different network list",
+                "restart from the first page (drop `cursor`) when changing route",
+            );
+        }
+    }
+    all.sort_by(|a, b| key(a).cmp(key(b)));
+    let window = all
+        .into_iter()
+        .filter(|row| after.as_ref().is_none_or(|cur| key(row) > cur.a.as_str()))
+        .take(limit as usize + 1)
+        .collect();
+    let (items, page) = Page::from_overfetch(window, limit, |last| AddrCursor {
+        s: scope.to_owned(),
+        a: key(last).to_owned(),
+    });
+    Json(json!({ "items": items, "page": page })).into_response()
 }
 
 /// Build the operator/control router (`node/*`, `network/*`, `mining/*`,
@@ -262,4 +304,96 @@ pub fn operator_router(
         ));
 
     t0.merge(t1).merge(t2).with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+
+    // ----- helpers -----
+
+    async fn page(rows: Vec<&str>, q: ListQuery) -> serde_json::Value {
+        let response = keyed_collection(rows, "peers", |row| row, &q, 2, 3);
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // ----- happy path -----
+
+    #[tokio::test]
+    async fn keyed_collection_last_page_has_no_next_cursor() {
+        for rows in [vec![], vec!["b"], vec!["b", "a"]] {
+            let result = page(rows, ListQuery::default()).await;
+            assert_eq!(result["page"]["limit"], 2);
+            assert_eq!(result["page"]["has_more"], false);
+            assert!(result["page"]["next_cursor"].is_null());
+        }
+    }
+
+    // ----- round-trips -----
+
+    #[tokio::test]
+    async fn keyed_collection_resumes_strictly_after_last_key() {
+        // Wire strings use byte order, so .10 sorts before .2.
+        let first = page(
+            vec!["10.0.0.3:9030", "10.0.0.2:9030", "10.0.0.10:9030"],
+            ListQuery::default(),
+        )
+        .await;
+        assert_eq!(first["items"], json!(["10.0.0.10:9030", "10.0.0.2:9030"]));
+        assert_eq!(first["page"]["has_more"], true);
+        let cursor = first["page"]["next_cursor"].as_str().unwrap().to_owned();
+        // Both a retained boundary key and a removed boundary key resume at .3.
+        for rows in [
+            vec![
+                "10.0.0.3:9030",
+                "10.0.0.1:9030",
+                "10.0.0.2:9030",
+                "10.0.0.10:9030",
+            ],
+            vec!["10.0.0.3:9030", "10.0.0.1:9030"],
+        ] {
+            let next = page(
+                rows,
+                ListQuery {
+                    limit: Some(0),
+                    cursor: Some(cursor.clone()),
+                },
+            )
+            .await;
+            assert_eq!(next["items"], json!(["10.0.0.3:9030"]));
+            assert_eq!(next["page"]["limit"], 1);
+            assert_eq!(next["page"]["has_more"], false);
+            assert!(next["page"]["next_cursor"].is_null());
+        }
+    }
+
+    // ----- error paths -----
+
+    #[tokio::test]
+    async fn keyed_collection_tampered_cursor_is_invalid_cursor() {
+        let mut cursor = encode_cursor(&AddrCursor {
+            s: "peers".into(),
+            a: "10.0.0.2:9030".into(),
+        });
+        cursor.push('!');
+        let response = keyed_collection(
+            vec!["10.0.0.3:9030"],
+            "peers",
+            |row| row,
+            &ListQuery {
+                cursor: Some(cursor),
+                ..Default::default()
+            },
+            2,
+            3,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["reason"], "invalid_cursor");
+    }
 }

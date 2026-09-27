@@ -6,12 +6,13 @@
 // the wallet flow.
 //
 // Verification: `GET /wallet/status` is always mounted and api_key-gated, so it
-// is a universal probe — 200 => valid, 403 => invalid — regardless of whether a
+// is a universal probe — 200 => valid, 403 => inspect reason — regardless of whether a
 // wallet is configured. Other gated calls confirm/deny opportunistically via
 // report(). Public reads return 200 even with a bad key, so a 200 from them is
-// NOT treated as proof; only 403 (a definitive reject) or a 2xx from a *gated*
+// NOT treated as proof; only an auth rejection or a 2xx from a *gated*
 // call flips the state.
 const KEY = 'ergo.apikey';
+export const CONFIGURE_API_KEY = 'Configure [api.security] api_key_hash, then restart';
 const LEGACY = 'ergo_api_key'; // pre-unification wallet slot
 
 // One-time migration: MOVE a legacy wallet key into the unified slot, then
@@ -29,7 +30,7 @@ const LEGACY = 'ergo_api_key'; // pre-unification wallet slot
 })();
 
 // none: no key set · checking: probe in flight · authorized: probe 200 ·
-// invalid: probe/gated-call 403 · unverified: key set but probe inconclusive.
+// unconfigured: no server hash · invalid: rejected key · unverified: inconclusive.
 let state = 'none';
 const subs = new Set();
 
@@ -41,10 +42,9 @@ export function getApiKey() {
   }
 }
 
-// Reported state collapses to 'none' whenever no key is set, so subscribers
-// never see a stale 'authorized' after a clear.
+// Server configuration is independent of the key stored in this tab.
 export function authState() {
-  return getApiKey() ? state : 'none';
+  return state === 'unconfigured' ? state : (getApiKey() ? state : 'none');
 }
 
 export function subscribe(fn) {
@@ -62,35 +62,40 @@ function setState(s) {
 
 // Opportunistic re-verify from api-client / wallet calls. `gated` marks a call
 // the server actually auth-checks; a 2xx there confirms the key, whereas a 2xx
-// from a public endpoint proves nothing. A 403 anywhere is a definitive reject.
+// from a public endpoint proves nothing. Only auth-specific reasons reject a key.
 // `keyUsed` is the api_key the request was sent with; a response that arrives
 // after the operator changed the key is ignored so it can't mislabel the new
 // key (e.g. key A's 403 marking key B invalid).
-export function report(status, gated = false, keyUsed) {
+export function report(status, gated = false, keyUsed, reason) {
   const key = getApiKey();
-  if (!key) return;
   if (keyUsed !== undefined && keyUsed !== key) return;
-  if (status === 403) setState('invalid');
-  else if (gated && status >= 200 && status < 300 && state !== 'authorized') {
+  if (status === 403 && reason === 'api-key-not-configured') {
+    setState('unconfigured');
+    return;
+  }
+  if (status === 403 && reason === 'invalid.api-key') {
+    setState(key ? 'invalid' : 'none');
+    return;
+  }
+  if (!key) return;
+  if (gated && status >= 200 && status < 300 && state !== 'authorized') {
     setState('authorized');
   }
 }
 
 async function verify() {
   const probeKey = getApiKey();
-  if (!probeKey) {
-    setState('none');
-    return;
-  }
-  setState('checking');
+  if (probeKey) setState('checking');
   try {
     const r = await fetch('/wallet/status', {
       cache: 'no-store',
-      headers: { api_key: probeKey },
+      headers: probeKey ? { api_key: probeKey } : {},
     });
     if (probeKey !== getApiKey()) return; // a newer setApiKey superseded this probe
-    if (r.status === 200) setState('authorized');
-    else if (r.status === 403) setState('invalid');
+    const body = r.status === 403 ? await r.json() : null;
+    if (probeKey !== getApiKey()) return;
+    if (r.status === 200) setState(probeKey ? 'authorized' : 'none');
+    else if (r.status === 403) report(r.status, true, probeKey, body?.reason);
     else setState('unverified');
   } catch {
     if (probeKey === getApiKey()) setState('unverified');
@@ -106,11 +111,12 @@ export async function setApiKey(v) {
   } catch {
     /* ignore storage errors */
   }
-  if (key) await verify();
-  else setState('none');
+  if (!key && state !== 'unconfigured') setState('none');
+  await verify();
 }
 
 const LABELS = {
+  unconfigured: 'API key not configured',
   none: 'Authorize',
   checking: 'Checking…',
   authorized: 'Authorized',
@@ -118,6 +124,7 @@ const LABELS = {
   unverified: 'Key set',
 };
 const DOT = {
+  unconfigured: 'var(--yellow)',
   none: 'var(--tx3)',
   checking: 'var(--yellow)',
   authorized: 'var(--green)',
@@ -125,6 +132,7 @@ const DOT = {
   unverified: 'var(--blue)',
 };
 const TITLES = {
+  unconfigured: CONFIGURE_API_KEY,
   none: 'No api_key set — click to authorize operator actions',
   checking: 'Verifying the api_key…',
   authorized: 'api_key verified — operator actions enabled',
@@ -166,6 +174,7 @@ export function initAuth(chip, dialog) {
         actions (voting, wallet). It is held only in this tab
         (<code>sessionStorage</code>), sent as the <code>api_key</code> request
         header — never written to disk. This is not the wallet password.</p>
+      <p class="dialog__note" data-configure-key hidden></p>
       <label>api_key
         <input id="auth-key" class="input" type="password" autocomplete="off"
                spellcheck="false"></label>
@@ -185,6 +194,11 @@ export function initAuth(chip, dialog) {
     else if (v === 'clear') setApiKey('');
     input.value = ''; // don't leave the key in the DOM after the dialog closes
   });
-  subscribe((s) => renderChip(chip, s));
-  if (getApiKey()) verify(); // probe a key restored from a prior load / migration
+  subscribe((s) => {
+    renderChip(chip, s);
+    const guidance = dialog.querySelector('[data-configure-key]');
+    guidance.hidden = s !== 'unconfigured';
+    guidance.textContent = CONFIGURE_API_KEY;
+  });
+  verify(); // Detect missing server configuration even before a key is entered.
 }

@@ -3,9 +3,11 @@
 
 use parking_lot::RwLock;
 
-use super::generate_sign::transaction_sign_impl;
+use super::generate_sign::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
 use super::tx_build::build_transaction_impl;
-use crate::node::wallet_bridge::{ChainStateAccessor, TxSubmitter, WalletAdminError};
+use crate::node::wallet_bridge::{
+    map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
+};
 
 /// Convert a native [`ExternalSecret`](ergo_api::wallet::native::dto::ExternalSecret)
 /// to the compat `ExternalSecretDto` so the single existing prover decoder
@@ -118,36 +120,31 @@ pub(crate) async fn send_transaction_native_impl(
     use ergo_api::wallet::native::dto::{SendTxRequest, SendTxResponse};
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
-    let signed_bytes = match req {
+    let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
             let built = build_transaction_impl(intent, state, db, chain, network).await?;
-            // The wallet signs with its own secrets; the EIP-27 self-verify gate runs
-            // inside `sign_unsigned_tx` on a freshly built tx (inputs still in the UTXO
-            // set, so the self-verify lookup succeeds).
-            transaction_sign_impl(
+            let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+            let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
                 None,
                 None,
                 storage,
                 state,
                 db,
-                chain,
-            )
-            .await?
+                &snapshot,
+            )?;
+            (bytes, Some(snapshot))
         }
         SendTxRequest::Signed { signed_transaction } => {
             let bytes = hex::decode(signed_transaction.bytes_hex())
                 .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?;
-            // Validate the caller's bytes parse as a transaction NOW, so a
-            // valid-hex-but-not-a-tx blob is a 400 (not a 500 from the txId helper,
-            // which stays strict for our own internally-signed bytes).
             let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
             ergo_ser::transaction::read_transaction(&mut r).map_err(|e| {
                 WalletAdminError::BadRequest(format!(
                     "signedTransaction: not a valid transaction: {e:?}"
                 ))
             })?;
-            bytes
+            (bytes, None)
         }
     };
 
@@ -180,6 +177,13 @@ pub(crate) async fn send_transaction_native_impl(
             });
         }
     }
+
+    if let Some(snapshot) = snapshot.as_ref() {
+        chain
+            .ensure_snapshot_current(snapshot)
+            .map_err(map_chain_error)?;
+    }
+    drop(snapshot);
 
     // 3. Submit. A `duplicate` reason (already in-pool) is idempotently accepted.
     match submitter.submit_transaction(signed_bytes).await {
@@ -290,7 +294,7 @@ pub(crate) fn decode_external_secret(
 pub(crate) fn build_prover(
     storage: &ergo_wallet::storage::SecretStorage,
     db: &redb::Database,
-    chain: &dyn ChainStateAccessor,
+    params: &ergo_wallet::tx_context::BlockchainParameters,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<ergo_wallet::proving::prover::Prover, WalletAdminError> {
     let registry = if let Some(unlocked) = storage.unlocked() {
@@ -323,8 +327,10 @@ pub(crate) fn build_prover(
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?
     };
 
-    let params = chain.build_signing_params()?;
-    Ok(ergo_wallet::proving::prover::Prover::new(registry, params))
+    Ok(ergo_wallet::proving::prover::Prover::new(
+        registry,
+        params.clone(),
+    ))
 }
 
 /// Sign an `UnsignedTransaction` using the wallet prover, performing
@@ -337,28 +343,32 @@ pub(crate) fn sign_unsigned_tx(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     storage: &ergo_wallet::storage::SecretStorage,
     db: &redb::Database,
-    chain: &dyn ChainStateAccessor,
+    snapshot: &ChainSnapshot,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
     hints: &ergo_wallet::proving::hints::TransactionHintsBag,
 ) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
-    let state_ctx = chain.build_signing_context()?;
-    let params = chain.build_signing_params()?;
-    let prover = build_prover(storage, db, chain, externals)?;
+    let state_ctx = snapshot.state_context();
+    let params = snapshot.signing_params();
+    let prover = build_prover(storage, db, params, externals)?;
 
-    // Look up the full ErgoBox for each input.
     let boxes_to_spend: Vec<ergo_ser::ergo_box::ErgoBox> = unsigned_tx
         .inputs
         .iter()
         .enumerate()
         .map(|(idx, ui)| {
             let box_id = ui.box_id.as_bytes();
-            chain.lookup_utxo(box_id).ok_or_else(|| {
-                WalletAdminError::Internal(format!(
-                    "input {} box {} not found in UTXO set",
-                    idx,
-                    hex::encode(box_id)
-                ))
-            })
+            snapshot
+                .lookup_utxo(box_id)
+                .map_err(|error| {
+                    WalletAdminError::Internal(format!("snapshot UTXO read: {error}"))
+                })?
+                .ok_or_else(|| {
+                    WalletAdminError::Internal(format!(
+                        "input {} box {} not found in UTXO set",
+                        idx,
+                        hex::encode(box_id)
+                    ))
+                })
         })
         .collect::<Result<_, _>>()?;
 
@@ -368,39 +378,36 @@ pub(crate) fn sign_unsigned_tx(
         .enumerate()
         .map(|(idx, di)| {
             let box_id = di.box_id.as_bytes();
-            chain.lookup_utxo(box_id).ok_or_else(|| {
-                WalletAdminError::Internal(format!(
-                    "data input {} box {} not found in UTXO set",
-                    idx,
-                    hex::encode(box_id)
-                ))
-            })
+            snapshot
+                .lookup_utxo(box_id)
+                .map_err(|error| {
+                    WalletAdminError::Internal(format!("snapshot UTXO read: {error}"))
+                })?
+                .ok_or_else(|| {
+                    WalletAdminError::Internal(format!(
+                        "data input {} box {} not found in UTXO set",
+                        idx,
+                        hex::encode(box_id)
+                    ))
+                })
         })
         .collect::<Result<_, _>>()?;
 
     let signed_tx = prover
-        .sign(unsigned_tx, &boxes_to_spend, &data_boxes, &state_ctx, hints)
+        .sign(unsigned_tx, &boxes_to_spend, &data_boxes, state_ctx, hints)
         .map_err(map_sign_error)?;
 
-    // Pre-submit structural validation against the SAME ruleset the node's
-    // consensus validator runs (size-aware min box value =
-    // serialized_box_size * min_value_per_byte, box/collection caps). This
-    // replaces the wallet's old flat MIN_BOX_VALUE heuristic so the wallet
-    // never builds a tx the node would reject as dust. Runs on the final
-    // signed tx, before the cost-accounting self-verify and submit.
-    let protocol_params = chain.build_protocol_params()?;
-    ergo_validation::tx::structural::validate_structural(&signed_tx, &protocol_params)
+    let protocol_params = snapshot.protocol_params();
+    ergo_validation::tx::structural::validate_structural(&signed_tx, protocol_params)
         .map_err(|e| WalletAdminError::BadRequest(format!("transaction rejected: {e}")))?;
 
-    // Mandatory self-verify: reproduces chain validator cost accounting + the
-    // EIP-27 re-emission burn gate before submission.
     self_verify_signed_tx(
         &signed_tx,
         &boxes_to_spend,
         &data_boxes,
-        &state_ctx,
-        &params,
-        chain.reemission_rules(),
+        state_ctx,
+        params,
+        snapshot.reemission_rules(),
     )?;
 
     Ok(signed_tx)

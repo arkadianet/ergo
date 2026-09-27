@@ -79,6 +79,37 @@ async fn api_addr_resolves_ephemeral_port() {
     handle.shutdown().await.expect("clean shutdown");
 }
 
+/// Boot must bind and serve public reads while keeping the admin bridge closed.
+#[tokio::test]
+async fn api_unconfigured_boot_serves_reads_and_denies_shutdown() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = make_test_config(tmp.path().to_path_buf());
+    config.api_key_hash = None;
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.expect("keyless API binds");
+    for (method, path, expected) in [
+        ("POST", "/node/shutdown", "403 Forbidden"),
+        ("GET", "/info", "200 OK"),
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.contains(expected), "{text}");
+        if method == "POST" {
+            assert!(text.contains("api-key-not-configured"));
+        }
+    }
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown request was not dispatched");
+}
+
 /// Scala `/info` `restApiUrl` must reflect the actually-bound socket,
 /// not the requested bind string. Regression guard for the bind →
 /// serve_on split: when `api_bind = 127.0.0.1:0`, the kernel assigns an

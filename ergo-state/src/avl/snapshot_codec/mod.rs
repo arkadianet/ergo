@@ -112,8 +112,8 @@ mod server;
 
 pub use manifest::{
     enumerate_chunk_roots, enumerate_expected_chunk_ids, manifest_tree_height,
-    recompute_chunk_root_label, reconstruct_tree, serialize_chunk, serialize_manifest,
-    ReconstructedNode, ReconstructedTree,
+    recompute_chunk_root_label, recompute_manifest_root_label, reconstruct_tree, serialize_chunk,
+    serialize_manifest, ReconstructedNode, ReconstructedTree,
 };
 pub use node_codec::{parse_prover_node, serialize_prover_node, ParsedProverNode};
 pub use server::SnapshotServer;

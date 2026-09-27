@@ -5,7 +5,9 @@ use parking_lot::RwLock;
 
 use super::hints_codec::tx_hints_bag_to_dto;
 use super::sign_submit::decode_external_secret;
-use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError};
+use crate::node::wallet_bridge::{
+    map_chain_error, ChainSnapshot, ChainStateAccessor, WalletAdminError,
+};
 
 /// Collect all `SigmaBoolean` propositions the registry can prove.
 ///
@@ -122,12 +124,23 @@ pub(crate) fn hex_pk_to_sigma_boolean(
     Ok(SigmaBoolean::ProveDlog(GroupElement::from_bytes(bytes)))
 }
 
+fn lookup_snapshot_utxo(
+    snapshot: &ChainSnapshot,
+    box_id: &[u8; 32],
+    label: &str,
+) -> Result<ergo_ser::ergo_box::ErgoBox, WalletAdminError> {
+    snapshot
+        .lookup_utxo(box_id)
+        .map_err(|error| WalletAdminError::Internal(format!("{label} snapshot read: {error}")))?
+        .ok_or(WalletAdminError::BoxNotFound)
+}
+
 /// Resolve input box IDs: use `override_ids` if supplied, else look up every
 /// input in the unsigned transaction from the UTXO set via `chain`.
 pub(crate) fn resolve_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
-    chain: &dyn ChainStateAccessor,
+    snapshot: &ChainSnapshot,
     label: &str,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
@@ -143,7 +156,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
                             "{label} override[{i}]: bad box id hex"
                         ))
                     })?;
-                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, &id, "input")
             })
             .collect(),
         None => unsigned_tx
@@ -151,9 +164,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
             .iter()
             .map(|ui| {
                 let box_id = ui.box_id.as_bytes();
-                chain
-                    .lookup_utxo(box_id)
-                    .ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, box_id, "input")
             })
             .collect(),
     }
@@ -163,7 +174,7 @@ pub(crate) fn resolve_inputs_for_unsigned(
 pub(crate) fn resolve_data_inputs_for_unsigned(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     override_ids: Option<&[String]>,
-    chain: &dyn ChainStateAccessor,
+    snapshot: &ChainSnapshot,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -178,7 +189,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
                             "data_input override[{i}]: bad box id hex"
                         ))
                     })?;
-                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, &id, "data_input")
             })
             .collect(),
         None => unsigned_tx
@@ -186,9 +197,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
             .iter()
             .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                chain
-                    .lookup_utxo(box_id)
-                    .ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, box_id, "data_input")
             })
             .collect(),
     }
@@ -198,7 +207,7 @@ pub(crate) fn resolve_data_inputs_for_unsigned(
 pub(crate) fn resolve_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
-    chain: &dyn ChainStateAccessor,
+    snapshot: &ChainSnapshot,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -211,7 +220,7 @@ pub(crate) fn resolve_inputs_for_signed(
                     .ok_or_else(|| {
                         WalletAdminError::BadRequest(format!("input override[{i}]: bad box id hex"))
                     })?;
-                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, &id, "input")
             })
             .collect(),
         None => tx
@@ -219,9 +228,7 @@ pub(crate) fn resolve_inputs_for_signed(
             .iter()
             .map(|inp| {
                 let box_id = inp.box_id.as_bytes();
-                chain
-                    .lookup_utxo(box_id)
-                    .ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, box_id, "input")
             })
             .collect(),
     }
@@ -231,7 +238,7 @@ pub(crate) fn resolve_inputs_for_signed(
 pub(crate) fn resolve_data_inputs_for_signed(
     tx: &ergo_ser::transaction::Transaction,
     override_ids: Option<&[String]>,
-    chain: &dyn ChainStateAccessor,
+    snapshot: &ChainSnapshot,
 ) -> Result<Vec<ergo_ser::ergo_box::ErgoBox>, WalletAdminError> {
     match override_ids {
         Some(ids) => ids
@@ -246,7 +253,7 @@ pub(crate) fn resolve_data_inputs_for_signed(
                             "data_input override[{i}]: bad box id hex"
                         ))
                     })?;
-                chain.lookup_utxo(&id).ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, &id, "data_input")
             })
             .collect(),
         None => tx
@@ -254,9 +261,7 @@ pub(crate) fn resolve_data_inputs_for_signed(
             .iter()
             .map(|di| {
                 let box_id = di.box_id.as_bytes();
-                chain
-                    .lookup_utxo(box_id)
-                    .ok_or(WalletAdminError::BoxNotFound)
+                lookup_snapshot_utxo(snapshot, box_id, "data_input")
             })
             .collect(),
     }
@@ -297,19 +302,20 @@ pub(crate) async fn generate_commitments_impl(
     let generate_for = collect_generate_for(&storage_guard, db, &externals)?;
     drop(storage_guard);
 
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
     let boxes_to_spend =
-        resolve_inputs_for_unsigned(&unsigned_tx, request.inputs.as_deref(), chain, "input")?;
+        resolve_inputs_for_unsigned(&unsigned_tx, request.inputs.as_deref(), &snapshot, "input")?;
     let data_boxes =
-        resolve_data_inputs_for_unsigned(&unsigned_tx, request.data_inputs.as_deref(), chain)?;
+        resolve_data_inputs_for_unsigned(&unsigned_tx, request.data_inputs.as_deref(), &snapshot)?;
 
-    let state_ctx = chain.build_signing_context()?;
+    let state_ctx = snapshot.state_context();
 
     let mut rng = ergo_wallet::proving::randomness::OsRngBackend;
     let tbag = ergo_wallet::proving::commitments::generate_commitments_for_tx(
         &unsigned_tx,
         &boxes_to_spend,
         &data_boxes,
-        &state_ctx,
+        state_ctx,
         &generate_for,
         &mut rng,
     )
@@ -350,16 +356,18 @@ pub(crate) async fn extract_hints_impl(
         .map(|s| hex_pk_to_sigma_boolean(s))
         .collect::<Result<_, _>>()?;
 
-    let boxes_to_spend = resolve_inputs_for_signed(&tx, request.inputs.as_deref(), chain)?;
-    let data_boxes = resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), chain)?;
+    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let boxes_to_spend = resolve_inputs_for_signed(&tx, request.inputs.as_deref(), &snapshot)?;
+    let data_boxes =
+        resolve_data_inputs_for_signed(&tx, request.data_inputs.as_deref(), &snapshot)?;
 
-    let state_ctx = chain.build_signing_context()?;
+    let state_ctx = snapshot.state_context();
 
     let tbag = ergo_wallet::proving::extract::bag_for_transaction(
         &tx,
         &boxes_to_spend,
         &data_boxes,
-        &state_ctx,
+        state_ctx,
         &real,
         &simulated,
     )

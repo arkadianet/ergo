@@ -91,13 +91,10 @@ pub(super) fn admin_router(
             post(set_votes_handler),
         )
         .with_state(admin);
-    match security {
-        Some(security) => routes.route_layer(axum::middleware::from_fn_with_state(
-            security,
-            crate::auth::require_api_key,
-        )),
-        None => routes,
-    }
+    routes.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
 }
 
 pub(super) fn conditional_chain_router(

@@ -370,17 +370,19 @@ pub(crate) struct NodeState {
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).
     pub(super) mining_enabled: bool,
-    /// Mirror of `config.api_bind.is_some_and(|a| !a.ip().is_loopback())`.
+    /// True for a non-loopback API bind or `config.api_local_reverse_proxy`.
     /// The `api_key` gate never covers `POST /transactions*` /
     /// `/api/v1/mempool/{submit,check}` (read/submit routes are
     /// unauthenticated by design — see `docs/configuration.md`), so once
     /// the operator opts into a non-loopback `[api] bind` (which requires
-    /// `public_bind = true` at load), that submission surface is reachable
-    /// by arbitrary internet callers. `admission::admit_api_transaction`
-    /// reads this to route such submissions through `TxSource::PublicApi`
+    /// `public_bind = true` at load) or declares a loopback reverse proxy,
+    /// that submission surface is reachable by arbitrary internet callers.
+    /// `admission::admit_api_transaction` reads this to route such submissions
+    /// through `TxSource::PublicApi`
     /// (shared global budget) instead of `TxSource::Api` (local reserve),
     /// so a public unauthenticated flood cannot exhaust the reserve the
-    /// operator's own loopback tooling depends on.
+    /// operator's tooling depends on. With a declared proxy, direct local
+    /// API submissions also use the public budget.
     pub(super) api_publicly_bound: bool,
     /// Active mempool priority-weight function converted at boot to its
     /// wire form. Snapshot ticks read this directly — no per-tick

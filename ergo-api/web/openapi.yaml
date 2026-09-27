@@ -3279,6 +3279,8 @@ paths:
 
     post:
       summary: Send a mined block
+      security:
+        - ApiKeyAuth: [api_key]
       operationId: sendMinedBlock
       tags:
         - blocks

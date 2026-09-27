@@ -35,7 +35,7 @@ use tower::ServiceExt;
 const PLAINTEXT_KEY: &str = "hello";
 const SCALA_HELLO_HASH: &str = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf";
 
-fn security() -> Arc<ApiSecurity> {
+pub(super) fn security() -> Arc<ApiSecurity> {
     Arc::new(ApiSecurity::new(SCALA_HELLO_HASH.to_string()).expect("valid hex hash"))
 }
 
@@ -44,7 +44,7 @@ fn wallet_app_gated() -> axum::Router {
     router_with_security(admin, Some(security()))
 }
 
-fn wallet_app_ungated() -> axum::Router {
+fn wallet_app_unconfigured() -> axum::Router {
     let admin: Arc<dyn WalletAdmin> = Arc::new(NoopWalletAdmin);
     router_with_security(admin, None)
 }
@@ -77,14 +77,15 @@ async fn wallet_status_with_correct_api_key_returns_200() {
 }
 
 #[tokio::test]
-async fn wallet_status_ungated_returns_200_without_header() {
-    // Sanity check: when no `ApiSecurity` is configured, the
-    // `/wallet/*` subtree is reachable without any header. Used by
-    // tests and read-only mirrors. Pairs with the gated test above to
-    // show the gate is the only thing producing 403.
-    let app = wallet_app_ungated();
-    let resp = app.oneshot(get("/wallet/status")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+async fn wallet_status_unconfigured_returns_distinct_403() {
+    let resp = wallet_app_unconfigured()
+        .oneshot(get("/wallet/status"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = body_string(resp).await;
+    assert!(body.contains("api-key-not-configured"));
+    assert!(body.contains(ergo_api::auth::API_KEY_NOT_CONFIGURED));
 }
 
 // ----- error paths -----
@@ -249,7 +250,7 @@ fn shutdown_app_gated() -> axum::Router {
     // `route_layer`, mirroring the production wiring in `server.rs` —
     // a plain `layer` would capture this router's fallback too.
     admin_routes.route_layer(axum::middleware::from_fn_with_state(
-        security(),
+        Some(security()),
         ergo_api::auth::require_api_key,
     ))
 }

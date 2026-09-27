@@ -64,7 +64,9 @@ pub(crate) async fn build_unsigned_tx(
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<BuiltTx, WalletAdminError> {
     let state = state.read();
-    let as_of = chain.wallet_scan_height();
+    let as_of = chain
+        .wallet_scan_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     // Decode payment requests: address → pubkey → ErgoTree bytes.
     let payment_reqs: Vec<ergo_wallet::tx_builder::PaymentRequest> = requests
@@ -133,7 +135,9 @@ pub(crate) async fn build_unsigned_tx(
     let fee_ergo_tree = ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES.to_vec();
 
     // Get the chain tip height for candidate creation_height.
-    let current_height = chain.tip_height();
+    let current_height = chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
     // Build unsigned tx.
     if let Some(explicit_inputs) = override_inputs {
@@ -763,7 +767,10 @@ pub(crate) fn select_boxes_impl(
         .collect();
 
     let reemission = chain.reemission_rules();
-    let reemission_height = chain.tip_height().saturating_add(1);
+    let reemission_height = chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        .saturating_add(1);
 
     // Narrow to the requested input set, then plan: `auto` sub-selects greedily;
     // `boxIds` uses the EXACT set (same as `transactions/build`).
@@ -877,7 +884,9 @@ pub(crate) fn select_boxes_impl(
             assets: assets_map_to_dto(&plan.change_tokens),
         },
         reemission_burn: reemission_burn_dto(plan.to_burn, reemission),
-        as_of: chain.wallet_scan_height(),
+        as_of: chain
+            .wallet_scan_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
     })
 }
 
@@ -1041,17 +1050,23 @@ mod tests {
     }
 
     impl ChainStateAccessor for BurnTestChain {
-        fn wallet_scan_height(&self) -> u32 {
-            self.tip
+        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
         }
-        fn tip_height(&self) -> u32 {
-            self.tip
+        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(self.tip)
         }
         fn is_pruned(&self) -> bool {
             false
         }
-        fn read_block_at(&self, _h: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
-            None
+        fn read_block_at(
+            &self,
+            _h: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
         }
         fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
             Some(&self.rules)
@@ -1184,17 +1199,23 @@ mod tests {
 
     struct NoBlocksChain;
     impl ChainStateAccessor for NoBlocksChain {
-        fn wallet_scan_height(&self) -> u32 {
-            0
+        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(0)
         }
-        fn tip_height(&self) -> u32 {
-            0
+        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(0)
         }
         fn is_pruned(&self) -> bool {
             false
         }
-        fn read_block_at(&self, _h: u32) -> Option<ergo_state::wallet::scan::RescanBlock> {
-            None
+        fn read_block_at(
+            &self,
+            _h: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
         }
     }
 

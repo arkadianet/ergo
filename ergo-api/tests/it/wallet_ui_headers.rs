@@ -78,6 +78,7 @@ fn app() -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
     };
     // Security gate is irrelevant to these header assertions; `None`
     // keeps the static routes reachable without a key.

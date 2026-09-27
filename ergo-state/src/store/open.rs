@@ -314,6 +314,7 @@ impl StateStore {
             blocks_to_keep: -1,
             rollback_window: ROLLBACK_WINDOW,
         };
+        crate::wallet::migrate_schema(&store.db)?;
         store.backfill_header_chain_index_if_needed()?;
         store.reconcile_voted_params()?;
         store.migrate_voted_params_codec_v2_if_needed()?;

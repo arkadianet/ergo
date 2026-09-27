@@ -11,9 +11,8 @@
 //! - `GET  /mining/rewardAddress`    → `{ rewardAddress: "9..." }`
 //! - `GET  /mining/rewardPublicKey`  → `{ rewardPubkey: "02..." }`
 //!
-//! All four routes sit behind the api_key gate when the server is built
-//! with `[api.security] api_key_hash` (production always does — the hash
-//! is mandatory whenever the API is enabled). This is a deliberate
+//! All four routes sit behind the api_key gate; an absent
+//! `[api.security] api_key_hash` keeps them closed. This is a deliberate
 //! hardening over Scala, which leaves `/mining/*` open; see
 //! `server/scala_api.rs::auxiliary_router`.
 

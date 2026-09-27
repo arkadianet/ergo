@@ -172,13 +172,13 @@ fn canonical_rust_openapi_preserves_prices_contract() {
 
     assert_eq!(
         response_statuses(operation),
-        BTreeSet::from(["200", "400", "409", "500", "503"])
+        BTreeSet::from(["200", "400", "409", "500", "503", "504"])
     );
     assert_eq!(
         response_schema_ref(operation, "200"),
         "#/components/schemas/PricesResponse"
     );
-    for status in ["400", "409", "500", "503"] {
+    for status in ["400", "409", "500", "503", "504"] {
         assert_eq!(
             response_schema_ref(operation, status),
             "#/components/schemas/V1Error"

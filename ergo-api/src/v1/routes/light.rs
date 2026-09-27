@@ -24,6 +24,7 @@ use utoipa::ToSchema;
 use super::dto::unix_ms_to_iso;
 use super::extract::V1Query;
 use super::{valid_modifier_id, V1State};
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, decode_opt_cursor, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
 use crate::v1::routes::dto::V1MerkleProof;
@@ -229,8 +230,9 @@ pub struct BootstrapQuery {
         (status = 200, description = "NiPoPoW bootstrap proof", body = LightPopowProof),
         (status = 400, description = "m/k out of range, or `at` is not a valid header id", body = V1Error),
         (status = 413, description = "Serialized proof exceeds the response-byte ceiling", body = V1Error),
-        (status = 500, description = "Proof failed to serialize", body = V1Error),
-        (status = 503, description = "This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable", body = V1Error),
+        (status = 500, description = "Proof failed to serialize; internal_error on read failure", body = V1Error),
+        (status = 503, description = "This node cannot build a NiPoPoW proof (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn bootstrap_proof(
@@ -238,7 +240,7 @@ pub async fn bootstrap_proof(
     V1Query(q): V1Query<BootstrapQuery>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     let m = q.m.unwrap_or(DEFAULT_NIPOPOW_M);
@@ -270,41 +272,47 @@ pub async fn bootstrap_proof(
         }
         None => None,
     };
-    match chain.nipopow_proof(m, k, anchor.as_deref()) {
-        Ok(proof) => {
-            let dto = LightPopowProof::from_scala(&proof, anchor);
-            // Serialize once to enforce the response-byte ceiling before the
-            // body is handed to the client (§3.13 governor #2).
-            match serde_json::to_vec(&dto) {
-                Ok(bytes) if bytes.len() > MAX_PROOF_BYTES => v1_error(
-                    Reason::ProofTooLarge,
-                    "the proof exceeds the response-byte ceiling",
-                    format!(
-                        "serialized {} bytes > {} cap; request a smaller m/k",
-                        bytes.len(),
-                        MAX_PROOF_BYTES
-                    ),
-                ),
-                Ok(bytes) => (
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    bytes,
-                )
-                    .into_response(),
-                Err(_) => v1_error(
-                    Reason::InternalError,
-                    "failed to serialize the proof",
-                    "the prover returned a proof that could not be encoded",
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            match chain.nipopow_proof(m, k, anchor.as_deref()) {
+                Ok(proof) => {
+                    let dto = LightPopowProof::from_scala(&proof, anchor);
+                    // Serialize once to enforce the response-byte ceiling before the
+                    // body is handed to the client (§3.13 governor #2).
+                    match serde_json::to_vec(&dto) {
+                        Ok(bytes) if bytes.len() > MAX_PROOF_BYTES => v1_error(
+                            Reason::ProofTooLarge,
+                            "the proof exceeds the response-byte ceiling",
+                            format!(
+                                "serialized {} bytes > {} cap; request a smaller m/k",
+                                bytes.len(),
+                                MAX_PROOF_BYTES
+                            ),
+                        ),
+                        Ok(bytes) => (
+                            [(axum::http::header::CONTENT_TYPE, "application/json")],
+                            bytes,
+                        )
+                            .into_response(),
+                        Err(_) => v1_error(
+                            Reason::InternalError,
+                            "failed to serialize the proof",
+                            "the prover returned a proof that could not be encoded",
+                        ),
+                    }
+                }
+                // The prover default `Err` path = extension/interlink data not
+                // retained (a pruned node cannot build the proof).
+                Err(detail) => v1_error(
+                    Reason::NipopowUnavailable,
+                    "this node cannot build a NiPoPoW proof",
+                    detail,
                 ),
             }
-        }
-        // The prover default `Err` path = extension/interlink data not
-        // retained (a pruned node cannot build the proof).
-        Err(detail) => v1_error(
-            Reason::NipopowUnavailable,
-            "this node cannot build a NiPoPoW proof",
-            detail,
-        ),
-    }
+        })
+        .await
 }
 
 // ----- GET /light/headers-interlinks --------------------------------------
@@ -346,7 +354,9 @@ pub struct LightHeadersPage {
     responses(
         (status = 200, description = "Headers + interlinks + batch-Merkle proofs (empty page past tip)", body = LightHeadersPage),
         (status = 400, description = "Missing from_height/cursor, or invalid cursor", body = V1Error),
-        (status = 503, description = "Interlink data not retained on this node (pruned), or chain reader unavailable", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 503, description = "Interlink data not retained on this node (pruned), or chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn headers_interlinks(
@@ -354,7 +364,7 @@ pub async fn headers_interlinks(
     V1Query(q): V1Query<HeadersQuery>,
 ) -> Response {
     let chain = match state.chain() {
-        Ok(c) => c,
+        Ok(c) => c.clone(),
         Err(e) => return *e,
     };
     // Cursor supersedes from_height; one of them is required.
@@ -374,59 +384,66 @@ pub async fn headers_interlinks(
     };
     let limit = clamp_limit(q.limit, HEADERS_DEFAULT_LIMIT, HEADERS_MAX_LIMIT);
 
-    // A height past the tip is not an error — it is simply an empty tail.
-    let tip = state.read.sync().best_full_block_height;
-    if start > tip {
-        return Json(LightHeadersPage {
-            items: Vec::new(),
-            page: Page {
-                limit,
-                next_cursor: None,
-                has_more: false,
-            },
-        })
-        .into_response();
-    }
-
-    let end = start.saturating_add(limit).min(tip.saturating_add(1));
-    let mut items: Vec<LightPopowHeader> = Vec::new();
-    let mut last_height = start;
-    for h in start..end {
-        match chain.nipopow_header_at_height(h) {
-            Some(ph) => {
-                items.push(LightPopowHeader::from_scala(&ph));
-                last_height = h;
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            // A height past the tip is not an error — it is simply an empty tail.
+            let tip = state.read.sync().best_full_block_height;
+            if start > tip {
+                return Json(LightHeadersPage {
+                    items: Vec::new(),
+                    page: Page {
+                        limit,
+                        next_cursor: None,
+                        has_more: false,
+                    },
+                })
+                .into_response();
             }
-            // A miss at a height <= tip means the extension/interlink data is
-            // not retained on this node — honest 409, never a silent gap.
-            None => {
-                if items.is_empty() {
-                    return v1_error(
-                        Reason::NipopowUnavailable,
-                        "interlink data is not retained on this node",
-                        "a pruned node cannot serve popow headers",
-                    );
+
+            let end = start.saturating_add(limit).min(tip.saturating_add(1));
+            let mut items: Vec<LightPopowHeader> = Vec::new();
+            let mut last_height = start;
+            for h in start..end {
+                match chain.try_nipopow_header_at_height(h) {
+                    Err(error) => return super::chain::chain_read_failed(error),
+                    Ok(Some(ph)) => {
+                        items.push(LightPopowHeader::from_scala(&ph));
+                        last_height = h;
+                    }
+                    // A miss at a height <= tip means the extension/interlink data is
+                    // not retained on this node; preserve the nipopow_unavailable response.
+                    Ok(None) => {
+                        if items.is_empty() {
+                            return v1_error(
+                                Reason::NipopowUnavailable,
+                                "interlink data is not retained on this node",
+                                "a pruned node cannot serve popow headers",
+                            );
+                        }
+                        break;
+                    }
                 }
-                break;
             }
-        }
-    }
 
-    let has_more = last_height < tip;
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&NextHeightCursor {
-            next_height: last_height.saturating_add(1),
+            let has_more = last_height < tip;
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&NextHeightCursor {
+                    next_height: last_height.saturating_add(1),
+                })
+            });
+            Json(LightHeadersPage {
+                items,
+                page: Page {
+                    limit,
+                    next_cursor,
+                    has_more,
+                },
+            })
+            .into_response()
         })
-    });
-    Json(LightHeadersPage {
-        items,
-        page: Page {
-            limit,
-            next_cursor,
-            has_more,
-        },
-    })
-    .into_response()
+        .await
 }
 
 // ----- GET /light/membership-proof (O2 dual mount) ------------------------
@@ -455,7 +472,9 @@ pub struct MembershipQuery {
         (status = 200, description = "Merkle membership proof (same core as chain/proofs/{header_id}/transactions/{tx_id})", body = V1MerkleProof),
         (status = 400, description = "Missing/malformed header_id or tx_id", body = V1Error),
         (status = 404, description = "No block, or tx not in that block", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 500, description = "Stored chain record could not be serialised; internal_error on read failure", body = V1Error),
+        (status = 503, description = "Chain reader unavailable; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn membership_proof(
@@ -480,7 +499,7 @@ pub async fn membership_proof(
             "supply ?header_id=<hex>&tx_id=<hex>",
         );
     };
-    super::chain::merkle_membership_proof(chain.as_ref(), &header_id, &tx_id)
+    super::chain::merkle_membership_proof(&state.blocking, chain.clone(), header_id, tx_id).await
 }
 
 // ----- GET /light/status --------------------------------------------------

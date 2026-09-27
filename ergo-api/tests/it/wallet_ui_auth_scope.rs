@@ -93,6 +93,7 @@ fn app() -> axum::Router {
         emission: None,
         emission_scripts: None,
         utxo_reads_supported: true,
+        local_reverse_proxy: false,
     };
     router_with_mempool_and_wallet_and_security(
         ctx,

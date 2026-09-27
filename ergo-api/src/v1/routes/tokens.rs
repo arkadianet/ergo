@@ -22,6 +22,7 @@ use super::dto::{
 };
 use super::extract::V1Query;
 use super::{offset_from_cursor, parse_id32, OffsetCursor, V1State};
+use crate::v1::blocking::ReadLane;
 use crate::v1::cursor::{clamp_limit, encode_cursor, Page};
 use crate::v1::error::{v1_error, Reason, V1Error};
 
@@ -69,22 +70,29 @@ fn token_not_found() -> Response {
         (status = 400, description = "Malformed token id", body = V1Error),
         (status = 404, description = "No token with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn token_by_id(State(state): State<V1State>, Path(token_hex): Path<String>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&token_hex) else {
         return invalid_token_id();
     };
     let tid = TokenId::from_bytes(raw);
-    match idx.token_by_id(&tid) {
-        Some(t) => Json(token_from_dto(&t)).into_response(),
-        None => token_not_found(),
-    }
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Point, move || match idx.try_token_by_id(&tid) {
+            Err(error) => super::indexer_read_failed(error),
+            Ok(Some(t)) => Json(token_from_dto(&t)).into_response(),
+            Ok(None) => token_not_found(),
+        })
+        .await
 }
 
 // ----- tokens (list) — honest gap ------------------------------------------
@@ -205,7 +213,9 @@ pub(super) fn scan_token_holders(
         (status = 200, description = "Holder ranking + scan meta (scan_capped honesty flag)", body = CollectionMeta<V1TokenHolder, HoldersMeta>),
         (status = 400, description = "Malformed token id/cursor", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn token_holders(
@@ -214,7 +224,7 @@ pub async fn token_holders(
     V1Query(q): V1Query<HoldersQuery>,
 ) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&token_hex) else {
@@ -227,37 +237,43 @@ pub async fn token_holders(
     };
     let limit = clamp_limit(q.limit, HOLDERS_DEFAULT_LIMIT, HOLDERS_MAX_LIMIT);
 
-    let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
-    let mut items: Vec<V1TokenHolder> = scan
-        .holders
-        .iter()
-        .skip(start as usize)
-        .take(limit as usize + 1)
-        .map(|(address, amount)| V1TokenHolder {
-            address: address.clone(),
-            amount: amount.to_string(),
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let mut items: Vec<V1TokenHolder> = scan
+                .holders
+                .iter()
+                .skip(start as usize)
+                .take(limit as usize + 1)
+                .map(|(address, amount)| V1TokenHolder {
+                    address: address.clone(),
+                    amount: amount.to_string(),
+                })
+                .collect();
+            let has_more = items.len() as u32 > limit;
+            if has_more {
+                items.truncate(limit as usize);
+            }
+            let next_cursor = has_more.then(|| {
+                encode_cursor(&OffsetCursor {
+                    off: start.saturating_add(limit),
+                })
+            });
+            let page = Page {
+                limit,
+                next_cursor,
+                has_more,
+            };
+            let meta = HoldersMeta {
+                as_of_height: idx.indexed_height(),
+                scanned_boxes: scan.scanned,
+                scan_capped: scan.capped,
+            };
+            Json(CollectionMeta { items, page, meta }).into_response()
         })
-        .collect();
-    let has_more = items.len() as u32 > limit;
-    if has_more {
-        items.truncate(limit as usize);
-    }
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&OffsetCursor {
-            off: start.saturating_add(limit),
-        })
-    });
-    let page = Page {
-        limit,
-        next_cursor,
-        has_more,
-    };
-    let meta = HoldersMeta {
-        as_of_height: idx.indexed_height(),
-        scanned_boxes: scan.scanned,
-        scan_capped: scan.capped,
-    };
-    Json(CollectionMeta { items, page, meta }).into_response()
+        .await
 }
 
 /// `GET /api/v1/tokens/{token_id}/stats` — bare object; shares the holders
@@ -270,29 +286,39 @@ pub async fn token_holders(
         (status = 400, description = "Malformed token id", body = V1Error),
         (status = 404, description = "No token with that id", body = V1Error),
         (status = 409, description = "Extra index disabled", body = V1Error),
-        (status = 503, description = "Extra index syncing/halted", body = V1Error),
+        (status = 503, description = "Extra index syncing/halted; overloaded (Retry-After: 1) or shutting_down", body = V1Error),
+        (status = 500, description = "Internal read failure (internal_error)", body = V1Error),
+        (status = 504, description = "Read timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn token_stats(State(state): State<V1State>, Path(token_hex): Path<String>) -> Response {
     let idx = match state.indexer() {
-        Ok(i) => i,
+        Ok(i) => i.clone(),
         Err(e) => return *e,
     };
     let Some(raw) = parse_id32(&token_hex) else {
         return invalid_token_id();
     };
     let tid = TokenId::from_bytes(raw);
-    let Some(token) = idx.token_by_id(&tid) else {
-        return token_not_found();
-    };
-    let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
-    let stats = V1TokenStats {
-        token_id: hex::encode(tid.as_bytes()),
-        emission_amount: token.emission_amount.to_string(),
-        circulating_supply: scan.circulating.to_string(),
-        holder_count: scan.holders.len() as u64,
-        box_count: idx.token_total_boxes(&tid),
-        scan_capped: scan.capped,
-    };
-    Json(stats).into_response()
+    state
+        .blocking
+        .clone()
+        .run(ReadLane::Scan, move || {
+            let token = match idx.try_token_by_id(&tid) {
+                Ok(Some(token)) => token,
+                Ok(None) => return token_not_found(),
+                Err(error) => return super::indexer_read_failed(error),
+            };
+            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let stats = V1TokenStats {
+                token_id: hex::encode(tid.as_bytes()),
+                emission_amount: token.emission_amount.to_string(),
+                circulating_supply: scan.circulating.to_string(),
+                holder_count: scan.holders.len() as u64,
+                box_count: idx.token_total_boxes(&tid),
+                scan_capped: scan.capped,
+            };
+            Json(stats).into_response()
+        })
+        .await
 }

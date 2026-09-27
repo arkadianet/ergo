@@ -15,13 +15,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
+use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
 use ergo_api::compat::types::{
     Parameters, ScalaAdProofs, ScalaBlockTransactions, ScalaExtension, ScalaFullBlock, ScalaHeader,
     ScalaInfo, ScalaPowSolutions, ScalaTransactionInput,
 };
 use ergo_api::compat::NodeChainQuery;
-use ergo_api::server::router;
-use ergo_api::traits::{NodeReadState, NodeSubmit};
+use ergo_api::server::{router_with_mempool_and_wallet_and_security, ServerCtx};
+use ergo_api::traits::{NodeReadState, NodeSubmit, NoopMempoolView};
 use ergo_api::types::{
     ApiFullBlockRef, ApiHeaderRef, ApiHealth, ApiInfo, ApiMempoolSummary, ApiMempoolTransaction,
     ApiMempoolTransactions, ApiPeer, ApiStatus, ApiSubmitError, ApiSyncStatus, ApiTip,
@@ -257,12 +258,27 @@ fn build_app(
     submit: Option<Arc<dyn NodeSubmit>>,
 ) -> axum::Router {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState);
-    router(
+    let ctx = ServerCtx {
         read,
         compat,
         submit,
+        indexer: None,
+        mempool: Arc::new(NoopMempoolView::new()),
+        network: ergo_ser::address::NetworkPrefix::Mainnet,
+        chain_params: None,
+        mining: None,
+        emission: None,
+        emission_scripts: None,
+        utxo_reads_supported: true,
+        local_reverse_proxy: false,
+    };
+    router_with_mempool_and_wallet_and_security(
+        ctx,
         None,
-        ergo_ser::address::NetworkPrefix::Mainnet,
+        Arc::new(ergo_api::wallet::NoopWalletAdmin),
+        Some(Arc::new(
+            ApiSecurity::new(ApiSecurity::hash_key(b"block-submit-test")).unwrap(),
+        )),
     )
 }
 
@@ -275,7 +291,7 @@ fn compat() -> Arc<dyn NodeChainQuery> {
 /// section ids wouldn't match), but the route tests use a
 /// `StubBlockSubmit` that bypasses the bridge entirely — so the
 /// content needs only to deserialize cleanly via `serde_json`.
-fn synthetic_block_json() -> Vec<u8> {
+pub(super) fn synthetic_block_json() -> Vec<u8> {
     let block = ScalaFullBlock {
         header: ScalaHeader {
             extension_id: String::new(),
@@ -330,6 +346,7 @@ async fn post(app: axum::Router, path: &str, body: Vec<u8>) -> (StatusCode, Vec<
             Request::builder()
                 .method(Method::POST)
                 .uri(path)
+                .header(API_KEY_HEADER, "block-submit-test")
                 .body(Body::from(body))
                 .unwrap(),
         )

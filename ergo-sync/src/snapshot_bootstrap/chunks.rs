@@ -94,6 +94,11 @@ pub enum ChunkReceiveOutcome {
 }
 
 impl ChunkAssembly {
+    /// Whether this peer currently owns a chunk request.
+    pub fn has_requests_from(&self, peer: &PeerId) -> bool {
+        self.inflight.values().any(|request| &request.peer == peer)
+    }
+
     /// Initialize the assembly with the expected chunk IDs from
     /// the verified manifest. Empty list = no chunks needed
     /// (entire tree fits in the manifest); `is_complete()`

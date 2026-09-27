@@ -412,10 +412,6 @@ pub struct CachedDiskArena {
     /// Running sum of the sizes in `unpersisted`, so the hot eviction
     /// path can tell "nothing is evictable" without walking the map.
     unpersisted_bytes: Cell<usize>,
-    /// Last value of `durable_seq` the pin set was settled against.
-    /// `release_durable_pins` is on the per-insert path, so it returns
-    /// without touching the maps unless the watermark actually moved.
-    durable_seen: Cell<u64>,
     /// Sequence number of the last persist job whose redb commit
     /// completed. Written by the persist worker, read here. Monotonic;
     /// stays 0 when no pipeline is attached (and then nothing is ever
@@ -462,7 +458,6 @@ impl CachedDiskArena {
             unpersisted: RefCell::new(HashMap::new()),
             pins_by_job: RefCell::new(BTreeMap::new()),
             unpersisted_bytes: Cell::new(0),
-            durable_seen: Cell::new(0),
             durable_seq: Arc::new(AtomicU64::new(0)),
             overrun_logged: Cell::new(false),
             label_dirty: RefCell::new(HashSet::new()),
@@ -483,12 +478,10 @@ impl CachedDiskArena {
 
     /// Drop pins whose persist job has since committed.
     ///
-    /// On the per-insert hot path, so it is O(1) unless the durable
-    /// watermark moved since the last call: one acquire load compared
-    /// against `durable_seen`. When it did move, only the job buckets
-    /// that became durable are popped (`BTreeMap::split_off`), so the
-    /// cost is proportional to the pins being released, not to the pins
-    /// still held.
+    /// Check the oldest pin bucket before splitting off durable jobs,
+    /// without scanning the pins still held. `commit` can register more
+    /// pins for a job after an earlier insertion observed its ack, so an
+    /// unchanged watermark does not imply there is nothing to release.
     fn release_durable_pins(&self) {
         let mut durable = self.durable_seq.load(Ordering::Acquire);
         // An open read session pins its snapshot; nodes made durable after
@@ -498,12 +491,11 @@ impl CachedDiskArena {
         if let Some(session) = lock_session(&self.session).as_ref() {
             durable = durable.min(session.durable_floor);
         }
-        if durable == self.durable_seen.get() {
-            return;
-        }
-        self.durable_seen.set(durable);
         let mut by_job = self.pins_by_job.borrow_mut();
-        if by_job.is_empty() {
+        if by_job
+            .first_key_value()
+            .is_none_or(|(&seq, _)| seq > durable)
+        {
             return;
         }
         // Buckets strictly above the watermark stay; everything else is
@@ -646,6 +638,27 @@ impl CachedDiskArena {
             "avl arena: clean cache over budget — persist jobs have not \
              committed, so their nodes cannot be evicted",
         );
+    }
+
+    /// Move a committed node into the clean cache, pinning it to its
+    /// persist job when that job was pending at the start of `commit`.
+    fn insert_committed(&mut self, id: NodeId, node: AvlNode, pin_to_seq: Option<u64>) {
+        if let Some(seq) = pin_to_seq {
+            let size = node_byte_size(&node);
+            // A re-write in a later job supersedes the earlier pin;
+            // only the delta in size is added to the running total.
+            // The earlier bucket entry goes stale and is skipped at
+            // release because the id's sequence no longer matches.
+            let prev = self
+                .unpersisted
+                .get_mut()
+                .insert(id, (seq, size))
+                .map_or(0, |(_, old_size)| old_size);
+            self.pins_by_job.get_mut().entry(seq).or_default().push(id);
+            self.unpersisted_bytes
+                .set(self.unpersisted_bytes.get() + size - prev);
+        }
+        self.insert_clean(id, node);
     }
 
     /// Insert a node into the clean cache, enforcing the byte budget.
@@ -811,22 +824,7 @@ impl NodeArena for CachedDiskArena {
         };
         let dirty = std::mem::take(self.dirty.get_mut());
         for (id, node) in dirty {
-            if let Some(seq) = pin_to_seq {
-                let size = node_byte_size(&node);
-                // A re-write in a later job supersedes the earlier pin;
-                // only the delta in size is added to the running total.
-                // The earlier bucket entry goes stale and is skipped at
-                // release because the id's sequence no longer matches.
-                let prev = self
-                    .unpersisted
-                    .get_mut()
-                    .insert(id, (seq, size))
-                    .map_or(0, |(_, old_size)| old_size);
-                self.pins_by_job.get_mut().entry(seq).or_default().push(id);
-                self.unpersisted_bytes
-                    .set(self.unpersisted_bytes.get() + size - prev);
-            }
-            self.insert_clean(id, node);
+            self.insert_committed(id, node, pin_to_seq);
         }
         // Clear removed set. Deleted nodes are unreachable from the root
         // and `next_id` never recycles an id (`AvlTree::allocate`), so a
@@ -986,6 +984,34 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn pending_job_ack_during_node_registration_releases_all_pins() {
+        for budget in [0, 1024] {
+            let (_dir, db) = fixture(&[]);
+            let mut arena = CachedDiskArena::new(Arc::clone(&db), budget);
+
+            // `commit` captures this once before iterating over dirty nodes.
+            let pin_to_seq = Some(1);
+            arena.insert_committed(1, leaf(0xA1), pin_to_seq);
+            assert!(arena.cache_unpersisted_bytes() > 0);
+            assert_eq!(arena.cache_clean_len(), 1);
+
+            // The worker commits the entire job between node insertions.
+            persist(&db, &[(1, 0xA1), (2, 0xA2), (3, 0xA3)]);
+            arena.durable_seq.store(1, Ordering::Release);
+            arena.insert_committed(2, leaf(0xA2), pin_to_seq);
+            assert_eq!(arena.cache_unpersisted_bytes(), 0);
+
+            // The next iteration registers another pin for the same job,
+            // after budget enforcement has already observed its ack.
+            // No further job or watermark advance is needed to release it.
+            arena.insert_committed(3, leaf(0xA3), pin_to_seq);
+            assert_eq!(arena.cache_unpersisted_bytes(), 0);
+            assert!(arena.cache_clean_bytes() <= budget);
+            assert_eq!(leaf_tag(&arena.get(3).expect("durable node")), 0xA3);
+        }
+    }
 
     #[test]
     fn read_session_cold_reads_match_sessionless_reads() {

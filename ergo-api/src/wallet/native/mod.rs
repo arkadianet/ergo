@@ -760,11 +760,8 @@ pub fn router_with_security(
             any(crate::auth::unknown_gated_subpath),
         )
         .with_state(admin);
-    match security {
-        Some(sec) => r.route_layer(axum::middleware::from_fn_with_state(
-            sec,
-            crate::auth::require_api_key,
-        )),
-        None => r,
-    }
+    r.route_layer(axum::middleware::from_fn_with_state(
+        security,
+        crate::auth::require_api_key,
+    ))
 }

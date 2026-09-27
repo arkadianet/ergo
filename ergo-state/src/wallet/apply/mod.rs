@@ -141,9 +141,7 @@ pub fn apply_block_to_wallet_rescan(
             tx,
         )?;
     }
-    // Advance scan height.
-    let mut scan_height_tbl = txn.open_table(WALLET_SCAN_HEIGHT)?;
-    scan_height_tbl.insert((), block_height)?;
+    set_scan_cursor(txn, block_height, (block_height > 0).then_some(block_id))?;
     Ok(())
 }
 
@@ -151,9 +149,65 @@ pub fn apply_block_to_wallet_rescan(
 /// the table doesn't exist yet (fresh wallet) or contains false.
 pub fn is_scan_invalidated(txn: &WriteTransaction) -> Result<bool, redb::Error> {
     match txn.open_table(WALLET_SCAN_INVALIDATED) {
-        Ok(t) => Ok(t.get(()).ok().flatten().map(|g| g.value()).unwrap_or(false)),
+        Ok(t) => Ok(t.get(())?.map(|g| g.value()).unwrap_or(false)),
         Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
         Err(e) => Err(e.into()),
+    }
+}
+
+pub(crate) fn set_scan_cursor(
+    txn: &WriteTransaction,
+    height: u32,
+    header_id: Option<&[u8; 32]>,
+) -> Result<(), redb::Error> {
+    let mut height_table = txn.open_table(WALLET_SCAN_HEIGHT)?;
+    let mut header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+    height_table.insert((), height)?;
+    if let Some(header_id) = header_id {
+        header_table.insert((), *header_id)?;
+    } else {
+        header_table.remove(())?;
+    }
+    Ok(())
+}
+
+/// Rewind the cursor after per-block rollback has lowered its height.
+///
+/// Per-block rollback owns lowering the height and removes the header row;
+/// this final call owns restoring the surviving tip identity. A missing header
+/// at an equal height is therefore a repairable intermediate state.
+pub(crate) fn rewind_scan_cursor(
+    txn: &WriteTransaction,
+    target_height: u32,
+    target_header_id: Option<&[u8; 32]>,
+) -> Result<(), redb::Error> {
+    let current = {
+        let height_table = txn.open_table(WALLET_SCAN_HEIGHT)?;
+        let current = height_table.get(())?.map(|row| row.value());
+        current
+    };
+    let Some(current) = current else {
+        return Ok(());
+    };
+    if current < target_height {
+        return Ok(());
+    }
+    if current > target_height {
+        return set_scan_cursor(txn, target_height, target_header_id);
+    }
+    let stored = {
+        let header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+        let stored = header_table.get(())?.map(|row| row.value());
+        stored
+    };
+    match (stored, target_header_id) {
+        (None, Some(header_id)) => set_scan_cursor(txn, target_height, Some(header_id)),
+        (None, None) => Ok(()),
+        (Some(stored), Some(expected)) if stored == *expected => Ok(()),
+        _ => Err(redb::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "wallet scan cursor header mismatch",
+        ))),
     }
 }
 
@@ -253,12 +307,12 @@ fn apply_outputs(
     }
 
     // If this tx touched the wallet (in or out), record it in WALLET_TXS.
-    let wallet_inputs: Vec<[u8; 32]> = tx
-        .inputs
-        .iter()
-        .filter(|id| boxes_tbl.get(**id).ok().flatten().is_some())
-        .copied()
-        .collect();
+    let mut wallet_inputs: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
+    for input in tx.inputs {
+        if boxes_tbl.get(*input)?.is_some() {
+            wallet_inputs.push(*input);
+        }
+    }
     if !wallet_outputs.is_empty() || !wallet_inputs.is_empty() {
         let wt = WalletTransaction {
             tx_id: tx.tx_id,
@@ -282,11 +336,12 @@ fn apply_outputs(
 /// rescan-cancellation primitive. Wiring is explicit so the
 /// integrator can't omit it.
 ///
-/// Production impl (in `ergo-node/src/wallet_boot.rs`): flips
-/// `RESCAN_IN_PROGRESS = false` AND writes
-/// `WALLET_SCAN_INVALIDATED = true` (via the supplied `txn`, so
-/// both rollback's table changes and the invalidated flip commit
-/// atomically).
+/// Production impl (in `ergo-node/src/wallet_boot.rs`): revokes
+/// the active rescan identity immediately. When cancellation requires
+/// invalidation, `WALLET_SCAN_INVALIDATED = true` is written via the supplied
+/// `txn`, so rollback's table changes and durable invalidation commit atomically.
+/// A replacement rescan owns a different identity; the cancelled task cannot
+/// regain ownership or clear its successor's flags and durable invalidation.
 pub trait RescanGuard {
     /// Abort any in-progress rescan AND invalidate wallet scan
     /// state IF (and only if) a rescan was actually running.
@@ -423,6 +478,8 @@ pub fn rollback_block_from_wallet(
     let current = scan_height_tbl.get(())?.map(|g| g.value());
     if let Some(current) = current {
         if current > target {
+            let mut header_table = txn.open_table(WALLET_SCAN_HEADER_ID)?;
+            header_table.remove(())?;
             scan_height_tbl.insert((), target)?;
         }
     }

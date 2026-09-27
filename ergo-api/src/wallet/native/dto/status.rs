@@ -30,6 +30,11 @@ pub enum RescanStateDto {
         from_height: u32,
     },
     #[serde(rename_all = "camelCase")]
+    Failed {
+        height: u32,
+        reason: String,
+    },
+    #[serde(rename_all = "camelCase")]
     Unavailable {
         detail: String,
     },
@@ -156,6 +161,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RescanStateDto::Running { from_height: 100 }).unwrap(),
             serde_json::json!({ "type": "running", "fromHeight": 100 }),
+        );
+        assert_eq!(
+            serde_json::to_value(RescanStateDto::Failed {
+                height: 7,
+                reason: "storage".to_string(),
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "failed", "height": 7, "reason": "storage" }),
         );
         assert_eq!(
             serde_json::to_value(RescanStateDto::Unavailable {

@@ -3,6 +3,7 @@
 // "Your node" panel shows an explicit disabled state when identity.mining
 // is false. Network series follow the header tip; recently applied blocks
 // follow the local full-block tip independently while syncing.
+import { subscribe, CONFIGURE_API_KEY } from './auth.js';
 import { api } from './api-client.js';
 import { makeTable } from './table.js';
 import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
@@ -67,6 +68,7 @@ export function mount(elRoot) {
         <span class="pg-count micro-label" data-sub></span>
       </div>
     </div>
+    <p class="muted" data-configure-key hidden></p>
     <div class="mn-grid">
       <section class="panel">
         <div class="panel__head"><h2 class="panel__title">Your node</h2></div>
@@ -88,6 +90,11 @@ export function mount(elRoot) {
         <div class="panel__body" data-recent></div>
       </section>
     </div>`;
+  subscribe((s) => {
+    const guidance = elRoot.querySelector('[data-configure-key]');
+    guidance.hidden = s !== 'unconfigured';
+    guidance.textContent = CONFIGURE_API_KEY;
+  });
   els = {
     sub: elRoot.querySelector('[data-sub]'),
     you: elRoot.querySelector('[data-you]'),

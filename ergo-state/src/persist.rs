@@ -816,6 +816,7 @@ impl PersistPipeline {
         #[cfg(any(test, feature = "test-utils"))]
         let durability = crate::redb_util::test_durability(db, durability);
         write_txn.set_durability(durability);
+        let mut wallet_store = crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
 
         // 1. AVL_NODES — apply in job order so later blocks overwrite
         //    earlier writes on the same node id (redb insert is upsert).
@@ -1149,61 +1150,17 @@ impl PersistPipeline {
         //    order chain mutations were applied above.
         for job in &jobs {
             if let Some(payload) = &job.wallet_payload {
-                let bound = crate::store::owned_to_block_txs(&payload.block_txs_owned);
-                let btxs = bound.as_block_txs();
-                // Scan-only payloads (no tracked trees/pubkeys) bypass wallet
-                // apply + maturity-promotion so they don't advance
-                // WALLET_SCAN_HEIGHT for blocks the wallet never classified
-                // (which would surface as a bogus walletHeight in /wallet/status).
-                if payload.has_wallet_tracking() {
-                    crate::wallet::apply::apply_block_to_wallet(
-                        &write_txn,
-                        &payload.tracked_p2pk_trees,
-                        &payload.cached_pubkeys,
-                        job.height,
-                        &job.header_id,
-                        &btxs,
-                    )
-                    .map_err(|error| {
-                        let message = format!("wallet apply at h={}: {error}", job.height);
-                        observe_persist_error(
-                            failure_context,
-                            "background_persist_wallet_apply",
-                            error,
-                        )
+                crate::wallet::WalletWrite::apply_block(
+                    &mut wallet_store,
+                    job.height,
+                    &job.header_id,
+                    payload,
+                )
+                .map_err(|error| {
+                    let message = format!("wallet store apply at h={}: {error}", job.height);
+                    observe_persist_error(failure_context, "background_persist_wallet_store", error)
                         .with_message(message)
-                    })?;
-                    crate::wallet::maturity::promote_matured_boxes(&write_txn, job.height)
-                        .map_err(|error| {
-                            let message = format!("wallet maturity at h={}: {error}", job.height);
-                            observe_persist_error(
-                                failure_context,
-                                "background_persist_wallet_maturity",
-                                error,
-                            )
-                            .with_message(message)
-                        })?;
-                }
-                // Only when scans are registered — skips opening/creating the
-                // scan tables and the per-input spend-index probe otherwise.
-                if payload.has_registered_scans {
-                    crate::wallet::apply::apply_block_to_scans(
-                        &write_txn,
-                        &payload.scan_matches,
-                        &btxs,
-                        job.height,
-                        &job.header_id,
-                    )
-                    .map_err(|error| {
-                        let message = format!("scan apply at h={}: {error}", job.height);
-                        observe_persist_error(
-                            failure_context,
-                            "background_persist_scan_apply",
-                            error,
-                        )
-                        .with_message(message)
-                    })?;
-                }
+                })?;
             }
         }
 

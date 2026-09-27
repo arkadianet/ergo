@@ -20,6 +20,10 @@ use ergo_primitives::digest::{ADDigest, Digest32, ModifierId};
 use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{serialize_header, Header};
 use ergo_state::store::StateStore;
+use redb::TableDefinition;
+
+const TEST_HEADER_CHAIN_INDEX: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("header_chain_index");
 
 // ----- helpers -----
 
@@ -380,6 +384,52 @@ fn header_window_and_params_match_store() {
             .disabled_rules(),
         store_settings.disabled_rules(),
     );
+}
+
+#[test]
+fn ancestor_window_ignores_a_divergent_best_header_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+    seed_genesis(&mut store);
+    let tip = apply_n_blocks(&mut store, 12);
+    let ancestor = store
+        .get_header_id_at_height(10)
+        .unwrap()
+        .expect("height 10 header");
+    let mut parent = ModifierId::from_bytes(ancestor);
+    let mut fork_ids = Vec::new();
+    for height in 11..=12 {
+        let header = synthetic_header_with_ts_base(height, parent, 9_000_000);
+        let (bytes, id) = serialize_header(&header).unwrap();
+        let id_bytes: [u8; 32] = *id.as_bytes();
+        store.store_header(&id_bytes, &bytes).unwrap();
+        fork_ids.push(id_bytes);
+        parent = id;
+    }
+    {
+        let txn = store.db_arc().begin_write().unwrap();
+        let mut index = txn.open_table(TEST_HEADER_CHAIN_INDEX).unwrap();
+        for (height, id) in fork_ids.iter().enumerate() {
+            index.insert((height + 11) as u64, id.as_slice()).unwrap();
+        }
+        drop(index);
+        txn.commit().unwrap();
+    }
+
+    let snap = store.committed_snapshot().unwrap().expect("snapshot");
+    let window = snap
+        .last_ancestor_headers_window()
+        .expect("ancestor window");
+    assert_eq!(
+        serialize_header(&window[0]).unwrap().1.as_bytes(),
+        tip.as_slice()
+    );
+    for pair in window.windows(2) {
+        assert_eq!(
+            pair[0].parent_id.as_bytes(),
+            serialize_header(&pair[1]).unwrap().1.as_bytes()
+        );
+    }
 }
 
 // ----- snapshot isolation (MVCC) -----

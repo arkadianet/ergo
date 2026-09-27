@@ -554,7 +554,7 @@ struct UtxoMutation<'a> {
 /// the payload crosses the persist-pipeline thread boundary into
 /// `PersistJob` without lifetime or Send/Sync friction.
 #[derive(Clone)]
-pub(crate) struct WalletApplyPayload {
+pub struct WalletApplyPayload {
     pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
     pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
     pub block_txs_owned: Vec<OwnedBlockTxData>,
@@ -594,7 +594,7 @@ impl WalletApplyPayload {
     /// This reproduces the pre-scan-tracking payload-build gate exactly:
     /// before scans existed, a payload was built (and wallet apply run) only
     /// when `!trees.is_empty() || !pubkeys.is_empty()`.
-    pub(crate) fn has_wallet_tracking(&self) -> bool {
+    pub fn has_wallet_tracking(&self) -> bool {
         !self.tracked_p2pk_trees.is_empty() || !self.cached_pubkeys.is_empty()
     }
 }
@@ -603,7 +603,7 @@ impl WalletApplyPayload {
 /// serialized box so the matched box can be persisted (and rendered for
 /// `/scan/spentBoxes` after it leaves the UTXO set).
 #[derive(Clone)]
-pub(crate) struct ScanMatchRecord {
+pub struct ScanMatchRecord {
     pub box_id: [u8; 32],
     /// Ids of every registered scan whose rule matched this box.
     pub scan_ids: Vec<u16>,
@@ -3745,12 +3745,10 @@ impl StateStore {
 
             // M5 final-slice atomicity: clone the wallet payload into
             // the job so the worker can apply wallet writes inside
-            // its batch's write_txn. Payload is owned data
-            // (BTreeSet/BTreeMap/Vec) — clone is cheap relative to
-            // the chain mutation itself. Without this, `apply_block`
-            // would still need to fire the wallet write on a
-            // separate post-flush write_txn (two-commit) on the
-            // pipeline path.
+            // its batch's write_txn. The payload is owned data
+            // (BTreeSet/BTreeMap/Vec) so it crosses the worker boundary;
+            // the worker invokes the wallet store against that same
+            // transaction before committing.
             let wallet_payload_owned = wallet_payload.cloned();
             let job = crate::persist::PersistJob {
                 height,
@@ -4005,52 +4003,14 @@ impl StateStore {
         // Maturity-promotion at this height is part of the same
         // atomic unit.
         if let Some(payload) = wallet_payload {
-            let bound = crate::store::owned_to_block_txs(&payload.block_txs_owned);
-            let btxs = bound.as_block_txs();
-            // A scan-only payload (no tracked trees/pubkeys) must bypass wallet
-            // apply + maturity-promotion: those advance WALLET_SCAN_HEIGHT for
-            // blocks the wallet never classified, which would then surface as a
-            // bogus walletHeight in /wallet/status + /wallet/balances.
-            if payload.has_wallet_tracking() {
-                crate::wallet::apply::apply_block_to_wallet(
-                    &write_txn,
-                    &payload.tracked_p2pk_trees,
-                    &payload.cached_pubkeys,
-                    height,
-                    header_id,
-                    &btxs,
-                )
+            let mut wallet_store =
+                crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
+            crate::wallet::WalletWrite::apply_block(&mut wallet_store, height, header_id, payload)
                 .map_err(|e| StateError::WalletApply {
                     what: "apply hook (atomic)",
                     height,
-                    source: Box::new(e),
+                    source: Box::new(e.into()),
                 })?;
-                crate::wallet::maturity::promote_matured_boxes(&write_txn, height).map_err(
-                    |e| StateError::WalletApply {
-                        what: "maturity promote (atomic)",
-                        height,
-                        source: Box::new(e),
-                    },
-                )?;
-            }
-            // Scan tracking lands in the same atomic write-txn, independent of
-            // wallet-key tracking — but only when scans are actually registered.
-            // With no scans, skipping avoids opening/creating the scan tables and
-            // the per-input spend-index probe (the scan_count==0 fast path).
-            if payload.has_registered_scans {
-                crate::wallet::apply::apply_block_to_scans(
-                    &write_txn,
-                    &payload.scan_matches,
-                    &btxs,
-                    height,
-                    header_id,
-                )
-                .map_err(|e| StateError::WalletApply {
-                    what: "scan apply (atomic)",
-                    height,
-                    source: Box::new(e),
-                })?;
-            }
         }
 
         let t0 = std::time::Instant::now();

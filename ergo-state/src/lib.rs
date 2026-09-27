@@ -144,6 +144,23 @@ pub mod test_helpers {
             self.apply_block_unchecked(height, header_id, expected_state_root, transactions)
         }
 
+        pub fn apply_block_unchecked_for_test_with_wallet(
+            &mut self,
+            height: u32,
+            header_id: &[u8; 32],
+            expected_state_root: &ADDigest,
+            transactions: &[Transaction],
+            wallet_hook: Option<&dyn crate::wallet::WalletApplyHook>,
+        ) -> Result<(), StateError> {
+            self.apply_block_unchecked_with_wallet_for_test(
+                height,
+                header_id,
+                expected_state_root,
+                transactions,
+                wallet_hook,
+            )
+        }
+
         /// Same as `apply_block_unchecked_for_test` but lets the caller
         /// supply a `voted_params_row`, exercising the storage path that
         /// production block_proc uses on epoch-boundary blocks. Used by
