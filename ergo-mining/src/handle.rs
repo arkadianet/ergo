@@ -14,6 +14,9 @@
 //! - [`MiningHandle::verify_solution`]: drives the API-side pre-checks
 //!   in [`crate::solution`] and returns the packaged `SubmittedBlock`
 //!   when accepted. Called from `POST /mining/solution`.
+//! - [`MiningHandle::withdraw_templates_for_parent`]: the solution handler
+//!   withdraws the templates on a parent whose mined child became the best
+//!   header and then failed to apply.
 //!
 //! The handle holds an `Arc<RwLock<…>>` for the cache (concurrent readers,
 //! single writer on publish) so both the engine task and each axum handler
@@ -136,16 +139,19 @@ pub enum RewardKeySource {
 ///
 /// Bounded-ring design: `templates` holds the last
 /// [`MAX_RETAINED_TEMPLATES`] published templates, newest at the back. Serving
-/// returns the newest template whose parent matches the tip; solution
+/// returns the newest offered template whose parent matches the tip; solution
 /// verification scans the whole ring (newest-first) so a solution against any
 /// recently superseded template still resolves. Eviction is by age — once the
-/// ring is full, publishing a new template pops the oldest from the front.
+/// ring is full, publishing a new template pops the oldest from the front. A
+/// mined block's failed apply withdraws every template on its parent
+/// ([`MiningHandle::withdraw_templates_for_parent`]): a withdrawn template is
+/// no longer offered, and ages out of the ring like any other.
 #[derive(Debug, Default)]
 struct MiningCache {
     /// The last `MAX_RETAINED_TEMPLATES` published templates, newest at the
-    /// back. `cached_work_if_synced` serves from here; `verify_solution` scans
-    /// it newest-first.
-    templates: std::collections::VecDeque<Template>,
+    /// back. `cached_work_if_synced` serves from the offered ones;
+    /// `verify_solution` scans them all newest-first.
+    templates: std::collections::VecDeque<RetainedTemplate>,
     /// Monotonic publish counter, stamped onto each template's
     /// `TemplateIdentity::template_seq`. Never reset.
     template_seq: u64,
@@ -156,6 +162,34 @@ struct MiningCache {
     best_tip: BestTip,
 }
 
+/// A published template in the [`MiningCache`] ring.
+#[derive(Debug)]
+struct RetainedTemplate {
+    template: Template,
+    /// Set by [`MiningHandle::withdraw_templates_for_parent`] once a block
+    /// mined on the template's parent became the best header and failed to
+    /// apply. A withdrawn template is never served, never counts as the
+    /// parent's template, and a solution to it is answered stale rather than
+    /// accepted.
+    withdrawn: bool,
+}
+
+impl MiningCache {
+    /// The templates still offered to miners (not withdrawn), newest first.
+    fn offered(&self) -> impl Iterator<Item = &Template> {
+        self.templates
+            .iter()
+            .rev()
+            .filter(|t| !t.withdrawn)
+            .map(|t| &t.template)
+    }
+
+    /// The newest offered template built on `parent`.
+    fn newest_offered_on(&self, parent: &[u8; 32]) -> Option<&Template> {
+        self.offered().find(|t| t.candidate.parent_id == *parent)
+    }
+}
+
 /// API-task-facing mining entry point. Cheap to clone (`Arc` wrappers
 /// internally) so the axum routing layer can capture per-handler.
 #[derive(Clone)]
@@ -163,14 +197,15 @@ pub struct MiningHandle {
     cache: Arc<RwLock<MiningCache>>,
     /// "Serve-state changed" signal for longpoll waiters in the API task. Bumped
     /// on every change to what `cached_*_if_synced` would return: a publish
-    /// ([`MiningHandle::publish_if_current`] `Some` path) OR a tip transition
-    /// ([`MiningHandle::set_best_tip`] with a parent change or synced-bit flip).
-    /// A waiter on a stale template wakes the instant either happens, so it
-    /// re-fetches immediately instead of sleeping the full longpoll bound on
-    /// work the tip already moved off. The value is a monotonic counter; only
-    /// its change matters, not the number. `Arc` so every clone of the handle —
-    /// the engine task, the action loop, the boot-time subscriber — shares the
-    /// one channel.
+    /// ([`MiningHandle::publish_if_current`] `Some` path), a tip transition
+    /// ([`MiningHandle::set_best_tip`] with a parent change or synced-bit flip),
+    /// or a withdrawal ([`MiningHandle::withdraw_templates_for_parent`]
+    /// withdrawing any). A waiter on a stale template wakes the instant any of
+    /// these happens, so it re-fetches immediately instead of sleeping the full
+    /// longpoll bound on work that is no longer served. The value is a
+    /// monotonic counter; only its change matters, not the number. `Arc` so
+    /// every clone of the handle — the engine task, the action loop, the
+    /// boot-time subscriber — shares the one channel.
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
     reward_key: RewardKeySource,
     monetary: Arc<MonetarySettings>,
@@ -404,11 +439,13 @@ impl MiningHandle {
 
     /// Subscribe to serve-state-change notifications. The returned receiver
     /// observes a change on every event that alters what `cached_*_if_synced`
-    /// serves: a publish ([`MiningHandle::publish_if_current`] `Some` path) OR a
+    /// serves: a publish ([`MiningHandle::publish_if_current`] `Some` path), a
     /// tip transition ([`MiningHandle::set_best_tip`] with a parent change or
-    /// synced-bit flip). Backs the `GET /mining/candidate?longpoll=` wait in the
-    /// API task — a waiter parks on `Receiver::changed()` so it wakes the instant
-    /// the served state changes, without polling the cache.
+    /// synced-bit flip), or a withdrawal
+    /// ([`MiningHandle::withdraw_templates_for_parent`] withdrawing any). Backs
+    /// the `GET /mining/candidate?longpoll=` wait in the API task — a waiter
+    /// parks on `Receiver::changed()` so it wakes the instant the served state
+    /// changes, without polling the cache.
     pub fn subscribe_serve_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.serve_notify.subscribe()
     }
@@ -441,8 +478,9 @@ impl MiningHandle {
     /// at publish time.
     ///
     /// `template_seq` bumps once per publish; `clean_jobs` is true iff
-    /// `chain_seq` advanced versus the most-recently-published template (the ring
-    /// back, i.e. the parent changed), and true for the first publish ever.
+    /// `chain_seq` advanced versus the newest offered template (i.e. the parent
+    /// changed), and true when none is offered: the first publish ever, and the
+    /// rebuild after a withdrawal, whose jobs a Stratum proxy must abandon.
     /// `built_at_ms` is sampled from `now_ms` under this publish lock, right
     /// after the `should_publish` check passes — so the stamped time is the
     /// actual push instant, never preceding it under reader contention. The
@@ -478,8 +516,8 @@ impl MiningHandle {
         cache.template_seq += 1;
         let template_seq = cache.template_seq;
         let clean_jobs = cache
-            .templates
-            .back()
+            .offered()
+            .next()
             .is_none_or(|t| chain_seq > t.identity.chain_seq);
         let identity = TemplateIdentity {
             template_id: candidate.msg,
@@ -490,10 +528,13 @@ impl MiningHandle {
             built_at_ms,
             reason,
         };
-        cache.templates.push_back(Template {
-            candidate,
-            work,
-            identity: identity.clone(),
+        cache.templates.push_back(RetainedTemplate {
+            template: Template {
+                candidate,
+                work,
+                identity: identity.clone(),
+            },
+            withdrawn: false,
         });
         // Age-based eviction: keep the ring bounded by dropping the oldest.
         while cache.templates.len() > MAX_RETAINED_TEMPLATES {
@@ -525,29 +566,60 @@ impl MiningHandle {
             return None;
         }
         let parent = cache.best_tip.parent_id;
-        // Serve the newest template built against the current tip. Scanning the
-        // ring newest-first means a same-parent refresh's latest template wins,
-        // and an older parent's templates are skipped once the tip advances —
-        // the wrong-parent-never-served guarantee.
-        cache
-            .templates
-            .iter()
-            .rev()
-            .find(|t| t.candidate.parent_id == parent)
-            .map(|t| t.work.clone())
+        // Serve the newest offered template built against the current tip.
+        // Scanning the ring newest-first means a same-parent refresh's latest
+        // template wins, and an older parent's templates are skipped once the
+        // tip advances — the wrong-parent-never-served guarantee.
+        cache.newest_offered_on(&parent).map(|t| t.work.clone())
     }
 
-    /// Whether any retained template was built against `parent`. The engine
-    /// driver uses this to decide a tip's first build (nothing servable yet →
-    /// publish a minimal template first) versus a refresh (a template already
-    /// serves → go straight to the enriched build).
+    /// Whether any offered (not withdrawn) template was built against
+    /// `parent`. The engine driver uses this to decide a tip's first build
+    /// (nothing servable yet → publish a minimal template first) versus a
+    /// refresh (a template already serves → go straight to the enriched build).
     pub fn has_template_for_parent(&self, parent: &[u8; 32]) -> bool {
         let cache = self.cache.read().expect("cache poisoned");
-        cache
-            .templates
-            .iter()
-            .rev()
-            .any(|t| t.candidate.parent_id == *parent)
+        cache.newest_offered_on(parent).is_some()
+    }
+
+    /// Withdraw every offered template built on `parent`: none is served
+    /// again, and a solution to one of them is answered
+    /// [`SolutionOutcome::StaleParent`] instead of accepted. Wakes longpoll
+    /// waiters if any was withdrawn, and returns how many were.
+    ///
+    /// The mining handler calls this when a locally mined block on `parent`
+    /// became the best header and then failed to apply. Scala's
+    /// `CandidateGenerator.onSolvedBlockFailed` drops its current and previous
+    /// cached candidates then (v6.0.6 23aabead8 `CandidateGenerator.scala
+    /// :94-104`), normally both on the applied tip, which is `parent` here.
+    /// Templates on other parents stay offered: a solution to one of them is
+    /// stale unless a reorg returns the tip to its parent.
+    ///
+    /// A withdrawn template stays in the ring until it ages out, so a solution
+    /// the miner already found for it (valid PoW for the work it was given) is
+    /// told its candidate is stale rather than that its PoW is invalid. The
+    /// action loop then signals a rebuild on the tip
+    /// ([`BuildReason::SolvedBlockFailed`]); until it publishes, nothing is
+    /// served for the tip, as right after a tip change, and its first publish
+    /// carries `clean_jobs`.
+    pub fn withdraw_templates_for_parent(&self, parent: &[u8; 32]) -> usize {
+        let withdrawn = {
+            let mut cache = self.cache.write().expect("cache poisoned");
+            let mut withdrawn = 0;
+            for t in cache
+                .templates
+                .iter_mut()
+                .filter(|t| !t.withdrawn && t.template.candidate.parent_id == *parent)
+            {
+                t.withdrawn = true;
+                withdrawn += 1;
+            }
+            withdrawn
+        };
+        if withdrawn > 0 {
+            self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        }
+        withdrawn
     }
 
     /// Like [`MiningHandle::cached_work_if_synced`], but also returns the
@@ -562,10 +634,7 @@ impl MiningHandle {
         }
         let parent = cache.best_tip.parent_id;
         cache
-            .templates
-            .iter()
-            .rev()
-            .find(|t| t.candidate.parent_id == parent)
+            .newest_offered_on(&parent)
             .map(|t| (t.work.clone(), t.identity.clone()))
     }
 
@@ -592,7 +661,7 @@ impl MiningHandle {
     }
 
     /// Run the API-side solution pre-check against every cached template,
-    /// scanning the ring newest-first. A solution for any retained template
+    /// scanning the ring newest-first. A solution for any offered template
     /// verifies, so a solution submitted against a recently superseded template
     /// during a refresh burst or reorg still resolves.
     ///
@@ -601,12 +670,15 @@ impl MiningHandle {
     /// `StaleParent` / `InvalidPow` map to 400 responses.
     ///
     /// Reporting precedence on cache misses:
-    /// 1. `Accepted` from any template — wins immediately.
-    /// 2. `StaleParent` from any template — preferred over `InvalidPow`
-    ///    because it carries actionable signal ("your candidate is
-    ///    stale, refresh"). A miner that submits valid PoW against a
-    ///    chain-flipped candidate gets the actionable answer, not the
-    ///    misleading "invalid pow".
+    /// 1. `Accepted` from any offered template — wins immediately.
+    /// 2. `StaleParent` from any template whose PoW the solution passes: an
+    ///    offered one on a parent that is no longer the best full block, or a
+    ///    withdrawn one ([`MiningHandle::withdraw_templates_for_parent`]),
+    ///    whatever its parent. Preferred over `InvalidPow` because it carries
+    ///    actionable signal ("your candidate is stale, refresh"). A miner
+    ///    that submits valid PoW against a chain-flipped or withdrawn
+    ///    candidate gets the actionable answer, not the misleading "invalid
+    ///    pow".
     /// 3. `InvalidPow` — the residual fall-through.
     pub fn verify_solution(
         &self,
@@ -615,15 +687,24 @@ impl MiningHandle {
     ) -> Result<SolutionOutcome, MiningError> {
         let cache = self.cache.read().expect("cache poisoned");
         let mut saw_stale: Option<SolutionOutcome> = None;
-        for template in cache.templates.iter().rev() {
-            match verify_solution(&template.candidate, solution, state)? {
-                SolutionOutcome::Accepted(b) => {
+        for retained in cache.templates.iter().rev() {
+            let candidate = &retained.template.candidate;
+            match verify_solution(candidate, solution, state)? {
+                SolutionOutcome::InvalidPow => continue,
+                SolutionOutcome::Accepted(b) if !retained.withdrawn => {
                     return Ok(SolutionOutcome::Accepted(b));
                 }
-                SolutionOutcome::InvalidPow => continue,
+                // The PoW passes on the live parent, but the template was
+                // withdrawn: the block would repeat the one that failed.
+                SolutionOutcome::Accepted(_) => {
+                    saw_stale = Some(SolutionOutcome::StaleParent {
+                        candidate_parent: candidate.parent_id,
+                        live_parent: candidate.parent_id,
+                    });
+                }
+                // Latch a stale-parent result but keep looking — another
+                // cached template might still accept.
                 other @ SolutionOutcome::StaleParent { .. } => {
-                    // Latch a stale-parent result but keep looking — the
-                    // other cached template might still accept.
                     saw_stale = Some(other);
                 }
             }
@@ -1087,6 +1168,192 @@ mod tests {
         assert!(h.cached_template_if_synced().is_none());
     }
 
+    #[test]
+    fn withdraw_templates_for_parent_withdraws_only_that_parents_templates() {
+        // A mined block on parent B failed to apply: every template on B is
+        // withdrawn (the minimal and the enriched one alike, as Scala drops
+        // both of its cached candidates) but stays in the ring to answer its
+        // in-flight solutions, while the prior parent's template stays offered
+        // for a reorg back to A.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let pa = [0x0Au8; 32];
+        let pb = [0x0Bu8; 32];
+        h.set_best_tip(synced_tip_seq(pa, 1));
+        let (ca, wa) = candidate_pair_msg(pa, [0x1Au8; 32]);
+        assert!(h
+            .publish_if_current(ca, wa, &pa, || BUILT_AT_MS, BuildReason::Startup)
+            .is_some());
+        h.set_best_tip(synced_tip_seq(pb, 2));
+        for tag in [0x1Bu8, 0x2B] {
+            let (c, w) = candidate_pair_msg(pb, [tag; 32]);
+            assert!(h
+                .publish_if_current(c, w, &pb, || BUILT_AT_MS, BuildReason::Tip)
+                .is_some());
+        }
+
+        assert_eq!(h.withdraw_templates_for_parent(&pb), 2);
+
+        let ring: Vec<([u8; 32], bool)> = h
+            .cache
+            .read()
+            .expect("cache poisoned")
+            .templates
+            .iter()
+            .map(|t| (t.template.identity.template_id, t.withdrawn))
+            .collect();
+        assert_eq!(
+            ring,
+            vec![
+                ([0x1Au8; 32], false),
+                ([0x1Bu8; 32], true),
+                ([0x2Bu8; 32], true)
+            ],
+            "only B's templates are withdrawn, and none leaves the ring"
+        );
+        assert!(!h.has_template_for_parent(&pb));
+        assert!(h.has_template_for_parent(&pa));
+        assert_eq!(
+            h.cached_template_if_synced(),
+            None,
+            "nothing is served on the tip until a rebuild publishes"
+        );
+    }
+
+    #[test]
+    fn withdraw_templates_for_parent_bumps_serve_notify_only_when_it_withdraws() {
+        // A longpoll waiter parked on a withdrawn template wakes and re-fetches
+        // instead of sleeping the full bound on work no solution can use; a
+        // withdrawal that withdraws nothing changes nothing served.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0x0Cu8; 32];
+        h.set_best_tip(synced_tip(parent));
+        let (c, w) = candidate_pair(parent);
+        assert!(h
+            .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+        let mut rx = h.subscribe_serve_changes();
+        rx.borrow_and_update();
+
+        assert_eq!(h.withdraw_templates_for_parent(&[0x0Du8; 32]), 0);
+        assert!(
+            !rx.has_changed().expect("sender alive"),
+            "withdrawing nothing must not wake waiters"
+        );
+
+        assert_eq!(h.withdraw_templates_for_parent(&parent), 1);
+        assert!(
+            rx.has_changed().expect("sender alive"),
+            "withdrawing the served template wakes waiters"
+        );
+        rx.borrow_and_update();
+
+        assert_eq!(
+            h.withdraw_templates_for_parent(&parent),
+            0,
+            "an already withdrawn template is not withdrawn again"
+        );
+        assert!(!rx.has_changed().expect("sender alive"));
+    }
+
+    #[test]
+    fn withdraw_templates_then_same_parent_publish_is_a_clean_job() {
+        // After the withdrawal, the rebuild on the same tip carries clean_jobs,
+        // so a Stratum proxy abandons the withdrawn jobs instead of treating
+        // the fresh template as a same-parent refresh.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0x0Eu8; 32];
+        h.set_best_tip(synced_tip_seq(parent, 4));
+        let (c1, w1) = candidate_pair_msg(parent, [0x31u8; 32]);
+        assert!(
+            h.publish_if_current(c1, w1, &parent, || BUILT_AT_MS, BuildReason::Tip)
+                .expect("first publish")
+                .clean_jobs
+        );
+        let (c2, w2) = candidate_pair_msg(parent, [0x32u8; 32]);
+        assert!(
+            !h.publish_if_current(c2, w2, &parent, || BUILT_AT_MS, BuildReason::MempoolRefresh)
+                .expect("refresh")
+                .clean_jobs
+        );
+
+        h.withdraw_templates_for_parent(&parent);
+        let (c3, w3) = candidate_pair_msg(parent, [0x33u8; 32]);
+        let rebuilt = h
+            .publish_if_current(
+                c3,
+                w3,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::SolvedBlockFailed,
+            )
+            .expect("the rebuild publishes on the same tip");
+        assert!(rebuilt.clean_jobs, "the rebuild is a clean job");
+        assert_eq!(rebuilt.template_seq, 3, "template_seq never resets");
+        let (served, served_id) = h.cached_template_if_synced().expect("serves the rebuild");
+        assert_eq!(served.msg, [0x33u8; 32]);
+        assert_eq!(served_id, rebuilt);
+    }
+
+    #[test]
+    fn verify_solution_offered_template_behind_same_parent_rebuild_accepts_its_solution() {
+        // A newer template on the same parent does not hide an offered older
+        // one: at a real target, a nonce that solves only the older template
+        // is accepted for it. A mined header whose section write failed is
+        // the best header without a body, so a tip build publishes such a
+        // newer template, not a clean job since the full tip did not move,
+        // before the miner resubmits the same solution; the resubmission must
+        // still reach the template it was found on.
+        use ergo_crypto::autolykos::common::calc_n;
+        use ergo_crypto::autolykos::v2::hit_for_v2;
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(16u8));
+        let target = ergo_crypto::difficulty::get_target(n_bits);
+        let (offered_msg, rebuilt_msg) = ([0x61u8; 32], [0x62u8; 32]);
+        h.set_best_tip(synced_tip(parent));
+        let (c1, w1) = candidate_pair_msg_nbits(parent, offered_msg, n_bits);
+        let offered = h
+            .publish_if_current(c1, w1, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .expect("the first template publishes");
+        let (mut c2, w2) = candidate_pair_msg_nbits(parent, rebuilt_msg, n_bits);
+        // Built later, so a block from it differs from one from the older
+        // template.
+        c2.header.timestamp += 1;
+        let rebuilt = h
+            .publish_if_current(c2, w2, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .expect("the same-parent rebuild publishes");
+        assert!(
+            !rebuilt.clean_jobs,
+            "a same-parent rebuild is not a clean job"
+        );
+        assert_eq!(rebuilt.chain_seq, offered.chain_seq);
+        assert_eq!(
+            h.cached_template_if_synced().expect("serves the rebuild").1,
+            rebuilt,
+            "the rebuild is the template served"
+        );
+        // The helper's templates are version 3 at height 1.
+        let n = calc_n(3, 1);
+        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+        let nonce = (0u64..)
+            .map(u64::to_be_bytes)
+            .find(|nonce| solves(&offered_msg, nonce) && !solves(&rebuilt_msg, nonce))
+            .expect("some nonce qualifies");
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let block = match h
+            .verify_solution(&MinerSolution { nonce, pk: None }, &state)
+            .expect("verify ok")
+        {
+            SolutionOutcome::Accepted(block) => block,
+            other => panic!("the older template's solution is accepted, got {other:?}"),
+        };
+        assert_eq!(
+            block.header.timestamp, 1_700_000_000_000,
+            "accepted for the older template"
+        );
+    }
+
     // ----- round-trips -----
 
     #[test]
@@ -1269,7 +1536,7 @@ mod tests {
         let ids: Vec<[u8; 32]> = cache
             .templates
             .iter()
-            .map(|t| t.identity.template_id)
+            .map(|t| t.template.identity.template_id)
             .collect();
         assert_eq!(
             ids,
@@ -1313,12 +1580,24 @@ mod tests {
         // the front is that-many-th publish, not the first.
         let oldest_retained = (total - MAX_RETAINED_TEMPLATES) as u8;
         assert_eq!(
-            cache.templates.front().unwrap().identity.template_id,
+            cache
+                .templates
+                .front()
+                .unwrap()
+                .template
+                .identity
+                .template_id,
             [oldest_retained; 32],
             "front is the oldest retained, not the first ever published",
         );
         assert_eq!(
-            cache.templates.back().unwrap().identity.template_id,
+            cache
+                .templates
+                .back()
+                .unwrap()
+                .template
+                .identity
+                .template_id,
             last_msg,
             "back is the newest published",
         );
@@ -1533,6 +1812,103 @@ mod tests {
             matches!(outcome, SolutionOutcome::StaleParent { .. }),
             "verify must scan past the PoW-failing newest templates to the deep \
              PoW-passing one, got {outcome:?}",
+        );
+    }
+
+    #[test]
+    fn verify_solution_withdrawn_template_solution_returns_stale_parent() {
+        // A solution to a withdrawn template is never accepted, and its valid
+        // PoW earns the actionable stale answer rather than invalid_pow. The
+        // template is on the live parent (a fresh store's zeroed best full
+        // block), so before the withdrawal the same solution is accepted.
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        h.set_best_tip(synced_tip(parent));
+        let (c, w) = candidate_pair_msg_nbits(parent, [0x41u8; 32], 0x03000001);
+        assert!(h
+            .publish_if_current(c, w, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let solution = MinerSolution {
+            nonce: [0u8; 8],
+            pk: None,
+        };
+        assert!(matches!(
+            h.verify_solution(&solution, &state).expect("verify ok"),
+            SolutionOutcome::Accepted(_)
+        ));
+
+        h.withdraw_templates_for_parent(&parent);
+
+        let outcome = h.verify_solution(&solution, &state).expect("verify ok");
+        assert!(
+            matches!(outcome, SolutionOutcome::StaleParent { .. }),
+            "a withdrawn template's solution is stale, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn verify_solution_withdrawn_template_real_target_prefers_stale_over_invalid_pow() {
+        // At a real target a nonce that solves the withdrawn template almost
+        // never solves the rebuilt one on the same parent. Its PoW is valid
+        // for the work the miner was given, so the answer is StaleParent (400
+        // stale_candidate), not InvalidPow; Scala answers it with its own
+        // error, not a PoW failure (CandidateGenerator.scala:246-247 and
+        // 280-283 at v6.0.6 23aabead8). A nonce that also solves the rebuilt
+        // template is accepted for it, as Scala tries its current candidate
+        // first (256-258).
+        use ergo_crypto::autolykos::common::calc_n;
+        use ergo_crypto::autolykos::v2::hit_for_v2;
+        let h = MiningHandle::mainnet([0x02u8; 33]);
+        let parent = [0u8; 32];
+        let n_bits = ergo_ser::difficulty::encode_compact_bits(&num_bigint::BigUint::from(16u8));
+        let target = ergo_crypto::difficulty::get_target(n_bits);
+        let (withdrawn_msg, fresh_msg) = ([0x51u8; 32], [0x52u8; 32]);
+        h.set_best_tip(synced_tip(parent));
+        let (c1, w1) = candidate_pair_msg_nbits(parent, withdrawn_msg, n_bits);
+        assert!(h
+            .publish_if_current(c1, w1, &parent, || BUILT_AT_MS, BuildReason::Tip)
+            .is_some());
+        h.withdraw_templates_for_parent(&parent);
+        let (c2, w2) = candidate_pair_msg_nbits(parent, fresh_msg, n_bits);
+        assert!(h
+            .publish_if_current(
+                c2,
+                w2,
+                &parent,
+                || BUILT_AT_MS,
+                BuildReason::SolvedBlockFailed
+            )
+            .is_some());
+        // The helper's templates are version 3 at height 1.
+        let n = calc_n(3, 1);
+        let solves = |msg: &[u8; 32], nonce: &[u8; 8]| hit_for_v2(msg, nonce, 1, n) <= target;
+        let nonce_where = |pred: &dyn Fn(&[u8; 8]) -> bool| {
+            (0u64..)
+                .map(u64::to_be_bytes)
+                .find(|nonce| pred(nonce))
+                .expect("some nonce qualifies")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
+        let verify = |nonce: [u8; 8]| {
+            h.verify_solution(&MinerSolution { nonce, pk: None }, &state)
+                .expect("verify ok")
+        };
+
+        let old_work = nonce_where(&|n| solves(&withdrawn_msg, n) && !solves(&fresh_msg, n));
+        let outcome = verify(old_work);
+        assert!(
+            matches!(outcome, SolutionOutcome::StaleParent { .. }),
+            "valid PoW for the withdrawn template is stale, not invalid pow, got {outcome:?}"
+        );
+        let neither = nonce_where(&|n| !solves(&withdrawn_msg, n) && !solves(&fresh_msg, n));
+        assert!(matches!(verify(neither), SolutionOutcome::InvalidPow));
+        let both = nonce_where(&|n| solves(&withdrawn_msg, n) && solves(&fresh_msg, n));
+        assert!(
+            matches!(verify(both), SolutionOutcome::Accepted(_)),
+            "a nonce that solves the rebuilt template is accepted for it"
         );
     }
 

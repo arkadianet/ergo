@@ -4621,14 +4621,18 @@ mod block_relay {
         handle
     }
 
+    /// What the real `POST /mining/solution` handler did with one solution.
+    struct Submitted {
+        result: Result<(), ergo_api::MiningApiError>,
+        /// Whether the handler asked the action loop to rebuild the candidate
+        /// on the current tip now.
+        rebuild: bool,
+    }
+
     /// Submit `nonce` through the real `POST /mining/solution` handler.
-    fn submit_solution(
-        state: &mut NodeState,
-        handle: &MiningHandle,
-        nonce: [u8; 8],
-    ) -> Result<(), ergo_api::MiningApiError> {
+    fn submit(state: &mut NodeState, handle: &MiningHandle, nonce: [u8; 8]) -> Submitted {
         let (reply, mut rx) = tokio::sync::oneshot::channel();
-        super::super::mining_dispatch::handle_mining_request(
+        let rebuild = super::super::mining_dispatch::handle_mining_request(
             state,
             Some(handle),
             false,
@@ -4642,6 +4646,36 @@ mod block_relay {
                 reply,
             },
         );
+        Submitted {
+            result: rx
+                .try_recv()
+                .expect("the mining handler replies before returning"),
+            rebuild,
+        }
+    }
+
+    /// [`submit`], keeping only the reply.
+    fn submit_solution(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+        nonce: [u8; 8],
+    ) -> Result<(), ergo_api::MiningApiError> {
+        submit(state, handle, nonce).result
+    }
+
+    /// Fetch work through the real `GET /mining/candidate` handler.
+    fn get_candidate(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+    ) -> Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError> {
+        let (reply, mut rx) = tokio::sync::oneshot::channel();
+        let rebuild = super::super::mining_dispatch::handle_mining_request(
+            state,
+            Some(handle),
+            false,
+            crate::mining_bridge::MiningRequest::GetCandidate { reply },
+        );
+        assert!(!rebuild, "serving work never asks for a rebuild");
         rx.try_recv()
             .expect("the mining handler replies before returning")
     }
@@ -5106,21 +5140,25 @@ mod block_relay {
         inventories(&mut queue.lock().unwrap())
     }
 
-    /// What one probed submission queued for the peer.
+    /// What one probed submission did and queued for the peer.
     struct ProbedSubmission {
         result: Result<(), ergo_api::MiningApiError>,
+        /// Whether the handler asked the action loop to rebuild the candidate
+        /// on the current tip now.
+        rebuild: bool,
         before_apply: Inventory,
         after_apply: Inventory,
     }
 
-    /// Submit `nonce` through the real mining handler with an
-    /// [`ApplyEntryProbe`] armed on the peer queue.
-    fn submit_probing_apply(
+    /// [`submit`] with an [`ApplyEntryProbe`] armed on the peer queue. Also
+    /// returns what the probe drained when apply started, or `None` when the
+    /// handler never started apply.
+    fn submit_armed(
         state: &mut NodeState,
         handle: &MiningHandle,
         nonce: [u8; 8],
         queue: &SharedQueue,
-    ) -> ProbedSubmission {
+    ) -> (Submitted, Option<Inventory>) {
         install_apply_entry_probe();
         ARMED_PROBE.with(|armed| {
             *armed.borrow_mut() = Some(ArmedProbe {
@@ -5128,18 +5166,33 @@ mod block_relay {
                 before_apply: None,
             })
         });
-        let result = submit_solution(state, handle, nonce);
+        let submitted = submit(state, handle, nonce);
         let probe = ARMED_PROBE
             .with(|armed| armed.borrow_mut().take())
             .expect("the probe stays armed until the submission returns");
-        let Some(before_apply) = probe.before_apply else {
+        (submitted, probe.before_apply)
+    }
+
+    /// Submit `nonce` through the real mining handler with an
+    /// [`ApplyEntryProbe`] armed on the peer queue; the handler must start
+    /// apply.
+    fn submit_probing_apply(
+        state: &mut NodeState,
+        handle: &MiningHandle,
+        nonce: [u8; 8],
+        queue: &SharedQueue,
+    ) -> ProbedSubmission {
+        let (submitted, before_apply) = submit_armed(state, handle, nonce, queue);
+        let Some(before_apply) = before_apply else {
             panic!(
-                "the handler never started apply: {result:?}: {:?}",
+                "the handler never started apply: {:?}: {:?}",
+                submitted.result,
                 state.executor.last_block_apply_error()
             )
         };
         ProbedSubmission {
-            result,
+            result: submitted.result,
+            rebuild: submitted.rebuild,
             before_apply,
             after_apply: drain(queue),
         }
@@ -5216,8 +5269,20 @@ mod block_relay {
         );
     }
 
+    /// Declare a state root apply does not reach: apply fails the UTXO
+    /// state-root check (`StateError::DigestMismatch`), a failure without a
+    /// validation verdict, so the block is only session-marked.
+    fn replace_state_root(candidate: &mut Candidate) {
+        candidate.header.state_root = ADDigest::from_bytes([7; 33]);
+    }
+
     fn apply_failed(result: &Result<(), ergo_api::MiningApiError>) -> bool {
         matches!(result, Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("block apply failed"))
+    }
+
+    /// The reply for a mined block stored as a fork, which is never applied.
+    fn stored_as_fork(result: &Result<(), ergo_api::MiningApiError>) -> bool {
+        matches!(result, Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("block apply failed (stored as a fork"))
     }
 
     fn wall_clock_ms() -> u64 {
@@ -5755,7 +5820,7 @@ mod block_relay {
         // follows, which must refuse the block instead of building on it.
         let dir = tempfile::tempdir().unwrap();
         let (mut state, handle) = devnet_node(dir.path());
-        mine_and_apply(&mut state, &handle);
+        let parent = mine_and_apply(&mut state, &handle);
         publish_candidate(&state, &handle);
         let mined = solve(&state, &handle, 0);
         process_header(&mut state, &serialize_header(&mined.header).unwrap().0);
@@ -5777,6 +5842,10 @@ mod block_relay {
             format!("{error:?}").contains("background persist failed at h=1"),
             "apply must see the pending persistence failure, got {error:?}"
         );
+        // The resubmitted block is the best header, and it failed to apply,
+        // so its parent's templates are withdrawn as after a first submission.
+        assert!(probed.rebuild, "the failed apply asks for a rebuild");
+        assert!(!handle.has_template_for_parent(&parent));
     }
 
     #[test]
@@ -5794,17 +5863,22 @@ mod block_relay {
         process_header(&mut state, &serialize_header(&bodyless.header).unwrap().0);
         let mut rx = register_connected_peer(&mut state, test_peer());
         let sibling = solve(&state, &handle, 1);
-        let result = submit_solution(&mut state, &handle, sibling.nonce);
+        let submitted = submit(&mut state, &handle, sibling.nonce);
+        let result = submitted.result;
         assert!(
             matches!(
                 &result,
                 Err(ergo_api::MiningApiError::Internal(reason))
-                    if reason.starts_with("block apply failed")
+                    if reason.starts_with("block apply failed (stored as a fork")
                         && reason.contains(&hex::encode(bodyless.id))
                         && reason.contains("sections are not all stored")
             ),
             "the reply names the bodyless best header: {result:?}"
         );
+        // A fork is never applied, so nothing failed: the template stays
+        // offered for the bodyless header's own solution to be resubmitted.
+        assert!(!submitted.rebuild);
+        assert!(handle.cached_work_if_synced().is_some());
         assert!(state.store.get_header(&sibling.id).unwrap().is_some());
         let chain = state.store.chain_state_meta();
         assert_eq!(
@@ -5870,14 +5944,17 @@ mod block_relay {
         process_header(&mut state, &serialize_header(&rival.header).unwrap().0);
         assert_eq!(state.store.chain_state_meta().best_header_id, rival.id);
         let mut rx = register_connected_peer(&mut state, test_peer());
-        let result = submit_solution(&mut state, &handle, ours.nonce);
+        let submitted = submit(&mut state, &handle, ours.nonce);
         // Only the best header is applied, so the handler reports the fork
         // as not applied.
-        assert!(apply_failed(&result), "{result:?}");
+        assert!(stored_as_fork(&submitted.result), "{:?}", submitted.result);
         assert!(
             state.store.get_header(&ours.id).unwrap().is_some(),
             "the mined header is stored as a fork"
         );
+        // Nothing failed to apply, so the template it came from stays served.
+        assert!(!submitted.rebuild);
+        assert!(handle.cached_work_if_synced().is_some());
         flush_actions(&mut state, vec![]);
         assert!(
             inventories(&mut rx).is_empty(),
@@ -6373,6 +6450,129 @@ mod block_relay {
     }
 
     #[test]
+    fn locally_mined_block_section_write_failure_keeps_template_resubmission_applies() {
+        // A section write failing after the header is stored is a persist
+        // failure, not an apply failure, so nothing is withdrawn and no
+        // rebuild is requested: the recovery is the same solution resubmitted
+        // against the same template. A serving window above the mined height
+        // stands in for the storage fault until it clears.
+        use super::super::mining_dispatch::{
+            decide_mining_signal, MiningProducerState, MiningSignalIntervals, MiningTipSnapshot,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        let window = state.store.read_minimal_full_block_height().unwrap();
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .write_minimal_full_block_height(3)
+            .unwrap();
+        let queue = register_shared_peer(&mut state);
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        let mut serve = handle.subscribe_serve_changes();
+        serve.borrow_and_update();
+        let tip_before = MiningTipSnapshot::capture(&state);
+
+        let failed = submit(&mut state, &handle, mined.nonce);
+        assert!(
+            matches!(
+                &failed.result,
+                Err(ergo_api::MiningApiError::Internal(reason))
+                    if reason.starts_with("persist:") && reason.contains("sentinel")
+            ),
+            "{:?}",
+            failed.result
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_id),
+            (mined.id, parent),
+            "the mined header is the best header, without its body"
+        );
+        assert!(
+            !failed.rebuild,
+            "a failed section write asks for no rebuild"
+        );
+        assert!(
+            handle.has_template_for_parent(&parent),
+            "the template the block came from stays offered"
+        );
+        assert!(
+            !serve.has_changed().expect("sender alive"),
+            "nothing was withdrawn"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(drain(&queue).is_empty(), "nothing is announced");
+
+        // The best header moved, so the action loop's next decision is a tip
+        // build. The template is still offered on the parent, so the engine
+        // builds an enriched template on the same parent, not a clean job
+        // since the full tip did not move. The resubmission below arrives
+        // before that template publishes. After it, the newer template is
+        // tried first: a nonce it rejects falls through to this one
+        // (ergo-mining's
+        // `verify_solution_offered_template_behind_same_parent_rebuild_accepts_its_solution`),
+        // but at the devnet's difficulty one every nonce meets it, so the
+        // resubmission makes a different block on it, which ties this header
+        // and is stored as a fork.
+        let now = Instant::now();
+        let reason = decide_mining_signal(
+            &MiningProducerState {
+                last_tip: tip_before,
+                last_revision: state.mempool.revision(),
+                last_recovery: Some(now),
+                last_mempool_signal: Some(now),
+                rebuild_requested: failed.rebuild,
+            },
+            MiningTipSnapshot::capture(&state),
+            handle.best_tip().synced,
+            handle.cached_work_if_synced().is_some(),
+            state.mempool.revision(),
+            now,
+            MiningSignalIntervals {
+                recovery: Duration::from_secs(1),
+                refresh_debounce: Duration::from_secs(1),
+            },
+        );
+        assert_eq!(reason, Some(BuildReason::Tip));
+
+        // The fault clears, and the miner resubmits the same solution.
+        state
+            .store
+            .as_utxo()
+            .unwrap()
+            .test_force_set_minimal_full_block_height_unsafe(window)
+            .unwrap();
+        let recovered = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(
+            recovered.result.is_ok(),
+            "{:?}: {:?}",
+            recovered.result,
+            state.executor.last_block_apply_error()
+        );
+        assert!(!recovered.rebuild);
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_full_block_id, chain.best_full_block_height),
+            (mined.id, 2)
+        );
+        assert_eq!(
+            recovered.before_apply,
+            stored_inventory(&state, mined.id),
+            "the header and every section are announced before apply"
+        );
+        assert!(
+            recovered.after_apply.is_empty(),
+            "{:?}",
+            recovered.after_apply
+        );
+        assert_announced_ids_served(&mut state, &recovered.before_apply);
+    }
+
+    #[test]
     fn locally_mined_block_apply_failure_already_announced_once() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, _) = genesis_state(dir.path());
@@ -6394,14 +6594,23 @@ mod block_relay {
         );
         assert_announced_ids_served(&mut state, &announced);
         flush_actions(&mut state, vec![]);
-        // Its sections are stored, so the miner resubmitting the same
-        // solution stops at the known-header check.
+        // The state-root mismatch is no validation verdict, so the block is
+        // only session-marked and stays the best header. (A verdict
+        // re-anchors the best header to the parent:
+        // `locally_mined_block_failed_apply_resubmission_refused_before_known_header_check`.)
+        assert_eq!(
+            super::super::mining_dispatch::failed_apply_invalidity(&state, &block.id).0,
+            "session"
+        );
+        assert_eq!(state.store.chain_state_meta().best_header_id, block.id);
+        // Its template was withdrawn all the same, so the miner resubmitting
+        // the same solution (say after a 504 while apply ran) is told its
+        // candidate is stale before anything is stored, ahead of the
+        // known-header check (which would stop it too: its sections are
+        // stored).
         let resubmitted = submit_solution(&mut state, &handle, block.nonce);
         assert!(
-            matches!(
-                &resubmitted,
-                Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("process_header:")
-            ),
+            matches!(&resubmitted, Err(ergo_api::MiningApiError::StaleParent)),
             "{resubmitted:?}"
         );
         assert!(inventories(&mut rx).is_empty());
@@ -6452,8 +6661,11 @@ mod block_relay {
         // judge the block themselves and no request for it ends in a
         // non-delivery timeout.
         assert_announced_ids_served(&mut state, &announced);
-        // The template stays cached, so another nonce on it passes every
-        // header check as a new best header and fails apply the same way.
+        // The failed template was withdrawn. A builder/validator mismatch
+        // that reproduces on the fresh template yields another block that
+        // passes every header check as a new best header and fails apply the
+        // same way.
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
         let second = solve(&state, &handle, 1);
         assert_ne!(second.id, first.id);
         let result = submit_solution(&mut state, &handle, second.nonce);
@@ -6472,6 +6684,329 @@ mod block_relay {
         assert!(
             inventories(&mut rx).is_empty(),
             "no pre-apply announcement on a parent whose announced child failed"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_failed_apply_same_template_solution_refused() {
+        // Scala's onSolvedBlockFailed drops both cached candidates once the
+        // view holder rejects the solved block (CandidateGenerator.scala
+        // :94-104 at v6.0.6 23aabead8), so no further solution on them makes
+        // a block. Here the failed block's template is withdrawn.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        let mut rx = register_connected_peer(&mut state, test_peer());
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
+        let first = solve(&state, &handle, 0);
+        let second = solve(&state, &handle, 1);
+        let mut serve = handle.subscribe_serve_changes();
+        serve.borrow_and_update();
+
+        let failed = submit(&mut state, &handle, first.nonce);
+        assert!(apply_failed(&failed.result), "{:?}", failed.result);
+        assert_eq!(
+            inventories(&mut rx),
+            stored_inventory(&state, first.id),
+            "the failed block was announced before apply"
+        );
+
+        // The nonce solves the withdrawn template, so the miner is told its
+        // candidate is stale (400 stale_candidate), not that its PoW is
+        // invalid.
+        let refused = submit(&mut state, &handle, second.nonce);
+        assert!(
+            matches!(refused.result, Err(ergo_api::MiningApiError::StaleParent)),
+            "a second solution on the failed template is refused, got {:?}",
+            refused.result
+        );
+        assert!(
+            state.store.get_header(&second.id).unwrap().is_none(),
+            "the refused solution is never persisted"
+        );
+        assert_eq!(state.store.chain_state_meta().best_header_id, parent);
+        flush_actions(&mut state, vec![]);
+        assert!(inventories(&mut rx).is_empty(), "nothing more is announced");
+
+        // The miner is pointed at fresh work: the failure asks the loop for a
+        // rebuild, a longpoll parked on the withdrawn template wakes, and GET
+        // /mining/candidate answers 503 until the rebuild publishes.
+        assert!(failed.rebuild, "the failed apply asks for a rebuild");
+        assert!(!refused.rebuild);
+        assert!(
+            serve.has_changed().expect("sender alive"),
+            "a longpoll parked on the withdrawn template wakes"
+        );
+        let candidate = get_candidate(&mut state, &handle);
+        assert!(
+            matches!(
+                &candidate,
+                Err(ergo_api::MiningApiError::Unavailable(reason))
+                    if reason.starts_with("no candidate published for the current tip")
+            ),
+            "{candidate:?}"
+        );
+    }
+
+    #[test]
+    fn locally_mined_block_failed_apply_resubmission_refused_before_known_header_check() {
+        // The same solution resubmitted after its block became the best
+        // header and failed to apply on a verdict (say after a 504 while
+        // apply ran) is answered stale_candidate by the solution check, which
+        // runs before the known-header check. A resubmission whose header is
+        // known goes on past that check only while a section is missing, and
+        // apply keeps the failed block's sections, so the known-header check
+        // would stop it too; the withdrawal is what answers it stale.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        let queue = register_shared_peer(&mut state);
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
+        let mined = solve(&state, &handle, 0);
+
+        let failed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(apply_failed(&failed.result), "{:?}", failed.result);
+        assert!(failed.rebuild, "the failed apply asks for a rebuild");
+        assert!(
+            !handle.has_template_for_parent(&parent),
+            "the failed block's template is withdrawn"
+        );
+        assert_eq!(
+            failed.before_apply,
+            stored_inventory(&state, mined.id),
+            "the failed block was announced before apply"
+        );
+        assert_eq!(
+            missing_from(
+                state.store.as_utxo().unwrap(),
+                &stored_inventory(&state, mined.id)
+            ),
+            Vec::<[u8; 32]>::new(),
+            "the failed block's header and sections stay stored"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(drain(&queue).is_empty());
+        let chain = state.store.chain_state_meta();
+        let before = (
+            chain.best_header_id,
+            chain.best_header_height,
+            chain.best_full_block_id,
+            chain.best_full_block_height,
+        );
+        assert_eq!(
+            before,
+            (parent, 1, parent, 1),
+            "the verdict re-anchored the best header to the parent"
+        );
+
+        let (resubmitted, apply_started) = submit_armed(&mut state, &handle, mined.nonce, &queue);
+        assert!(
+            matches!(
+                resubmitted.result,
+                Err(ergo_api::MiningApiError::StaleParent)
+            ),
+            "the resubmission is refused as stale_candidate, got {:?}",
+            resubmitted.result
+        );
+        assert!(!resubmitted.rebuild);
+        assert_eq!(
+            apply_started, None,
+            "the refused resubmission never reaches apply"
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (
+                chain.best_header_id,
+                chain.best_header_height,
+                chain.best_full_block_id,
+                chain.best_full_block_height,
+            ),
+            before,
+            "nothing new is stored"
+        );
+        assert_eq!(
+            super::super::mining_dispatch::failed_apply_invalidity(&state, &mined.id).0,
+            "durable"
+        );
+        flush_actions(&mut state, vec![]);
+        assert!(drain(&queue).is_empty(), "nothing more is announced");
+    }
+
+    #[tokio::test]
+    async fn locally_mined_block_failed_apply_rebuild_serves_fresh_template_that_applies() {
+        use super::super::mining_dispatch::{
+            decide_mining_signal, signal_mining_engine, MiningProducerState, MiningSignalIntervals,
+            MiningTipSnapshot, MiningWiring,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        publish_tampered_candidate(&state, &handle, replace_ad_proofs);
+        let withdrawn = handle.cached_work_if_synced().unwrap().msg;
+        let first = solve(&state, &handle, 0);
+        let tip_before = MiningTipSnapshot::capture(&state);
+        let failed = submit(&mut state, &handle, first.nonce);
+        assert!(apply_failed(&failed.result), "{:?}", failed.result);
+
+        // The action loop's post-arm decision: the durable verdict left the
+        // tip snapshot unchanged and the recovery retry has just run, so only
+        // the handler's request makes the rebuild happen now.
+        let now = Instant::now();
+        let reason = decide_mining_signal(
+            &MiningProducerState {
+                last_tip: tip_before,
+                last_revision: state.mempool.revision(),
+                last_recovery: Some(now),
+                last_mempool_signal: Some(now),
+                rebuild_requested: failed.rebuild,
+            },
+            MiningTipSnapshot::capture(&state),
+            handle.best_tip().synced,
+            handle.cached_work_if_synced().is_some(),
+            state.mempool.revision(),
+            now,
+            MiningSignalIntervals {
+                recovery: Duration::from_secs(1),
+                refresh_debounce: Duration::from_secs(1),
+            },
+        );
+        assert_eq!(reason, Some(BuildReason::SolvedBlockFailed));
+
+        // Signal the production engine as the loop does and let it build.
+        let (intent_tx, intent_rx) = tokio::sync::watch::channel(None);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let wiring = MiningWiring {
+            handle: handle.clone(),
+            intent_tx,
+            refresh_debounce: Duration::from_secs(1),
+            block_interval_ms: 120_000,
+            offline_generation: false,
+        };
+        let mut serve = handle.subscribe_serve_changes();
+        serve.borrow_and_update();
+        let (engine, worker) = super::spawn_engine_with_worker(
+            state.store.as_utxo().unwrap().reader_handle(),
+            handle.clone(),
+            None,
+            intent_rx,
+            cancel_rx,
+        );
+        let mut chain_seq = handle.best_tip().chain_seq;
+        signal_mining_engine(
+            &state,
+            &wiring,
+            &mut chain_seq,
+            &parent,
+            BuildReason::SolvedBlockFailed,
+        );
+        // Nothing is offered on the tip until the rebuild publishes, so the
+        // first template seen is the rebuild's first publish. The pool is
+        // empty and rent claims are off, so the engine publishes only the
+        // minimal template (`full_refresh_adds_nothing`); with pooled
+        // transactions an enriched same-parent refresh (clean_jobs false)
+        // would follow it.
+        let rebuilt = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some((_, identity)) = handle.cached_template_if_synced() {
+                    break identity;
+                }
+                serve.changed().await.expect("handle alive");
+            }
+        })
+        .await
+        .expect("the engine publishes a fresh template on the same tip");
+        assert!(rebuilt.clean_jobs, "the rebuild is a clean job");
+        assert_eq!(rebuilt.reason, BuildReason::SolvedBlockFailed);
+        assert_ne!(rebuilt.template_id, withdrawn);
+
+        let work = get_candidate(&mut state, &handle).expect("fresh work is served");
+        assert_ne!(work.msg, hex::encode(withdrawn));
+        let mined = solve(&state, &handle, 0);
+        assert_eq!(mined.header.parent_id.as_bytes(), &parent);
+        let applied = submit(&mut state, &handle, mined.nonce);
+        assert!(
+            applied.result.is_ok(),
+            "{:?}: {:?}",
+            applied.result,
+            state.executor.last_block_apply_error()
+        );
+        assert!(!applied.rebuild);
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_full_block_id, chain.best_full_block_height),
+            (mined.id, 2)
+        );
+
+        cancel_tx.send(true).unwrap();
+        drop(wiring);
+        tokio::time::timeout(Duration::from_secs(5), engine)
+            .await
+            .expect("engine exits after cancel")
+            .expect("engine does not panic");
+        worker.join().expect("worker does not panic");
+    }
+
+    #[test]
+    fn locally_mined_block_session_marked_failure_rebuilt_sibling_stored_as_fork() {
+        // A failure without a verdict only session-marks the block
+        // (`invalidate_or_session_mark`), so it stays the best header. A block
+        // from the rebuilt template on its parent has the same score, and
+        // header processing takes a new best header only on a strictly
+        // greater one (`process_header`), so it is stored as a fork and never
+        // applied until restart. Scala re-anchors on every apply failure
+        // (ErgoNodeViewHolder.scala:252-255 at v6.0.6 23aabead8).
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        let parent = mine_and_apply(&mut state, &handle);
+        publish_tampered_candidate(&state, &handle, replace_state_root);
+        let failed_block = solve(&state, &handle, 0);
+        let failed = submit(&mut state, &handle, failed_block.nonce);
+        assert!(apply_failed(&failed.result), "{:?}", failed.result);
+        assert!(
+            failed.rebuild,
+            "the failure withdraws the parent's templates and asks for a rebuild"
+        );
+        assert_eq!(
+            super::super::mining_dispatch::failed_apply_invalidity(&state, &failed_block.id).0,
+            "session",
+            "{:?}",
+            state.executor.last_block_apply_error()
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_id),
+            (failed_block.id, parent),
+            "the session-marked block stays the best header"
+        );
+
+        // The rebuild on the parent, as the engine publishes it.
+        publish_candidate(&state, &handle);
+        let sibling = solve(&state, &handle, 0);
+        assert_eq!(sibling.header.parent_id.as_bytes(), &parent);
+        let submitted = submit(&mut state, &handle, sibling.nonce);
+        // The failed block keeps its sections, so the fork reply names no
+        // best header with sections missing.
+        assert!(
+            matches!(
+                &submitted.result,
+                Err(ergo_api::MiningApiError::Internal(reason))
+                    if reason == "block apply failed (stored as a fork; only the best header chain is applied)"
+            ),
+            "{:?}",
+            submitted.result
+        );
+        assert!(
+            !submitted.rebuild,
+            "a fork is never applied, so nothing is withdrawn"
+        );
+        assert!(
+            state.store.get_header(&sibling.id).unwrap().is_some(),
+            "the sibling is stored as a fork"
+        );
+        let chain = state.store.chain_state_meta();
+        assert_eq!(
+            (chain.best_header_id, chain.best_full_block_id),
+            (failed_block.id, parent)
         );
     }
 

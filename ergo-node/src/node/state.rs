@@ -356,10 +356,11 @@ pub(crate) struct NodeState {
     pub(super) mining_enabled: bool,
     /// Parent of a self-mined block that became the best header and then
     /// failed to apply. While a mined block's parent equals it, the block is
-    /// announced only after it applies: the failed block's template stays
-    /// cached, so each further solution on it would otherwise advertise
-    /// another block this node rejects. Cleared when a block applies (the
-    /// full tip moves); see `block_relay`.
+    /// announced only after it applies: the templates on that parent are
+    /// withdrawn and rebuilt, but a deterministic builder/validator mismatch
+    /// reproduces on the fresh template, so each solution on it would
+    /// otherwise advertise another block this node rejects. Cleared when a
+    /// block applies (the full tip moves); see `block_relay`.
     pub(super) mined_apply_failed_parent: Option<[u8; 32]>,
     /// True for a non-loopback API bind or `config.api_local_reverse_proxy`.
     /// The `api_key` gate never covers `POST /transactions*` /

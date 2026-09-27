@@ -112,6 +112,11 @@ pub(super) async fn action_loop(
     // Set by the votes-changed arm; consumed in the post-arm mining block to
     // force a same-tip rebuild this iteration (so a vote change applies now).
     let mut mining_votes_dirty = false;
+    // Set by the mining arm when a mined block that became the best header
+    // failed to apply and its parent's templates were withdrawn; taken by the
+    // post-arm mining block, which signals a same-tip rebuild so the miner
+    // gets fresh work without waiting for the recovery retry.
+    let mut mining_rebuild_requested = false;
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
     // latch; offline generation and an empty devnet have explicit exceptions.
@@ -216,7 +221,7 @@ pub(super) async fn action_loop(
             // is unreachable in practice — the rejection is defense
             // in depth.
             Some(req) = mining_submit_rx.recv() => {
-                handle_mining_request(
+                mining_rebuild_requested |= handle_mining_request(
                     &mut state,
                     mining.as_ref().map(|m| &m.handle),
                     mining.as_ref().is_some_and(|m| m.offline_generation),
@@ -241,16 +246,21 @@ pub(super) async fn action_loop(
             let tip_now = MiningTipSnapshot::capture(&state);
             let revision_now = state.mempool.revision();
             let has_cached = wiring.handle.cached_work_if_synced().is_some();
-            // Tip preempts recovery preempts refresh; recovery is throttled to
-            // `MINING_RECOVERY_RETRY`, refresh to the configured debounce. The
-            // precedence + gating is the pure `decide_mining_signal` (unit-
-            // tested in mining_dispatch.rs); this arm only carries out the
-            // chosen signal and advances the producer trackers.
+            // Tip preempts a requested rebuild, which preempts recovery, which
+            // preempts refresh; recovery is throttled to `MINING_RECOVERY_RETRY`,
+            // refresh to the configured debounce. The precedence + gating is the
+            // pure `decide_mining_signal` (unit-tested in mining_dispatch.rs);
+            // this arm only carries out the chosen signal and advances the
+            // producer trackers. A requested rebuild is taken here: the
+            // decision signals whenever one is requested (a solution is only
+            // accepted once mining has started), and any signal rebuilds on
+            // the current tip.
             let producer = MiningProducerState {
                 last_tip: mining_last_tip,
                 last_revision: mining_last_revision,
                 last_recovery: mining_last_recovery,
                 last_mempool_signal: mining_last_mempool_signal,
+                rebuild_requested: std::mem::take(&mut mining_rebuild_requested),
             };
             // A vote change forces a same-tip rebuild even when the tip/mempool
             // are unchanged. A tip/recovery/mempool signal (if any) takes its
@@ -275,12 +285,15 @@ pub(super) async fn action_loop(
                 mining_last_tip =
                     signal_mining_engine(&state, wiring, &mut mining_chain_seq, &prev, reason);
                 match reason {
-                    // A fresh build (tip change or recovery) already snapshots the
-                    // latest pool, so realign the refresh trackers to "current" —
-                    // don't immediately re-fire a same-parent refresh for the pool
-                    // we just captured — and reset the recovery clock so the build
-                    // gets a full interval to publish before any retry.
-                    BuildReason::Tip | BuildReason::WalletReady => {
+                    // A fresh build (tip change, a failed mined block's rebuild,
+                    // or recovery) already snapshots the latest pool, so realign
+                    // the refresh trackers to "current" — don't immediately
+                    // re-fire a same-parent refresh for the pool we just
+                    // captured — and reset the recovery clock so the build gets
+                    // a full interval to publish before any retry.
+                    BuildReason::Tip
+                    | BuildReason::WalletReady
+                    | BuildReason::SolvedBlockFailed => {
                         mining_last_revision = state.mempool.revision();
                         mining_last_mempool_signal = Some(now);
                         mining_last_recovery = Some(now);
