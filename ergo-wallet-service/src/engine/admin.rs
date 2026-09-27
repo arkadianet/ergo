@@ -80,47 +80,43 @@ impl AttemptLimiter {
 
 impl WalletEngine {
     pub fn status(&self) -> Result<WalletStatus, WalletAdminError> {
-        (|| -> Result<WalletStatus, WalletAdminError> {
-            let storage = self.storage.read();
-            let state = self.state.read();
-            let change_address = if state.is_unlocked() {
-                state.change_address().unwrap_or("").to_string()
-            } else {
-                String::new()
-            };
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let invalidated = read
-                .scan_invalidated()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let rescan_state = read
-                .rescan_state()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            Ok(WalletStatus {
-                is_initialized: !matches!(
-                    storage.lock_state(),
-                    ergo_wallet::storage::LockState::Uninitialized
-                ),
-                is_unlocked: state.is_unlocked(),
-                change_address,
-                wallet_height: self
-                    .chain
-                    .wallet_scan_height()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
-                error: match rescan_state {
-                    crate::wallet::RescanState::Failed { reason, .. } => {
-                        format!("rescan_failed: {reason}")
-                    }
-                    crate::wallet::RescanState::Running { .. } => "rescan_running".to_string(),
-                    crate::wallet::RescanState::Idle if invalidated => {
-                        "scan_invalidated".to_string()
-                    }
-                    crate::wallet::RescanState::Idle => String::new(),
-                },
-            })
-        })()
+        let storage = self.storage.read();
+        let state = self.state.read();
+        let change_address = if state.is_unlocked() {
+            state.change_address().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let invalidated = read
+            .scan_invalidated()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let rescan_state = read
+            .rescan_state()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        Ok(WalletStatus {
+            is_initialized: !matches!(
+                storage.lock_state(),
+                ergo_wallet::storage::LockState::Uninitialized
+            ),
+            is_unlocked: state.is_unlocked(),
+            change_address,
+            wallet_height: self
+                .chain
+                .wallet_scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+            error: match rescan_state {
+                crate::wallet::RescanState::Failed { reason, .. } => {
+                    format!("rescan_failed: {reason}")
+                }
+                crate::wallet::RescanState::Running { .. } => "rescan_running".to_string(),
+                crate::wallet::RescanState::Idle if invalidated => "scan_invalidated".to_string(),
+                crate::wallet::RescanState::Idle => String::new(),
+            },
+        })
     }
 
     pub fn init(

@@ -12,36 +12,34 @@ use super::WalletEngine;
 
 impl WalletEngine {
     pub fn balances(&self) -> Result<WalletBalances, WalletAdminError> {
-        (|| -> Result<WalletBalances, WalletAdminError> {
-            let balance = if let Some(service) = self.service.as_deref() {
-                service
-                    .confirmed_balance()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            } else {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                read.balance()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            };
-            let assets = balance
-                .tokens
-                .iter()
-                .map(|(id, amt)| TokenBalance {
-                    token_id: hex::encode(id),
-                    amount: *amt,
-                })
-                .collect();
-            Ok(WalletBalances {
-                height: self
-                    .chain
-                    .wallet_scan_height()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
-                balance: balance.confirmed_nano_ergs,
-                assets,
+        let balance = if let Some(service) = self.service.as_deref() {
+            service
+                .confirmed_balance()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        } else {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            read.balance()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        };
+        let assets = balance
+            .tokens
+            .iter()
+            .map(|(id, amt)| TokenBalance {
+                token_id: hex::encode(id),
+                amount: *amt,
             })
-        })()
+            .collect();
+        Ok(WalletBalances {
+            height: self
+                .chain
+                .wallet_scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+            balance: balance.confirmed_nano_ergs,
+            assets,
+        })
     }
 
     /// `GET /wallet/balances/withUnconfirmed`: confirmed balance with a
@@ -70,63 +68,61 @@ impl WalletEngine {
     pub fn balances_with_unconfirmed(&self) -> Result<WalletBalances, WalletAdminError> {
         use ergo_primitives::digest::Digest32;
 
-        (|| -> Result<WalletBalances, WalletAdminError> {
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-            let confirmed = read
-                .balance()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let confirmed = read
+            .balance()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-            // Outgoing pending: confirmed wallet boxes a pool tx already spends.
-            let mut subtract: Vec<UnconfirmedDelta> = Vec::new();
-            for wb in read
-                .unspent_boxes()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        // Outgoing pending: confirmed wallet boxes a pool tx already spends.
+        let mut subtract: Vec<UnconfirmedDelta> = Vec::new();
+        for wb in read
+            .unspent_boxes()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        {
+            if self
+                .mempool
+                .is_spent_by_pool(&Digest32::from_bytes(wb.box_id))
             {
-                if self
-                    .mempool
-                    .is_spent_by_pool(&Digest32::from_bytes(wb.box_id))
-                {
-                    subtract.push(UnconfirmedDelta {
-                        nano: wb.value,
-                        tokens: wb.assets.clone(),
-                    });
-                }
+                subtract.push(UnconfirmedDelta {
+                    nano: wb.value,
+                    tokens: wb.assets.clone(),
+                });
             }
+        }
 
-            // Incoming pending: pool outputs paying a tracked wallet tree.
-            let mut add: Vec<UnconfirmedDelta> = Vec::new();
-            {
-                let state = self.state.read();
-                for out in self.mempool.pool_outputs().values() {
-                    if !state.is_tracked_tree(out.candidate.ergo_tree_bytes()) {
-                        continue;
-                    }
-                    add.push(UnconfirmedDelta {
-                        nano: out.candidate.value,
-                        tokens: out
-                            .candidate
-                            .tokens
-                            .iter()
-                            .map(|t| (*t.token_id.as_bytes(), t.amount))
-                            .collect(),
-                    });
+        // Incoming pending: pool outputs paying a tracked wallet tree.
+        let mut add: Vec<UnconfirmedDelta> = Vec::new();
+        {
+            let state = self.state.read();
+            for out in self.mempool.pool_outputs().values() {
+                if !state.is_tracked_tree(out.candidate.ergo_tree_bytes()) {
+                    continue;
                 }
+                add.push(UnconfirmedDelta {
+                    nano: out.candidate.value,
+                    tokens: out
+                        .candidate
+                        .tokens
+                        .iter()
+                        .map(|t| (*t.token_id.as_bytes(), t.amount))
+                        .collect(),
+                });
             }
+        }
 
-            let (balance, assets) = overlay_unconfirmed_balance(&confirmed, &add, &subtract);
-            Ok(WalletBalances {
-                height: self
-                    .chain
-                    .wallet_scan_height()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
-                balance,
-                assets,
-            })
-        })()
+        let (balance, assets) = overlay_unconfirmed_balance(&confirmed, &add, &subtract);
+        Ok(WalletBalances {
+            height: self
+                .chain
+                .wallet_scan_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?,
+            balance,
+            assets,
+        })
     }
 
     /// `GET /api/v1/wallet/balance` — the native EIP-27-aware breakdown.
@@ -158,135 +154,133 @@ impl WalletEngine {
             return Err(WalletAdminError::Uninitialized);
         }
 
-        (|| -> Result<WalletBalanceDto, WalletAdminError> {
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-            let height = read
-                .scan_cursor()
+        let height = read
+            .scan_cursor()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0);
+
+        let bal = read
+            .balance()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let confirmed = bal.confirmed_nano_ergs;
+        let immature = bal.immature_nano_ergs;
+
+        // Confirmed (unspent) boxes — fetched once, reused for the EIP-27
+        // reserve and the outgoing leg of the unconfirmed overlay.
+        let need_boxes = self.config.reemission.is_some() || include_unconfirmed;
+        let confirmed_boxes = if need_boxes {
+            read.unspent_boxes()
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|cursor| cursor.height)
-                .unwrap_or(0);
+        } else {
+            Vec::new()
+        };
 
-            let bal = read
-                .balance()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let confirmed = bal.confirmed_nano_ergs;
-            let immature = bal.immature_nano_ergs;
+        // EIP-27 reserve via the shared obligation core at candidate height
+        // `tip+1`. The `reemission` block is present whenever EIP-27 is active
+        // on this net at the next-spend height (cfg.reemission Some AND
+        // tip+1 > activation), even if this wallet holds no reward boxes.
+        let reemission_token_id = self
+            .config
+            .reemission
+            .as_ref()
+            .map(|r| r.reemission_token_id);
+        let mut reserved: u64 = 0;
+        let mut reemission: Option<ReemissionInfoDto> = None;
+        if let Some(rules) = self.config.reemission.as_ref() {
+            let candidate_height = self
+                .chain
+                .tip_height()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .saturating_add(1);
+            if candidate_height > rules.activation_height {
+                let token_id = rules.reemission_token_id;
+                let obl = ergo_validation::reemission_obligation_core(
+                    confirmed_boxes.iter().map(|wb| {
+                        let tok = wb
+                            .assets
+                            .iter()
+                            .filter(|(id, _)| *id == token_id)
+                            .map(|(_, amt)| *amt)
+                            .fold(0u64, u64::saturating_add);
+                        (wb.value, tok)
+                    }),
+                    candidate_height,
+                    rules.activation_height,
+                );
+                reserved = obl.to_burn;
+                reemission = Some(ReemissionInfoDto {
+                    token_id: hex::encode(token_id),
+                    reserved_token_amount: obl.to_burn.to_string(),
+                    reserved_box_count: u32::try_from(obl.box_count).unwrap_or(u32::MAX),
+                    reserved_exceeds_confirmed: obl.to_burn > confirmed,
+                });
+            }
+        }
+        let available = confirmed.saturating_sub(reserved);
 
-            // Confirmed (unspent) boxes — fetched once, reused for the EIP-27
-            // reserve and the outgoing leg of the unconfirmed overlay.
-            let need_boxes = self.config.reemission.is_some() || include_unconfirmed;
-            let confirmed_boxes = if need_boxes {
-                read.unspent_boxes()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            } else {
-                Vec::new()
-            };
+        // Confirmed token balances, omitting the re-emission token (accounted
+        // for solely by `reserved`/`reemission`).
+        let assets = bal
+            .tokens
+            .iter()
+            .filter(|(id, _)| reemission_token_id.is_none_or(|rt| **id != rt))
+            .map(|(id, amt)| WalletAssetDto {
+                token_id: hex::encode(id),
+                amount: amt.to_string(),
+            })
+            .collect();
 
-            // EIP-27 reserve via the shared obligation core at candidate height
-            // `tip+1`. The `reemission` block is present whenever EIP-27 is active
-            // on this net at the next-spend height (cfg.reemission Some AND
-            // tip+1 > activation), even if this wallet holds no reward boxes.
-            let reemission_token_id = self
-                .config
-                .reemission
-                .as_ref()
-                .map(|r| r.reemission_token_id);
-            let mut reserved: u64 = 0;
-            let mut reemission: Option<ReemissionInfoDto> = None;
-            if let Some(rules) = self.config.reemission.as_ref() {
-                let candidate_height = self
-                    .chain
-                    .tip_height()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                    .saturating_add(1);
-                if candidate_height > rules.activation_height {
-                    let token_id = rules.reemission_token_id;
-                    let obl = ergo_validation::reemission_obligation_core(
-                        confirmed_boxes.iter().map(|wb| {
-                            let tok = wb
-                                .assets
-                                .iter()
-                                .filter(|(id, _)| *id == token_id)
-                                .map(|(_, amt)| *amt)
-                                .fold(0u64, u64::saturating_add);
-                            (wb.value, tok)
-                        }),
-                        candidate_height,
-                        rules.activation_height,
-                    );
-                    reserved = obl.to_burn;
-                    reemission = Some(ReemissionInfoDto {
-                        token_id: hex::encode(token_id),
-                        reserved_token_amount: obl.to_burn.to_string(),
-                        reserved_box_count: u32::try_from(obl.box_count).unwrap_or(u32::MAX),
-                        reserved_exceeds_confirmed: obl.to_burn > confirmed,
-                    });
+        // Labeled single-hop mempool delta (only when requested); NEVER folded
+        // into confirmed/available. Incoming = pool outputs to tracked trees;
+        // outgoing = confirmed wallet boxes a pool tx already spends.
+        let unconfirmed = if include_unconfirmed {
+            let mut outgoing: u128 = 0;
+            for wb in &confirmed_boxes {
+                if self
+                    .mempool
+                    .is_spent_by_pool(&Digest32::from_bytes(wb.box_id))
+                {
+                    outgoing = outgoing.saturating_add(wb.value as u128);
                 }
             }
-            let available = confirmed.saturating_sub(reserved);
-
-            // Confirmed token balances, omitting the re-emission token (accounted
-            // for solely by `reserved`/`reemission`).
-            let assets = bal
-                .tokens
-                .iter()
-                .filter(|(id, _)| reemission_token_id.is_none_or(|rt| **id != rt))
-                .map(|(id, amt)| WalletAssetDto {
-                    token_id: hex::encode(id),
-                    amount: amt.to_string(),
-                })
-                .collect();
-
-            // Labeled single-hop mempool delta (only when requested); NEVER folded
-            // into confirmed/available. Incoming = pool outputs to tracked trees;
-            // outgoing = confirmed wallet boxes a pool tx already spends.
-            let unconfirmed = if include_unconfirmed {
-                let mut outgoing: u128 = 0;
-                for wb in &confirmed_boxes {
-                    if self
-                        .mempool
-                        .is_spent_by_pool(&Digest32::from_bytes(wb.box_id))
-                    {
-                        outgoing = outgoing.saturating_add(wb.value as u128);
+            let mut incoming: u128 = 0;
+            {
+                let state = self.state.read();
+                for out in self.mempool.pool_outputs().values() {
+                    if state.is_tracked_tree(out.candidate.ergo_tree_bytes()) {
+                        incoming = incoming.saturating_add(out.candidate.value as u128);
                     }
                 }
-                let mut incoming: u128 = 0;
-                {
-                    let state = self.state.read();
-                    for out in self.mempool.pool_outputs().values() {
-                        if state.is_tracked_tree(out.candidate.ergo_tree_bytes()) {
-                            incoming = incoming.saturating_add(out.candidate.value as u128);
-                        }
-                    }
-                }
-                let net = incoming as i128 - outgoing as i128;
-                Some(UnconfirmedDeltaDto {
-                    scope: ScopeDto::SingleHop,
-                    incoming_nano_erg: incoming.to_string(),
-                    outgoing_nano_erg: outgoing.to_string(),
-                    net_nano_erg: net.to_string(),
-                })
-            } else {
-                None
-            };
-
-            Ok(WalletBalanceDto {
-                height,
-                nano_erg: NanoErgBreakdownDto {
-                    confirmed: confirmed.to_string(),
-                    available: available.to_string(),
-                    reserved: reserved.to_string(),
-                    immature: immature.to_string(),
-                },
-                assets,
-                reemission,
-                unconfirmed,
+            }
+            let net = incoming as i128 - outgoing as i128;
+            Some(UnconfirmedDeltaDto {
+                scope: ScopeDto::SingleHop,
+                incoming_nano_erg: incoming.to_string(),
+                outgoing_nano_erg: outgoing.to_string(),
+                net_nano_erg: net.to_string(),
             })
-        })()
+        } else {
+            None
+        };
+
+        Ok(WalletBalanceDto {
+            height,
+            nano_erg: NanoErgBreakdownDto {
+                confirmed: confirmed.to_string(),
+                available: available.to_string(),
+                reserved: reserved.to_string(),
+                immature: immature.to_string(),
+            },
+            assets,
+            reemission,
+            unconfirmed,
+        })
     }
 
     pub fn addresses(&self) -> Result<WalletAddressList, WalletAdminError> {
@@ -296,87 +290,78 @@ impl WalletEngine {
     }
 
     pub fn boxes(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
-        (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let all = if let Some(service) = self.service.as_deref() {
-                service
-                    .boxes()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            } else {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                read.all_boxes()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            };
-            Ok(super::dto::paginate_boxes(all, page))
-        })()
+        let all = if let Some(service) = self.service.as_deref() {
+            service
+                .boxes()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        } else {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            read.all_boxes()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        };
+        Ok(super::dto::paginate_boxes(all, page))
     }
 
     pub fn boxes_unspent(&self, page: Page) -> Result<WalletBoxesPage, WalletAdminError> {
-        (|| -> Result<WalletBoxesPage, WalletAdminError> {
-            let unspent = if let Some(service) = self.service.as_deref() {
-                service
-                    .confirmed_boxes()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            } else {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                read.unspent_boxes()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            };
-            Ok(super::dto::paginate_boxes(unspent, page))
-        })()
+        let unspent = if let Some(service) = self.service.as_deref() {
+            service
+                .confirmed_boxes()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        } else {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            read.unspent_boxes()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        };
+        Ok(super::dto::paginate_boxes(unspent, page))
     }
 
     pub fn transactions(&self, page: Page) -> Result<WalletTransactionsPage, WalletAdminError> {
-        (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-            let all = if let Some(service) = self.service.as_deref() {
-                service
-                    .transactions()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            } else {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                read.all_transactions()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-            };
-            Ok(super::dto::paginate_transactions(all, page))
-        })()
+        let all = if let Some(service) = self.service.as_deref() {
+            service
+                .transactions()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        } else {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            read.all_transactions()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+        };
+        Ok(super::dto::paginate_transactions(all, page))
     }
 
     pub fn transaction_by_id(
         &self,
         tx_id_hex: String,
     ) -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
-        (|| -> Result<Option<WalletTransactionEntry>, WalletAdminError> {
-            let tx_bytes = hex::decode(&tx_id_hex)
-                .map_err(|_| WalletAdminError::Internal("tx_id_hex is not valid hex".to_string()))
-                .and_then(|v| {
-                    v.try_into().map_err(|_| {
-                        WalletAdminError::Internal("tx_id must be 32 bytes".to_string())
-                    })
-                })?;
-            let entry = if let Some(service) = self.service.as_deref() {
-                service
-                    .transaction_by_id(&tx_bytes)
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                    .map(super::dto::wallet_tx_to_entry)
-            } else {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                read.transaction_by_id(&tx_bytes)
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                    .map(super::dto::wallet_tx_to_entry)
-            };
-            Ok(entry)
-        })()
+        let tx_bytes = hex::decode(&tx_id_hex)
+            .map_err(|_| WalletAdminError::Internal("tx_id_hex is not valid hex".to_string()))
+            .and_then(|v| {
+                v.try_into()
+                    .map_err(|_| WalletAdminError::Internal("tx_id must be 32 bytes".to_string()))
+            })?;
+        let entry = if let Some(service) = self.service.as_deref() {
+            service
+                .transaction_by_id(&tx_bytes)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(super::dto::wallet_tx_to_entry)
+        } else {
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            read.transaction_by_id(&tx_bytes)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .map(super::dto::wallet_tx_to_entry)
+        };
+        Ok(entry)
     }
 
     pub fn transactions_by_scan_id(
@@ -392,16 +377,14 @@ impl WalletEngine {
         // scans; reserved 9 + unknown ids read as empty — Scala serves mining-scan
         // txs at id 9, a documented parity gap).
         if scan_id == u32::from(crate::scan::PAYMENTS_SCAN_ID) {
-            (|| -> Result<WalletTransactionsPage, WalletAdminError> {
-                let read = self
-                    .store
-                    .read()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                let all = read
-                    .all_transactions()
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                Ok(super::dto::paginate_transactions(all, page))
-            })()
+            let read = self
+                .store
+                .read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            let all = read
+                .all_transactions()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            Ok(super::dto::paginate_transactions(all, page))
         } else {
             match u16::try_from(scan_id) {
                 Ok(id) => super::scan::scan_transactions_impl(self.store.as_ref(), id, page),
@@ -416,72 +399,70 @@ impl WalletEngine {
         &self,
     ) -> Result<ergo_wallet_protocol::native::dto::WalletStatusDto, WalletAdminError> {
         use ergo_wallet_protocol::native::dto::{NetworkDto, RescanStateDto, WalletStatusDto};
-        (|| -> Result<WalletStatusDto, WalletAdminError> {
-            let initialized = !matches!(
-                self.storage.read().lock_state(),
-                ergo_wallet::storage::LockState::Uninitialized
-            );
-            let locked = !self.state.read().is_unlocked();
-            // Scan height + scan-invalidated + change address from ONE read txn.
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let scan_height = read
-                .scan_cursor()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|cursor| cursor.height)
-                .unwrap_or(0);
-            let scan_invalidated = read
-                .scan_invalidated()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let change_address = read
-                .change_address_pubkey()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, self.config.network))
-                .transpose()
-                .map_err(|e| WalletAdminError::Internal(format!("change address encode: {e}")))?;
-            let tip_height = self
-                .chain
-                .tip_height()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let eip27_active = match &self.config.reemission {
-                Some(rules) => tip_height.saturating_add(1) > rules.activation_height,
-                None => false,
-            };
-            let network = match self.config.network {
-                ergo_ser::address::NetworkPrefix::Mainnet => NetworkDto::Mainnet,
-                ergo_ser::address::NetworkPrefix::Testnet => NetworkDto::Testnet,
-            };
-            let rescan_state = read
-                .rescan_state()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let rescan = match rescan_state {
-                crate::wallet::RescanState::Running { from_height } => {
-                    RescanStateDto::Running { from_height }
+        let initialized = !matches!(
+            self.storage.read().lock_state(),
+            ergo_wallet::storage::LockState::Uninitialized
+        );
+        let locked = !self.state.read().is_unlocked();
+        // Scan height + scan-invalidated + change address from ONE read txn.
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let scan_height = read
+            .scan_cursor()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0);
+        let scan_invalidated = read
+            .scan_invalidated()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let change_address = read
+            .change_address_pubkey()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|pk| ergo_wallet::address::pubkey_to_p2pk_address(&pk, self.config.network))
+            .transpose()
+            .map_err(|e| WalletAdminError::Internal(format!("change address encode: {e}")))?;
+        let tip_height = self
+            .chain
+            .tip_height()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let eip27_active = match &self.config.reemission {
+            Some(rules) => tip_height.saturating_add(1) > rules.activation_height,
+            None => false,
+        };
+        let network = match self.config.network {
+            ergo_ser::address::NetworkPrefix::Mainnet => NetworkDto::Mainnet,
+            ergo_ser::address::NetworkPrefix::Testnet => NetworkDto::Testnet,
+        };
+        let rescan_state = read
+            .rescan_state()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let rescan = match rescan_state {
+            crate::wallet::RescanState::Running { from_height } => {
+                RescanStateDto::Running { from_height }
+            }
+            crate::wallet::RescanState::Failed { height, reason } => {
+                RescanStateDto::Failed { height, reason }
+            }
+            crate::wallet::RescanState::Idle if self.chain.is_pruned() => {
+                RescanStateDto::Unavailable {
+                    detail: "node is pruned; block replay unavailable".to_string(),
                 }
-                crate::wallet::RescanState::Failed { height, reason } => {
-                    RescanStateDto::Failed { height, reason }
-                }
-                crate::wallet::RescanState::Idle if self.chain.is_pruned() => {
-                    RescanStateDto::Unavailable {
-                        detail: "node is pruned; block replay unavailable".to_string(),
-                    }
-                }
-                crate::wallet::RescanState::Idle => RescanStateDto::Idle,
-            };
-            Ok(WalletStatusDto {
-                initialized,
-                locked,
-                scan_height,
-                tip_height,
-                change_address,
-                network,
-                eip27_active,
-                rescan,
-                scan_invalidated,
-            })
-        })()
+            }
+            crate::wallet::RescanState::Idle => RescanStateDto::Idle,
+        };
+        Ok(WalletStatusDto {
+            initialized,
+            locked,
+            scan_height,
+            tip_height,
+            change_address,
+            network,
+            eip27_active,
+            rescan,
+            scan_invalidated,
+        })
     }
 
     /// `GET /api/v1/wallet/addresses` (paged). Renders each tracked pubkey to its
@@ -493,45 +474,43 @@ impl WalletEngine {
     ) -> Result<ergo_wallet_protocol::native::dto::AddressPage, WalletAdminError> {
         use ergo_wallet_protocol::native::dto::{AddressPage, WalletAddressDto};
         let network = self.config.network;
-        (|| -> Result<AddressPage, WalletAdminError> {
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let as_of = read
-                .scan_cursor()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|cursor| cursor.height)
-                .unwrap_or(0);
-            // Ordered by path_idx ASC (the reader's contract).
-            let metas = read
-                .tracked_addresses_with_meta()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let total = u32::try_from(metas.len()).unwrap_or(u32::MAX);
-            let items = metas
-                .into_iter()
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(|m| {
-                    let address = ergo_wallet::address::pubkey_to_p2pk_address(&m.pubkey, network)
-                        .map_err(|e| WalletAdminError::Internal(format!("address encode: {e}")))?;
-                    Ok(WalletAddressDto {
-                        address,
-                        derivation_path: super::keys::render_derivation_path(&m.derivation_path),
-                        // `index` is `u64` (matches `path_idx`) — no narrowing, so
-                        // distinct addresses never alias past `u32::MAX`.
-                        index: m.path_idx,
-                        label: (!m.label.is_empty()).then_some(m.label),
-                        added_at_height: m.added_at_height,
-                    })
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let as_of = read
+            .scan_cursor()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0);
+        // Ordered by path_idx ASC (the reader's contract).
+        let metas = read
+            .tracked_addresses_with_meta()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let total = u32::try_from(metas.len()).unwrap_or(u32::MAX);
+        let items = metas
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|m| {
+                let address = ergo_wallet::address::pubkey_to_p2pk_address(&m.pubkey, network)
+                    .map_err(|e| WalletAdminError::Internal(format!("address encode: {e}")))?;
+                Ok(WalletAddressDto {
+                    address,
+                    derivation_path: super::keys::render_derivation_path(&m.derivation_path),
+                    // `index` is `u64` (matches `path_idx`) — no narrowing, so
+                    // distinct addresses never alias past `u32::MAX`.
+                    index: m.path_idx,
+                    label: (!m.label.is_empty()).then_some(m.label),
+                    added_at_height: m.added_at_height,
                 })
-                .collect::<Result<Vec<_>, WalletAdminError>>()?;
-            Ok(AddressPage {
-                items,
-                total,
-                as_of,
             })
-        })()
+            .collect::<Result<Vec<_>, WalletAdminError>>()?;
+        Ok(AddressPage {
+            items,
+            total,
+            as_of,
+        })
     }
 
     /// `GET /api/v1/wallet/boxes` (paged). All wallet boxes (any status), ordered
@@ -542,37 +521,35 @@ impl WalletEngine {
         limit: u32,
     ) -> Result<ergo_wallet_protocol::native::dto::BoxPage, WalletAdminError> {
         use ergo_wallet_protocol::native::dto::BoxPage;
-        (|| -> Result<BoxPage, WalletAdminError> {
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let as_of = read
-                .scan_cursor()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|cursor| cursor.height)
-                .unwrap_or(0);
-            let mut boxes = read
-                .all_boxes()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            boxes.sort_by(|a, b| {
-                b.creation_height
-                    .cmp(&a.creation_height)
-                    .then_with(|| a.box_id.cmp(&b.box_id))
-            });
-            let total = u32::try_from(boxes.len()).unwrap_or(u32::MAX);
-            let items = boxes
-                .into_iter()
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(box_to_summary)
-                .collect::<Result<Vec<_>, WalletAdminError>>()?;
-            Ok(BoxPage {
-                items,
-                total,
-                as_of,
-            })
-        })()
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let as_of = read
+            .scan_cursor()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0);
+        let mut boxes = read
+            .all_boxes()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        boxes.sort_by(|a, b| {
+            b.creation_height
+                .cmp(&a.creation_height)
+                .then_with(|| a.box_id.cmp(&b.box_id))
+        });
+        let total = u32::try_from(boxes.len()).unwrap_or(u32::MAX);
+        let items = boxes
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(box_to_summary)
+            .collect::<Result<Vec<_>, WalletAdminError>>()?;
+        Ok(BoxPage {
+            items,
+            total,
+            as_of,
+        })
     }
 
     /// `GET /api/v1/wallet/boxes/{boxId}` — O(1) lookup; `None` if not tracked.
@@ -580,17 +557,15 @@ impl WalletEngine {
         &self,
         box_id_hex: String,
     ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletBoxSummary>, WalletAdminError> {
-        (|| {
-            let box_id = decode_hex32(&box_id_hex)?;
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let wb = read
-                .box_by_id(&box_id)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            wb.map(box_to_summary).transpose()
-        })()
+        let box_id = decode_hex32(&box_id_hex)?;
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let wb = read
+            .box_by_id(&box_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        wb.map(box_to_summary).transpose()
     }
 
     /// `GET /api/v1/wallet/transactions` (paged). Ordered `(blockHeight desc, txId
@@ -601,37 +576,35 @@ impl WalletEngine {
         limit: u32,
     ) -> Result<ergo_wallet_protocol::native::dto::TxPage, WalletAdminError> {
         use ergo_wallet_protocol::native::dto::TxPage;
-        (|| -> Result<TxPage, WalletAdminError> {
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let as_of = read
-                .scan_cursor()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
-                .map(|cursor| cursor.height)
-                .unwrap_or(0);
-            let mut txs = read
-                .all_transactions()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            txs.sort_by(|a, b| {
-                b.block_height
-                    .cmp(&a.block_height)
-                    .then_with(|| a.tx_id.cmp(&b.tx_id))
-            });
-            let total = u32::try_from(txs.len()).unwrap_or(u32::MAX);
-            let items = txs
-                .into_iter()
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(tx_to_summary)
-                .collect();
-            Ok(TxPage {
-                items,
-                total,
-                as_of,
-            })
-        })()
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let as_of = read
+            .scan_cursor()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+            .map(|cursor| cursor.height)
+            .unwrap_or(0);
+        let mut txs = read
+            .all_transactions()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        txs.sort_by(|a, b| {
+            b.block_height
+                .cmp(&a.block_height)
+                .then_with(|| a.tx_id.cmp(&b.tx_id))
+        });
+        let total = u32::try_from(txs.len()).unwrap_or(u32::MAX);
+        let items = txs
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(tx_to_summary)
+            .collect();
+        Ok(TxPage {
+            items,
+            total,
+            as_of,
+        })
     }
 
     /// `GET /api/v1/wallet/transactions/{txId}` — `None` if not found.
@@ -640,17 +613,15 @@ impl WalletEngine {
         tx_id_hex: String,
     ) -> Result<Option<ergo_wallet_protocol::native::dto::WalletTransactionSummary>, WalletAdminError>
     {
-        (|| {
-            let tx_id = decode_hex32(&tx_id_hex)?;
-            let read = self
-                .store
-                .read()
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            let wt = read
-                .transaction_by_id(&tx_id)
-                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-            Ok(wt.map(tx_to_summary))
-        })()
+        let tx_id = decode_hex32(&tx_id_hex)?;
+        let read = self
+            .store
+            .read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let wt = read
+            .transaction_by_id(&tx_id)
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        Ok(wt.map(tx_to_summary))
     }
 }
 
