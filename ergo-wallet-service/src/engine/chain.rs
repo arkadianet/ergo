@@ -43,12 +43,16 @@ pub enum ChainAccessError {
     NoCommittedState,
     #[error("chain snapshot is unsupported by this accessor")]
     Unsupported,
-    #[error("committed chain tip moved from ({expected_height}, {expected_id}) to ({actual_height}, {actual_id})")]
+    #[error(
+        "committed chain tip moved from ({expected_height}, {expected_id}) to ({actual_height}, {actual_id})",
+        expected_height = expected.height,
+        expected_id = expected.header_id_hex(),
+        actual_height = actual.height,
+        actual_id = actual.header_id_hex()
+    )]
     StaleTip {
-        expected_height: u32,
-        expected_id: String,
-        actual_height: u32,
-        actual_id: String,
+        expected: CommittedTip,
+        actual: CommittedTip,
     },
 }
 
@@ -147,12 +151,7 @@ pub trait WalletChainAccess: Send + Sync {
         if actual == expected {
             return Ok(());
         }
-        Err(ChainAccessError::StaleTip {
-            expected_height: expected.height,
-            expected_id: hex::encode(expected.header_id),
-            actual_height: actual.height,
-            actual_id: hex::encode(actual.header_id),
-        })
+        Err(ChainAccessError::StaleTip { expected, actual })
     }
 
     /// Build the blockchain state context needed for signing: last ≤10
@@ -214,15 +213,17 @@ mod tests {
     #[test]
     fn map_chain_error_keeps_stale_tip_typed_and_messages_verbatim() {
         let stale = ChainAccessError::StaleTip {
-            expected_height: 1,
-            expected_id: "aa".to_string(),
-            actual_height: 2,
-            actual_id: "bb".to_string(),
+            expected: CommittedTip::new(1, [0xaa; 32]),
+            actual: CommittedTip::new(2, [0xbb; 32]),
         };
+        let expected_detail = format!(
+            "committed chain tip moved from (1, {}) to (2, {})",
+            "aa".repeat(32),
+            "bb".repeat(32)
+        );
         assert!(matches!(
             map_chain_error(stale),
-            WalletAdminError::StaleChainTip(detail)
-                if detail == "committed chain tip moved from (1, aa) to (2, bb)"
+            WalletAdminError::StaleChainTip(detail) if detail == expected_detail
         ));
         assert!(matches!(
             map_chain_error(ChainAccessError::State("disk on fire".to_string())),

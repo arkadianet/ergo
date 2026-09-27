@@ -176,24 +176,8 @@ impl InProcessChainClient {
 
     fn chain_state_error(error: ChainAccessError) -> ChainClientError {
         match error {
-            ChainAccessError::StaleTip {
-                expected_height,
-                expected_id,
-                actual_height,
-                actual_id,
-            } => {
-                let parse = |value: String| {
-                    hex::decode(value)
-                        .ok()
-                        .and_then(|bytes| bytes.try_into().ok())
-                };
-                match (parse(expected_id), parse(actual_id)) {
-                    (Some(expected), Some(actual)) => ChainClientError::StaleTip {
-                        expected: CommittedTip::new(expected_height, expected),
-                        actual: CommittedTip::new(actual_height, actual),
-                    },
-                    _ => ChainClientError::Failure("invalid stale-tip identity".to_string()),
-                }
+            ChainAccessError::StaleTip { expected, actual } => {
+                ChainClientError::StaleTip { expected, actual }
             }
             ChainAccessError::NoCommittedState | ChainAccessError::Unsupported => {
                 ChainClientError::Unsupported
