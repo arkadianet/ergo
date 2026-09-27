@@ -1,10 +1,12 @@
 //! Node-runtime wallet session lifecycle: session ids, the wallet tasks
 //! tracked per session (the writer task and its rescan jobs), and routing a
-//! node shutdown to the session's rescan coordinator.
+//! node shutdown, by session id, to that session's rescan coordinator.
 //!
 //! The rescan fence flags themselves are per-wallet state owned by
 //! [`RescanCoordinator`]; this module only remembers which coordinator
-//! belongs to which session so shutdown can cancel that wallet's rescan. The
+//! belongs to which session so a node's shutdown cancels its own wallet's
+//! rescan, even when another session has begun in the same process since
+//! (parallel test nodes, an embedder running two nodes). The
 //! unlock/hydrate/persist path lives in the wallet service
 //! ([`ergo_wallet_service::engine::WalletBootService`]).
 
@@ -152,14 +154,13 @@ pub(crate) async fn await_wallet_tasks(session_id: u64) -> Result<(), JoinError>
     }
 }
 
-/// Node shutdown for `session_id`: when it is still the current session,
-/// ask its rescan coordinator to refuse new rescans, cancel the running
-/// one, and fail closed if a rescan task is active.
+/// Node shutdown for `session_id`: ask that session's rescan coordinator to
+/// refuse new rescans, cancel the running one, and fail closed if a rescan
+/// task is active. Routed by id rather than to the latest session, so an
+/// older node still cancels its own rescan after a newer session began; an
+/// unknown id, or a session without a wallet, is a no-op.
 pub(crate) fn request_rescan_shutdown_for(session_id: u64) {
     let tasks = wallet_tasks();
-    if wallet_session_id() != session_id {
-        return;
-    }
     if let Some(rescan) = task_session_index(&tasks, session_id)
         .and_then(|index| tasks.sessions[index].1.rescan.as_ref())
     {

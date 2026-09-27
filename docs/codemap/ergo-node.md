@@ -61,7 +61,8 @@ seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
 - `src/node/wallet_bridge/chain_snapshot.rs` — `ChainSnapshot`, the committed
   `SigningView` over an `ergo-state` `CommittedSnapshot`.
 - `src/wallet_boot.rs` — wallet session ids, per-session task tracking, and
-  routing a node shutdown to the session's `RescanCoordinator`.
+  routing a node shutdown, by session id, to that session's
+  `RescanCoordinator`.
 - `src/api_bridge.rs` (+ siblings) — API trait implementations backed by the
   node snapshot and submission channels.
 - `src/mining_bridge.rs`, `src/node/mining_dispatch.rs`,
@@ -147,6 +148,8 @@ seams over `ergo-state`, the submission and mempool adapters, the `ergo_api`
   blocks the chain writer on ordinary reads.
 - **Task ownership is explicit.** Shutdown signals and aborts every task
   registered by `RunHandle`; wallet writer/rescan tasks are tracked by
-  `wallet_boot` so they cannot outlive the embedded wallet session silently,
-  and shutdown cancels a running rescan through the session's
-  `RescanCoordinator`.
+  `wallet_boot` so they cannot outlive the embedded wallet session silently.
+  A node's shutdown is routed by its wallet session id to that session's
+  `RescanCoordinator`, so it cancels its own running rescan even when another
+  session has begun in the same process since, and never reaches another
+  session's wallet.
