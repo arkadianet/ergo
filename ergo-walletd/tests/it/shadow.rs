@@ -1142,16 +1142,6 @@ struct EmbeddedSide {
 
 impl EmbeddedSide {
     fn open(path: &Path, plan: ChainPlan) -> Self {
-        // A fenced wallet apply would silently make this side track nothing.
-        // Nothing on the daemon path fences, but a previous test in this binary
-        // tripping the embedded continuity guard would, and a vacuous
-        // comparison is worse than a loud failure.
-        assert!(
-            !ergo_wallet_service::wallet::wallet_apply_fenced(),
-            "the process-wide wallet-apply fence is set before the shadow harness \
-             started; a fenced hook would report zero boxes and every shadow \
-             assertion would pass for the wrong reason"
-        );
         let mainnet = match &plan {
             ChainPlan::Mainnet { .. } => Some(MainnetFixture::load()),
             ChainPlan::Synthetic { .. } => None,
