@@ -37,7 +37,11 @@ contain `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`, `ergo-mining`,
 ## Modules
 - `src/runtime.rs` — synchronous service orchestration over a wallet store and
   chain client; `WalletRuntime` is an alias for `WalletService`.
-- `src/chain.rs` — runtime-facing chain port and owned response types.
+- `src/chain.rs` — runtime-facing chain port and owned response types, plus
+  `authenticate_header` / `HeaderAuthError`: decode raw header bytes as exactly
+  one header, recompute the id over the received bytes, and check the claimed
+  height and parent (`ChainBlock::authenticate_header`,
+  `ChainHeader::authenticate`).
 - `src/state.rs` — cached wallet state and hydration boundary.
 - `src/wallet/` — redb tables, value types, reader/writer traits, apply and
   maturity logic, scan tracking, schema migration, and rescan service.

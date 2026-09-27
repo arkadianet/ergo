@@ -138,17 +138,18 @@ Explorer, Peers, Mempool, Mining, Voting, and Wallet sections — plus Scala API
 docs at `/swagger` and RUST API docs at `/swagger/native`; wallet actions
 require the API key. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
 
-Two deviations the daemon does not paper over, both written up in
-[`docs/codemap/ergo-walletd.md`](./docs/codemap/ergo-walletd.md#known-deviations):
+What the daemon checks and what it still takes on trust are written up in
+[`docs/codemap/ergo-walletd.md`](./docs/codemap/ergo-walletd.md#what-the-daemon-verifies):
 
-- the chain protocol carries no raw header bytes, so a block's protocol id is
-  checked for *consistency* (parent linkage, height, tip agreement, uniqueness)
-  but **not recomputed** from header bytes; ErgoBox bytes *are* parsed and
-  fully re-derived;
-- `/balance` and `/status` are values the daemon computes from blocks it has
-  applied — confirmed-only, with `available == confirmed`, literal-zero
-  `reserved`/`immature`, and `null` `unconfirmed`/`reemission` — so they are
-  **not** byte-identical to an embedded wallet's embedded values.
+- every block and snapshot header arrives with its raw header, and the daemon
+  recomputes each id from those bytes and reads height and parent out of them;
+  ErgoBox bytes are parsed and fully re-derived. Transactions arrive as their
+  wallet-relevant parts, so they are not bound to the header's transactions
+  root, and proof-of-work is not checked;
+- one known deviation: `/balance` and `/status` are values the daemon computes
+  from blocks it has applied — confirmed-only, with `available == confirmed`,
+  literal-zero `reserved`/`immature`, and `null` `unconfirmed`/`reemission` —
+  so they are **not** byte-identical to an embedded wallet's embedded values.
 The full build / test / run / configuration surface — profiles, feature-gated
 tests, the config reference, observability — is in
 [`docs/overview.md`](./docs/overview.md).

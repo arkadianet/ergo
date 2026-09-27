@@ -296,6 +296,12 @@ pub struct ChainHeader {
     #[serde(deserialize_with = "deserialize_header_id")]
     pub parent_id: String,
     pub timestamp_unix_ms: u64,
+    /// The canonical serialized header, PoW solution included, as lowercase
+    /// hex. `blake2b256(header_bytes)` is `header_id`, and the decoded header
+    /// carries `height`, `parent_id` and `timestamp_unix_ms`, so a consumer can
+    /// authenticate every other field of this record instead of trusting it.
+    #[serde(deserialize_with = "deserialize_hex_bytes")]
+    pub header_bytes: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,10 +412,11 @@ pub struct ChainTransaction {
     pub outputs: Vec<ChainOutput>,
 }
 
-/// Structured block identity, height, parent, and transactions. Raw header
-/// bytes are intentionally absent from this protocol version; consumers can
-/// validate the supplied header id, height, and parent continuity, but cannot
-/// independently recompute the header id without a raw-header extension.
+/// Block identity, height, parent, the raw header those three are derived
+/// from, and the wallet-relevant transactions. Consumers recompute `block_id`
+/// as `blake2b256(header_bytes)` and read `height` and `parent_id` out of the
+/// decoded header, so a node cannot serve a block under an id its header does
+/// not hash to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainBlock {
@@ -418,6 +425,10 @@ pub struct ChainBlock {
     pub height: u32,
     #[serde(deserialize_with = "deserialize_id32")]
     pub parent_id: String,
+    /// The canonical serialized header, PoW solution included, as lowercase
+    /// hex.
+    #[serde(deserialize_with = "deserialize_hex_bytes")]
+    pub header_bytes: String,
     #[serde(alias = "txs")]
     pub transactions: Vec<ChainTransaction>,
 }

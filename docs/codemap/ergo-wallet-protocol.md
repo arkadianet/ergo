@@ -40,6 +40,9 @@ crate, `redb`, `tokio`, `axum`, or `utoipa`; this boundary is checked by
 - `Id32`, `HexBytes` — validated lowercase wire representations of 32-byte
   identifiers and raw bytes.
 - `ChainTip`, `ChainSnapshot`, `ChainBlock` — neutral chain read shapes.
+  Each `ChainBlock` and each snapshot `ChainHeader` carries its raw serialized
+  header as `headerBytes`, so a consumer can recompute the id instead of
+  trusting it.
 - `BlocksSinceResponse` — tagged `Forward`, `Ancestor`, and `Pruned` results.
 - `SubmitRequest`, `SubmitResponse` — neutral transaction submission shapes.
 - `WalletAdminError` — shared lifecycle, authorization, and transaction error

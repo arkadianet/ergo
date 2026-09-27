@@ -59,6 +59,53 @@ fn forward_sync_uses_requested_cursor_and_limit_across_batches() {
 }
 
 #[test]
+fn node_outage_mid_sync_is_retryable_and_resumes_from_the_durable_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = FakeChain::new(CommittedTip::new(7, [7; 32]));
+    let store = Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+    let syncer = build_syncer(chain.clone(), store.clone(), 3);
+
+    // Blocks 1..=3 land, then the node becomes unreachable. A fresh wallet's
+    // first sync is a rebuild, which keeps the wallet marked invalidated
+    // until it reaches the tip; the outage must leave that, the cursor and the
+    // rescan state exactly as the last committed pass left them.
+    assert!(!syncer.sync_once().unwrap().completed);
+    let invalidated_before_outage = store.read().unwrap().scan_invalidated().unwrap();
+    chain.set_down(true);
+    let error = syncer.sync_once().unwrap_err();
+    assert!(error.retryable(), "a node outage must be retried: {error}");
+    {
+        let read = store.read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 3);
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+        assert_eq!(read.scan_invalidated().unwrap(), invalidated_before_outage);
+    }
+
+    // The node comes back with the same chain. The daemon resumes from the
+    // cursor it committed before the outage: no gap, nothing re-applied.
+    chain.set_down(false);
+    let served_before_outage = chain.requests().len();
+    let mut completed = false;
+    for _ in 0..10 {
+        if syncer.sync_once().unwrap().completed {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "sync did not converge after the node came back");
+    let resumed = &chain.requests()[served_before_outage..];
+    assert_eq!(resumed.first(), Some(&(3, 3)), "{resumed:?}");
+    let read = store.read().unwrap();
+    let cursor = read.scan_cursor().unwrap().unwrap();
+    assert_eq!(cursor.height, 7);
+    assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+    assert!(
+        !read.scan_invalidated().unwrap(),
+        "the rebuild must complete once the node is back"
+    );
+}
+
+#[test]
 fn regressed_forward_tip_is_retryable_without_applying_the_page() {
     let dir = tempfile::tempdir().unwrap();
     let chain = FakeChain::with_responses(
@@ -283,12 +330,14 @@ fn ancestor_response_rewinds_to_the_returned_cursor_and_continues() {
                         block_id: [21; 32],
                         height: 2,
                         parent_id: [1; 32],
+                        header_bytes: Vec::new(),
                         transactions: Vec::new(),
                     },
                     ergo_wallet_service::ChainBlock {
                         block_id: [30; 32],
                         height: 3,
                         parent_id: [21; 32],
+                        header_bytes: Vec::new(),
                         transactions: Vec::new(),
                     },
                 ],
