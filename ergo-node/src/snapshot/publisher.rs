@@ -547,7 +547,7 @@ mod tests {
             age_ms: 10_800_000,
         };
         // Age and downloaded headers do not clear an unresolved rejection.
-        // Equal height is conservative; committed progress must pass it.
+        // The rejected ID at the applied tip remains unresolved.
         // A rollback or a newer rejection restores the active warning.
         for (applied, rejected, expected) in [
             (499, 500, HealthStatus::Rejecting),
@@ -558,6 +558,7 @@ mod tests {
             (501, 0, HealthStatus::Rejecting),
         ] {
             let mut parts = make_parts(600, applied, &[]);
+            parts.best_full_block_id = [0xab; 32];
             parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
                 height: rejected,
                 ..error.clone()
@@ -572,6 +573,24 @@ mod tests {
             assert_eq!(retained.reason, error.reason);
             assert_eq!(snap.status.block_apply_errors_total, 1);
         }
+    }
+
+    #[test]
+    fn block_rejection_applied_sibling_clears_health_overlay() {
+        let mut publisher =
+            SnapshotPublisher::new(fake_info(), Instant::now(), ApiWeightFunction::Cost);
+        let mut parts = make_parts(500, 500, &[]);
+        parts.best_full_block_id = [0xcd; 32];
+        parts.last_block_apply_error = Some(ergo_api::types::ApiBlockApplyError {
+            block_id: "ab".repeat(32),
+            height: 500,
+            reason: "local failure".into(),
+            age_ms: 0,
+        });
+        publisher.publish(parts);
+        let snap = publisher.handle().load_full();
+        assert_ne!(snap.health.status, HealthStatus::Rejecting);
+        assert!(snap.status.last_block_apply_error.is_some());
     }
 
     #[test]

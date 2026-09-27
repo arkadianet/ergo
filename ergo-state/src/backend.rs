@@ -62,6 +62,13 @@ pub trait ChainStateRead {
 /// concrete backend (session invalidity is session-scoped in-memory
 /// state; the reader handle and lifecycle are backend concerns).
 pub trait HeaderSectionStore {
+    /// Selection prefilter: O(number of marks) metadata lookups on real stores.
+    /// Unknown mark IDs do not block a height.
+    /// Stores without an enumerable mark set conservatively permit the check.
+    fn has_session_mark_at_height(&self, _height: u32) -> Result<bool, StateError> {
+        Ok(true)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
     fn get_header_meta(&self, header_id: &[u8; 32]) -> Result<Option<HeaderMeta>, StateError>;
     fn get_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError>;
@@ -188,6 +195,18 @@ impl ChainStateRead for StateStore {
 }
 
 impl HeaderSectionStore for StateStore {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        for id in &self.chain_state().session_invalids {
+            if self
+                .get_header_meta(id)?
+                .is_some_and(|meta| meta.height == height)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         StateStore::get_header(self, header_id)
     }
@@ -425,6 +444,13 @@ impl ChainStateRead for StateBackendKind {
 }
 
 impl HeaderSectionStore for StateBackendKind {
+    fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+        match self {
+            Self::Utxo(store) => store.has_session_mark_at_height(height),
+            Self::Digest(store) => store.has_session_mark_at_height(height),
+        }
+    }
+
     fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         match self {
             StateBackendKind::Utxo(s) => s.get_header(header_id),
@@ -622,6 +648,31 @@ mod tests {
     }
 
     // ----- happy path -----
+
+    #[test]
+    fn session_marks_both_backends_dispatch_height_filter() {
+        for (mut backend, _dir) in [utxo_backend(), digest_backend()] {
+            assert!(!backend.has_session_mark_at_height(1).unwrap());
+            backend.mark_session_invalid([1; 32]);
+            assert!(!backend.has_session_mark_at_height(1).unwrap());
+            backend
+                .store_validated_header(
+                    &[1; 32],
+                    &[1; 8],
+                    &HeaderMeta {
+                        parent_id: [0; 32],
+                        height: 1,
+                        cumulative_score: vec![1],
+                        pow_validity: 1,
+                        timestamp: 1,
+                    },
+                    None,
+                )
+                .unwrap();
+            assert!(backend.has_session_mark_at_height(1).unwrap());
+            assert!(!backend.has_session_mark_at_height(2).unwrap());
+        }
+    }
 
     #[test]
     fn both_variants_dispatch_chain_state_read_through_enum() {

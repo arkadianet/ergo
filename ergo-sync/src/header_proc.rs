@@ -7,7 +7,7 @@
 //! 4. Running full header validation (PoW, difficulty, linkage)
 //! 5. Computing cumulative score
 //! 6. Persisting header + header_meta
-//! 7. Updating best_header if this header has higher cumulative score
+//! 7. Updating best_header by cumulative score, preferring an unblocked tie
 
 use ergo_crypto::difficulty::{
     epoch_length_for_height, previous_heights_for_recalculation, DifficultyParams,
@@ -140,13 +140,113 @@ pub fn check_header_checkpoint(
     }
 }
 
+/// Check the first unapplied header on the current best branch. The committed
+/// index covers its persisted ancestry; only a pending batch suffix needs a walk.
+fn branch_session_blocked<S: HeaderSectionStore + ?Sized>(
+    store: &S,
+    mut id: [u8; 32],
+    chain: &ergo_state::chain::ChainStateMeta,
+) -> Result<bool, HeaderProcessError> {
+    let first = chain.best_full_block_height + 1;
+    while id != chain.best_full_block_id {
+        let Some(meta) = store.get_header_meta(&id)? else {
+            return Ok(false);
+        };
+        if meta.height < first {
+            return Ok(false);
+        }
+        if meta.height == first {
+            return Ok(store.is_invalid(&id)? && !store.is_durably_invalid(&id)?);
+        }
+        if store.get_header_id_at_height(meta.height)? == Some(id) {
+            return match store.get_header_id_at_height(first)? {
+                Some(first_id) => Ok(store.get_header_meta(&first_id)?.is_some()
+                    && store.is_invalid(&first_id)?
+                    && !store.is_durably_invalid(&first_id)?),
+                None => Ok(false),
+            };
+        }
+        id = meta.parent_id;
+    }
+    Ok(false)
+}
+
+/// Bound local escape work on constant-difficulty networks, where arbitrarily
+/// long branches can tie. Sixteen heights allow short sibling recovery while
+/// keeping per-header ancestry reads independent of the initial-sync gap.
+pub(crate) const SESSION_PROMOTION_SEARCH_DEPTH: u32 = 16;
+
+/// Candidates must reach the applied ID itself without crossing any invalid
+/// header. Sparse local ancestry is ineligible, never a remote-parent error.
+pub(super) fn branch_session_eligible<S: HeaderSectionStore + ?Sized>(
+    store: &S,
+    mut id: [u8; 32],
+    chain: &ergo_state::chain::ChainStateMeta,
+) -> Result<bool, ergo_state::store::StateError> {
+    let mut walked = 0;
+    while id != chain.best_full_block_id {
+        if walked >= SESSION_PROMOTION_SEARCH_DEPTH {
+            return Ok(false);
+        }
+        walked += 1;
+        let Some(meta) = store.get_header_meta(&id)? else {
+            return Ok(false);
+        };
+        if meta.height <= chain.best_full_block_height || store.is_invalid(&id)? {
+            return Ok(false);
+        }
+        // Joining the committed best branch inherits its blocked first header.
+        if store.get_header_id_at_height(meta.height)? == Some(id) {
+            if let Some(first) = store.get_header_id_at_height(chain.best_full_block_height + 1)? {
+                if store.is_invalid(&first)? {
+                    return Ok(false);
+                }
+            }
+        }
+        id = meta.parent_id;
+    }
+    Ok(true)
+}
+
+/// Select by cumulative score, allowing an eligible branch to replace a
+/// session-blocked branch on an exact tie. Local selection read failures must
+/// not turn a fully linked remote header into an orphan or a peer penalty.
+fn header_is_new_best<S: HeaderSectionStore + ?Sized>(
+    store: &S,
+    cumulative_score: &BigUint,
+    parent_id: [u8; 32],
+    chain: &ergo_state::chain::ChainStateMeta,
+) -> bool {
+    let current_best_score = BigUint::from_bytes_be(&chain.best_header_score);
+    if *cumulative_score > current_best_score {
+        return true;
+    }
+    if *cumulative_score != current_best_score {
+        return false;
+    }
+    let selection = || -> Result<bool, HeaderProcessError> {
+        Ok(
+            store.has_session_mark_at_height(chain.best_full_block_height + 1)?
+                && branch_session_blocked(store, chain.best_header_id, chain)?
+                && branch_session_eligible(store, parent_id, chain)?,
+        )
+    };
+    match selection() {
+        Ok(eligible) => eligible,
+        Err(error) => {
+            tracing::warn!(%error, parent = %hex::encode(parent_id), best_full_height = chain.best_full_block_height, "local ancestry unavailable for session tie selection");
+            false
+        }
+    }
+}
+
 /// Result of successfully processing a header.
 #[derive(Debug)]
 pub struct ProcessedHeader {
     pub header_id: [u8; 32],
     pub height: u32,
     pub parent_id: [u8; 32],
-    /// True if this header became the new best header (higher cumulative score).
+    /// True if this header became the new best header by score or an unblocked tie.
     pub is_new_best: bool,
     /// The parsed header's transactions_root, extension_root, ad_proofs_root
     /// for computing expected section IDs.
@@ -514,9 +614,9 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     let cumulative_score = parent_score + header_difficulty;
     let score_bytes = cumulative_score.to_bytes_be();
 
-    // 9. Check if this is the new best header (heaviest chain by cumulative score).
-    let current_best_score = BigUint::from_bytes_be(&store.chain_state_meta().best_header_score);
-    let is_new_best = cumulative_score > current_best_score;
+    // 9. Select by score, allowing an eligible escape from a session-blocked tie.
+    let chain = store.chain_state_meta();
+    let is_new_best = header_is_new_best(store, &cumulative_score, parent_id, &chain);
 
     // 10. Persist header + meta + optional best-header in one redb transaction.
     let meta = HeaderMeta {
@@ -707,13 +807,335 @@ pub fn find_header_at_height<S: HeaderSectionStore + ?Sized>(
 mod tests {
     use super::*;
 
+    use ergo_state::store::StateError;
+
     // ----- helpers -----
+
+    struct CountingStore {
+        inner: ergo_state::store::StateStore,
+        reads: std::cell::Cell<usize>,
+        fail_on: Option<[u8; 32]>,
+    }
+
+    impl HeaderSectionStore for CountingStore {
+        fn has_session_mark_at_height(&self, height: u32) -> Result<bool, StateError> {
+            self.inner.has_session_mark_at_height(height)
+        }
+
+        fn get_header(&self, header_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            ergo_state::store::StateStore::get_header(&self.inner, header_id)
+        }
+        fn get_header_meta(&self, header_id: &[u8; 32]) -> Result<Option<HeaderMeta>, StateError> {
+            self.reads.set(self.reads.get() + 1);
+            if self.fail_on == Some(*header_id) {
+                return Err(StateError::InvalidPrecondition {
+                    what: "injected local read failure",
+                });
+            }
+            ergo_state::store::StateStore::get_header_meta(&self.inner, header_id)
+        }
+        fn get_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+            ergo_state::store::StateStore::get_header_id_at_height(&self.inner, height)
+        }
+        fn get_block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
+            ergo_state::store::StateStore::get_block_section(&self.inner, modifier_id)
+        }
+        fn get_section_height(&self, section_id: &[u8; 32]) -> Result<Option<u32>, StateError> {
+            ergo_state::store::StateStore::get_section_height(&self.inner, section_id)
+        }
+        fn scan_header_chain_range(
+            &self,
+            lo: u32,
+            hi: u32,
+        ) -> Result<Vec<(u32, [u8; 32])>, StateError> {
+            ergo_state::store::StateStore::scan_header_chain_range(&self.inner, lo, hi)
+        }
+        fn store_header(
+            &self,
+            header_id: &[u8; 32],
+            header_bytes: &[u8],
+        ) -> Result<(), StateError> {
+            ergo_state::store::StateStore::store_header(&self.inner, header_id, header_bytes)
+        }
+        fn store_validated_header(
+            &mut self,
+            header_id: &[u8; 32],
+            header_bytes: &[u8],
+            meta: &HeaderMeta,
+            new_best: Option<(u32, Vec<u8>)>,
+        ) -> Result<(), StateError> {
+            ergo_state::store::StateStore::store_validated_header(
+                &mut self.inner,
+                header_id,
+                header_bytes,
+                meta,
+                new_best,
+            )
+        }
+        fn store_block_section_typed(
+            &self,
+            modifier_id: &[u8; 32],
+            section_bytes: &[u8],
+            section_type: u8,
+        ) -> Result<(), StateError> {
+            ergo_state::store::StateStore::store_block_section_typed(
+                &self.inner,
+                modifier_id,
+                section_bytes,
+                section_type,
+            )
+        }
+        fn store_block_sections_durable(
+            &self,
+            sections: &[(&[u8; 32], &[u8], u8)],
+        ) -> Result<(), StateError> {
+            ergo_state::store::StateStore::store_block_sections_durable(&self.inner, sections)
+        }
+        fn begin_header_batch(&mut self) {
+            ergo_state::store::StateStore::begin_header_batch(&mut self.inner)
+        }
+        fn flush_header_batch(&mut self) -> Result<(), StateError> {
+            ergo_state::store::StateStore::flush_header_batch(&mut self.inner)
+        }
+        fn mark_session_invalid(&mut self, header_id: [u8; 32]) {
+            ergo_state::store::StateStore::mark_session_invalid(&mut self.inner, header_id)
+        }
+        fn invalidate_validation_branch(
+            &mut self,
+            header_id: [u8; 32],
+        ) -> Result<Vec<[u8; 32]>, StateError> {
+            ergo_state::store::StateStore::invalidate_validation_branch(&mut self.inner, header_id)
+        }
+        fn is_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+            ergo_state::store::StateStore::is_invalid(&self.inner, header_id)
+        }
+        fn is_durably_invalid(&self, header_id: &[u8; 32]) -> Result<bool, StateError> {
+            ergo_state::store::StateStore::is_durably_invalid(&self.inner, header_id)
+        }
+        fn reader_handle(&self) -> ergo_state::reader::ChainStoreReader {
+            ergo_state::store::StateStore::reader_handle(&self.inner)
+        }
+        fn shutdown_cleanly(&mut self) -> Result<(), StateError> {
+            ergo_state::store::StateStore::shutdown_cleanly(&mut self.inner)
+        }
+    }
 
     fn id(byte: u8) -> [u8; 32] {
         [byte; 32]
     }
 
+    fn blocked_branch_fixture(
+        validity: u8,
+        marked: bool,
+    ) -> (tempfile::TempDir, ergo_state::store::StateStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store =
+            ergo_state::store::StateStore::open(&dir.path().join("state.redb")).unwrap();
+        for (byte, parent, height) in [(1, 0, 1), (2, 1, 2)] {
+            store
+                .store_validated_header(
+                    &id(byte),
+                    &[byte; 8],
+                    &HeaderMeta {
+                        parent_id: id(parent),
+                        height,
+                        cumulative_score: vec![byte],
+                        pow_validity: if byte == 1 { validity } else { 1 },
+                        timestamp: u64::from(height),
+                    },
+                    Some((height, vec![byte])),
+                )
+                .unwrap();
+        }
+        if marked {
+            store.mark_session_invalid(id(1));
+        }
+        (dir, store)
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn header_tie_without_session_marks_performs_no_ancestor_reads() {
+        let (_dir, inner) = blocked_branch_fixture(1, false);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        let chain = store.inner.chain_state_meta();
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(0),
+            &chain
+        ));
+        assert_eq!(
+            store.reads.get(),
+            0,
+            "ordinary ties must not walk ancestors"
+        );
+    }
+
+    #[test]
+    fn header_tie_with_session_mark_prefers_only_eligible_branch() {
+        let (_dir, inner) = blocked_branch_fixture(1, true);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        let chain = store.inner.chain_state_meta();
+        assert!(header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(0),
+            &chain
+        ));
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(1),
+            &chain
+        ));
+    }
+
+    #[test]
+    fn blocked_branch_first_unapplied_session_mark_detected() {
+        let (_dir, store) = blocked_branch_fixture(1, true);
+        assert!(branch_session_blocked(&store, id(2), &store.chain_state_meta()).unwrap());
+    }
+
+    #[test]
+    fn header_tie_stale_mark_below_applied_tip_skips_ancestry() {
+        let (_dir, mut inner) = blocked_branch_fixture(1, true);
+        for h in 3..=200u8 {
+            inner
+                .store_validated_header(
+                    &id(h),
+                    &[h; 8],
+                    &HeaderMeta {
+                        parent_id: id(h - 1),
+                        height: u32::from(h),
+                        cumulative_score: vec![h],
+                        pow_validity: 1,
+                        timestamp: u64::from(h),
+                    },
+                    Some((u32::from(h), vec![h])),
+                )
+                .unwrap();
+        }
+        let mut chain = inner.chain_state_meta();
+        chain.best_full_block_height = 100;
+        chain.best_full_block_id = id(100);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(200u8),
+            id(199),
+            &chain
+        ));
+        assert_eq!(store.reads.get(), 0);
+    }
+
+    #[test]
+    fn header_tie_pending_batch_uses_selected_overlay() {
+        let (_dir, mut store) = blocked_branch_fixture(1, true);
+        store.begin_header_batch();
+        for (byte, parent, height) in [(3, 2, 3), (4, 0, 1), (5, 4, 2)] {
+            store
+                .store_validated_header(
+                    &id(byte),
+                    &[byte; 8],
+                    &HeaderMeta {
+                        parent_id: id(parent),
+                        height,
+                        cumulative_score: vec![height as u8],
+                        pow_validity: 1,
+                        timestamp: u64::from(height),
+                    },
+                    Some((height, vec![height as u8])),
+                )
+                .unwrap();
+            let chain = store.chain_state_meta();
+            let selected = header_is_new_best(&store, &BigUint::from(height), id(0), &chain);
+            assert_eq!(selected, byte == 3, "pending header {byte}");
+        }
+        store.flush_header_batch().unwrap();
+    }
+
+    #[test]
+    fn header_tie_long_blocked_chain_uses_committed_index() {
+        let (_dir, mut inner) = blocked_branch_fixture(1, true);
+        for h in 3..=200u8 {
+            inner
+                .store_validated_header(
+                    &id(h),
+                    &[h; 8],
+                    &HeaderMeta {
+                        parent_id: id(h - 1),
+                        height: u32::from(h),
+                        cumulative_score: vec![h],
+                        pow_validity: 1,
+                        timestamp: u64::from(h),
+                    },
+                    Some((u32::from(h), vec![h])),
+                )
+                .unwrap();
+        }
+        let chain = inner.chain_state_meta();
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(200u8),
+            id(199),
+            &chain
+        ));
+        assert!(store.reads.get() <= 4, "reads: {}", store.reads.get());
+    }
+
+    #[test]
+    fn header_tie_unknown_mark_skips_ancestry() {
+        let (_dir, mut inner) = blocked_branch_fixture(1, false);
+        inner.mark_session_invalid(id(99));
+        let chain = inner.chain_state_meta();
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(0),
+            &chain
+        ));
+        assert_eq!(store.reads.get(), 0);
+    }
+
+    #[test]
+    fn applied_anchor_needs_no_ancestry_reads() {
+        let (_dir, inner) = blocked_branch_fixture(1, false);
+        let mut chain = inner.chain_state_meta();
+        chain.best_full_block_height = 1;
+        chain.best_full_block_id = id(9);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!branch_session_blocked(&store, id(9), &chain).unwrap());
+        assert!(branch_session_eligible(&store, id(9), &chain).unwrap());
+        assert_eq!(store.reads.get(), 0);
+    }
 
     #[test]
     fn checkpoint_matching_id_at_checkpoint_height_accepts() {
@@ -775,6 +1197,164 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn header_tie_local_read_failure_does_not_reject_header() {
+        let (_dir, inner) = blocked_branch_fixture(1, true);
+        let chain = inner.chain_state_meta();
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: Some(id(2)),
+        };
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(0),
+            &chain
+        ));
+    }
+
+    #[test]
+    fn header_tie_missing_ancestor_not_orphan() {
+        let (_dir, mut store) = blocked_branch_fixture(1, true);
+        store
+            .store_validated_header(
+                &id(3),
+                &[3; 8],
+                &HeaderMeta {
+                    parent_id: id(99),
+                    height: 3,
+                    cumulative_score: vec![3],
+                    pow_validity: 1,
+                    timestamp: 3,
+                },
+                None,
+            )
+            .unwrap();
+        let mut chain = store.chain_state_meta();
+        chain.best_header_id = id(99);
+        chain.best_header_score = vec![3];
+        assert!(!branch_session_blocked(&store, id(99), &chain).unwrap());
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(3u8),
+            id(0),
+            &chain
+        ));
+        assert!(!branch_session_eligible(&store, id(3), &chain).unwrap());
+    }
+
+    #[test]
+    fn header_tie_below_applied_fork_ineligible() {
+        let (_dir, mut store) = blocked_branch_fixture(1, true);
+        store.mark_session_invalid(id(2));
+        let mut chain = store.chain_state_meta();
+        chain.best_full_block_height = 1;
+        chain.best_full_block_id = id(9);
+        assert!(!header_is_new_best(
+            &store,
+            &BigUint::from(2u8),
+            id(1),
+            &chain
+        ));
+    }
+
+    #[test]
+    fn candidate_intermediate_mark_makes_branch_ineligible() {
+        let (_dir, mut store) = blocked_branch_fixture(1, true);
+        for (byte, parent, height) in [(4, 0, 1), (5, 4, 2)] {
+            store
+                .store_validated_header(
+                    &id(byte),
+                    &[byte; 8],
+                    &HeaderMeta {
+                        parent_id: id(parent),
+                        height,
+                        cumulative_score: vec![height as u8],
+                        pow_validity: 1,
+                        timestamp: u64::from(height),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        store.mark_session_invalid(id(4));
+        assert!(!branch_session_eligible(&store, id(5), &store.chain_state_meta()).unwrap());
+    }
+
+    #[test]
+    fn candidate_below_applied_height_stops_immediately() {
+        let (_dir, inner) = blocked_branch_fixture(1, false);
+        let mut chain = inner.chain_state_meta();
+        chain.best_full_block_height = 1;
+        chain.best_full_block_id = id(9);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!branch_session_eligible(&store, id(1), &chain).unwrap());
+        assert_eq!(store.reads.get(), 1);
+        store.reads.set(0);
+        assert!(!branch_session_blocked(&store, id(1), &chain).unwrap());
+        assert_eq!(store.reads.get(), 1);
+    }
+
+    #[test]
+    fn candidate_long_off_index_fork_bounds_reads() {
+        let (_dir, mut inner) = blocked_branch_fixture(1, true);
+        for h in 3..=200u8 {
+            inner
+                .store_validated_header(
+                    &id(h),
+                    &[h; 8],
+                    &HeaderMeta {
+                        parent_id: id(h - 1),
+                        height: u32::from(h),
+                        cumulative_score: vec![h],
+                        pow_validity: 1,
+                        timestamp: u64::from(h),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let mut chain = inner.chain_state_meta();
+        chain.best_full_block_height = 10;
+        chain.best_full_block_id = id(250);
+        let store = CountingStore {
+            inner,
+            reads: std::cell::Cell::new(0),
+            fail_on: None,
+        };
+        assert!(!branch_session_eligible(&store, id(200), &chain).unwrap());
+        assert!(
+            store.reads.get() <= SESSION_PROMOTION_SEARCH_DEPTH as usize,
+            "reads: {}",
+            store.reads.get()
+        );
+    }
+
+    #[test]
+    fn blocked_branch_durable_or_absent_mark_not_session_blocked() {
+        for (validity, marked) in [(1, false), (2, false), (3, false), (3, true)] {
+            let (_dir, store) = blocked_branch_fixture(validity, marked);
+            assert!(!branch_session_blocked(&store, id(2), &store.chain_state_meta()).unwrap());
+            assert!(!branch_session_blocked(&store, id(1), &store.chain_state_meta()).unwrap());
+        }
+    }
+
+    #[test]
+    fn blocked_branch_at_or_below_applied_tip_not_blocked() {
+        let (_dir, store) = blocked_branch_fixture(1, true);
+        let mut chain = store.chain_state_meta();
+        chain.best_full_block_height = 1;
+        chain.best_full_block_id = id(9);
+        assert!(!branch_session_blocked(&store, id(1), &chain).unwrap());
+        // The applied anchor needs no parent lookup, at this nonzero height.
+        assert!(!branch_session_blocked(&store, id(9), &chain).unwrap());
+    }
 
     #[test]
     fn checkpoint_mismatching_id_at_checkpoint_height_errors() {

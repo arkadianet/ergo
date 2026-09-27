@@ -259,8 +259,29 @@ fn rollback_restores_root_chain_state_at_target_height() {
     assert_eq!(store.chain_state().best_full_block_id, synth_header_id(3));
     assert_eq!(
         store.chain_state().best_header_score,
-        (3u64).to_be_bytes().to_vec(),
+        (5u64).to_be_bytes().to_vec(),
     );
+}
+
+#[test]
+fn rollback_without_marks_preserves_current_header_selection() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_at(tmp.path());
+    for h in 1..=5 {
+        apply_synth(&mut store, h);
+    }
+    let selected = store.chain_state.clone();
+    store.rollback_to(3).unwrap();
+    assert_eq!(store.chain_state.best_header_id, selected.best_header_id);
+    assert_eq!(
+        store.chain_state.best_header_height,
+        selected.best_header_height
+    );
+    assert_eq!(
+        store.chain_state.best_header_score,
+        selected.best_header_score
+    );
+    assert_eq!(store.height(), 3);
 }
 
 #[test]
@@ -273,10 +294,12 @@ fn rollback_to_genesis_restores_empty_state() {
     store.rollback_to(0).expect("rollback to genesis");
     assert_eq!(store.height(), 0);
     assert_eq!(store.root_digest(), TEST_GENESIS_DIGEST);
-    assert_eq!(store.chain_state().best_header_height, 0);
-    // Genesis restores the canonical empty-state score ([0]),
-    // matching `ChainState::empty()`.
-    assert_eq!(store.chain_state().best_header_score, vec![0]);
+    assert_eq!(store.chain_state().best_header_height, 3);
+    // Rolling back the applied state preserves header selection.
+    assert_eq!(
+        store.chain_state().best_header_score,
+        3u64.to_be_bytes().to_vec()
+    );
 }
 
 #[test]
@@ -297,7 +320,10 @@ fn rollback_to_genesis_then_reopen_boots_clean() {
     let store = open_at(tmp.path());
     assert_eq!(store.height(), 0);
     assert_eq!(store.root_digest(), TEST_GENESIS_DIGEST);
-    assert_eq!(store.chain_state().best_header_score, vec![0]);
+    assert_eq!(
+        store.chain_state().best_header_score,
+        3u64.to_be_bytes().to_vec()
+    );
 }
 
 #[test]
@@ -2070,5 +2096,22 @@ mod c2_bridge {
             "verifier rejection must mark the header session-invalid"
         );
         assert_eq!(store.height(), 4, "no state advance on rejection");
+    }
+}
+
+mod rollback_selection {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[test]
+    fn rollback_invalid_selected_header_rejects_committed_shape() {
+        let tmp = tempdir().unwrap();
+        let mut store = open_at(tmp.path());
+        apply_synth(&mut store, 1);
+        apply_synth(&mut store, 2);
+        store.chain_state.best_header_height = 0;
+        assert!(store.rollback_to(1).is_err());
+        assert_eq!(store.height(), 2);
     }
 }

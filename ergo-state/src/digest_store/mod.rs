@@ -26,9 +26,9 @@
 //!   current AT that height. The rollback substrate, analogous to
 //!   the role `LDBVersionedStore` plays in Scala's `DigestState`.
 //! - `CHAIN_STATE_HISTORY[height: u64] -> ChainStateMeta` — full
-//!   chain-state snapshot at that height, so rollback restores
-//!   `best_header_*`, `best_full_block_*`, `header_availability`
-//!   atomically with the digest.
+//!   chain-state snapshot at that height. Rollback restores `best_full_block_*`
+//!   and `header_availability` atomically with the digest, preserving current
+//!   `best_header_*` selection.
 //! - `STATE_META["root_digest"] -> [u8; 33]` — current root digest.
 //!   Reuses the existing `STATE_META` table with a key distinct from
 //!   Mode 1's `"root"` so a misopened store cannot confuse the two.
@@ -92,9 +92,8 @@ pub(crate) const DIGEST_HISTORY: TableDefinition<u64, &[u8]> =
     TableDefinition::new("digest_history");
 
 /// Per-height ledger of the full chain-state snapshot. Pairs with
-/// `DIGEST_HISTORY` so rollback restores `(root_digest,
-/// best_header_*, best_full_block_*, header_availability)`
-/// atomically.
+/// `DIGEST_HISTORY` so rollback restores `(root_digest, best_full_block_*,
+/// header_availability)` atomically, preserving current `best_header_*` selection.
 pub(crate) const CHAIN_STATE_HISTORY: TableDefinition<u64, &[u8]> =
     TableDefinition::new("chain_state_history");
 

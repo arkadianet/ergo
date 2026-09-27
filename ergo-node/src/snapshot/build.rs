@@ -60,13 +60,16 @@ pub(super) fn build_snapshot(
     };
 
     // Retain the rejection for diagnosis, but stop treating it as an active
-    // fault once committed blocks advance beyond its height. Elapsed time or
+    // fault once committed blocks pass its height or a sibling applies there.
+    // At equal height the applied tip is the chain-index ID. Elapsed time or
     // downloaded headers alone never establish recovery. A rollback below
     // that height makes the rejection unresolved again.
-    let rejecting = p
-        .last_block_apply_error
-        .as_ref()
-        .is_some_and(|error| error.height == 0 || p.best_full_block_height <= error.height);
+    let rejecting = p.last_block_apply_error.as_ref().is_some_and(|error| {
+        error.height == 0
+            || p.best_full_block_height < error.height
+            || (p.best_full_block_height == error.height
+                && hex32(&p.best_full_block_id) == error.block_id)
+    });
     // Terminal deep-fork wedge: strictly worse than Rejecting (nothing can
     // ever apply again without a resync), so it wins the overlay.
     let wedged = p.sync_wedged.is_some();
