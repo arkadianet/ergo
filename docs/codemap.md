@@ -1,6 +1,6 @@
 # Codebase map
 
-A landmark map of the 21-crate workspace. Every crate has a detailed page
+A landmark map of the 22-crate workspace. Every crate has a detailed page
 under [`codemap/`](./codemap/) — purpose, module-by-module responsibilities,
 key public types/traits/functions, owned invariants, and a “start here.”
 This index is the front door: find the crate, then open its page.
@@ -37,6 +37,7 @@ universal: `ergo-wallet-protocol` intentionally has neither.
 | **L7** | [ergo-rest-json](./codemap/ergo-rest-json.md) | 1.4K | JSON↔canonical-wire DTOs for the Scala-compat REST surface. |
 | **L7** | [ergo-indexer-types](./codemap/ergo-indexer-types.md) | 0.5K | Reader-side extra-index traits and DTOs, split out so the API does not depend on redb/state. |
 | **L8** Runtime | [ergo-node](./codemap/ergo-node.md) | 53K | Binary and embedded/API adapter: wires components, owns process lifecycle and the single-writer action loop, and hosts the wallet writer while delegating wallet core work to the service. |
+| **L8** Runtime | [ergo-walletd](./codemap/ergo-walletd.md) | 4.8K | Standalone watch-only wallet daemon: its own redb store, an HTTP chain client, a bounded sync/reorg loop, and a read-only local API on a Unix socket or loopback TCP. No secrets, no signing, no submit. |
 | **Dev** Tooling | [ergo-difftest](./codemap/ergo-difftest.md) | 7.5K | Dev/test-only differential and fuzz harness over wire decoders and generators. |
 
 ## Dependency graph
@@ -86,6 +87,10 @@ graph TD
   node --> wallet
   node --> service
   node --> sigma
+  walletd[ergo-walletd] --> service
+  walletd --> protocol
+  walletd --> wallet
+  walletd --> ser
 ```
 
 ## Dependency boundaries
@@ -104,6 +109,19 @@ graph TD
   are consumed transitively through the wallet and validation crates. It must
   not depend on `ergo-state`, `ergo-api`, `ergo-node`,
   `ergo-mempool`, `ergo-mining`, `ergo-sync`, `tokio`, or `axum`.
+- **`ergo-walletd`:** a separate process, not a node component. Its normal
+  workspace dependencies are `ergo-wallet`, `ergo-wallet-service`,
+  `ergo-wallet-protocol`, `ergo-primitives`, and `ergo-ser`. It must not depend
+  on `ergo-node`, `ergo-api`, `ergo-state`, `ergo-mempool`, `ergo-sync`, or
+  `ergo-chain-spec`: it reaches a node over `/api/v1/chain/*` HTTP, and its
+  network identity is config, not a chain-spec lookup. `ergo-node`, `ergo-api`,
+  and `ergo-state` **are** `[dev-dependencies]`, for the integration test alone:
+  it stands the real node chain API up in-process (real `StateStore`, real
+  `InProcessChainClient`, real `ergo-api` router with the real `api_key` gate)
+  so the daemon's own client and sync loop are exercised over real HTTP. A
+  dev-dependency never reaches the released binary's graph, so the normal
+  boundary above is unchanged — but moving any of those three into
+  `[dependencies]` would break it.
 - **Transitional edge:** `ergo-state -> ergo-wallet-service` is an intentional
   normal edge during phase 2. `ergo-state/src/wallet/` and selected
   `ergo-state/src/store` re-exports form a compatibility facade so the state
@@ -123,6 +141,7 @@ graph TD
 | Wallet protocol DTOs, ID/byte validation, or transport shapes | [ergo-wallet-protocol](./codemap/ergo-wallet-protocol.md) |
 | Wallet persistence, rescan/sync orchestration, box selection, or runtime core | [ergo-wallet-service](./codemap/ergo-wallet-service.md) |
 | The embedded wallet/API adapter and node wiring | [ergo-node](./codemap/ergo-node.md) |
+| The standalone watch-only wallet daemon, its config, or its read-only API | [ergo-walletd](./codemap/ergo-walletd.md) |
 | Proof-of-work / difficulty | [ergo-crypto](./codemap/ergo-crypto.md) |
 | Block production / the mining API | [ergo-mining](./codemap/ergo-mining.md) |
 | Mempool admission / ordering | [ergo-mempool](./codemap/ergo-mempool.md) |

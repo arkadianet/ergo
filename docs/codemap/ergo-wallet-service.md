@@ -23,11 +23,11 @@ contain `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`, `ergo-mining`,
 - `src/lib.rs` — module map and the service's public re-exports.
 - `src/state.rs` — in-memory `WalletState`, tracked-key caches, hydration, and
   lock-state projection.
-- `src/runtime.rs:71` — `WalletService`/`WalletRuntime`, status and balance
+- `src/runtime.rs:74` — `WalletService`/`WalletRuntime`, status and balance
   reads, bounded sync, and rescan orchestration.
-- `src/chain.rs:193` — object-safe `ChainClient` plus neutral tip, snapshot,
+- `src/chain.rs:312` — object-safe `ChainClient` plus neutral tip, snapshot,
   block-range, UTXO, and submit shapes used by the runtime.
-- `src/wallet/store.rs:52` — `WalletStore`/`WalletRead`/`WalletWrite` and the
+- `src/wallet/store.rs:170` — `WalletStore`/`WalletRead`/`WalletWrite` and the
   `RedbWalletStore` implementation.
 - `src/wallet/apply/` — chain-apply classification, scan tracking, maturity,
   and rollback hooks; these run inside the state's existing redb transaction.
@@ -50,7 +50,10 @@ contain `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`, `ergo-mining`,
 - `WalletStatus`, `RescanRequest`, `RescanReport` — status and bounded
   synchronization results.
 - `ChainClient`, `CommittedTip`, `BlocksSinceResponse` — transport-neutral
-  chain port used by rescan and runtime reads.
+  chain port used by rescan and runtime reads. `ChainClient::committed_tip_within`
+  is the bounded variant for read paths that must not block on a transport's
+  default deadline; the default implementation is the unbounded call, so a
+  transport opts in rather than being silently truncated.
 - `WalletState`, `HydrationSource` — in-memory wallet projection and its
   persistence input.
 - `WalletStore`, `WalletRead`, `WalletWrite`, `RedbWalletStore` — persistence
@@ -78,6 +81,14 @@ contain `ergo-state`, `ergo-api`, `ergo-node`, `ergo-mempool`, `ergo-mining`,
 - **Fail-closed recovery.** Apply generations, fences, rescan state, and the
   durable `scan_invalidated` flag prevent a partial or reorg-conflicted
   replay from silently advancing wallet state.
+- **Two-direction applied-header index.** The standalone store's applied-header
+  history is written in both directions in the same transaction —
+  `height -> block id` (`WALLET_APPLIED_HEADERS`) and `block id -> height`
+  (`WALLET_APPLIED_HEADER_IDS`) — so duplicate detection ("this block id is
+  already applied at another height") is a point lookup instead of a full scan
+  per applied block, and rollback/rescan truncation drops both. The reverse
+  table is derived state and is rebuilt at open if it is missing or out of
+  step, so a store written by an older build keeps duplicate detection.
 - **Transport neutrality.** The service exposes synchronous ports and owned
   values. It does not open sockets, spawn a tokio runtime, depend on axum, or
   know the node's command loop.

@@ -1,0 +1,1536 @@
+#![allow(clippy::result_large_err)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use ergo_ser::address::build_p2pk_tree_bytes;
+use ergo_wallet_service::wallet::scan::{RescanBlock, ScanRescanMatcher, WalletScanMatcher};
+use ergo_wallet_service::{
+    ChainBlock, ChainClientError, ChainCursor, CommittedTip, RescanState, ScanMatchRecord,
+    WalletService, WalletServiceError, WalletStoreError,
+};
+use thiserror::Error;
+
+use crate::tip::CachedNodeTip;
+
+const MAX_RETRY_ATTEMPTS: usize = 4;
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
+
+/// Consecutive ancestor (reorg) responses tolerated *without a single forward
+/// block in between*. This is not a rebuild budget: a chain that reorgs,
+/// advances, and reorgs again resets the counter on every forward block, so a
+/// normal reorg-heavy network never trips it. It only fires when the node keeps
+/// answering "rewind me" and never lets the wallet make progress, which is a
+/// protocol-level non-convergence, not a reorg. The old per-batch cap of 8
+/// ancestor responses (independent of progress) is deliberately gone: a
+/// legitimate chain can serve more than 8 reorgs in one batch.
+const MAX_UNPROGRESSIVE_REWINDS: u32 = 64;
+
+/// Upper bound for both sync knobs. Matches the node's own `blocks-since`
+/// request limit and the adapter's request validation, so a pass can never ask
+/// for a page the node would reject or that `validate_page` would refuse.
+pub const MAX_SYNC_BLOCKS: u32 = 1024;
+
+/// Blocks requested per `blocks-since` HTTP call, by default.
+///
+/// This is deliberately **not** the apply budget. The adapter refuses any
+/// response body over `MAX_RESPONSE_BODY_BYTES` (8 MiB), and the chain
+/// protocol carries every output box as a hex string, so a page's JSON body
+/// costs roughly twice the bytes of the blocks it carries. Consensus bounds one
+/// block's `BlockTransactions` section by the voted `maxBlockSize` parameter,
+/// and this node documents a `maxBlockSize = 2097152` (2 MiB) vote, so one
+/// maxed-out block is already 4 MiB of hex: two of them are 8 MiB *before* any
+/// JSON envelope, so a page of `2` is **not provably** under the cap while a
+/// page of `1` is — 4 MiB plus an envelope of a few hundred kilobytes, less
+/// than half the cap. That is the whole reason this is `1` and not `2`: the
+/// safe default is the largest page whose *worst legal* body still fits, and a
+/// real mainnet page is far smaller. A page sized from `sync_batch` (the old
+/// behaviour: `min(batch, remaining)`) could ask for up to 1024 blocks and
+/// simply hit the cap on any real chain.
+///
+/// Raising it is allowed and bounded (`1..=1024`), but it is an operator
+/// decision made against their own node's `maxBlockSize`, not a default.
+///
+/// A block too large even for a one-block page is **not** retried smaller: the
+/// daemon never shrinks a page, so `HttpChainClient` reports it as a terminal
+/// bounded error naming the cap and the page size (see `crate::chain_http`).
+pub const DEFAULT_BLOCKS_PER_PAGE: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub struct SyncConfig {
+    /// Maximum blocks **applied** per pass — the work budget of one
+    /// `sync_once`. Independent of how those blocks are fetched: a pass applies
+    /// up to `batch` blocks and may therefore issue several HTTP calls.
+    pub batch: u32,
+    /// Maximum blocks requested per `blocks-since` call. Bounds one response
+    /// body; see [`DEFAULT_BLOCKS_PER_PAGE`] for why it is separate from
+    /// `batch`.
+    pub page: u32,
+    pub retry_delay: Duration,
+    pub max_retry_delay: Duration,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            batch: 256,
+            page: DEFAULT_BLOCKS_PER_PAGE,
+            retry_delay: Duration::from_millis(250),
+            max_retry_delay: MAX_RETRY_DELAY,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    pub from_height: u32,
+    pub wallet_height: u32,
+    pub blocks_processed: u32,
+    pub completed: bool,
+    pub tip: CommittedTip,
+}
+
+#[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("wallet sync cancelled")]
+    Cancelled,
+    #[error("wallet store failure: {0}")]
+    Store(#[from] WalletStoreError),
+    #[error("wallet service failure: {0}")]
+    Service(#[from] WalletServiceError),
+    #[error("chain failure: {0}")]
+    Chain(#[from] ChainClientError),
+    #[error("chain protocol failure: {0}")]
+    Protocol(String),
+    #[error("chain history is pruned at minimum height {0}")]
+    Pruned(u32),
+}
+
+impl SyncError {
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Chain(error) if is_retryable(error))
+    }
+}
+
+pub struct StandaloneSyncer {
+    service: Arc<WalletService>,
+    config: SyncConfig,
+    tip: Arc<CachedNodeTip>,
+    fail_next_commit: Arc<AtomicBool>,
+    cancelled: AtomicBool,
+    #[cfg(test)]
+    panic_next_commit: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+struct SyncStart {
+    cursor: ChainCursor,
+    rebuild: bool,
+    from_height: u32,
+}
+
+impl StandaloneSyncer {
+    pub fn new(service: Arc<WalletService>, config: SyncConfig, tip: Arc<CachedNodeTip>) -> Self {
+        Self {
+            service,
+            config,
+            tip,
+            fail_next_commit: Arc::new(AtomicBool::new(false)),
+            cancelled: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_next_commit: AtomicBool::new(false),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.service.chain().cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn check_cancelled(&self) -> Result<(), SyncError> {
+        if self.is_cancelled() {
+            Err(SyncError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn inject_next_commit_failure(&self) {
+        self.fail_next_commit.store(true, Ordering::SeqCst);
+    }
+
+    pub fn service(&self) -> &Arc<WalletService> {
+        &self.service
+    }
+
+    pub fn sync_once(&self) -> Result<SyncReport, SyncError> {
+        match self.sync_once_inner() {
+            Ok(report) => Ok(report),
+            Err(_) if self.is_cancelled() => {
+                self.clear_running()?;
+                Err(SyncError::Cancelled)
+            }
+            Err(SyncError::Cancelled) => {
+                self.clear_running()?;
+                Err(SyncError::Cancelled)
+            }
+            Err(error) if error.retryable() => {
+                self.clear_running()?;
+                Err(error)
+            }
+            Err(SyncError::Pruned(minimum_height)) => {
+                Err(self.fail(SyncError::Pruned(minimum_height)))
+            }
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn sync_once_inner(&self) -> Result<SyncReport, SyncError> {
+        self.check_cancelled()?;
+        if self.config.batch == 0 || self.config.batch > MAX_SYNC_BLOCKS {
+            return Err(SyncError::Protocol(format!(
+                "sync batch must be between 1 and {MAX_SYNC_BLOCKS}"
+            )));
+        }
+        if self.config.page == 0 || self.config.page > MAX_SYNC_BLOCKS {
+            return Err(SyncError::Protocol(format!(
+                "blocks page size must be between 1 and {MAX_SYNC_BLOCKS}"
+            )));
+        }
+        let start = self.initial_cursor()?;
+        let mut full_rebuild = start.rebuild && start.cursor.is_genesis_sentinel();
+        let mut cursor = start.cursor;
+        let mut rebuild = start.rebuild;
+        let mut rebuild_origin = start.rebuild;
+        let mut from_height = start.from_height;
+        let mut tip = self.tip()?;
+        let mut processed = 0u32;
+        let mut rewinds_without_progress = 0u32;
+        let mut full_rebuilds = 0u32;
+        let mut reorgs = 0u32;
+        // `Running` is published *below* the at-tip check, not here: a
+        // caught-up daemon has no work to report, and writing `Running` only to
+        // overwrite it with `Idle` on the same idle tick costs a durable write
+        // every `sync_interval` forever. The reorg branches publish their own
+        // `Running` with the post-rewind `from_height`, so this stays true
+        // across them.
+        let mut running_published = false;
+
+        loop {
+            self.check_cancelled()?;
+            if rebuild {
+                self.prepare_rebuild(&mut cursor, full_rebuild)?;
+                rebuild = false;
+                full_rebuild = false;
+            }
+            if cursor.height == tip.height && cursor.header_id == tip.header_id {
+                self.finish_rebuild(rebuild_origin)?;
+                self.persist_state(RescanState::Idle)?;
+                return Ok(SyncReport {
+                    from_height,
+                    wallet_height: cursor.height,
+                    blocks_processed: processed,
+                    completed: true,
+                    tip,
+                });
+            }
+            if processed >= self.config.batch {
+                return Ok(SyncReport {
+                    from_height,
+                    wallet_height: cursor.height,
+                    blocks_processed: processed,
+                    completed: false,
+                    tip,
+                });
+            }
+            if !running_published {
+                self.persist_state(RescanState::Running { from_height })?;
+                running_published = true;
+            }
+
+            let remaining = tip.height.saturating_sub(cursor.height).saturating_add(1);
+            // Two independent ceilings: the page budget bounds this one
+            // response body, the apply budget bounds the whole pass.
+            let limit = remaining
+                .min(self.config.page)
+                .min(self.config.batch - processed);
+            let response = if cursor.height > tip.height {
+                match self.probe_ancestor(&tip, limit, &mut rewinds_without_progress)? {
+                    Some(response) => response,
+                    None => {
+                        if full_rebuilds > 0 {
+                            return Err(SyncError::Protocol(
+                                "no retained ancestor after full rebuild".to_string(),
+                            ));
+                        }
+                        full_rebuilds += 1;
+                        rebuild = true;
+                        full_rebuild = true;
+                        rebuild_origin = true;
+                        from_height = 0;
+                        self.persist_state(RescanState::Running { from_height })?;
+                        continue;
+                    }
+                }
+            } else {
+                self.blocks_since(cursor.clone(), limit)?
+            };
+            self.check_cancelled()?;
+            match response {
+                ergo_wallet_service::BlocksSinceResponse::Forward(forward) => {
+                    if forward.tip.height < tip.height {
+                        return Err(SyncError::Chain(ChainClientError::stale_tip(
+                            tip,
+                            forward.tip,
+                        )));
+                    }
+                    if forward.tip.height < cursor.height {
+                        return Err(SyncError::Protocol(
+                            "chain page tip is behind the wallet cursor".to_string(),
+                        ));
+                    }
+                    tip = forward.tip;
+                    validate_page(&cursor, &forward.blocks, &tip, limit)?;
+                    if forward.blocks.is_empty() {
+                        if cursor.height < tip.height {
+                            return Err(SyncError::Protocol(
+                                "chain returned an empty page before the tip".to_string(),
+                            ));
+                        }
+                        continue;
+                    }
+                    let (tracked_trees, cached_pubkeys) = self.tracked_keys()?;
+                    let matcher = WalletScanMatcher::from_store(self.service.store().as_ref())?;
+                    for block in forward.blocks {
+                        self.check_cancelled()?;
+                        let height = block.height;
+                        let rescan_block = self.service.convert_block(block).map_err(|error| {
+                            SyncError::Protocol(format!("block conversion failed: {error}"))
+                        })?;
+                        let records = scan_records(&matcher, height, &rescan_block)?;
+                        let mut write = self.service.store().begin_write()?;
+                        write.apply_rescan_block(
+                            height,
+                            &tracked_trees,
+                            &cached_pubkeys,
+                            &rescan_block,
+                            records.as_deref(),
+                        )?;
+                        self.check_cancelled()?;
+                        write.commit()?;
+                        #[cfg(test)]
+                        if self.panic_next_commit.swap(false, Ordering::SeqCst) {
+                            panic!("injected panic after wallet commit");
+                        }
+                        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
+                            return Err(SyncError::Protocol(
+                                "injected post-commit failure".to_string(),
+                            ));
+                        }
+                        cursor = ChainCursor {
+                            height,
+                            header_id: rescan_block.block_id,
+                        };
+                        processed = processed.saturating_add(1);
+                        if processed >= self.config.batch {
+                            break;
+                        }
+                    }
+                    // Forward progress was made: a following reorg is a normal
+                    // chain event, not a non-converging loop.
+                    rewinds_without_progress = 0;
+                }
+                ergo_wallet_service::BlocksSinceResponse::Ancestor(ancestor) => {
+                    // A reorg is only actionable if it actually rewinds: an
+                    // ancestor at or above the wallet cursor is a protocol
+                    // violation, not a reorg.
+                    if ancestor.ancestor.height > cursor.height
+                        || ancestor.ancestor.height > ancestor.tip.height
+                    {
+                        return Err(SyncError::Protocol(
+                            "chain ancestor is ahead of the wallet cursor or committed tip"
+                                .to_string(),
+                        ));
+                    }
+                    rewinds_without_progress = rewinds_without_progress.saturating_add(1);
+                    if rewinds_without_progress > MAX_UNPROGRESSIVE_REWINDS {
+                        return Err(SyncError::Protocol(format!(
+                            "chain returned {} consecutive rewinds without applying a block",
+                            rewinds_without_progress
+                        )));
+                    }
+                    reorgs = reorgs.saturating_add(1);
+                    let from = cursor.height;
+                    match self.service.rewind_to_ancestor(ancestor.ancestor.clone()) {
+                        Ok(()) => {
+                            tracing::warn!(
+                                wallet_height = from,
+                                ancestor_height = ancestor.ancestor.height,
+                                node_tip = ancestor.tip.height,
+                                reorg = reorgs,
+                                "chain reorg: rewinding wallet to the common ancestor"
+                            );
+                            cursor = ancestor.ancestor;
+                            processed = 0;
+                            from_height = cursor.height.saturating_add(1);
+                            self.persist_state(RescanState::Running { from_height })?;
+                        }
+                        Err(WalletServiceError::RewindUnavailable(reason)) => {
+                            // The ancestor is outside the wallet's retained
+                            // history. One full rebuild can recover from that;
+                            // a second one cannot, so this is a terminal
+                            // deeper-than-history condition.
+                            if full_rebuilds > 0 {
+                                return Err(SyncError::Protocol(format!(
+                                    "chain reorg to height {} is deeper than retained history: {reason}",
+                                    ancestor.ancestor.height
+                                )));
+                            }
+                            full_rebuilds = full_rebuilds.saturating_add(1);
+                            tracing::warn!(
+                                wallet_height = from,
+                                ancestor_height = ancestor.ancestor.height,
+                                node_tip = ancestor.tip.height,
+                                reorg = reorgs,
+                                "chain reorg: ancestor is outside retained history, rebuilding from genesis"
+                            );
+                            rebuild = true;
+                            full_rebuild = true;
+                            rebuild_origin = true;
+                            from_height = 0;
+                            self.persist_state(RescanState::Running { from_height })?;
+                        }
+                        Err(error) => return Err(SyncError::Service(error)),
+                    }
+                    tip = self.tip()?;
+                }
+                ergo_wallet_service::BlocksSinceResponse::Pruned(pruned) => {
+                    return Err(SyncError::Pruned(pruned.minimum_height));
+                }
+            }
+        }
+    }
+
+    // A node cannot resolve an above-tip cursor. Probe our own retained
+    // headers instead; a Forward answer proves that probe is canonical.
+    fn probe_ancestor(
+        &self,
+        tip: &CommittedTip,
+        limit: u32,
+        attempts: &mut u32,
+    ) -> Result<Option<ergo_wallet_service::BlocksSinceResponse>, SyncError> {
+        use ergo_wallet_service::{AncestorBlocksSince, BlocksSinceResponse};
+        let mut ceiling = tip.height;
+        let mut rejected = false;
+        loop {
+            self.check_cancelled()?;
+            let header = self
+                .service
+                .store()
+                .read()?
+                .applied_header_at_or_below(ceiling)?;
+            let Some((height, header_id)) = header else {
+                if rejected {
+                    return Err(SyncError::Protocol(
+                        "node rejected all retained ancestor probes".to_string(),
+                    ));
+                }
+                return Ok(None);
+            };
+            *attempts = attempts.saturating_add(1);
+            if *attempts > MAX_UNPROGRESSIVE_REWINDS {
+                return Err(SyncError::Protocol(
+                    "ancestor probe/rewind limit exceeded without forward progress".to_string(),
+                ));
+            }
+            let probe = ChainCursor { height, header_id };
+            match self.blocks_since(probe.clone(), limit) {
+                Ok(BlocksSinceResponse::Forward(forward)) => {
+                    validate_page(&probe, &forward.blocks, &forward.tip, limit)?;
+                    if forward.tip.height < probe.height {
+                        return Err(SyncError::Protocol(
+                            "probe is above response tip".to_string(),
+                        ));
+                    }
+                    return Ok(Some(BlocksSinceResponse::Ancestor(AncestorBlocksSince {
+                        tip: forward.tip,
+                        ancestor: probe,
+                    })));
+                }
+                Ok(BlocksSinceResponse::Ancestor(ancestor)) => {
+                    if ancestor.ancestor.height > probe.height {
+                        return Err(SyncError::Protocol("ancestor is above probe".to_string()));
+                    }
+                    return Ok(Some(BlocksSinceResponse::Ancestor(ancestor)));
+                }
+                Err(SyncError::Chain(ChainClientError::UnsupportedHistory { .. })) => {
+                    rejected = true;
+                    if height == 0 {
+                        return Err(SyncError::Protocol(
+                            "node rejected all retained ancestor probes".to_string(),
+                        ));
+                    }
+                    ceiling = height - 1;
+                }
+                other => return other.map(Some),
+            }
+        }
+    }
+
+    fn clear_running(&self) -> Result<(), SyncError> {
+        let state = self.service.store().read()?.rescan_state()?;
+        if matches!(state, RescanState::Running { .. }) {
+            self.persist_state(RescanState::Idle)?;
+        }
+        Ok(())
+    }
+
+    fn initial_cursor(&self) -> Result<SyncStart, SyncError> {
+        let read = self.service.store().read()?;
+        let invalidated = read.scan_invalidated()?;
+        let cursor = read.scan_cursor()?;
+        drop(read);
+        match cursor {
+            None => Ok(SyncStart {
+                cursor: ChainCursor::genesis(),
+                rebuild: true,
+                from_height: 0,
+            }),
+            Some(cursor) if cursor.height == 0 && cursor.header_id.is_none() => Ok(SyncStart {
+                cursor: ChainCursor::genesis(),
+                rebuild: invalidated,
+                from_height: 0,
+            }),
+            Some(cursor) => {
+                let header_id = cursor.header_id.ok_or_else(|| {
+                    SyncError::Protocol("positive wallet cursor has no header identity".to_string())
+                })?;
+                Ok(SyncStart {
+                    cursor: ChainCursor {
+                        height: cursor.height,
+                        header_id,
+                    },
+                    rebuild: invalidated,
+                    from_height: if invalidated {
+                        0
+                    } else {
+                        cursor.height.saturating_add(1)
+                    },
+                })
+            }
+        }
+    }
+
+    fn prepare_rebuild(
+        &self,
+        cursor: &mut ChainCursor,
+        full_rebuild: bool,
+    ) -> Result<(), SyncError> {
+        let mut write = self.service.store().begin_write()?;
+        if full_rebuild {
+            write.prepare_rescan(0, true)?;
+            *cursor = ChainCursor::genesis();
+        } else {
+            write.prepare_rescan(cursor.height.saturating_add(1), false)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    fn finish_rebuild(&self, was_rebuild: bool) -> Result<(), SyncError> {
+        if !was_rebuild {
+            return Ok(());
+        }
+        let read = self.service.store().read()?;
+        let invalidated = read.scan_invalidated()?;
+        drop(read);
+        if !invalidated {
+            return Ok(());
+        }
+        let mut write = self.service.store().begin_write()?;
+        write.finish_rescan(0)?;
+        write.commit()?;
+        Ok(())
+    }
+
+    fn tip(&self) -> Result<CommittedTip, SyncError> {
+        let tip = self
+            .retry(|| self.service.chain().committed_tip())
+            .map_err(map_chain_error)?;
+        // Publish for the read API so a local `/status` read never has to probe
+        // the node itself.
+        self.tip.record(tip.clone());
+        Ok(tip)
+    }
+
+    fn blocks_since(
+        &self,
+        cursor: ChainCursor,
+        limit: u32,
+    ) -> Result<ergo_wallet_service::BlocksSinceResponse, SyncError> {
+        self.retry(|| {
+            self.service
+                .chain()
+                .blocks_since(ergo_wallet_service::BlocksSinceRequest {
+                    cursor: cursor.clone(),
+                    limit,
+                })
+        })
+        .map_err(map_chain_error)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn tracked_keys(&self) -> Result<(BTreeSet<Vec<u8>>, BTreeMap<u64, [u8; 33]>), SyncError> {
+        let read = self.service.store().read()?;
+        let tracked = read.tracked_pubkeys_with_paths()?;
+        drop(read);
+        let mut trees = BTreeSet::new();
+        let mut pubkeys = BTreeMap::new();
+        for (index, pubkey, _) in tracked {
+            let tree = build_p2pk_tree_bytes(&pubkey).map_err(|error| {
+                SyncError::Protocol(format!("tracked public key {index} is invalid: {error:?}"))
+            })?;
+            trees.insert(tree);
+            pubkeys.insert(index, pubkey);
+        }
+        Ok((trees, pubkeys))
+    }
+
+    fn persist_state(&self, state: RescanState) -> Result<(), SyncError> {
+        let mut write = self.service.store().begin_write()?;
+        write.set_rescan_state(&state)?;
+        write.commit()?;
+        Ok(())
+    }
+
+    fn retry<T, F>(&self, mut operation: F) -> Result<T, ChainClientError>
+    where
+        F: FnMut() -> Result<T, ChainClientError>,
+    {
+        let mut attempt = 0usize;
+        let mut delay = self.config.retry_delay;
+        loop {
+            if self.is_cancelled() {
+                return Err(ChainClientError::ShuttingDown(
+                    "wallet daemon shutdown".to_string(),
+                ));
+            }
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if is_retryable(&error) && attempt + 1 < MAX_RETRY_ATTEMPTS => {
+                    // Retryable only: the error string is generated locally by
+                    // the chain adapter, never a node response body.
+                    tracing::warn!(
+                        error = %error,
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRY_ATTEMPTS,
+                        delay_ms = delay.min(self.config.max_retry_delay).as_millis() as u64,
+                        "chain request failed; retrying"
+                    );
+                    if !delay.is_zero() {
+                        let deadline =
+                            std::time::Instant::now() + delay.min(self.config.max_retry_delay);
+                        while !self.is_cancelled() && std::time::Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(10).min(
+                                deadline.saturating_duration_since(std::time::Instant::now()),
+                            ));
+                        }
+                    }
+                    delay = delay.saturating_mul(2).min(self.config.max_retry_delay);
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn fail(&self, error: SyncError) -> SyncError {
+        let height = self
+            .service
+            .store()
+            .read()
+            .ok()
+            .and_then(|read| {
+                read.scan_cursor()
+                    .ok()
+                    .flatten()
+                    .map(|cursor| cursor.height)
+            })
+            .unwrap_or(0);
+        // Terminal: syncing stops while the read API retains the failure, so it
+        // is logged at error level. Protocol violations and pruned history are
+        // operator-actionable; the text is generated locally.
+        tracing::error!(
+            error = %error,
+            wallet_height = height,
+            terminal = true,
+            "wallet sync failed; status remains available"
+        );
+        let reason = error.to_string();
+        if let Ok(mut write) = self.service.store().begin_write() {
+            if matches!(error, SyncError::Pruned(_)) {
+                let _ = write.set_scan_invalidated(true);
+            }
+            let _ = write.set_rescan_state(&RescanState::Failed { height, reason });
+            let _ = write.commit();
+        }
+        error
+    }
+}
+
+fn map_chain_error(error: ChainClientError) -> SyncError {
+    match error {
+        ChainClientError::HistoryPruned {
+            minimum_height: Some(minimum_height),
+        } => SyncError::Pruned(minimum_height),
+        ChainClientError::HistoryPruned {
+            minimum_height: None,
+        } => SyncError::Protocol(
+            "chain reported pruned history without a minimum height".to_string(),
+        ),
+        // A protocol failure — a malformed page, a response over the byte cap,
+        // a continuity break — is this daemon's own invariant vocabulary, not
+        // a transport condition, so it is terminal in the same way either way
+        // and reads without the doubled "chain failure: chain protocol
+        // failure:" prefix. It is never retried: `Protocol` has no retryable
+        // arm, and a smaller page is not something the daemon will ask for.
+        ChainClientError::Protocol(detail) => SyncError::Protocol(detail),
+        other => SyncError::Chain(other),
+    }
+}
+
+fn is_retryable(error: &ChainClientError) -> bool {
+    matches!(
+        error,
+        ChainClientError::Transport(_)
+            | ChainClientError::Unavailable(_)
+            | ChainClientError::Timeout(_)
+            | ChainClientError::Overloaded(_)
+            | ChainClientError::ShuttingDown(_)
+            | ChainClientError::Conflict
+            | ChainClientError::StaleTip { .. }
+    )
+}
+
+fn validate_page(
+    cursor: &ChainCursor,
+    blocks: &[ChainBlock],
+    tip: &CommittedTip,
+    limit: u32,
+) -> Result<(), SyncError> {
+    if blocks.len() > limit as usize || blocks.len() > MAX_SYNC_BLOCKS as usize {
+        return Err(SyncError::Protocol(
+            "chain returned more blocks than requested".to_string(),
+        ));
+    }
+    let mut page_cursor = cursor.clone();
+    for block in blocks {
+        if block.height > tip.height {
+            return Err(SyncError::Protocol(
+                "chain page contains a block above its tip".to_string(),
+            ));
+        }
+        validate_block(&page_cursor, block)?;
+        page_cursor.height = block.height;
+        page_cursor.header_id = block.block_id;
+    }
+    if let Some(last) = blocks.last() {
+        if last.height == tip.height && last.block_id != tip.header_id {
+            return Err(SyncError::Protocol(
+                "chain page tip block id does not match the reported tip".to_string(),
+            ));
+        }
+    } else if cursor.height == tip.height && cursor.header_id != tip.header_id {
+        return Err(SyncError::Protocol(
+            "empty chain page does not match the reported tip".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_block(cursor: &ChainCursor, block: &ChainBlock) -> Result<(), SyncError> {
+    let expected_height = cursor.height.saturating_add(1);
+    if block.height != expected_height {
+        return Err(SyncError::Protocol(format!(
+            "block height {} does not match expected {expected_height}",
+            block.height
+        )));
+    }
+    if cursor.height > 0 && block.parent_id != cursor.header_id {
+        return Err(SyncError::Protocol(format!(
+            "block parent mismatch at height {}",
+            block.height
+        )));
+    }
+    if block.height > 0 && block.block_id == [0; 32] {
+        return Err(SyncError::Protocol(format!(
+            "positive-height block {} has a zero block id",
+            block.height
+        )));
+    }
+    Ok(())
+}
+
+fn scan_records(
+    matcher: &WalletScanMatcher,
+    height: u32,
+    block: &RescanBlock,
+) -> Result<Option<Vec<ScanMatchRecord>>, SyncError> {
+    if matcher.registry().is_empty() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    let mut metadata = Vec::new();
+    for transaction in &block.txs {
+        for output in &transaction.outputs {
+            bytes.push(output.box_bytes.as_slice());
+            metadata.push((output.box_id, output.output_index));
+        }
+    }
+    let matches = matcher
+        .match_boxes(&bytes)
+        .map_err(|reason| SyncError::Protocol(format!("scan matcher failed: {reason}")))?;
+    if matches.len() != bytes.len() {
+        return Err(SyncError::Protocol(
+            "scan matcher returned the wrong result count".to_string(),
+        ));
+    }
+    Ok(Some(
+        metadata
+            .into_iter()
+            .zip(matches)
+            .zip(bytes)
+            .filter(|((_, scan_ids), _)| !scan_ids.is_empty())
+            .map(
+                |(((box_id, output_index), scan_ids), box_bytes)| ScanMatchRecord {
+                    box_id,
+                    scan_ids,
+                    box_bytes: box_bytes.to_vec(),
+                    inclusion_height: height,
+                    creation_out_index: output_index,
+                },
+            )
+            .collect(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_wallet_service::{ChainClient, RedbWalletStore, WalletStore};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FakeState {
+        tip: CommittedTip,
+        responses: Arc<Mutex<Vec<ergo_wallet_service::BlocksSinceResponse>>>,
+        tip_calls: Arc<Mutex<usize>>,
+        requests: Arc<Mutex<Vec<(u32, u32)>>>,
+        dynamic: bool,
+        error: Option<ChainClientError>,
+    }
+
+    struct FakeClient {
+        state: FakeState,
+    }
+
+    impl ChainClient for FakeClient {
+        fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+            *self.state.tip_calls.lock().unwrap() += 1;
+            Ok(self.state.tip.clone())
+        }
+
+        fn snapshot(&self) -> Result<ergo_wallet_service::ChainSnapshot, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+
+        fn blocks_since(
+            &self,
+            request: ergo_wallet_service::BlocksSinceRequest,
+        ) -> Result<ergo_wallet_service::BlocksSinceResponse, ChainClientError> {
+            self.state
+                .requests
+                .lock()
+                .unwrap()
+                .push((request.cursor.height, request.limit));
+            if request.cursor.height > self.state.tip.height {
+                return Err(ChainClientError::stale_tip(
+                    CommittedTip::new(request.cursor.height, request.cursor.header_id),
+                    self.state.tip.clone(),
+                ));
+            }
+            if let Some(error) = &self.state.error {
+                return Err(error.clone());
+            }
+            let mut responses = self.state.responses.lock().unwrap();
+            if responses.is_empty() && self.state.dynamic {
+                let first = request.cursor.height.saturating_add(1);
+                let last = self
+                    .state
+                    .tip
+                    .height
+                    .min(first.saturating_add(request.limit.saturating_sub(1)));
+                let blocks = (first..=last)
+                    .map(|height| block(height, height.saturating_sub(1) as u8))
+                    .collect();
+                return Ok(ergo_wallet_service::BlocksSinceResponse::Forward(
+                    ergo_wallet_service::ForwardBlocksSince {
+                        tip: self.state.tip.clone(),
+                        blocks,
+                    },
+                ));
+            }
+            if responses.is_empty() {
+                Ok(ergo_wallet_service::BlocksSinceResponse::Forward(
+                    ergo_wallet_service::ForwardBlocksSince {
+                        tip: self.state.tip.clone(),
+                        blocks: Vec::new(),
+                    },
+                ))
+            } else {
+                Ok(responses.remove(0))
+            }
+        }
+
+        fn lookup_utxo(
+            &self,
+            _box_id: [u8; 32],
+            _expected_tip: CommittedTip,
+        ) -> Result<ergo_wallet_service::UtxoLookup, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+
+        fn submit(
+            &self,
+            _request: ergo_wallet_service::SubmitRequest,
+        ) -> Result<ergo_wallet_service::SubmitResponse, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+    }
+
+    fn block(height: u32, parent: u8) -> ChainBlock {
+        ChainBlock {
+            block_id: [height as u8; 32],
+            height,
+            parent_id: [parent; 32],
+            transactions: Vec::new(),
+        }
+    }
+
+    type RequestLog = Arc<Mutex<Vec<(u32, u32)>>>;
+
+    fn syncer_with_log(
+        dir: &tempfile::TempDir,
+        responses: Vec<ergo_wallet_service::BlocksSinceResponse>,
+        tip: CommittedTip,
+    ) -> (StandaloneSyncer, RequestLog) {
+        syncer_with_error_and_log(dir, responses, tip, None)
+    }
+
+    fn syncer_with_error_and_log(
+        dir: &tempfile::TempDir,
+        responses: Vec<ergo_wallet_service::BlocksSinceResponse>,
+        tip: CommittedTip,
+        error: Option<ChainClientError>,
+    ) -> (StandaloneSyncer, RequestLog) {
+        let store =
+            Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeState {
+            tip,
+            responses: Arc::new(Mutex::new(responses)),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: requests.clone(),
+            dynamic: false,
+            error,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let service = Arc::new(WalletService::new(store, chain.clone()));
+        (
+            StandaloneSyncer::new(
+                service,
+                SyncConfig {
+                    batch: 16,
+                    page: 16,
+                    retry_delay: Duration::ZERO,
+                    max_retry_delay: Duration::ZERO,
+                },
+                Arc::new(CachedNodeTip::new(chain)),
+            ),
+            requests,
+        )
+    }
+
+    fn syncer(
+        dir: &tempfile::TempDir,
+        responses: Vec<ergo_wallet_service::BlocksSinceResponse>,
+        tip: CommittedTip,
+    ) -> StandaloneSyncer {
+        syncer_with_log(dir, responses, tip).0
+    }
+
+    #[test]
+    fn forward_sync_is_incremental_and_persists_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(2, [2; 32]);
+        let syncer = syncer(
+            &dir,
+            vec![ergo_wallet_service::BlocksSinceResponse::Forward(
+                ergo_wallet_service::ForwardBlocksSince {
+                    tip: tip.clone(),
+                    blocks: vec![block(1, 0), block(2, 1)],
+                },
+            )],
+            tip.clone(),
+        );
+        let report = syncer.sync_once().unwrap();
+        assert_eq!(report.blocks_processed, 2);
+        assert_eq!(report.wallet_height, 2);
+        let read = syncer.service().store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 2);
+        assert_eq!(
+            read.scan_cursor().unwrap().unwrap().header_id,
+            Some([2; 32])
+        );
+        assert!(!read.scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn rebuild_progress_advances_across_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(20, [20; 32]);
+        let store =
+            Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        write.commit().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeState {
+            tip: tip.clone(),
+            responses: Arc::new(Mutex::new(Vec::new())),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: requests.clone(),
+            dynamic: true,
+            error: None,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let service = Arc::new(WalletService::new(store, chain.clone()));
+        let syncer = StandaloneSyncer::new(
+            service,
+            SyncConfig {
+                batch: 4,
+                page: 4,
+                retry_delay: Duration::ZERO,
+                max_retry_delay: Duration::ZERO,
+            },
+            Arc::new(CachedNodeTip::new(chain)),
+        );
+        for (index, (expected, completed)) in
+            [(4, false), (8, false), (12, false), (16, false), (20, true)]
+                .into_iter()
+                .enumerate()
+        {
+            let report = syncer.sync_once().unwrap();
+            assert_eq!(report.wallet_height, expected, "batch {index}");
+            assert_eq!(report.completed, completed, "batch {index}");
+            let read = syncer.service().store().read().unwrap();
+            assert_eq!(read.scan_cursor().unwrap().unwrap().height, expected);
+            assert_eq!(read.scan_invalidated().unwrap(), !completed);
+        }
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests, vec![(0, 4), (4, 4), (8, 4), (12, 4), (16, 4)]);
+    }
+
+    #[test]
+    fn ancestor_rewinds_and_uses_returned_cursor() {
+        assert_ancestor_rewind(3);
+    }
+
+    #[test]
+    fn node_tip_below_cursor_rewinds_to_ancestor_and_resumes() {
+        assert_ancestor_rewind(5);
+    }
+
+    fn assert_ancestor_rewind(initial_height: u32) {
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(3, [30; 32]);
+        let store =
+            Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        for height in 1..=initial_height {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: Vec::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.finish_rescan(0).unwrap();
+        write.commit().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeState {
+            tip: tip.clone(),
+            responses: Arc::new(Mutex::new(vec![
+                ergo_wallet_service::BlocksSinceResponse::Ancestor(
+                    ergo_wallet_service::AncestorBlocksSince {
+                        tip: tip.clone(),
+                        ancestor: ChainCursor {
+                            height: 1,
+                            header_id: [1; 32],
+                        },
+                    },
+                ),
+                ergo_wallet_service::BlocksSinceResponse::Forward(
+                    ergo_wallet_service::ForwardBlocksSince {
+                        tip: tip.clone(),
+                        blocks: vec![
+                            ChainBlock {
+                                block_id: [21; 32],
+                                height: 2,
+                                parent_id: [1; 32],
+                                transactions: Vec::new(),
+                            },
+                            ChainBlock {
+                                block_id: [30; 32],
+                                height: 3,
+                                parent_id: [21; 32],
+                                transactions: Vec::new(),
+                            },
+                        ],
+                    },
+                ),
+            ])),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: requests.clone(),
+            dynamic: false,
+            error: None,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let service = Arc::new(WalletService::new(store, chain.clone()));
+        let syncer = StandaloneSyncer::new(
+            service,
+            SyncConfig {
+                batch: 16,
+                page: 16,
+                retry_delay: Duration::ZERO,
+                max_retry_delay: Duration::ZERO,
+            },
+            Arc::new(CachedNodeTip::new(chain)),
+        );
+        let report = syncer.sync_once().unwrap();
+        assert_eq!(report.wallet_height, 3);
+        assert_eq!(report.blocks_processed, 2);
+        assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap(),
+            RescanState::Idle
+        );
+        assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .chain_index_header(initial_height.max(4))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![(initial_height.min(3), 1), (1, 3)]
+        );
+        assert_eq!(
+            syncer
+                .service()
+                .store()
+                .read()
+                .unwrap()
+                .scan_cursor()
+                .unwrap()
+                .unwrap()
+                .header_id,
+            Some([30; 32])
+        );
+    }
+
+    fn seed_wallet(syncer: &StandaloneSyncer, height: u32) {
+        let mut write = syncer.service.store().begin_write().unwrap();
+        write.prepare_rescan(0, true).unwrap();
+        for height in 1..=height {
+            write
+                .apply_rescan_block(
+                    height,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: vec![],
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        write.finish_rescan(0).unwrap();
+        write.commit().unwrap();
+    }
+
+    #[test]
+    fn retryable_error_after_running_restores_idle_and_preserves_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_error_and_log(
+            &dir,
+            vec![],
+            CommittedTip::new(3, [3; 32]),
+            Some(ChainClientError::Conflict),
+        );
+        seed_wallet(&syncer, 1);
+        let before = syncer
+            .service
+            .store()
+            .read()
+            .unwrap()
+            .scan_cursor()
+            .unwrap();
+        assert!(syncer.sync_once().unwrap_err().retryable());
+        assert_eq!(*requests.lock().unwrap(), vec![(1, 3); MAX_RETRY_ATTEMPTS]);
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap(), before);
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+    }
+
+    #[test]
+    fn rejected_ancestor_probes_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_error_and_log(
+            &dir,
+            vec![],
+            CommittedTip::new(65, [165; 32]),
+            Some(ChainClientError::UnsupportedHistory {
+                reason: "missing ancestor".to_string(),
+            }),
+        );
+        seed_wallet(&syncer, 66);
+        assert!(matches!(syncer.sync_once(), Err(SyncError::Protocol(_))));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            MAX_UNPROGRESSIVE_REWINDS as usize
+        );
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 66);
+        assert!(matches!(
+            read.rescan_state().unwrap(),
+            RescanState::Failed { height: 66, .. }
+        ));
+    }
+
+    #[test]
+    fn lower_tip_forward_probe_rewinds_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let (syncer, requests) = syncer_with_log(&dir, vec![], CommittedTip::new(2, [2; 32]));
+        seed_wallet(&syncer, 4);
+        let report = syncer.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(report.wallet_height, 2);
+        assert_eq!(*requests.lock().unwrap(), vec![(2, 1)]);
+        let read = syncer.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 2);
+        assert_eq!(read.chain_index_header(3).unwrap(), None);
+        assert_eq!(read.rescan_state().unwrap(), RescanState::Idle);
+    }
+
+    #[test]
+    fn lower_tip_without_retained_headers_rebuilds_from_genesis() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(1, [1; 32]);
+        let (syncer, requests) = syncer_with_log(
+            &dir,
+            vec![ergo_wallet_service::BlocksSinceResponse::Forward(
+                ergo_wallet_service::ForwardBlocksSince {
+                    tip: tip.clone(),
+                    blocks: vec![block(1, 0)],
+                },
+            )],
+            tip,
+        );
+        let mut write = syncer.service.store().begin_write().unwrap();
+        write.set_scan_cursor(3, Some(&[3; 32])).unwrap();
+        write.commit().unwrap();
+        let report = syncer.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(*requests.lock().unwrap(), vec![(0, 2)]);
+        assert_eq!(
+            syncer
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap(),
+            RescanState::Idle
+        );
+    }
+
+    #[test]
+    fn gap_and_duplicate_pages_are_terminal_protocol_errors() {
+        for blocks in [vec![block(2, 1)], vec![block(1, 0), block(1, 0)]] {
+            let dir = tempfile::tempdir().unwrap();
+            let tip = CommittedTip::new(2, [2; 32]);
+            let syncer = syncer(
+                &dir,
+                vec![ergo_wallet_service::BlocksSinceResponse::Forward(
+                    ergo_wallet_service::ForwardBlocksSince { tip, blocks },
+                )],
+                CommittedTip::new(2, [2; 32]),
+            );
+            assert!(matches!(syncer.sync_once(), Err(SyncError::Protocol(_))));
+            let state = syncer
+                .service()
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap();
+            assert!(matches!(state, RescanState::Failed { .. }));
+        }
+    }
+
+    #[test]
+    fn pruned_invalidates_and_persists_failed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let syncer = syncer(
+            &dir,
+            vec![ergo_wallet_service::BlocksSinceResponse::Pruned(
+                ergo_wallet_service::PrunedBlocksSince {
+                    tip: CommittedTip::new(10, [10; 32]),
+                    minimum_height: 4,
+                },
+            )],
+            CommittedTip::new(10, [10; 32]),
+        );
+        assert!(matches!(syncer.sync_once(), Err(SyncError::Pruned(4))));
+        let read = syncer.service().store().read().unwrap();
+        assert!(read.scan_invalidated().unwrap());
+        assert!(matches!(
+            read.rescan_state().unwrap(),
+            RescanState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn http_pruned_and_conflict_are_typed_and_retryable() {
+        assert!(matches!(
+            map_chain_error(ChainClientError::HistoryPruned {
+                minimum_height: Some(7)
+            }),
+            SyncError::Pruned(7)
+        ));
+        assert!(SyncError::Chain(ChainClientError::Conflict).retryable());
+        assert!(!SyncError::Pruned(7).retryable());
+    }
+
+    #[tokio::test]
+    async fn permanently_lower_tip_without_a_valid_ancestor_is_terminal_on_status() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(2, [20; 32]);
+        let (syncer, requests) = syncer_with_error_and_log(
+            &dir,
+            vec![],
+            tip,
+            Some(ChainClientError::UnsupportedHistory {
+                reason: "ancestor history missing".to_string(),
+            }),
+        );
+        seed_wallet(&syncer, 3);
+        let error = syncer.sync_once().unwrap_err();
+        assert!(!error.retryable());
+        assert_eq!(*requests.lock().unwrap(), vec![(2, 1), (1, 1)]);
+        let router = crate::api::router(crate::api::ApiContext {
+            service: syncer.service.clone(),
+            network: crate::config::Network::Mainnet,
+            tip: syncer.tip.clone(),
+            tip_max_age: Duration::from_secs(60),
+        });
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["rescan"]["type"], "failed");
+        assert!(status["rescan"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("ancestor"));
+    }
+
+    #[test]
+    fn panic_after_commit_reopens_and_resumes_without_gaps_or_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeState {
+            tip: CommittedTip::new(3, [3; 32]),
+            responses: Arc::new(Mutex::new(vec![])),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: requests.clone(),
+            dynamic: true,
+            error: None,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let open = || {
+            let store =
+                Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+            StandaloneSyncer::new(
+                Arc::new(WalletService::new(store, chain.clone())),
+                SyncConfig {
+                    page: 1,
+                    ..SyncConfig::default()
+                },
+                Arc::new(CachedNodeTip::new(chain.clone())),
+            )
+        };
+        {
+            let syncer = open();
+            syncer.panic_next_commit.store(true, Ordering::SeqCst);
+            let panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| syncer.sync_once()));
+            assert!(panic.is_err());
+            assert_eq!(
+                syncer
+                    .service
+                    .store()
+                    .read()
+                    .unwrap()
+                    .scan_cursor()
+                    .unwrap()
+                    .unwrap()
+                    .height,
+                1
+            );
+            assert_eq!(requests.lock().unwrap().as_slice(), &[(0, 1)]);
+        }
+        // No store/service/syncer survives: reopen the same file as a new daemon would.
+        let restarted = open();
+        let report = restarted.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(report.blocks_processed, 2);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[(0, 1), (1, 1), (2, 1)]
+        );
+        let read = restarted.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 3);
+        for height in 1..=3 {
+            assert_eq!(
+                read.chain_index_header(height).unwrap(),
+                Some([height as u8; 32])
+            );
+        }
+        assert!(!read.scan_invalidated().unwrap());
+    }
+
+    #[test]
+    fn restart_after_commit_fault_resumes_from_persisted_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+        let mut write = store.begin_write().unwrap();
+        write.prepare_rescan(0, false).unwrap();
+        write
+            .apply_rescan_block(
+                1,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &RescanBlock {
+                    block_id: [1; 32],
+                    txs: Vec::new(),
+                },
+                None,
+            )
+            .unwrap();
+        write.commit().unwrap();
+        let mut write = store.begin_write().unwrap();
+        write.finish_rescan(0).unwrap();
+        write.commit().unwrap();
+        let tip = CommittedTip::new(2, [2; 32]);
+        let state = FakeState {
+            tip: tip.clone(),
+            responses: Arc::new(Mutex::new(vec![
+                ergo_wallet_service::BlocksSinceResponse::Forward(
+                    ergo_wallet_service::ForwardBlocksSince {
+                        tip,
+                        blocks: vec![block(2, 1)],
+                    },
+                ),
+            ])),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            dynamic: false,
+            error: None,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let service = Arc::new(WalletService::new(store, chain.clone()));
+        let syncer = StandaloneSyncer::new(
+            service,
+            SyncConfig {
+                batch: 16,
+                page: 16,
+                retry_delay: Duration::ZERO,
+                max_retry_delay: Duration::ZERO,
+            },
+            Arc::new(CachedNodeTip::new(chain)),
+        );
+        syncer.inject_next_commit_failure();
+        assert!(matches!(syncer.sync_once(), Err(SyncError::Protocol(_))));
+        assert_eq!(
+            syncer
+                .service()
+                .store()
+                .read()
+                .unwrap()
+                .scan_cursor()
+                .unwrap()
+                .unwrap()
+                .height,
+            2
+        );
+        assert!(matches!(
+            syncer
+                .service()
+                .store()
+                .read()
+                .unwrap()
+                .rescan_state()
+                .unwrap(),
+            RescanState::Failed { .. }
+        ));
+        let report = syncer.sync_once().unwrap();
+        assert!(report.completed);
+    }
+}

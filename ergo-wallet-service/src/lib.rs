@@ -34,11 +34,11 @@ pub use tx_builder::{
     change_goes_to_fee, select_with_reemission, PaymentRequest, SelectionPlan, UnsignedTxBuilder,
 };
 pub use wallet::{
-    migrate_schema, owned_to_block_txs, Balance, BlockOutput, BlockTx, BoundBlockTxs,
-    BoxProvenance, BoxStatus, OwnedBlockOutput, OwnedBlockTxData, RedbWalletStore, RedbWalletWrite,
-    RescanGuard, RescanReadError, RescanState, RewardKeyResolution, ScanBoxStatus, ScanMatchRecord,
-    ScanRegistrySnapshot, ScanTrackedBox, ScanTxRecord, StoredScan, TrackedPubkeyMeta,
-    WalletApplyHook, WalletApplyPayload, WalletBox, WalletRead, WalletReader, WalletScanCursor,
-    WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError, WalletTransaction,
-    WalletWiring, WalletWrite, WALLET_SCHEMA_VERSION,
+    migrate_schema, migrate_standalone_schema, owned_to_block_txs, Balance, BlockOutput, BlockTx,
+    BoundBlockTxs, BoxProvenance, BoxStatus, OwnedBlockOutput, OwnedBlockTxData, RedbWalletStore,
+    RedbWalletWrite, RescanGuard, RescanReadError, RescanState, RewardKeyResolution, ScanBoxStatus,
+    ScanMatchRecord, ScanRegistrySnapshot, ScanTrackedBox, ScanTxRecord, StoredScan,
+    TrackedPubkeyMeta, WalletApplyHook, WalletApplyPayload, WalletBox, WalletRead, WalletReader,
+    WalletScanCursor, WalletScanMatcher, WalletScanService, WalletStore, WalletStoreError,
+    WalletTransaction, WalletWiring, WalletWrite, WALLET_SCHEMA_VERSION,
 };

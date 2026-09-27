@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -207,6 +209,16 @@ pub enum SubmitResponse {
 pub enum ChainClientError {
     #[error("unsupported chain operation")]
     Unsupported,
+    #[error("chain endpoint unauthorized")]
+    Unauthorized,
+    #[error("chain endpoint conflict")]
+    Conflict,
+    #[error("chain endpoint unavailable: {0}")]
+    Unavailable(String),
+    #[error("chain transport failure: {0}")]
+    Transport(String),
+    #[error("chain protocol failure: {0}")]
+    Protocol(String),
     #[error("chain client overloaded: {0}")]
     Overloaded(String),
     #[error("chain client shutting down: {0}")]
@@ -298,6 +310,10 @@ impl TryFrom<(&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip)> for
 }
 
 pub trait ChainClient: Send + Sync {
+    /// Stop starting requests during shutdown. Blocking implementations may
+    /// finish an in-flight request, but must not start another one.
+    fn cancel(&self) {}
+
     fn committed_tip(&self) -> Result<CommittedTip, ChainClientError>;
 
     fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError>;
@@ -316,6 +332,18 @@ pub trait ChainClient: Send + Sync {
     fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse, ChainClientError>;
 
     fn tip(&self) -> Result<CommittedTip, ChainClientError> {
+        self.committed_tip()
+    }
+
+    /// Fetch the committed tip, giving up after `timeout`.
+    ///
+    /// Used by read paths that must not block on an unbounded chain request
+    /// (the standalone daemon's `/status`). Implementations that own a network
+    /// client with a request-level deadline override this; the default keeps
+    /// the unbounded call so a transport that cannot bound the wait is never
+    /// silently truncated into a false "tip unavailable".
+    fn committed_tip_within(&self, timeout: Duration) -> Result<CommittedTip, ChainClientError> {
+        let _ = timeout;
         self.committed_tip()
     }
 

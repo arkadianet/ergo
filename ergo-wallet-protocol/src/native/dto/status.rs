@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::chain::{ChainCursor, ChainTip};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum NetworkDto {
@@ -38,6 +40,35 @@ pub struct WalletStatusDto {
     pub eip27_active: bool,
     pub rescan: RescanStateDto,
     pub scan_invalidated: bool,
+}
+
+/// Standalone watch-only status projection. Unlike the embedded node status,
+/// this keeps the durable cursor and node tip identities together with the
+/// derived lag so a caller can tell a healthy lag from an invalidated rebuild.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchOnlyWalletStatusDto {
+    pub scan_cursor: Option<ChainCursor>,
+    pub node_tip: Option<ChainTip>,
+    pub lag: u32,
+    pub scan_invalidated: bool,
+    pub rescan: RescanStateDto,
+    pub sync: SyncStateDto,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SyncStateDto {
+    Idle,
+    Syncing,
+    CatchingUp,
+    AtTip,
+    Rebuilding,
+    Failed,
+    #[serde(rename_all = "camelCase")]
+    Unavailable {
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

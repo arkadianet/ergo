@@ -140,7 +140,7 @@ jobs:
       # The slow redb tests are 15–27x slower on Windows than Ubuntu due
       # to disk waits. Eight threads (2x the runner's four cores) overlap
       # those waits. Crate groups avoid linking other shards' test binaries.
-      # Four Windows groups predict 8.25–8.6 min including job overhead;
+      # Four Windows groups predict 8.25–12.65 min including job overhead;
       # node lib/it build separately. See scripts/ci-shards.py for assumptions.
       - name: cargo nextest run (Windows shard)
         if: runner.os == 'Windows'

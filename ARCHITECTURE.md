@@ -34,8 +34,8 @@ These are the standing constraints the codebase is built around:
 
 ## Crate layering
 
-The node's runtime is 20 workspace crates forming a strict, acyclic
-dependency DAG enforced by `cargo`. A separate 21st workspace crate,
+The node's runtime is 21 workspace crates forming a strict, acyclic
+dependency DAG enforced by `cargo`. A separate 22nd workspace crate,
 `ergo-difftest`, is a dev/test-only differential-fuzz harness
 (`publish = false`): it depends on the consensus crates but nothing depends
 on it, so it sits outside this runtime DAG. The table below is a summary; the
@@ -53,6 +53,7 @@ dependency graph.
 | **L6** subsystems | `ergo-mempool`, `ergo-sync`, `ergo-mining`, `ergo-indexer` | admission/reorg handling; chain sync; block production; extra-index |
 | **L7** API | `ergo-api` | HTTP/JSON server; talks to the node only through `Arc<dyn …>` traits and protocol DTOs |
 | **L8** runtime | `ergo-node` | the binary: process wiring, lifecycle, the single-writer chain action loop, and the embedded/API wallet adapter |
+| **L8** runtime | `ergo-walletd` | the standalone watch-only wallet daemon: its own wallet database, an HTTP chain client, a bounded sync/reorg loop, and a read-only local API. A separate process with its own single-writer sync thread, not a node component |
 
 The wallet split is intentionally transitional at the state boundary.
 `ergo-wallet-protocol` is transport-neutral and owns only wire DTOs and
@@ -64,6 +65,28 @@ service-owned wallet writes can share the chain store's existing redb
 transaction. The reverse edge is forbidden. The node remains the embedded
 host/API adapter; its secret storage, command loop, state hook, and in-process
 chain client are still present, so full runtime relocation is not complete.
+
+`ergo-walletd` is the wallet runtime with the node removed. It runs as its
+own process with its own single-writer sync thread over its own redb store,
+pulls chain data from a node's `/api/v1/chain/*` HTTP surface, and serves a
+read-only local API. It never holds a secret key, never signs, and never
+submits, so the local socket is the whole trust boundary: it is created
+`0o600` under a `0o077` umask, and the optional TCP listener is restricted to
+loopback at config load. Because the daemon cannot ask a node which network it
+serves, `network` is a required config identity threaded into descriptor
+validation and into every address the API renders.
+
+Startup is two phases rather than one `async fn`. `reqwest`'s blocking client
+owns a private Tokio runtime, created and dropped inside
+`ClientBuilder::build`, and Tokio aborts when a runtime is dropped on a thread
+that is inside an async context — so building it from `run` (or from under
+`#[tokio::main]`) panicked before the first log line in a dev build. `prepare`
+does every blocking construction step and `main` calls it *before* the runtime
+exists; `run` then takes an already-built `Daemon` and cannot construct a
+client at all. The daemon's only scan input is the descriptor file, which the
+strict schema limits to public keys, so the `/scan/*` registry the backing store
+also implements is always empty here and `/scans` always returns `[]`; scan
+registration stays a node capability.
 
 Two layering decisions diverge from the Scala reference and are worth
 internalizing first:

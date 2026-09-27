@@ -240,6 +240,83 @@ pub fn rollback_scans_from_block(
     Ok(())
 }
 
+/// Rewind scan tracking to `start_height` without replaying the removed
+/// blocks. Rows created at or above the boundary are removed, and boxes that
+/// were spent at or above it return to `Unspent`. This is the range-rewind
+/// counterpart used by a retained-history reorg, where the orphaned block
+/// transactions are no longer available to [`rollback_scans_from_block`].
+pub fn rewind_scans_from_height(
+    txn: &WriteTransaction,
+    start_height: u32,
+) -> Result<(), redb::Error> {
+    let mut removed: std::collections::BTreeMap<[u8; 32], Vec<u16>> =
+        std::collections::BTreeMap::new();
+    let mut restore: Vec<([u8; 34], ScanTrackedBox)> = Vec::new();
+    {
+        let mut boxes_tbl = txn.open_table(WALLET_SCAN_BOXES)?;
+        let mut delete_keys: Vec<[u8; 34]> = Vec::new();
+        for entry in boxes_tbl.iter()? {
+            let (key, value) = entry?;
+            let key = key.value();
+            let tracked = scan_de_box(&value.value())?;
+            if tracked.inclusion_height >= start_height {
+                removed
+                    .entry(tracked.box_id)
+                    .or_default()
+                    .push(tracked.scan_id);
+                delete_keys.push(key);
+            } else if let ScanBoxStatus::Spent { spent_at, .. } = tracked.status {
+                if spent_at >= start_height {
+                    restore.push((
+                        key,
+                        ScanTrackedBox {
+                            status: ScanBoxStatus::Unspent,
+                            ..tracked
+                        },
+                    ));
+                }
+            }
+        }
+        for key in delete_keys {
+            boxes_tbl.remove(key)?;
+        }
+        for (key, tracked) in restore {
+            boxes_tbl.insert(key, scan_ser(&tracked)?)?;
+        }
+    }
+    {
+        let mut index_tbl = txn.open_table(WALLET_SCAN_BOX_INDEX)?;
+        for (box_id, removed_ids) in removed {
+            let remaining: Vec<u16> = match index_tbl.get(&box_id)? {
+                Some(value) => scan_de_ids(&value.value())?
+                    .into_iter()
+                    .filter(|scan_id| !removed_ids.contains(scan_id))
+                    .collect(),
+                None => continue,
+            };
+            if remaining.is_empty() {
+                index_tbl.remove(&box_id)?;
+            } else {
+                index_tbl.insert(box_id, scan_ser(&remaining)?)?;
+            }
+        }
+    }
+    {
+        let mut txs_tbl = txn.open_table(WALLET_SCAN_TXS)?;
+        let keys: Vec<[u8; 36]> = txs_tbl
+            .iter()?
+            .map(|entry| entry.map(|(key, _)| key.value()))
+            .collect::<Result<_, _>>()?;
+        for key in keys {
+            let height = u32::from_be_bytes(key[..4].try_into().expect("four-byte key"));
+            if height >= start_height {
+                txs_tbl.remove(key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Drop ALL scan-tracked boxes + the reverse index, inside the chain
 /// write-txn. Called from the reorg paths that cannot replay a block's txs
 /// (pruned / unreadable section) and so can't selectively roll scans back:

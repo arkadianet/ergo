@@ -44,6 +44,7 @@ macro_rules! impl_wallet_store_error_from {
 impl_wallet_store_error_from!(
     redb::StorageError,
     redb::TableError,
+    redb::DatabaseError,
     redb::TransactionError,
     redb::CommitError,
 );
