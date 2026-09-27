@@ -185,12 +185,32 @@ where
             "no local API listener configured".to_string(),
         ));
     }
-    let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel::<SyncError>(1);
+    let result = supervise_sync(syncer, config, listeners, shutdown).await;
+    #[cfg(unix)]
+    if let Some(mut guard) = unix_guard {
+        guard.cleanup();
+    }
+    result
+}
+
+async fn supervise_sync<F>(
+    syncer: Arc<StandaloneSyncer>,
+    config: &Config,
+    mut listeners: tokio::task::JoinSet<Result<(), DaemonError>>,
+    shutdown: F,
+) -> Result<(), DaemonError>
+where
+    F: std::future::Future<Output = Result<(), DaemonError>>,
+{
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
     let interval = config.sync_interval;
+    let worker_syncer = syncer.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        let terminal_sender = terminal_tx;
+        let syncer = worker_syncer;
         loop {
+            if syncer.is_cancelled() {
+                return;
+            }
             match syncer.sync_once() {
                 Ok(report) => {
                     tracing::info!(
@@ -199,12 +219,16 @@ where
                         completed = report.completed,
                         "wallet sync completed"
                     );
+                    if !report.completed {
+                        continue;
+                    }
                 }
+                Err(SyncError::Cancelled) => return,
                 Err(error) if error.retryable() => {
                     tracing::warn!(error = %error, "wallet sync transport unavailable; retrying");
                 }
                 Err(error) => {
-                    let _ = terminal_sender.blocking_send(error);
+                    tracing::error!(%error, "wallet sync stopped; inspect /status for the terminal failure");
                     return;
                 }
             }
@@ -216,7 +240,6 @@ where
     });
     let result = tokio::select! {
         result = shutdown => result,
-        Some(error) = terminal_rx.recv() => Err(DaemonError::Sync(error)),
         Some(result) = listeners.join_next(), if !listeners.is_empty() => {
             match result {
                 Ok(Ok(())) => Err(DaemonError::Server("local API listener stopped".to_string())),
@@ -225,12 +248,12 @@ where
             }
         }
     };
+    syncer.cancel();
     drop(shutdown_tx);
-    worker.abort();
+    let deadline = tokio::time::Instant::now() + config.shutdown_timeout;
     listeners.shutdown().await;
-    #[cfg(unix)]
-    if let Some(mut guard) = unix_guard {
-        guard.cleanup();
+    if tokio::time::timeout_at(deadline, worker).await.is_err() {
+        tracing::warn!("wallet sync request did not finish before the shutdown timeout");
     }
     result
 }
@@ -288,4 +311,307 @@ pub fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(all(test, unix))]
+mod review_tests {
+    use super::*;
+    use ergo_wallet_service::{
+        BlocksSinceRequest, BlocksSinceResponse, ChainBlock, ChainClient, ChainClientError,
+        ChainSnapshot, CommittedTip, ForwardBlocksSince, SubmitRequest, SubmitResponse, UtxoLookup,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    struct TestChain {
+        entered: AtomicBool,
+        released: (Mutex<bool>, Condvar),
+        block: bool,
+        release_on_cancel: bool,
+    }
+
+    impl TestChain {
+        fn new(block: bool) -> Arc<Self> {
+            Arc::new(Self {
+                entered: AtomicBool::new(false),
+                released: (Mutex::new(false), Condvar::new()),
+                block,
+                release_on_cancel: true,
+            })
+        }
+    }
+
+    impl ChainClient for TestChain {
+        fn cancel(&self) {
+            if self.release_on_cancel {
+                *self.released.0.lock().unwrap() = true;
+                self.released.1.notify_all();
+            }
+        }
+        fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
+            Ok(CommittedTip::new(3, [3; 32]))
+        }
+        fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+        fn blocks_since(
+            &self,
+            request: BlocksSinceRequest,
+        ) -> Result<BlocksSinceResponse, ChainClientError> {
+            self.entered.store(true, Ordering::SeqCst);
+            if self.block {
+                let mut released = self.released.0.lock().unwrap();
+                while !*released {
+                    released = self.released.1.wait(released).unwrap();
+                }
+            }
+            let height = request.cursor.height + 1;
+            Ok(BlocksSinceResponse::Forward(ForwardBlocksSince {
+                tip: self.committed_tip()?,
+                blocks: vec![ChainBlock {
+                    height,
+                    block_id: [height as u8; 32],
+                    parent_id: request.cursor.header_id,
+                    transactions: vec![],
+                }],
+            }))
+        }
+        fn lookup_utxo(
+            &self,
+            _: [u8; 32],
+            _: CommittedTip,
+        ) -> Result<UtxoLookup, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+        fn submit(&self, _: SubmitRequest) -> Result<SubmitResponse, ChainClientError> {
+            Err(ChainClientError::Unsupported)
+        }
+    }
+
+    fn daemon(dir: &tempfile::TempDir, chain: Arc<TestChain>) -> Daemon {
+        let store =
+            Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+        let tip = Arc::new(CachedNodeTip::new(chain.clone()));
+        let service = Arc::new(WalletService::new(store, chain));
+        let syncer = Arc::new(StandaloneSyncer::new(
+            service.clone(),
+            SyncConfig {
+                batch: 1,
+                page: 1,
+                ..SyncConfig::default()
+            },
+            tip.clone(),
+        ));
+        Daemon {
+            config: Config {
+                network: config::Network::Mainnet,
+                data_dir: dir.path().to_owned(),
+                node_url: "http://127.0.0.1:9053/".parse().unwrap(),
+                api_key_file: dir.path().join("key"),
+                descriptor_file: dir.path().join("descriptor"),
+                sync_interval: Duration::from_secs(60),
+                shutdown_timeout: Duration::from_millis(500),
+                sync_batch: 1,
+                blocks_page: 1,
+                unix_socket: Some(dir.path().join("wallet.sock")),
+                tcp_fallback: None,
+            },
+            service,
+            syncer,
+            tip,
+        }
+    }
+
+    async fn run_without_binding<F>(daemon: Daemon, shutdown: F) -> Result<(), DaemonError>
+    where
+        F: std::future::Future<Output = Result<(), DaemonError>>,
+    {
+        let mut listeners = tokio::task::JoinSet::new();
+        listeners.spawn(std::future::pending::<Result<(), DaemonError>>());
+        supervise_sync(daemon.syncer, &daemon.config, listeners, shutdown).await
+    }
+
+    #[tokio::test]
+    async fn run_until_cancels_blocked_pass_within_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::new(true);
+        let daemon = daemon(&dir, chain.clone());
+        let service = daemon.service.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_until(daemon, async {
+            shutdown_rx.await.unwrap();
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !chain.entered.load(Ordering::SeqCst) {
+                assert!(
+                    !task.is_finished(),
+                    "daemon stopped before the fake request"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            service
+                .store()
+                .read()
+                .unwrap()
+                .scan_cursor()
+                .unwrap()
+                .unwrap()
+                .height,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_blocked_pass_within_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::new(true);
+        let daemon = daemon(&dir, chain.clone());
+        let service = daemon.service.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_without_binding(daemon, async {
+            shutdown_rx.await.unwrap();
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !chain.entered.load(Ordering::SeqCst) {
+                assert!(
+                    !task.is_finished(),
+                    "daemon stopped before the fake request"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            service
+                .store()
+                .read()
+                .unwrap()
+                .scan_cursor()
+                .unwrap()
+                .unwrap()
+                .height,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_bounds_an_uncooperative_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = Arc::new(TestChain {
+            entered: AtomicBool::new(false),
+            released: (Mutex::new(false), Condvar::new()),
+            block: true,
+            release_on_cancel: false,
+        });
+        let mut daemon = daemon(&dir, chain.clone());
+        daemon.config.shutdown_timeout = Duration::from_millis(25);
+        let syncer = daemon.syncer.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_without_binding(daemon, async {
+            shutdown_rx.await.unwrap();
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !chain.entered.load(Ordering::SeqCst) {
+                assert!(
+                    !task.is_finished(),
+                    "daemon stopped before the fake request"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(250), task).await;
+        // Release the fake even if the timeout assertion below fails.
+        *chain.released.0.lock().unwrap() = true;
+        chain.released.1.notify_all();
+        result.unwrap().unwrap().unwrap();
+        assert!(syncer.is_cancelled());
+    }
+
+    #[test]
+    fn cancelled_request_does_not_commit_returned_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = TestChain::new(true);
+        let daemon = daemon(&dir, chain.clone());
+        let syncer = daemon.syncer.clone();
+        let worker = std::thread::spawn(move || syncer.sync_once());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !chain.entered.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        daemon.syncer.cancel();
+        assert!(matches!(worker.join().unwrap(), Err(SyncError::Cancelled)));
+        assert_eq!(
+            daemon
+                .service
+                .store()
+                .read()
+                .unwrap()
+                .scan_cursor()
+                .unwrap()
+                .unwrap()
+                .height,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn unfinished_pass_continues_without_waiting_for_sync_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = daemon(&dir, TestChain::new(false));
+        let service = daemon.service.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_without_binding(daemon, async {
+            shutdown_rx.await.unwrap();
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                assert!(!task.is_finished(), "daemon stopped before catching up");
+                if service
+                    .store()
+                    .read()
+                    .unwrap()
+                    .scan_cursor()
+                    .unwrap()
+                    .is_some_and(|cursor| cursor.height == 3)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
 }

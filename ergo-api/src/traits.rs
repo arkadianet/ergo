@@ -114,6 +114,11 @@ pub enum WalletChainError {
         expected: wallet_chain_wire::ChainTip,
         actual: wallet_chain_wire::ChainTip,
     },
+    #[error("the committed chain tip moved")]
+    StaleTipId {
+        expected_header_id: String,
+        actual: wallet_chain_wire::ChainTip,
+    },
     #[error("chain history is pruned")]
     HistoryPruned { minimum_height: u32 },
     #[error("the requested box is not in the committed UTXO set")]

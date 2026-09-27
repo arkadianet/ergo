@@ -108,6 +108,8 @@ pub struct FileConfig {
         deserialize_with = "deserialize_seconds"
     )]
     pub sync_interval: u64,
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_secs: u64,
     #[serde(default = "default_sync_batch", alias = "batch_size")]
     pub sync_batch: u32,
     #[serde(default = "default_blocks_page", alias = "page_size")]
@@ -116,6 +118,10 @@ pub struct FileConfig {
     #[serde(alias = "tcp_addr")]
     pub tcp_fallback: Option<SocketAddr>,
     pub api: Option<ApiSection>,
+}
+
+fn default_shutdown_timeout() -> u64 {
+    5
 }
 
 fn deserialize_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -230,6 +236,7 @@ pub struct Config {
     pub api_key_file: PathBuf,
     pub descriptor_file: PathBuf,
     pub sync_interval: Duration,
+    pub shutdown_timeout: Duration,
     pub sync_batch: u32,
     pub blocks_page: u32,
     pub unix_socket: Option<PathBuf>,
@@ -301,6 +308,11 @@ impl Config {
                 "api_key_file must not be empty".to_string(),
             ));
         }
+        if file.shutdown_timeout_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "shutdown_timeout_secs must be greater than zero".to_string(),
+            ));
+        }
         if file.sync_interval == 0 {
             return Err(ConfigError::Invalid(
                 "sync_interval must be greater than zero".to_string(),
@@ -355,6 +367,7 @@ impl Config {
             api_key_file: file.api_key_file,
             descriptor_file: file.descriptor_file,
             sync_interval: Duration::from_secs(file.sync_interval),
+            shutdown_timeout: Duration::from_secs(file.shutdown_timeout_secs),
             sync_batch: file.sync_batch,
             blocks_page: file.blocks_page,
             unix_socket: file.unix_socket,
@@ -448,6 +461,7 @@ mod tests {
             api_key_file: PathBuf::from("/tmp/api-key"),
             descriptor_file: PathBuf::from("/tmp/descriptors.toml"),
             sync_interval: 1,
+            shutdown_timeout_secs: 5,
             sync_batch: 10,
             blocks_page: 2,
             unix_socket: None,

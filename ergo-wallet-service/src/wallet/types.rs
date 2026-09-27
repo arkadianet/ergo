@@ -197,7 +197,6 @@ pub struct ScanMatchRecord {
 
 #[derive(Clone)]
 pub struct WalletApplyPayload {
-    pub apply_generation: u64,
     pub tracked_p2pk_trees: std::collections::BTreeSet<Vec<u8>>,
     pub cached_pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
     pub block_txs_owned: Vec<OwnedBlockTxData>,

@@ -262,7 +262,6 @@ pub(crate) struct PersistJob {
     /// Send/Sync friction. `None` when no wallet hook is wired (no-
     /// wallet deployments, tests).
     pub wallet_payload: Option<crate::wallet::WalletApplyPayload>,
-    pub wallet_apply_generation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -784,25 +783,9 @@ impl PersistPipeline {
         if jobs.is_empty() {
             return Ok(0.0);
         }
-        let _chain_apply_guard = crate::wallet::chain_apply_guard_after_wallet_finalization();
 
         let mut write_txn = crate::begin_write_qr(db)
             .observe_persist_error(failure_context, "background_persist_begin_write")?;
-        let current_wallet_generation = crate::wallet::wallet_apply_generation();
-        let wallet_generation_stale = jobs
-            .iter()
-            .any(|job| job.wallet_apply_generation != current_wallet_generation);
-        let wallet_apply_blocked = crate::wallet::wallet_apply_fenced()
-            || crate::wallet::wallet_finalization_in_progress();
-        if wallet_generation_stale || wallet_apply_blocked {
-            write_txn
-                .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
-                .observe_persist_error(failure_context, "background_persist_wallet_fence")?
-                .insert((), true)
-                .observe_persist_error(failure_context, "background_persist_wallet_fence")?;
-            crate::wallet::fence_wallet_apply();
-        }
-
         // Durability mode per batch:
         //   - `None`     : pure-memory commit, queued for next durable flush.
         //                  Used between IBD durable points.
@@ -1275,7 +1258,6 @@ mod tests {
             parent_header_id: [0u8; 32],
             voted_params_row: None,
             wallet_payload: None,
-            wallet_apply_generation: crate::wallet::wallet_apply_generation(),
         }
     }
 
@@ -1304,7 +1286,6 @@ mod tests {
             }],
         };
         j.wallet_payload = Some(crate::wallet::WalletApplyPayload {
-            apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: trees,
             cached_pubkeys: std::collections::BTreeMap::new(),
             block_txs_owned: vec![tx],
@@ -1599,130 +1580,47 @@ mod tests {
     }
 
     #[test]
-    fn queued_job_survives_wallet_finalization_fence() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
-        let (_dir, pipeline) = fresh_pipeline(2);
-        crate::wallet::set_wallet_finalization_in_progress(true);
-        pipeline.send(minimal_job(1)).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        let early_result = pipeline
-            .result_rx
-            .recv_timeout(Duration::from_millis(50))
-            .is_err();
-        crate::wallet::set_wallet_finalization_in_progress(false);
-        assert!(early_result);
-        assert!(pipeline.flush().is_none());
-        crate::wallet::unfence_wallet_apply();
-    }
-
-    #[test]
-    fn finalization_timeout_keeps_pipeline_usable_and_invalidates_wallet() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
+    fn full_rescan_with_queued_persist_jobs_converges_without_invalidation() {
+        use crate::wallet::scan::{RescanBlock, WalletScanService};
+        use crate::wallet::{RedbWalletStore, WalletStore};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");
         let db = Arc::new(Database::create(&path).unwrap());
-        let pipeline = PersistPipeline::new(Arc::clone(&db), path, 2, 1024, -1, None);
-        let generation = crate::wallet::wallet_apply_generation();
-        crate::wallet::set_wallet_finalization_in_progress(true);
-        pipeline
-            .send(job_with_tracked_output(1, vec![0], [0xA1; 32], 1_000_000))
-            .unwrap();
-        let result = pipeline
-            .result_rx
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap();
-        crate::wallet::set_wallet_finalization_in_progress(false);
-        assert!(matches!(result, PersistResult::Ok { .. }));
-        assert!(crate::wallet::wallet_apply_generation() > generation);
-        assert!(crate::wallet::wallet_apply_fenced());
-        pipeline.send(minimal_job(2)).unwrap();
-        assert!(
-            pipeline.flush().is_none(),
-            "timeout must not poison CommitWatch"
-        );
-        let read = db.begin_read().unwrap();
-        assert!(read
-            .open_table(CHAIN_INDEX)
-            .unwrap()
-            .get(2)
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            read.open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
-                .unwrap()
-                .get(())
-                .unwrap()
-                .map(|row| row.value()),
-            Some(true)
-        );
-        if let Ok(boxes) = read.open_table(crate::wallet::tables::WALLET_BOXES) {
-            assert!(boxes.get([0xA1; 32]).unwrap().is_none());
+        let pipeline = PersistPipeline::new(db.clone(), path, 8, 1024, -1, None);
+        let store = RedbWalletStore::new(db.clone());
+        // Hold the database writer so the jobs cannot commit before rescan starts.
+        let write = db.begin_write().unwrap();
+        for height in 1..=3 {
+            pipeline.send(minimal_job(height)).unwrap();
         }
-        crate::wallet::unfence_wallet_apply();
-    }
-
-    #[test]
-    fn queued_chain_only_job_invalidates_on_generation_change() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
-        let pipeline = PersistPipeline::new(Arc::clone(&db), path.clone(), 2, 1024, -1, None);
-        let job = minimal_job(1);
-        let queued_generation = job.wallet_apply_generation;
-        crate::wallet::set_wallet_finalization_in_progress(true);
-        pipeline.send(job).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(crate::wallet::advance_wallet_apply_generation() > queued_generation);
-        crate::wallet::set_wallet_finalization_in_progress(false);
-        assert!(pipeline.flush().is_none());
-        drop(pipeline);
-        drop(db);
-
-        let db = Database::create(path).unwrap();
-        let read = db.begin_read().unwrap();
-        let table = read
-            .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
-            .unwrap();
-        assert_eq!(table.get(()).unwrap().map(|row| row.value()), Some(true));
-        crate::wallet::unfence_wallet_apply();
-    }
-
-    #[test]
-    fn queued_payload_crossing_partial_rescan_invalidates() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persist.redb");
-        let db = Arc::new(Database::create(&path).unwrap());
-        let pipeline = PersistPipeline::new(Arc::clone(&db), path.clone(), 2, 1024, -1, None);
-        let captured_generation = crate::wallet::wallet_apply_generation();
-        let mut job = job_with_tracked_output(
-            1,
-            vec![0x00, 0x08, 0xCD, 0x02, 0xAA, 0xBB],
-            [0xA1; 32],
-            5_000_000_000,
-        );
-        job.wallet_apply_generation = captured_generation;
-        job.wallet_payload.as_mut().unwrap().apply_generation = captured_generation;
-        assert!(crate::wallet::advance_wallet_apply_generation() > captured_generation);
-        pipeline.send(job).unwrap();
-        assert!(pipeline.flush().is_none());
-        drop(pipeline);
-        drop(db);
-
-        let db = Database::create(path).unwrap();
-        let read = db.begin_read().unwrap();
-        let invalidated = read
-            .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
+        let worker = std::thread::spawn(move || {
+            WalletScanService::rescan_full_rebuild_store(
+                &store,
+                Default::default(),
+                Default::default(),
+                0,
+                0,
+                |height| {
+                    Ok(Some(RescanBlock {
+                        block_id: [height as u8; 32],
+                        txs: vec![],
+                    }))
+                },
+                || {
+                    assert!(pipeline.flush().is_none());
+                    Ok(3)
+                },
+                || false,
+                None,
+            )
             .unwrap()
-            .get(())
-            .unwrap()
-            .map(|row| row.value());
-        assert_eq!(invalidated, Some(true));
-        if let Ok(boxes) = read.open_table(crate::wallet::tables::WALLET_BOXES) {
-            assert!(boxes.get([0xA1; 32]).unwrap().is_none());
-        }
-        crate::wallet::unfence_wallet_apply();
+        });
+        drop(write);
+        assert_eq!(worker.join().unwrap(), 3);
+        let store = RedbWalletStore::new(db);
+        let read = store.read().unwrap();
+        assert!(!read.scan_invalidated().unwrap());
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 3);
     }
 
     /// M5 final-slice atomic-pipeline test: a `PersistJob` carrying
@@ -1738,7 +1636,6 @@ mod tests {
     /// without needing fixture-heavy CheckedBlock construction.
     #[test]
     fn worker_applies_wallet_payload_inside_batch_txn() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
         use crate::wallet::tables::WALLET_BOXES;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.redb");

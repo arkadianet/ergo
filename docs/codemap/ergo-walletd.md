@@ -404,7 +404,7 @@ reached the limiter and needs no change.
 - **Fail-closed sync.** A page that breaks height, parent, or duplicate
   invariants, an ancestor that does not rewind, and a second reorg deeper than
   retained history after a full rebuild are terminal: the durable rescan state
-  becomes `failed` and the daemon exits. A reorg that *does* rewind is a warn and
+  becomes `failed`; syncing stops and the read API stays available. A reorg that *does* rewind is a warn and
   a continue — the old fixed "8 rebuilds per batch" cap is gone. Terminal and
   retryable failures log at `error`/`warn` with locally generated text only.
 - **Bounded reads.** `/status` never blocks on an unbounded node request: it
@@ -418,3 +418,7 @@ reached the limiter and needs no change.
 - **Idle ticks do not write.** A pass publishes `running` only after it knows it
   has work, i.e. below the at-tip check, so a caught-up daemon costs the single
   `idle` write per tick instead of `running` followed by `idle`.
+
+Block ids are checked for internal consistency but are not recomputed from header bytes. Phase 3 requires header bytes in the blocks-since response so the daemon can independently recompute block ids.
+
+A pass that exhausts its block budget continues immediately. Completed passes and retryable errors wait for `sync_interval`; terminal errors stop syncing while `/status` remains available. `shutdown_timeout_secs` (default 5) bounds shutdown waiting, with cancellation checked between blocks, retries, and HTTP requests. An in-flight blocking HTTP request may finish after this deadline, but cancellation prevents subsequent block application.

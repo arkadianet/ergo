@@ -545,7 +545,6 @@ struct UtxoMutation<'a> {
     /// on the pipeline path. Either way, chain + wallet commit
     /// together.
     wallet_payload: Option<&'a WalletApplyPayload>,
-    wallet_apply_generation: u64,
 }
 
 // ---- Persistent state store ----
@@ -3533,7 +3532,6 @@ impl StateStore {
         undo_and_emission: (&UndoEntry, &emission::EmissionTransition),
         voted_params_row: Option<ergo_validation::ActiveProtocolParameters>,
         wallet_payload: Option<&WalletApplyPayload>,
-        wallet_apply_generation: u64,
     ) -> Result<crate::avl::arena::CommitDurability, StateError> {
         let (undo, emission) = undo_and_emission;
         // Defensive: voted_params_row should be `Some` iff this is an
@@ -3664,7 +3662,6 @@ impl StateStore {
                 parent_header_id,
                 voted_params_row,
                 wallet_payload: wallet_payload_owned,
-                wallet_apply_generation,
             };
 
             if height.is_multiple_of(1000) || height <= 5 {
@@ -3698,15 +3695,6 @@ impl StateStore {
         // --- Synchronous fallback ---
         let t0 = std::time::Instant::now();
         let mut write_txn = crate::begin_write_qr(&self.db)?;
-        if wallet_apply_generation != crate::wallet::wallet_apply_generation()
-            || crate::wallet::wallet_apply_fenced()
-            || crate::wallet::wallet_finalization_in_progress()
-        {
-            write_txn
-                .open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)?
-                .insert((), true)?;
-            crate::wallet::fence_wallet_apply();
-        }
 
         if !durable_this_block {
             write_txn.set_durability(redb::Durability::None);
@@ -4016,44 +4004,12 @@ mod tests {
 
     // ----- WalletApplyPayload::has_wallet_tracking -----
 
-    #[test]
-    fn synchronous_finalization_timeout_commits_chain_and_wallet_invalidation() {
-        let _guard = crate::wallet::WALLET_APPLY_TEST_LOCK.lock().unwrap();
-        let (mut store, _dir) = fresh_store();
-        store.initialize_genesis(&[]).unwrap();
-        let digest = store.tree.root_digest();
-        let generation = crate::wallet::wallet_apply_generation();
-        crate::wallet::set_wallet_finalization_in_progress(true);
-        let result = store.apply_genesis(&[1; 32], &digest, &[]);
-        crate::wallet::set_wallet_finalization_in_progress(false);
-        result.unwrap();
-        assert!(crate::wallet::wallet_apply_generation() > generation);
-        assert!(crate::wallet::wallet_apply_fenced());
-        let read = store.db.begin_read().unwrap();
-        assert!(read
-            .open_table(CHAIN_INDEX)
-            .unwrap()
-            .get(1)
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            read.open_table(crate::wallet::tables::WALLET_SCAN_INVALIDATED)
-                .unwrap()
-                .get(())
-                .unwrap()
-                .map(|row| row.value()),
-            Some(true)
-        );
-        crate::wallet::unfence_wallet_apply();
-    }
-
     fn payload_with(
         trees: std::collections::BTreeSet<Vec<u8>>,
         pubkeys: std::collections::BTreeMap<u64, [u8; 33]>,
         scan_matches: Vec<ScanMatchRecord>,
     ) -> WalletApplyPayload {
         WalletApplyPayload {
-            apply_generation: crate::wallet::wallet_apply_generation(),
             tracked_p2pk_trees: trees,
             has_registered_scans: !scan_matches.is_empty(),
             cached_pubkeys: pubkeys,

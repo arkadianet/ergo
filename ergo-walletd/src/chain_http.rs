@@ -26,6 +26,7 @@
 //! page size. See [`crate::sync::DEFAULT_BLOCKS_PER_PAGE`].
 
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ergo_primitives::reader::VlqReader;
@@ -53,6 +54,7 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct HttpChainClient {
     client: Client,
+    cancelled: AtomicBool,
     base_url: Url,
     api_key: ApiKey,
     max_response_body_bytes: usize,
@@ -161,6 +163,7 @@ impl HttpChainClient {
             })?;
         Ok(Self {
             client,
+            cancelled: AtomicBool::new(false),
             base_url,
             api_key,
             max_response_body_bytes: MAX_RESPONSE_BODY_BYTES,
@@ -210,6 +213,11 @@ impl HttpChainClient {
     /// different *body* policy (see [`Self::page_bytes`]) can share the URL,
     /// header, and transport handling instead of duplicating it.
     fn send(&self, path: &str, deadline: Option<Duration>) -> Result<Response, ChainClientError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ChainClientError::ShuttingDown(
+                "wallet daemon shutdown".to_string(),
+            ));
+        }
         let url = self
             .base_url
             .join(path)
@@ -220,7 +228,13 @@ impl HttpChainClient {
         if let Some(deadline) = deadline {
             request = request.timeout(deadline);
         }
-        request.send().map_err(map_transport_error)
+        let response = request.send().map_err(map_transport_error)?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(ChainClientError::ShuttingDown(
+                "wallet daemon shutdown".to_string(),
+            ));
+        }
+        Ok(response)
     }
 
     /// Map a non-success response onto the typed error. Consumes the response
@@ -302,6 +316,10 @@ impl HttpChainClient {
 }
 
 impl ChainClient for HttpChainClient {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
     fn committed_tip(&self) -> Result<CommittedTip, ChainClientError> {
         let tip: wire::ChainTip = self.get_json("api/v1/chain/tip")?;
         neutral_tip(tip)
@@ -872,6 +890,21 @@ fn neutral_blocks_since(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancelled_http_client_does_not_start_another_request() {
+        use ergo_wallet_service::ChainClient;
+        let client = super::HttpChainClient::new(
+            "http://127.0.0.1:1/".parse().unwrap(),
+            crate::config::ApiKey::from_test(b"key".to_vec()),
+        )
+        .unwrap();
+        client.cancel();
+        assert!(matches!(
+            client.committed_tip(),
+            Err(ergo_wallet_service::ChainClientError::ShuttingDown(_))
+        ));
+    }
+
     use super::*;
     use ergo_primitives::digest::ModifierId;
     use ergo_ser::ergo_box::{serialize_ergo_box, ErgoBox, ErgoBoxCandidate};

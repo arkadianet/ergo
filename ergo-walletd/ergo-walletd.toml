@@ -30,6 +30,7 @@ api_key_file = "./node-api-key"  # File holding the node's `api_key` request
 descriptor_file = "./descriptors.toml" # Public descriptor file: compressed
                                  # secp256k1 public keys, derivation paths, and
                                  # labels. Any secret field is a hard error.
+shutdown_timeout_secs = 5
 sync_interval = "15s"            # How often the sync loop runs. Accepts plain
                                  # seconds or a duration string ("500ms",
                                  # "30s", "2m").

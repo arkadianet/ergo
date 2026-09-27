@@ -310,6 +310,10 @@ impl TryFrom<(&ergo_wallet_protocol::chain::BoxLookupRequest, CommittedTip)> for
 }
 
 pub trait ChainClient: Send + Sync {
+    /// Stop starting requests during shutdown. Blocking implementations may
+    /// finish an in-flight request, but must not start another one.
+    fn cancel(&self) {}
+
     fn committed_tip(&self) -> Result<CommittedTip, ChainClientError>;
 
     fn snapshot(&self) -> Result<ChainSnapshot, ChainClientError>;

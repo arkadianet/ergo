@@ -339,6 +339,17 @@ fn map_chain_error(error: WalletChainError) -> Response {
                 expected.height, expected.header_id, actual.height, actual.header_id
             ),
         ),
+        WalletChainError::StaleTipId {
+            expected_header_id,
+            actual,
+        } => v1_error(
+            Reason::StaleTip,
+            "the committed chain tip changed; retry from the new tip",
+            format!(
+                "expected id {expected_header_id}, actual height {} / {}",
+                actual.height, actual.header_id
+            ),
+        ),
         WalletChainError::HistoryPruned { minimum_height } => v1_error(
             Reason::HistoryPruned,
             "the requested chain history is no longer retained",
