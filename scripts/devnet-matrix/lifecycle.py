@@ -266,7 +266,23 @@ def stop(names=None):
             while owned(pid, configs) and time.monotonic() < deadline:
                 time.sleep(0.2)
             if owned(pid, configs):
-                raise RuntimeError(f'{name} did not stop; PID {pid} retained')
+                # rm-A-restart-armA-3: two Scala JVMs (mid-restart,
+                # never reached readiness) ignored SIGTERM for the full
+                # 30 s grace and were still holding their ports minutes
+                # later — this used to give up here and raise, leaving
+                # them running and the ports bound for every run after.
+                # SIGKILL only the SAME pid `owned` already verified
+                # (never a fresh lookup, so nothing new gets matched by
+                # coincidence), with its own short grace before giving
+                # up for real.
+                os.kill(pid, signal.SIGKILL)
+                deadline = time.monotonic() + 10
+                while owned(pid, configs) and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                if owned(pid, configs):
+                    raise RuntimeError(
+                        f'{name} did not stop; PID {pid} retained a port even '
+                        'after SIGKILL')
         path.unlink()
         config_path.unlink(missing_ok=True)
 
@@ -530,6 +546,57 @@ def _self_test():
     assert _state_root_pending(GENESIS_STATE_ROOT) is False
     print('self-test OK: _state_root_pending treats None and "" as not '
           'ready yet, and any other string as a reportable root')
+    _self_test_stop_escalates_to_sigkill()
+
+
+def _self_test_stop_escalates_to_sigkill():
+    """rm-A-restart-armA-3: two Scala JVMs ignored SIGTERM for the full
+    30 s grace and were still holding their ports minutes later — `stop`
+    used to give up right there and raise, leaving them running. Spawns
+    a REAL process that truly ignores SIGTERM (only `owned()`-verified
+    PIDs are ever signalled, so this proves the escalation against the
+    exact mechanism it protects, not a mock of it) and checks `stop`
+    still brings it down. Takes ~30 s: the SIGTERM grace it is exercising
+    is not itself shortened for the test.
+    """
+    WORK.mkdir(exist_ok=True)
+    ready = WORK / 'selftest-sigkill.ready'
+    ready.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        ['python3', '-c',
+         f'import signal, time\n'
+         f'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+         f'open({str(ready)!r}, "w").close()\n'
+         f'while True:\n    time.sleep(1)\n',
+         # An arg matching one of `owned`'s known config substrings —
+         # `stop` only ever signals a PID it can verify this way.
+         'devnet-matrix/rust-node.toml'],
+        cwd=ROOT)
+    try:
+        (WORK / 'selftest-sigkill.pid').write_text(str(proc.pid))
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists(), 'the test process never confirmed SIGTERM is ignored'
+        assert owned(proc.pid), 'the spawned process must be recognized as owned'
+        started = time.monotonic()
+        stop(names=['selftest-sigkill'])
+        elapsed = time.monotonic() - started
+        assert not owned(proc.pid), 'SIGKILL escalation must still bring it down'
+        # `stop` killed it with a raw os.kill, not through this Popen
+        # object, so it is a zombie — still unreaped, not still running —
+        # until something here calls wait(); `.poll()` alone can race it.
+        assert proc.wait(timeout=5) is not None, 'the process must actually be gone'
+        assert elapsed >= 29, (
+            f'expected the full ~30s SIGTERM grace before escalation, got {elapsed:.1f}s '
+            '— stop is no longer giving a real SIGTERM grace before SIGKILL')
+    finally:
+        ready.unlink(missing_ok=True)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    print(f'self-test OK: stop() escalates to SIGKILL after a {elapsed:.1f}s SIGTERM '
+         'grace against a process that truly ignores it')
 
 
 if __name__ == '__main__':
