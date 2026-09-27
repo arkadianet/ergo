@@ -910,10 +910,29 @@ impl WalletChain for WalletChainAdapter {
         let current_tip = self.client.committed_tip().map_err(map_service_error)?;
         let service_request =
             UtxoLookupRequest::from_wire(&request, current_tip).map_err(map_request_error)?;
-        let lookup = self
-            .client
-            .lookup_utxo_request(service_request)
-            .map_err(map_service_error)?;
+        let lookup =
+            self.client
+                .lookup_utxo_request(service_request)
+                .map_err(|error| match error {
+                    ChainClientError::StaleTip { actual, .. } if request.tip.is_some() => {
+                        let actual = match wire_tip(actual) {
+                            Ok(actual) => actual,
+                            Err(error) => return error,
+                        };
+                        let header_id = request.tip.clone().expect("supplied tip");
+                        match request.height {
+                            Some(height) => WalletChainError::StaleTip {
+                                expected: wire::ChainTip { height, header_id },
+                                actual,
+                            },
+                            None => WalletChainError::StaleTipId {
+                                expected_header_id: header_id,
+                                actual,
+                            },
+                        }
+                    }
+                    other => map_service_error(other),
+                })?;
         wire_box_lookup(lookup)
     }
 
@@ -1586,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_since_reports_ancestor_for_a_stale_cursor() {
+    fn blocks_since_reports_unavailable_history_for_an_unknown_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
         store.initialize_genesis(&[]).unwrap();
@@ -1634,6 +1653,19 @@ mod tests {
                 assert_eq!(response.tip.header_id, new_tip);
                 assert_eq!(response.ancestor.height, 1);
                 assert_eq!(response.ancestor.header_id, old_ids[0]);
+                let resumed = client
+                    .blocks_since(BlocksSinceRequest {
+                        cursor: response.ancestor,
+                        limit: 10,
+                    })
+                    .unwrap();
+                let BlocksSinceResponse::Forward(forward) = resumed else {
+                    panic!("expected forward blocks after rewinding");
+                };
+                assert_eq!(forward.blocks.len(), 1);
+                assert_eq!(forward.blocks[0].height, 2);
+                assert_eq!(forward.blocks[0].block_id, new_tip);
+                assert_eq!(forward.blocks[0].parent_id, old_ids[0]);
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -1754,7 +1786,9 @@ mod tests {
                 limit: 10,
             })
             .unwrap();
-        assert!(matches!(response, BlocksSinceResponse::Pruned(_)));
+        assert!(
+            matches!(response, BlocksSinceResponse::Pruned(pruned) if pruned.minimum_height == 3)
+        );
 
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh = StateStore::open(&fresh_dir.path().join("state.redb")).unwrap();
@@ -1764,6 +1798,47 @@ mod tests {
             fresh_client.committed_tip(),
             Err(ChainClientError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn box_lookup_stale_tip_preserves_supplied_height_or_id_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let ids = apply_empty_blocks(&mut store, 3);
+        let client =
+            InProcessChainClient::from_reader(ChainStoreReader::new_from_db(store.db_arc()));
+        let adapter = WalletChainAdapter::new(Arc::new(client));
+        for height in [Some(1), None] {
+            let error = WalletChain::box_lookup(
+                &adapter,
+                wire::BoxLookupRequest {
+                    box_id: hex::encode([1; 32]),
+                    tip: Some(hex::encode(ids[0])),
+                    height,
+                },
+            )
+            .unwrap_err();
+            match (height, error) {
+                (Some(height), WalletChainError::StaleTip { expected, actual }) => {
+                    assert_eq!(expected.height, height);
+                    assert_eq!(expected.header_id, hex::encode(ids[0]));
+                    assert_eq!(actual.height, 3);
+                    assert_eq!(actual.header_id, hex::encode(ids[2]));
+                }
+                (
+                    None,
+                    WalletChainError::StaleTipId {
+                        expected_header_id,
+                        actual,
+                    },
+                ) => {
+                    assert_eq!(expected_header_id, hex::encode(ids[0]));
+                    assert_eq!(actual.height, 3);
+                }
+                other => panic!("unexpected stale cursor: {other:?}"),
+            }
+        }
     }
 
     #[test]

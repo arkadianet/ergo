@@ -287,7 +287,7 @@ impl ChainStateAccessor for DerivationChain {
 }
 
 #[tokio::test]
-async fn derived_keys_automatically_rescan_and_restore_wallet_operations() {
+async fn derived_keys_track_forward_without_rescanning() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     let (admin, db, _dir) =
         spawn_writer_with_chain(Arc::new(DerivationChain), Arc::new(StubTxSubmitter));
@@ -306,17 +306,9 @@ async fn derived_keys_automatically_rescan_and_restore_wallet_operations() {
                 .unwrap()
                 .address
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst)
-                || ergo_state::wallet::wallet_apply_fenced()
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("automatic key rescan must finish");
+        assert!(!ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
         let read = store.read().unwrap();
-        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 2);
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 0);
         assert!(!read.scan_invalidated().unwrap());
         assert_eq!(
             read.rescan_state().unwrap(),
@@ -327,22 +319,24 @@ async fn derived_keys_automatically_rescan_and_restore_wallet_operations() {
 }
 
 #[tokio::test]
-async fn derivation_without_recovery_support_does_not_fence_or_persist_a_key() {
+async fn derivation_without_rescan_support_persists_a_key() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
     let store = RedbWalletStore::new(db);
     admin.init("pw".into(), String::new(), 24).await.unwrap();
     admin.unlock("pw".into()).await.unwrap();
     let keys = store.read().unwrap().tracked_pubkeys_with_paths().unwrap();
-    assert!(matches!(
-        admin.derive_next_key().await,
-        Err(WalletAdminError::RescanUnavailable(_))
-    ));
+    admin.derive_next_key().await.unwrap();
     assert_eq!(
-        store.read().unwrap().tracked_pubkeys_with_paths().unwrap(),
-        keys
+        store
+            .read()
+            .unwrap()
+            .tracked_pubkeys_with_paths()
+            .unwrap()
+            .len(),
+        keys.len() + 1
     );
-    assert!(!ergo_state::wallet::wallet_apply_fenced());
+    assert!(!store.read().unwrap().scan_invalidated().unwrap());
     assert!(admin.addresses().await.is_ok());
 }
 
@@ -409,7 +403,6 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
     })
     .await
     .expect("rescan task must finish before resetting global state");
-    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
@@ -465,7 +458,6 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     })
     .await
     .expect("rescan task must finish before resetting global state");
-    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
@@ -511,7 +503,6 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     })
     .await
     .expect("rescan task must finish before resetting global state");
-    ergo_state::wallet::unfence_wallet_apply();
     ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
     ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
