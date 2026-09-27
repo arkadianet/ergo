@@ -1040,7 +1040,9 @@ impl WalletWrite for RedbWalletWrite<'_> {
                 .open_table(crate::wallet::tables::WALLET_TRACKED_PUBKEYS)?
                 .is_empty()?
         {
-            let tip = {
+            let tip = if self.standalone {
+                None
+            } else {
                 let table = self
                     .txn()
                     .open_table(crate::wallet::tables::CHAIN_STATE_META)?;
@@ -1258,9 +1260,10 @@ impl WalletWrite for RedbWalletWrite<'_> {
         let header_id = if height == 0 {
             None
         } else {
-            let indexed_id = read_chain_index_header(self.txn(), height, self.standalone)?.ok_or_else(|| {
-                WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
-            })?;
+            let indexed_id = read_chain_index_header(self.txn(), height, self.standalone)?
+                .ok_or_else(|| {
+                    WalletStoreError::Decode(format!("rescan boundary {height} is missing"))
+                })?;
             if let Some(cursor) = read_wallet_cursor(self.txn())? {
                 if cursor.height == height && cursor.header_id != Some(indexed_id) {
                     return Err(WalletStoreError::Decode(format!(

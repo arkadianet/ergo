@@ -34,7 +34,9 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(error) = runtime.block_on(run(daemon)) {
+    let result = runtime.block_on(run(daemon));
+    runtime.shutdown_background();
+    if let Err(error) = result {
         eprintln!("ergo-walletd: {error}");
         std::process::exit(1);
     }

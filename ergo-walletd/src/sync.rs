@@ -94,6 +94,8 @@ pub struct SyncReport {
 
 #[derive(Debug, Error)]
 pub enum SyncError {
+    #[error("wallet sync cancelled")]
+    Cancelled,
     #[error("wallet store failure: {0}")]
     Store(#[from] WalletStoreError),
     #[error("wallet service failure: {0}")]
@@ -117,6 +119,9 @@ pub struct StandaloneSyncer {
     config: SyncConfig,
     tip: Arc<CachedNodeTip>,
     fail_next_commit: Arc<AtomicBool>,
+    cancelled: AtomicBool,
+    #[cfg(test)]
+    panic_next_commit: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +138,26 @@ impl StandaloneSyncer {
             config,
             tip,
             fail_next_commit: Arc::new(AtomicBool::new(false)),
+            cancelled: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_next_commit: AtomicBool::new(false),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.service.chain().cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn check_cancelled(&self) -> Result<(), SyncError> {
+        if self.is_cancelled() {
+            Err(SyncError::Cancelled)
+        } else {
+            Ok(())
         }
     }
 
@@ -147,6 +172,8 @@ impl StandaloneSyncer {
     pub fn sync_once(&self) -> Result<SyncReport, SyncError> {
         match self.sync_once_inner() {
             Ok(report) => Ok(report),
+            Err(_) if self.is_cancelled() => Err(SyncError::Cancelled),
+            Err(SyncError::Cancelled) => Err(SyncError::Cancelled),
             Err(error) if error.retryable() => Err(error),
             Err(SyncError::Pruned(minimum_height)) => {
                 Err(self.fail(SyncError::Pruned(minimum_height)))
@@ -156,6 +183,7 @@ impl StandaloneSyncer {
     }
 
     fn sync_once_inner(&self) -> Result<SyncReport, SyncError> {
+        self.check_cancelled()?;
         if self.config.batch == 0 || self.config.batch > MAX_SYNC_BLOCKS {
             return Err(SyncError::Protocol(format!(
                 "sync batch must be between 1 and {MAX_SYNC_BLOCKS}"
@@ -173,12 +201,6 @@ impl StandaloneSyncer {
         let mut rebuild_origin = start.rebuild;
         let mut from_height = start.from_height;
         let mut tip = self.tip()?;
-        if cursor.height > tip.height {
-            return Err(SyncError::Chain(ChainClientError::stale_tip(
-                CommittedTip::new(cursor.height, cursor.header_id),
-                tip,
-            )));
-        }
         let mut processed = 0u32;
         let mut rewinds_without_progress = 0u32;
         let mut full_rebuilds = 0u32;
@@ -192,6 +214,7 @@ impl StandaloneSyncer {
         let mut running_published = false;
 
         loop {
+            self.check_cancelled()?;
             if rebuild {
                 self.prepare_rebuild(&mut cursor, full_rebuild)?;
                 rebuild = false;
@@ -217,11 +240,6 @@ impl StandaloneSyncer {
                     tip,
                 });
             }
-            if cursor.height > tip.height {
-                return Err(SyncError::Protocol(
-                    "chain page advanced beyond its tip".to_string(),
-                ));
-            }
             if !running_published {
                 self.persist_state(RescanState::Running { from_height })?;
                 running_published = true;
@@ -234,6 +252,7 @@ impl StandaloneSyncer {
                 .min(self.config.page)
                 .min(self.config.batch - processed);
             let response = self.blocks_since(cursor.clone(), limit)?;
+            self.check_cancelled()?;
             match response {
                 ergo_wallet_service::BlocksSinceResponse::Forward(forward) => {
                     if forward.tip.height < tip.height {
@@ -260,6 +279,7 @@ impl StandaloneSyncer {
                     let (tracked_trees, cached_pubkeys) = self.tracked_keys()?;
                     let matcher = WalletScanMatcher::from_store(self.service.store().as_ref())?;
                     for block in forward.blocks {
+                        self.check_cancelled()?;
                         let height = block.height;
                         let rescan_block = self.service.convert_block(block).map_err(|error| {
                             SyncError::Protocol(format!("block conversion failed: {error}"))
@@ -273,7 +293,12 @@ impl StandaloneSyncer {
                             &rescan_block,
                             records.as_deref(),
                         )?;
+                        self.check_cancelled()?;
                         write.commit()?;
+                        #[cfg(test)]
+                        if self.panic_next_commit.swap(false, Ordering::SeqCst) {
+                            panic!("injected panic after wallet commit");
+                        }
                         if self.fail_next_commit.swap(false, Ordering::SeqCst) {
                             return Err(SyncError::Protocol(
                                 "injected post-commit failure".to_string(),
@@ -296,9 +321,12 @@ impl StandaloneSyncer {
                     // A reorg is only actionable if it actually rewinds: an
                     // ancestor at or above the wallet cursor is a protocol
                     // violation, not a reorg.
-                    if ancestor.ancestor.height > cursor.height {
+                    if ancestor.ancestor.height > cursor.height
+                        || ancestor.ancestor.height > ancestor.tip.height
+                    {
                         return Err(SyncError::Protocol(
-                            "chain ancestor is ahead of the wallet cursor".to_string(),
+                            "chain ancestor is ahead of the wallet cursor or committed tip"
+                                .to_string(),
                         ));
                     }
                     rewinds_without_progress = rewinds_without_progress.saturating_add(1);
@@ -485,6 +513,11 @@ impl StandaloneSyncer {
         let mut attempt = 0usize;
         let mut delay = self.config.retry_delay;
         loop {
+            if self.is_cancelled() {
+                return Err(ChainClientError::ShuttingDown(
+                    "wallet daemon shutdown".to_string(),
+                ));
+            }
             match operation() {
                 Ok(value) => return Ok(value),
                 Err(error) if is_retryable(&error) && attempt + 1 < MAX_RETRY_ATTEMPTS => {
@@ -498,7 +531,13 @@ impl StandaloneSyncer {
                         "chain request failed; retrying"
                     );
                     if !delay.is_zero() {
-                        std::thread::sleep(delay.min(self.config.max_retry_delay));
+                        let deadline =
+                            std::time::Instant::now() + delay.min(self.config.max_retry_delay);
+                        while !self.is_cancelled() && std::time::Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(10).min(
+                                deadline.saturating_duration_since(std::time::Instant::now()),
+                            ));
+                        }
                     }
                     delay = delay.saturating_mul(2).min(self.config.max_retry_delay);
                     attempt += 1;
@@ -521,14 +560,14 @@ impl StandaloneSyncer {
                     .map(|cursor| cursor.height)
             })
             .unwrap_or(0);
-        // Terminal: the loop stops and the daemon exits with this error, so it
+        // Terminal: syncing stops while the read API retains the failure, so it
         // is logged at error level. Protocol violations and pruned history are
         // operator-actionable; the text is generated locally.
         tracing::error!(
             error = %error,
             wallet_height = height,
             terminal = true,
-            "wallet sync failed; the daemon will not continue"
+            "wallet sync failed; status remains available"
         );
         let reason = error.to_string();
         if let Ok(mut write) = self.service.store().begin_write() {
@@ -886,13 +925,22 @@ mod tests {
 
     #[test]
     fn ancestor_rewinds_and_uses_returned_cursor() {
+        assert_ancestor_rewind(3);
+    }
+
+    #[test]
+    fn node_tip_below_cursor_rewinds_to_ancestor_and_resumes() {
+        assert_ancestor_rewind(5);
+    }
+
+    fn assert_ancestor_rewind(initial_height: u32) {
         let dir = tempfile::tempdir().unwrap();
         let tip = CommittedTip::new(3, [30; 32]);
         let store =
             Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
         let mut write = store.begin_write().unwrap();
         write.prepare_rescan(0, true).unwrap();
-        for height in 1..=3u32 {
+        for height in 1..=initial_height {
             write
                 .apply_rescan_block(
                     height,
@@ -960,7 +1008,10 @@ mod tests {
         let report = syncer.sync_once().unwrap();
         assert_eq!(report.wallet_height, 3);
         assert_eq!(report.blocks_processed, 2);
-        assert_eq!(requests.lock().unwrap().clone(), vec![(3, 1), (1, 3)]);
+        assert_eq!(
+            requests.lock().unwrap().clone(),
+            vec![(initial_height, 1), (1, 3)]
+        );
         assert_eq!(
             syncer
                 .service()
@@ -1031,6 +1082,121 @@ mod tests {
         ));
         assert!(SyncError::Chain(ChainClientError::Conflict).retryable());
         assert!(!SyncError::Pruned(7).retryable());
+    }
+
+    #[tokio::test]
+    async fn permanently_lower_tip_without_a_valid_ancestor_is_terminal_on_status() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tip = CommittedTip::new(1, [1; 32]);
+        let (syncer, requests) = syncer_with_log(
+            &dir,
+            vec![ergo_wallet_service::BlocksSinceResponse::Ancestor(
+                ergo_wallet_service::AncestorBlocksSince {
+                    tip: tip.clone(),
+                    ancestor: ChainCursor {
+                        height: 3,
+                        header_id: [3; 32],
+                    },
+                },
+            )],
+            tip,
+        );
+        let mut write = syncer.service.store().begin_write().unwrap();
+        write.set_scan_cursor(3, Some(&[3; 32])).unwrap();
+        write.commit().unwrap();
+        let error = syncer.sync_once().unwrap_err();
+        assert!(!error.retryable());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let router = crate::api::router(crate::api::ApiContext {
+            service: syncer.service.clone(),
+            network: crate::config::Network::Mainnet,
+            tip: syncer.tip.clone(),
+            tip_max_age: Duration::from_secs(60),
+        });
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["rescan"]["type"], "failed");
+        assert!(status["rescan"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("ancestor"));
+    }
+
+    #[test]
+    fn panic_after_commit_reopens_and_resumes_without_gaps_or_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = FakeState {
+            tip: CommittedTip::new(3, [3; 32]),
+            responses: Arc::new(Mutex::new(vec![])),
+            tip_calls: Arc::new(Mutex::new(0)),
+            requests: requests.clone(),
+            dynamic: true,
+        };
+        let chain: Arc<dyn ChainClient> = Arc::new(FakeClient { state });
+        let open = || {
+            let store =
+                Arc::new(RedbWalletStore::open_standalone(dir.path().join("wallet.redb")).unwrap());
+            StandaloneSyncer::new(
+                Arc::new(WalletService::new(store, chain.clone())),
+                SyncConfig {
+                    page: 1,
+                    ..SyncConfig::default()
+                },
+                Arc::new(CachedNodeTip::new(chain.clone())),
+            )
+        };
+        {
+            let syncer = open();
+            syncer.panic_next_commit.store(true, Ordering::SeqCst);
+            let panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| syncer.sync_once()));
+            assert!(panic.is_err());
+            assert_eq!(
+                syncer
+                    .service
+                    .store()
+                    .read()
+                    .unwrap()
+                    .scan_cursor()
+                    .unwrap()
+                    .unwrap()
+                    .height,
+                1
+            );
+            assert_eq!(requests.lock().unwrap().as_slice(), &[(0, 1)]);
+        }
+        // No store/service/syncer survives: reopen the same file as a new daemon would.
+        let restarted = open();
+        let report = restarted.sync_once().unwrap();
+        assert!(report.completed);
+        assert_eq!(report.blocks_processed, 2);
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            &[(0, 1), (1, 1), (2, 1)]
+        );
+        let read = restarted.service.store().read().unwrap();
+        assert_eq!(read.scan_cursor().unwrap().unwrap().height, 3);
+        for height in 1..=3 {
+            assert_eq!(
+                read.chain_index_header(height).unwrap(),
+                Some([height as u8; 32])
+            );
+        }
+        assert!(!read.scan_invalidated().unwrap());
     }
 
     #[test]
