@@ -388,22 +388,48 @@ def held_coverage(result, plan):
             and result['finished_ms'] >= result['hold_end_ms'])
 
 
-def tip_change_epoch_ms(samples, target, height_before):
-    """The FIRST `request_started_ms` (epoch ms) at which `target`
-    reported a height greater than `height_before`, among `samples` —
-    the caller decides which samples (e.g. flood/drain phase only) and
-    which baseline height are in scope. `None` if it never did. Pure,
-    so `--self-test` drives it directly."""
-    if height_before is None:
+def ttl_deadline_epoch_ms(result, coverage):
+    """When the flood's last wave's entries reach the store's TTL:
+    `last_send + ttlMs`, in the adversary's own epoch-ms report frame.
+    `None` when `coverage` is falsy — an incomplete/unconfirmed run's
+    timing fields cannot be trusted for this. Pure."""
+    if not coverage:
         return None
-    candidates = sorted(
-        (s['request_started_ms'], s[f'{target}_height'])
-        for s in samples
-        if s.get('request_started_ms') is not None
-        and s.get(f'{target}_height') is not None)
-    for req_ms, height in candidates:
-        if height > height_before:
-            return req_ms
+    return result['started_unix_ms'] + result['last_send_ms'] + ROOT_FLOOD_CAPS['ttlMs']
+
+
+def tip_change_epoch_ms(samples, target, deadline_ms):
+    """The `request_started_ms` (epoch ms) of the first sample, among
+    `samples` taken in chronological order, at which `target`'s
+    reported height is HIGHER than the immediately PRECEDING sample's —
+    i.e. an ordering block was applied to `target` — restricted to a
+    transition landing at or after `deadline_ms`. `None` if `deadline_ms`
+    is `None` or no such transition exists.
+
+    Checked against the immediately preceding sample, not a single
+    fixed baseline: the first-ever rise over a pre-flood height can
+    land well before `deadline_ms` while the target keeps advancing
+    normally for the rest of the window, and an early rise must not
+    stand in for a later one that never happened — rm-A-flood-armA-
+    held-patched-2's first cut of this function (compared against a
+    fixed pre-flood baseline) reported exactly that shape as measurable
+    when the transition it actually found was ~335s too early.
+
+    Pure, so `--self-test` drives it directly.
+    """
+    if deadline_ms is None:
+        return None
+    ordered = sorted(
+        (s for s in samples if s.get('request_started_ms') is not None
+         and s.get(f'{target}_height') is not None),
+        key=lambda s: s['request_started_ms'])
+    prev_height = None
+    for s in ordered:
+        height = s[f'{target}_height']
+        if (prev_height is not None and height > prev_height
+                and s['request_started_ms'] >= deadline_ms):
+            return s['request_started_ms']
+        prev_height = height
     return None
 
 
@@ -468,8 +494,7 @@ def evaluate_store_window(samples, baseline, patched, plan, result, tip_change_a
         # because the hold is long enough — it is measurable only once
         # the target's OWN height has actually moved at or after
         # last_send + ttlMs, while its sockets were still open.
-        ttl_deadline = ((result['started_unix_ms'] + result['last_send_ms']
-                        + ROOT_FLOOD_CAPS['ttlMs']) if coverage else None)
+        ttl_deadline = ttl_deadline_epoch_ms(result, coverage)
         expiry_measurable = (
             plan['hold_ms'] > ROOT_FLOOD_CAPS['ttlMs']
             and ttl_deadline is not None and tip_change_at is not None
@@ -602,19 +627,38 @@ def self_test_held_evaluation():
 
     # ----- round 6: drops.expired needs a tip change, not just a long hold -
 
-    # tip_change_epoch_ms: pure over samples carrying `request_started_ms`
-    # and `{target}_height`. Height must be STRICTLY greater than the
-    # baseline to count, and the EARLIEST qualifying sample wins even out
-    # of order.
+    # ttl_deadline_epoch_ms: pure, straight arithmetic in the adversary's
+    # own report frame, withheld entirely without confirmed coverage.
+    assert ttl_deadline_epoch_ms(result, True) == \
+        result['started_unix_ms'] + result['last_send_ms'] + ROOT_FLOOD_CAPS['ttlMs']
+    assert ttl_deadline_epoch_ms(result, False) is None
+
+    # tip_change_epoch_ms: a TRANSITION (height higher than the sample
+    # immediately before it, in chronological order — not "higher than a
+    # single fixed baseline"), restricted to one landing at/after the
+    # deadline. A rise entirely before the deadline must NOT stand in
+    # for one after it, even though the height is higher than it was at
+    # the very start (this is the exact bug armA-held-patched-2 exposed
+    # in the first cut, which compared against a fixed pre-flood height
+    # instead).
     height_samples = [
-        {'request_started_ms': 342000, 'scala3_height': 11},   # == before
-        {'request_started_ms': 348000, 'scala3_height': 12},   # first real rise
-        {'request_started_ms': 344000, 'scala3_height': 11},   # out of order, no rise
-        {'request_started_ms': 349000, 'scala3_height': 13},   # later still
+        {'request_started_ms': 100, 'scala3_height': 10},
+        {'request_started_ms': 200, 'scala3_height': 11},   # rise BEFORE deadline
+        {'request_started_ms': 300, 'scala3_height': 11},   # no rise, at/after
+        {'request_started_ms': 400, 'scala3_height': 11},   # still no rise
+        {'request_started_ms': 500, 'scala3_height': 12},   # the qualifying rise
     ]
-    assert tip_change_epoch_ms(height_samples, 'scala3', 11) == 348000
-    assert tip_change_epoch_ms(height_samples, 'scala3', 13) is None
-    assert tip_change_epoch_ms([], 'scala3', 11) is None
+    assert tip_change_epoch_ms(height_samples, 'scala3', 250) == 500
+    # Out of order in the input, same answer: sorted by time internally.
+    import random
+    shuffled = height_samples[:]
+    random.Random(0).shuffle(shuffled)
+    assert tip_change_epoch_ms(shuffled, 'scala3', 250) == 500
+    # A deadline early enough that the FIRST rise already qualifies.
+    assert tip_change_epoch_ms(height_samples, 'scala3', 150) == 200
+    # A deadline past every rise in the series: none qualifies.
+    assert tip_change_epoch_ms(height_samples, 'scala3', 600) is None
+    assert tip_change_epoch_ms([], 'scala3', 250) is None
     assert tip_change_epoch_ms(height_samples, 'scala3', None) is None
 
     # A sample with NEITHER counter grown, independent of the leftover
@@ -834,7 +878,10 @@ def _run_against_scala_follower(ctx, target):
     # Only an explicitly stock role receives the missing-store exemption.
     spec = campaign.lifecycle_roles().get(role)
     patched = spec is None or spec.patched
-    tip_change_at = tip_change_epoch_ms(flood_samples, target, height_before)
+    held = plan.get('hold_ms') is not None
+    coverage_now = held_coverage(result, plan) if held else None
+    ttl_deadline = ttl_deadline_epoch_ms(result, coverage_now) if held else None
+    tip_change_at = tip_change_epoch_ms(flood_samples, target, ttl_deadline)
     store_verdict = evaluate_store_window(
         flood_samples, baseline, patched, plan, result, tip_change_at)
     verdict.update(store_verdict)
