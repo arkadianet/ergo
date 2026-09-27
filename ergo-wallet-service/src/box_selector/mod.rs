@@ -24,8 +24,8 @@ pub struct SelectionTarget {
 /// Selection-time summary of a wallet box. Built from WALLET_BOXES rows
 /// (which store value + tokens; see ergo-state's WalletBox). The selector
 /// does not need full ErgoTree bytes — only value + tokens. Full ErgoBox
-/// data is fetched via `ChainStateAccessor::lookup_utxo` at the
-/// writer-task boundary.
+/// data is fetched via `WalletChainAccess::lookup_utxo` at the
+/// engine boundary.
 #[derive(Debug, Clone)]
 pub struct BoxSummary {
     pub box_id: [u8; 32],
@@ -34,7 +34,7 @@ pub struct BoxSummary {
 }
 
 /// What the selector returns: selected box ids + change metadata.
-/// Caller fetches full ErgoBox bytes via `ChainStateAccessor::lookup_utxo`
+/// Caller fetches full ErgoBox bytes via `WalletChainAccess::lookup_utxo`
 /// post-selection.
 #[derive(Debug, Clone)]
 pub struct SelectionResult {

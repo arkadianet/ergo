@@ -10,14 +10,14 @@
 //! For `from_dto`, the `image` field is only used to reconstruct the `SigmaBoolean`
 //! for hint matching inside the prover; we parse it from the tagged JSON object.
 
-use crate::node::wallet_bridge::WalletAdminError;
+use ergo_wallet_protocol::WalletAdminError;
 
 /// Serialize a `SigmaBoolean` to the `SigmaBooleanJson` wire shape.
 pub(crate) fn sigma_boolean_to_json(
     sb: &ergo_ser::sigma_value::SigmaBoolean,
-) -> ergo_api::wallet::sending::SigmaBooleanJson {
-    use ergo_api::wallet::sending::SigmaBooleanJson;
+) -> ergo_wallet_protocol::scala::sending::SigmaBooleanJson {
     use ergo_ser::sigma_value::SigmaBoolean;
+    use ergo_wallet_protocol::scala::sending::SigmaBooleanJson;
     use serde_json::{json, Value};
 
     let inner: Value = match sb {
@@ -53,7 +53,7 @@ pub(crate) fn sigma_boolean_to_json(
 /// Parse a `SigmaBooleanJson` back to a `SigmaBoolean`.
 /// Returns `Err` for unrecognised shapes.
 pub(crate) fn sigma_boolean_from_json(
-    json: &ergo_api::wallet::sending::SigmaBooleanJson,
+    json: &ergo_wallet_protocol::scala::sending::SigmaBooleanJson,
 ) -> Result<ergo_ser::sigma_value::SigmaBoolean, WalletAdminError> {
     use ergo_primitives::group_element::GroupElement;
     use ergo_ser::sigma_value::SigmaBoolean;
@@ -99,9 +99,9 @@ pub(crate) fn sigma_boolean_from_json(
 /// Serialize a `FirstProverMessage` to its `FirstProverMessageJson` wire shape.
 pub(crate) fn fpm_to_json(
     fpm: &ergo_wallet::proving::hints::FirstProverMessage,
-) -> ergo_api::wallet::sending::FirstProverMessageJson {
-    use ergo_api::wallet::sending::FirstProverMessageJson;
+) -> ergo_wallet_protocol::scala::sending::FirstProverMessageJson {
     use ergo_wallet::proving::hints::FirstProverMessage;
+    use ergo_wallet_protocol::scala::sending::FirstProverMessageJson;
 
     match fpm {
         FirstProverMessage::Schnorr(a) => FirstProverMessageJson::Dlog { a: hex::encode(a) },
@@ -114,10 +114,10 @@ pub(crate) fn fpm_to_json(
 
 /// Parse a `FirstProverMessageJson` back to `FirstProverMessage`.
 pub(crate) fn fpm_from_json(
-    json: &ergo_api::wallet::sending::FirstProverMessageJson,
+    json: &ergo_wallet_protocol::scala::sending::FirstProverMessageJson,
 ) -> Result<ergo_wallet::proving::hints::FirstProverMessage, WalletAdminError> {
-    use ergo_api::wallet::sending::FirstProverMessageJson;
     use ergo_wallet::proving::hints::FirstProverMessage;
+    use ergo_wallet_protocol::scala::sending::FirstProverMessageJson;
 
     fn decode_pt(hex_str: &str, label: &str) -> Result<[u8; 33], WalletAdminError> {
         hex::decode(hex_str)
@@ -146,10 +146,10 @@ pub(crate) fn fpm_from_json(
 /// `secret_hints`, everything else into `public_hints`.
 pub(crate) fn tx_hints_bag_to_dto(
     bag: &ergo_wallet::proving::hints::TransactionHintsBag,
-) -> ergo_api::wallet::sending::TxHintsBagDto {
-    use ergo_api::wallet::sending::node_position_to_str;
-    use ergo_api::wallet::sending::{HintDto, TxHintsBagDto};
+) -> ergo_wallet_protocol::scala::sending::TxHintsBagDto {
     use ergo_wallet::proving::hints::Hint;
+    use ergo_wallet_protocol::scala::sending::node_position_to_str;
+    use ergo_wallet_protocol::scala::sending::{HintDto, TxHintsBagDto};
     use std::collections::BTreeMap;
 
     fn hint_to_dto(hint: &Hint) -> HintDto {
@@ -217,14 +217,14 @@ pub(crate) fn tx_hints_bag_to_dto(
 /// the prover. The `image` field is parsed so the prover can match hints
 /// by proposition at sign time.
 pub(crate) fn tx_hints_bag_from_dto(
-    dto: &ergo_api::wallet::sending::TxHintsBagDto,
+    dto: &ergo_wallet_protocol::scala::sending::TxHintsBagDto,
 ) -> Result<ergo_wallet::proving::hints::TransactionHintsBag, WalletAdminError> {
-    use ergo_api::wallet::sending::{node_position_from_str, HintDto};
     use ergo_wallet::proving::hints::{
         Hint, HintsBag, OwnCommitment, RealCommitment, RealSecretProof, SimulatedCommitment,
         SimulatedSecretProof, TransactionHintsBag,
     };
     use ergo_wallet::proving::node_position::NodePosition;
+    use ergo_wallet_protocol::scala::sending::{node_position_from_str, HintDto};
 
     fn parse_challenge(hex_str: &str) -> Result<[u8; 24], WalletAdminError> {
         hex::decode(hex_str)

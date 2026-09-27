@@ -1,7 +1,7 @@
 //! Process-lifetime solution-verdict counters for `/metrics`
-//! (`ergo_solutions_*` series). Statics follow the `RESCAN_IN_PROGRESS`
-//! precedent: the mining dispatch task is the sole writer, the snapshot
-//! publisher the sole reader, so relaxed orderings suffice.
+//! (`ergo_solutions_*` series). Process-global statics: the mining dispatch
+//! task is the sole writer, the snapshot publisher the sole reader, so
+//! relaxed orderings suffice.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

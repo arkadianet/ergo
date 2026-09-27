@@ -1,26 +1,27 @@
 //! Integration test: NodeWalletAdmin init→status round-trip via the
 //! channel-backed writer task.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ergo_api::wallet::WalletAdmin;
 use ergo_api::wallet::WalletAdminError;
-use ergo_node::node::wallet_bridge::{
-    run_wallet_writer, ChainStateAccessor, NodeWalletAdmin, TxSubmitter, WriterConfig,
-};
+use ergo_node::node::wallet_bridge::{EmbeddedWallet, MempoolViewOverlay, NodeWalletAdmin};
 use ergo_state::wallet::tables::WALLET_SCANS;
 use ergo_state::wallet::{RedbWalletStore, WalletStore};
+use ergo_wallet_service::engine::{
+    ChainAccessError, RescanCoordinator, TxSubmitError, TxSubmitter, WalletChainAccess,
+    WalletEngineConfig, WalletEngineParts,
+};
 
 struct StubChainAccessor;
 
-impl ChainStateAccessor for StubChainAccessor {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for StubChainAccessor {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(0)
     }
 
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(0)
     }
 
@@ -43,12 +44,12 @@ impl ChainStateAccessor for StubChainAccessor {
 /// candidate-height (`tip+1`) trigger in `native_balance`.
 struct StubChainAccessorTip(u32);
 
-impl ChainStateAccessor for StubChainAccessorTip {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for StubChainAccessorTip {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self.0)
     }
 
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self.0)
     }
 
@@ -75,12 +76,12 @@ struct StubChainReemission {
     rules: ergo_validation::ReemissionRuleInputs,
 }
 
-impl ChainStateAccessor for StubChainReemission {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for StubChainReemission {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self.tip)
     }
 
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(self.tip)
     }
 
@@ -108,12 +109,12 @@ struct BlockingRescanChain {
     release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
-impl ChainStateAccessor for BlockingRescanChain {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for BlockingRescanChain {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(0)
     }
 
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(3)
     }
 
@@ -153,10 +154,7 @@ struct StubTxSubmitter;
 
 #[async_trait]
 impl TxSubmitter for StubTxSubmitter {
-    async fn submit_transaction(
-        &self,
-        _tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError> {
+    async fn submit_transaction(&self, _tx_bytes: Vec<u8>) -> Result<String, TxSubmitError> {
         Ok("0000000000000000000000000000000000000000000000000000000000000000".to_string())
     }
 }
@@ -170,11 +168,8 @@ struct RejectingSubmitter {
 
 #[async_trait]
 impl TxSubmitter for RejectingSubmitter {
-    async fn submit_transaction(
-        &self,
-        _tx_bytes: Vec<u8>,
-    ) -> Result<String, ergo_api::types::SubmitError> {
-        Err(ergo_api::types::SubmitError {
+    async fn submit_transaction(&self, _tx_bytes: Vec<u8>) -> Result<String, TxSubmitError> {
+        Err(TxSubmitError {
             reason: self.reason.clone(),
             detail: None,
         })
@@ -219,6 +214,33 @@ fn minimal_signed_tx() -> (Vec<u8>, [u8; 32]) {
     (w.result(), *id.as_bytes())
 }
 
+/// Build the embedded wallet from its writer's pieces (a fresh rescan
+/// coordinator, no service runtime), spawn the writer task, and return the
+/// admin handle.
+fn start_wallet(
+    storage: Arc<parking_lot::RwLock<ergo_wallet::storage::SecretStorage>>,
+    state: Arc<parking_lot::RwLock<ergo_wallet_service::state::WalletState>>,
+    store: Arc<dyn WalletStore>,
+    chain: Arc<dyn WalletChainAccess>,
+    config: WalletEngineConfig,
+    submitter: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+) -> NodeWalletAdmin {
+    let wallet = EmbeddedWallet::new(WalletEngineParts {
+        storage,
+        state,
+        store,
+        chain,
+        config,
+        submitter,
+        mempool: Arc::new(MempoolViewOverlay::new(mempool)),
+        service: None,
+        rescan: Arc::new(RescanCoordinator::new()),
+    });
+    tokio::spawn(wallet.writer.run());
+    wallet.admin
+}
+
 /// Spawn a writer task with the given submitter; returns the admin handle, a db
 /// clone for direct seeding, and the tempdir guard (keep it alive).
 fn spawn_writer(
@@ -228,10 +250,9 @@ fn spawn_writer(
 }
 
 fn spawn_writer_with_chain(
-    chain: Arc<dyn ChainStateAccessor>,
+    chain: Arc<dyn WalletChainAccess>,
     submitter: Arc<dyn TxSubmitter>,
 ) -> (NodeWalletAdmin, Arc<redb::Database>, tempfile::TempDir) {
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -241,7 +262,7 @@ fn spawn_writer_with_chain(
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
-    let cfg = WriterConfig {
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -250,21 +271,22 @@ fn spawn_writer_with_chain(
     };
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    (NodeWalletAdmin::new(tx), db_seed, dir)
+    (
+        start_wallet(storage, state, db, chain, cfg, submitter, mempool),
+        db_seed,
+        dir,
+    )
 }
 
 static WALLET_ADMIN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct DerivationChain;
 
-impl ChainStateAccessor for DerivationChain {
-    fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+impl WalletChainAccess for DerivationChain {
+    fn wallet_scan_height(&self) -> Result<u32, ChainAccessError> {
         Ok(0)
     }
-    fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+    fn tip_height(&self) -> Result<u32, ChainAccessError> {
         Ok(2)
     }
     fn is_pruned(&self) -> bool {
@@ -306,7 +328,7 @@ async fn derived_keys_track_forward_without_rescanning() {
                 .unwrap()
                 .address
         };
-        assert!(!ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst));
+        assert!(!admin.rescan_coordinator().task_active());
         let read = store.read().unwrap();
         assert_eq!(read.scan_cursor().unwrap().unwrap().height, 0);
         assert!(!read.scan_invalidated().unwrap());
@@ -393,21 +415,16 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         ergo_state::wallet::RescanState::Failed { height: 1, .. }
     ));
     assert!(read.scan_invalidated().unwrap());
-    assert!(ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.load(Ordering::SeqCst));
-    assert!(ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst));
-    assert!(ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    assert!(admin.rescan_coordinator().fail_closed());
+    assert!(admin.rescan_coordinator().in_progress());
+    assert!(admin.rescan_coordinator().scan_rebuild_in_progress());
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
+        while admin.rescan_coordinator().task_active() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("rescan task must finish before resetting global state");
-    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+    .expect("rescan task must finish before the test ends");
 }
 
 #[tokio::test]
@@ -440,7 +457,7 @@ async fn rescan_on_genesis_tip_is_accepted() {
     })
     .await
     .expect("tip-zero rescan must finish");
-    while ergo_node::wallet_boot::RESCAN_IN_PROGRESS.load(Ordering::SeqCst) {
+    while admin.rescan_coordinator().in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert!(store.read().unwrap().scan_boxes(11).unwrap().is_empty());
@@ -451,18 +468,6 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use std::time::Duration;
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("rescan task must finish before resetting global state");
-    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
     let (admin, db, _dir) =
         spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
     {
@@ -497,17 +502,12 @@ async fn corrupt_scan_registry_is_discarded_before_empty_full_rescan() {
     .await
     .expect("corrupt-registry recovery rescan must finish");
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.load(Ordering::SeqCst) {
+        while admin.rescan_coordinator().task_active() {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("rescan task must finish before resetting global state");
-    ergo_node::wallet_boot::RESCAN_FAIL_CLOSED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_IN_PROGRESS.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::RESCAN_TASK_ACTIVE.store(false, Ordering::SeqCst);
-    ergo_node::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+    .expect("rescan task must finish before the test ends");
 }
 
 /// `send.signed` idempotency (codex P0-4): a tx whose id is already a confirmed
@@ -671,7 +671,6 @@ async fn native_send_intent_locked_rejects() {
 #[tokio::test]
 async fn admin_init_status_roundtrip() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
 
     let storage = Arc::new(parking_lot::RwLock::new(
@@ -681,8 +680,8 @@ async fn admin_init_status_roundtrip() {
         ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessor);
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -693,11 +692,8 @@ async fn admin_init_status_roundtrip() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
 
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     // Before init: wallet is uninitialized.
     let status_before = admin.status().await.unwrap();
@@ -734,10 +730,9 @@ async fn admin_init_status_roundtrip() {
 #[tokio::test]
 async fn get_private_key_gated_by_expose_flag_false() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
-    // With `WriterConfig.expose_private_keys = false`, the route
+    // With `WalletEngineConfig.expose_private_keys = false`, the route
     // returns `Forbidden` before touching wallet state — so the test
     // doesn't need an initialized wallet to drive the gate.
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -746,8 +741,8 @@ async fn get_private_key_gated_by_expose_flag_false() {
         ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessor);
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -757,10 +752,7 @@ async fn get_private_key_gated_by_expose_flag_false() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     let request = ergo_api::wallet::admin_advanced::GetPrivateKeyRequest {
         address: "9hkXFKDcMUSXn1jUUH4ynjLNiVcyZxKqXjMtqEnDdJyHfXCPmiQ".to_string(),
@@ -799,7 +791,6 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -833,8 +824,8 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
         wtxn.commit().unwrap();
     }
 
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessor);
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -844,10 +835,7 @@ async fn generate_unsigned_emits_canonical_p2pk_recipient_tree() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     // init + unlock — unlock auto-derives keys AND backfills the change
     // address (the bug-B fix), so the build path has a change target.
@@ -919,7 +907,6 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
     const OTHER_TOKEN: [u8; 32] = [0x22; 32];
     const ACTIVATION: u32 = 100;
 
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -930,8 +917,8 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_for_seed = db.clone();
     // tip 200 → candidate height 201 > activation 100 → the EIP-27 spend trigger fires.
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessorTip(200));
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessorTip(200));
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -945,10 +932,7 @@ async fn native_balance_reserves_eip27_reward_box_tokens() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     // Initialize so the wallet is not Uninitialized (balance is a read — works locked).
     admin
@@ -1035,7 +1019,6 @@ async fn native_select_boxes_burn_aware_dry_run() {
     const OTHER_TOKEN: [u8; 32] = [0x22; 32];
     const ACTIVATION: u32 = 100;
 
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -1051,8 +1034,8 @@ async fn native_select_boxes_burn_aware_dry_run() {
         pay_to_reemission_tree: vec![0u8], // unused by the dry-run (no tree parse)
     };
     // tip 200 → candidate height 201 > activation 100 → the EIP-27 trigger fires.
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainReemission { tip: 200, rules });
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainReemission { tip: 200, rules });
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -1062,10 +1045,7 @@ async fn native_select_boxes_burn_aware_dry_run() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     admin
         .init("pw".to_string(), String::new(), 24)
@@ -1210,7 +1190,6 @@ async fn native_reads_status_boxes_and_lookup() {
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
 
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -1220,8 +1199,8 @@ async fn native_reads_status_boxes_and_lookup() {
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessorTip(200));
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessorTip(200));
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -1231,10 +1210,7 @@ async fn native_reads_status_boxes_and_lookup() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     admin
         .init("pw".to_string(), String::new(), 24)
@@ -1311,7 +1287,6 @@ async fn native_status_shows_change_address_while_locked() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
     use ergo_state::wallet::tables::WALLET_CHANGE_ADDRESS;
 
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -1321,8 +1296,8 @@ async fn native_status_shows_change_address_while_locked() {
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
     let db_seed = db.clone();
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessor);
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -1332,10 +1307,7 @@ async fn native_status_shows_change_address_while_locked() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     admin
         .init("pw".to_string(), String::new(), 24)
@@ -1375,7 +1347,6 @@ async fn native_status_shows_change_address_while_locked() {
 #[tokio::test]
 async fn init_twice_returns_wallet_exists() {
     let _test_guard = WALLET_ADMIN_TEST_LOCK.lock().await;
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
     let dir = tempfile::tempdir().unwrap();
     let storage = Arc::new(parking_lot::RwLock::new(
         ergo_wallet::storage::SecretStorage::open(dir.path().join("wallet")),
@@ -1384,8 +1355,8 @@ async fn init_twice_returns_wallet_exists() {
         ergo_wallet_service::state::WalletState::empty(false),
     ));
     let db = Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
-    let chain: Arc<dyn ChainStateAccessor> = Arc::new(StubChainAccessor);
-    let cfg = WriterConfig {
+    let chain: Arc<dyn WalletChainAccess> = Arc::new(StubChainAccessor);
+    let cfg = WalletEngineConfig {
         network: ergo_ser::address::NetworkPrefix::Mainnet,
         expose_private_keys: false,
         min_relay_fee_nano_erg: 1_000_000,
@@ -1395,10 +1366,7 @@ async fn init_twice_returns_wallet_exists() {
     let submitter: std::sync::Arc<dyn TxSubmitter> = std::sync::Arc::new(StubTxSubmitter);
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    let admin = NodeWalletAdmin::new(tx);
+    let admin = start_wallet(storage, state, db, chain, cfg, submitter, mempool);
 
     admin
         .init("pw".to_string(), String::new(), 24)

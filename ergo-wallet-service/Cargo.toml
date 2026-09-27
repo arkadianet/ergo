@@ -13,15 +13,31 @@ ergo-wallet-protocol = { workspace = true }
 ergo-primitives      = { workspace = true }
 ergo-ser             = { workspace = true }
 ergo-validation      = { workspace = true }
+# Spending-proof self-verify (`verify_spending_proof_with_context_and_cost`).
+ergo-sigma           = { workspace = true }
 serde                = { workspace = true, features = ["derive"] }
 serde_json           = { workspace = true }
 hex                  = { workspace = true }
 thiserror            = { workspace = true }
 redb                 = { workspace = true }
 bincode              = { workspace = true }
+tracing              = { workspace = true }
+# Runtime-agnostic `async fn` in the engine's `TxSubmitter` seam (a proc
+# macro; it pulls in no executor).
+async-trait          = { workspace = true }
+# The engine's shared `SecretStorage` / `WalletState` locks (the same lock type
+# the node's chain-apply hook reads).
+parking_lot          = { workspace = true }
+# External-secret scalar decoding and private-key export.
+k256                 = { workspace = true, features = ["arithmetic"] }
+zeroize              = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# TEST-ONLY: the `/scan/addBox` tests decode their Scala box JSON with the same
+# decoder the node uses in production. Kept out of the normal graph so the
+# service (and the daemon) never pull in the REST JSON layer.
+ergo-rest-json = { workspace = true }
 
 [[test]]
 name = "it"

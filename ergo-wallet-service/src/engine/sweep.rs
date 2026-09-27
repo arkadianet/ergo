@@ -3,11 +3,12 @@
 
 use parking_lot::RwLock;
 
-use super::sign_submit::{map_submit_error, serialize_signed_tx, sign_unsigned_tx};
-use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE, MIN_FEE};
-use crate::node::wallet_bridge::{
-    map_chain_error, ChainStateAccessor, TxSubmitter, WalletAdminError,
+use super::build::{build_unsigned_tx, MIN_BOX_VALUE, MIN_FEE};
+use super::sign::{serialize_signed_tx, sign_unsigned_tx};
+use crate::engine::{
+    map_chain_error, map_submit_error, MempoolOverlay, TxSubmitter, WalletChainAccess,
 };
+use ergo_wallet_protocol::WalletAdminError;
 
 /// Outcome of a "retrieve matured mining rewards" sweep. `tx_id` is `None` on a
 /// dry-run (preview); `Some` once built, signed, self-verified, and submitted.
@@ -52,7 +53,7 @@ struct SweepBreakdown {
 /// the on-chain burn cannot diverge. Errors `InsufficientFunds` if the matured
 /// ERG cannot cover `fee + reemission`.
 fn sweep_breakdown(
-    reward_boxes: &[ergo_state::wallet::types::WalletBox],
+    reward_boxes: &[crate::wallet::types::WalletBox],
     reemission_rules: Option<&ergo_validation::ReemissionRuleInputs>,
     tip_height: u32,
     fee: u64,
@@ -195,11 +196,11 @@ pub(crate) async fn retrieve_rewards_impl(
     box_ids_override: Option<&[String]>,
     dry_run: bool,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
-    mempool: &dyn ergo_api::MempoolView,
+    mempool: &dyn MempoolOverlay,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<RetrieveRewardsOutcome, WalletAdminError> {
     // Executing (sign + submit) needs an unlocked wallet; a dry-run does not.
@@ -212,7 +213,7 @@ pub(crate) async fn retrieve_rewards_impl(
     //    Pool-spent boxes are NOT excluded here — that filter applies only to
     //    auto-selection below; a PINNED retry must keep its (now pool-spent) boxes
     //    so it reaches the idempotent/duplicate submit handling.
-    let mut matured: Vec<ergo_state::wallet::types::WalletBox> = {
+    let mut matured: Vec<crate::wallet::types::WalletBox> = {
         let read = store
             .read()
             .map_err(|e| WalletAdminError::Internal(format!("wallet read txn: {e}")))?;
@@ -222,7 +223,7 @@ pub(crate) async fn retrieve_rewards_impl(
             .filter(|b| {
                 matches!(
                     b.provenance,
-                    ergo_state::wallet::types::BoxProvenance::MinerReward
+                    crate::wallet::types::BoxProvenance::MinerReward
                 )
             })
             .collect()
@@ -238,7 +239,7 @@ pub(crate) async fn retrieve_rewards_impl(
 
     // A box already spent by a PENDING mempool tx (e.g. a previous sweep still
     // in-pool) is not freshly sweepable.
-    let pool_spent = |b: &ergo_state::wallet::types::WalletBox| {
+    let pool_spent = |b: &crate::wallet::types::WalletBox| {
         mempool.is_spent_by_pool(&ergo_primitives::digest::Digest32::from_bytes(b.box_id))
     };
 
@@ -248,7 +249,7 @@ pub(crate) async fn retrieve_rewards_impl(
     // not-yet-pending boxes up to `MAX_SWEEP_INPUTS` (bounding tx size + cost under
     // the mempool limits), excluding boxes a prior sweep already spent so a
     // follow-up batch advances instead of re-picking them.
-    let (reward_boxes, remaining): (Vec<ergo_state::wallet::types::WalletBox>, u32) =
+    let (reward_boxes, remaining): (Vec<crate::wallet::types::WalletBox>, u32) =
         match box_ids_override {
             Some(ids) => {
                 let want: std::collections::BTreeSet<[u8; 32]> = ids
@@ -320,7 +321,7 @@ pub(crate) async fn retrieve_rewards_impl(
         }
     }
 
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
 
     // 2. Breakdown via the SHARED obligation (cannot drift from the build below).
     //    Fee floor = max(protocol min, configured relay floor); a sweep below it
@@ -404,8 +405,7 @@ pub(crate) async fn retrieve_rewards_impl(
         store,
         chain,
         network,
-    )
-    .await?;
+    )?;
 
     // Structurally validate the BUILT tx for BOTH paths (the dust + 122-token
     // checks above are partial — a token-heavy destination box can still exceed
@@ -444,20 +444,20 @@ pub(crate) async fn retrieve_rewards_impl(
 
     // 5. Execute: sign (mandatory self-verify, incl. `verify_reemission_spending`)
     //    then submit.
-    let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+    let snapshot = chain.signing_view().map_err(map_chain_error)?;
     let signed_tx = {
         let storage = storage.read();
         sign_unsigned_tx(
             &unsigned_tx,
             &storage,
             store,
-            &snapshot,
+            snapshot.as_ref(),
             &[],
             &ergo_wallet::proving::hints::TransactionHintsBag::empty(),
         )?
     };
     chain
-        .ensure_snapshot_current(&snapshot)
+        .ensure_view_current(snapshot.as_ref())
         .map_err(map_chain_error)?;
     drop(snapshot);
     let tx_id = ergo_ser::transaction::transaction_id(&signed_tx)
@@ -504,19 +504,16 @@ mod tests {
         }
     }
 
-    fn reward_box(
-        value: u64,
-        assets: Vec<([u8; 32], u64)>,
-    ) -> ergo_state::wallet::types::WalletBox {
-        ergo_state::wallet::types::WalletBox {
+    fn reward_box(value: u64, assets: Vec<([u8; 32], u64)>) -> crate::wallet::types::WalletBox {
+        crate::wallet::types::WalletBox {
             box_id: [0xAB; 32],
             creation_tx_id: [0; 32],
             creation_output_index: 0,
             creation_height: 1,
             value,
             assets,
-            status: ergo_state::wallet::types::BoxStatus::Confirmed,
-            provenance: ergo_state::wallet::types::BoxProvenance::MinerReward,
+            status: crate::wallet::types::BoxStatus::Confirmed,
+            provenance: crate::wallet::types::BoxProvenance::MinerReward,
         }
     }
 

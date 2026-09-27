@@ -3,20 +3,21 @@
 
 use parking_lot::RwLock;
 
-use super::generate_sign::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
-use super::tx_build::build_transaction_impl;
-use crate::node::wallet_bridge::{
-    map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
+use super::build::build_transaction_impl;
+use super::send::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
+use crate::engine::{
+    map_chain_error, map_submit_error, SigningView, TxSubmitter, WalletChainAccess,
 };
+use ergo_wallet_protocol::WalletAdminError;
 
-/// Convert a native [`ExternalSecret`](ergo_api::wallet::native::dto::ExternalSecret)
+/// Convert a native [`ExternalSecret`](ergo_wallet_protocol::native::dto::ExternalSecret)
 /// to the compat `ExternalSecretDto` so the single existing prover decoder
 /// ([`decode_external_secret`]) is reused. (`secret` maps to the compat `dlog`/`x`.)
 pub(crate) fn native_external_to_compat(
-    s: &ergo_api::wallet::native::dto::ExternalSecret,
-) -> ergo_api::wallet::sending::ExternalSecretDto {
-    use ergo_api::wallet::native::dto::ExternalSecret as N;
-    use ergo_api::wallet::sending::ExternalSecretDto as C;
+    s: &ergo_wallet_protocol::native::dto::ExternalSecret,
+) -> ergo_wallet_protocol::scala::sending::ExternalSecretDto {
+    use ergo_wallet_protocol::native::dto::ExternalSecret as N;
+    use ergo_wallet_protocol::scala::sending::ExternalSecretDto as C;
     match s {
         N::Dlog { secret } => C::Dlog {
             dlog: secret.clone(),
@@ -46,14 +47,14 @@ pub(crate) fn signed_tx_id_hex(signed_bytes: &[u8]) -> Result<String, WalletAdmi
 /// prover's missing-secret surfaces as `missing_secret(422)`. The EIP-27
 /// self-verify gate runs inside [`sign_unsigned_tx`], so an unsigned tx that
 /// violates the burn rule is caught here rather than network-rejected.
-pub(crate) async fn sign_transaction_native_impl(
-    req: &ergo_api::wallet::native::dto::SignTxRequest,
+pub(crate) fn sign_transaction_native_impl(
+    req: &ergo_wallet_protocol::native::dto::SignTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
-) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
-    let externals: Vec<ergo_api::wallet::sending::ExternalSecretDto> = req
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
+) -> Result<ergo_wallet_protocol::native::dto::SignTxResponse, WalletAdminError> {
+    let externals: Vec<ergo_wallet_protocol::scala::sending::ExternalSecretDto> = req
         .external_secrets
         .iter()
         .map(native_external_to_compat)
@@ -66,11 +67,10 @@ pub(crate) async fn sign_transaction_native_impl(
         state,
         store,
         chain,
-    )
-    .await?;
+    )?;
     let tx_id = signed_tx_id_hex(&signed_bytes)?;
-    Ok(ergo_api::wallet::native::dto::SignTxResponse {
-        signed_transaction: ergo_api::wallet::native::dto::TxRepr::from_bytes(&signed_bytes),
+    Ok(ergo_wallet_protocol::native::dto::SignTxResponse {
+        signed_transaction: ergo_wallet_protocol::native::dto::TxRepr::from_bytes(&signed_bytes),
         tx_id,
     })
 }
@@ -92,16 +92,6 @@ pub(crate) fn map_sign_error(e: ergo_wallet::error::WalletError) -> WalletAdminE
     }
 }
 
-/// Map a submit error to a native [`WalletAdminError`]. A `duplicate` reason is the
-/// caller's concern (handled as idempotent-accepted upstream); other reasons are a
-/// client-correctable rejection (`bad_request` carrying the typed reason).
-pub(crate) fn map_submit_error(e: ergo_api::types::SubmitError) -> WalletAdminError {
-    WalletAdminError::BadRequest(match e.detail {
-        Some(d) => format!("submit rejected ({}): {d}", e.reason),
-        None => format!("submit rejected: {}", e.reason),
-    })
-}
-
 /// Native `transactions/send`. **txId-first** idempotency: compute the
 /// id, short-circuit a known wallet tx BEFORE any UTXO-dependent self-verify, then
 /// submit. `intent` builds (burn-aware) + signs with the wallet's own secrets;
@@ -109,21 +99,21 @@ pub(crate) fn map_submit_error(e: ergo_api::types::SubmitError) -> WalletAdminEr
 /// idempotent `accepted` (never a 5xx on a re-seen tx).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_transaction_native_impl(
-    req: &ergo_api::wallet::native::dto::SendTxRequest,
+    req: &ergo_wallet_protocol::native::dto::SendTxRequest,
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
-    state: &RwLock<ergo_wallet_service::state::WalletState>,
-    store: &dyn ergo_state::wallet::WalletStore,
-    chain: &dyn ChainStateAccessor,
+    state: &RwLock<crate::state::WalletState>,
+    store: &dyn crate::wallet::WalletStore,
+    chain: &dyn WalletChainAccess,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
-) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
-    use ergo_api::wallet::native::dto::{SendTxRequest, SendTxResponse};
+) -> Result<ergo_wallet_protocol::native::dto::SendTxResponse, WalletAdminError> {
+    use ergo_wallet_protocol::native::dto::{SendTxRequest, SendTxResponse};
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, store, chain, network).await?;
-            let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+            let built = build_transaction_impl(intent, state, store, chain, network)?;
+            let snapshot = chain.signing_view().map_err(map_chain_error)?;
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
                 None,
@@ -131,7 +121,7 @@ pub(crate) async fn send_transaction_native_impl(
                 storage,
                 state,
                 store,
-                &snapshot,
+                snapshot.as_ref(),
             )?;
             (bytes, Some(snapshot))
         }
@@ -170,16 +160,14 @@ pub(crate) async fn send_transaction_native_impl(
             return Ok(SendTxResponse {
                 tx_id: tx_id_hex,
                 accepted: true,
-                transaction: Some(crate::node::wallet_bridge::commands::admin::tx_to_summary(
-                    wt,
-                )),
+                transaction: Some(super::dto::tx_to_summary(wt)),
             });
         }
     }
 
     if let Some(snapshot) = snapshot.as_ref() {
         chain
-            .ensure_snapshot_current(snapshot)
+            .ensure_view_current(snapshot.as_ref())
             .map_err(map_chain_error)?;
     }
     drop(snapshot);
@@ -220,10 +208,10 @@ pub(crate) fn serialize_signed_tx(
 
 /// Decode an `ExternalSecretDto` hex payload into `ProverExternalSecret`.
 pub(crate) fn decode_external_secret(
-    dto: &ergo_api::wallet::sending::ExternalSecretDto,
+    dto: &ergo_wallet_protocol::scala::sending::ExternalSecretDto,
 ) -> Result<ergo_wallet::proving::external::ProverExternalSecret, WalletAdminError> {
-    use ergo_api::wallet::sending::ExternalSecretDto;
     use ergo_wallet::proving::external::ProverExternalSecret;
+    use ergo_wallet_protocol::scala::sending::ExternalSecretDto;
     use k256::elliptic_curve::ops::Reduce;
     use k256::{FieldBytes, Scalar, U256};
 
@@ -292,7 +280,7 @@ pub(crate) fn decode_external_secret(
 /// proof time with `MissingSecret` — that is the correct failure mode.
 pub(crate) fn build_prover(
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_state::wallet::WalletStore,
+    store: &dyn crate::wallet::WalletStore,
     params: &ergo_wallet::tx_context::BlockchainParameters,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
 ) -> Result<ergo_wallet::proving::prover::Prover, WalletAdminError> {
@@ -339,8 +327,8 @@ pub(crate) fn build_prover(
 pub(crate) fn sign_unsigned_tx(
     unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
     storage: &ergo_wallet::storage::SecretStorage,
-    store: &dyn ergo_state::wallet::WalletStore,
-    snapshot: &ChainSnapshot,
+    store: &dyn crate::wallet::WalletStore,
+    snapshot: &dyn SigningView,
     externals: &[ergo_wallet::proving::external::ProverExternalSecret],
     hints: &ergo_wallet::proving::hints::TransactionHintsBag,
 ) -> Result<ergo_ser::transaction::Transaction, WalletAdminError> {
@@ -540,21 +528,5 @@ mod tests {
             map_sign_error(W::TxBuild("reduce: boom".into())),
             WalletAdminError::Internal(_)
         ));
-    }
-
-    /// A `duplicate` submit reason is handled as idempotent-accept upstream; any
-    /// other submit reason maps to a client `bad_request` carrying the typed reason.
-    #[test]
-    fn map_submit_error_carries_reason() {
-        let e = map_submit_error(ergo_api::types::SubmitError {
-            reason: "too_big".into(),
-            detail: Some("size 1234 > max".into()),
-        });
-        match e {
-            WalletAdminError::BadRequest(m) => {
-                assert!(m.contains("too_big") && m.contains("size 1234"));
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
     }
 }

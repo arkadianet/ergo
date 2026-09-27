@@ -689,15 +689,10 @@ pub(super) fn handle_mining_request(
             //    AssembleBlock path. Returns follow-up actions
             //    (Send / Penalize); mining doesn't trigger network
             //    I/O so any follow-ups are discarded.
-            let rescan_guard = crate::wallet_boot::ProdRescanGuard;
-            let wallet_wiring =
-                state
-                    .wallet_hook
-                    .as_deref()
-                    .map(|h| ergo_state::wallet::WalletWiring {
-                        hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                        rescan_guard: &rescan_guard,
-                    });
+            let wallet_wiring = state
+                .wallet_hook
+                .as_deref()
+                .map(crate::node::wallet_bridge::WalletStateHook::wiring);
             let follow_ups = state.executor.execute(
                 Action::AssembleBlock { header_id },
                 &mut state.store,

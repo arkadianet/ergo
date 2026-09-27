@@ -130,14 +130,10 @@ fn process_header_modifier_batch(
         return;
     }
 
-    let rescan_guard = crate::wallet_boot::ProdRescanGuard;
     let wallet_wiring = state
         .wallet_hook
         .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard: &rescan_guard,
-        });
+        .map(crate::node::wallet_bridge::WalletStateHook::wiring);
     let mut all_actions = state.executor.execute_all(
         batch_actions,
         &mut state.store,
@@ -838,14 +834,10 @@ fn inject_local_full_block(
     // calls `process_block`. If the local block isn't at tip+1 yet,
     // no-op — `try_apply_next_blocks` will pick it up on the next
     // chain advance.
-    let rescan_guard = crate::wallet_boot::ProdRescanGuard;
     let wallet_wiring = state
         .wallet_hook
         .as_deref()
-        .map(|h| ergo_state::wallet::WalletWiring {
-            hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-            rescan_guard: &rescan_guard,
-        });
+        .map(crate::node::wallet_bridge::WalletStateHook::wiring);
     let follow_ups = state.executor.execute(
         Action::AssembleBlock {
             header_id: header_id_bytes,

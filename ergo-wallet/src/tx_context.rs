@@ -15,9 +15,10 @@ use indexmap::IndexMap;
 
 /// Blockchain state snapshot needed for signing.
 ///
-/// Populated by `ChainStateAccessor::build_signing_context` in the wallet
-/// writer task. Carries only the fields the per-input evaluator needs;
-/// chain-apply state stays in `StateStore`.
+/// Populated by the wallet engine's committed signing view
+/// (`WalletChainAccess::signing_view` / `build_signing_context`). Carries
+/// only the fields the per-input evaluator needs; chain-apply state stays in
+/// `StateStore`.
 #[derive(Clone)]
 pub struct BlockchainStateContext {
     /// Last ≤10 applied headers, tip-first. `sigma_last_headers[0]` is
