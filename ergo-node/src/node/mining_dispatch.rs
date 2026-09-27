@@ -994,6 +994,8 @@ pub(super) fn handle_mining_request(
 }
 
 /// The best-chain header at `height` when some of its sections are not stored.
+/// Presence is read without draining persistence results, so a pending
+/// persistence failure still reaches the next apply.
 /// Apply takes only the best header chain, so a mined block at that height
 /// that does not outscore it is stored as a fork, and no block at that height
 /// applies until those sections arrive or a chain with more work replaces the
@@ -1015,7 +1017,7 @@ fn best_header_missing_sections_at(state: &NodeState, height: u32) -> Option<[u8
         sections.ad_proofs_id,
     ]
     .iter()
-    .any(|section| matches!(state.store.get_block_section(section), Ok(None)))
+    .any(|section| matches!(state.store.read_section_for_serving(section, 1), Ok(None)))
     .then_some(id)
 }
 

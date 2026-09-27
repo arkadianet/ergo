@@ -5674,6 +5674,10 @@ mod block_relay {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "copies the open redb file, which Windows locks while the store is open"
+    )]
     fn locally_mined_block_crash_image_at_apply_holds_sections() {
         // No peer holds a mined block's sections before this node serves
         // them, so they must be on disk before apply starts: a node killed
@@ -5695,6 +5699,10 @@ mod block_relay {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "copies the open redb file, which Windows locks while the store is open"
+    )]
     fn posted_block_crash_image_at_apply_holds_sections() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, root) = genesis_state(dir.path());
@@ -5738,6 +5746,37 @@ mod block_relay {
         );
         assert!(probed.after_apply.is_empty(), "{:?}", probed.after_apply);
         assert_announced_ids_served(&mut state, &probed.before_apply);
+    }
+
+    #[test]
+    fn locally_mined_block_known_header_resubmission_pending_persist_failure_reaches_apply() {
+        // The resubmission's section-presence check must not drain the
+        // persistence pipeline: a pending failure belongs to the apply that
+        // follows, which must refuse the block instead of building on it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, handle) = devnet_node(dir.path());
+        mine_and_apply(&mut state, &handle);
+        publish_candidate(&state, &handle);
+        let mined = solve(&state, &handle, 0);
+        process_header(&mut state, &serialize_header(&mined.header).unwrap().0);
+        state
+            .store
+            .as_utxo_mut()
+            .unwrap()
+            .inject_pending_persist_failure_for_test(1);
+        let queue = register_shared_peer(&mut state);
+        let probed = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
+        assert!(
+            matches!(&probed.result, Err(ergo_api::MiningApiError::Internal(m)) if m.starts_with("block apply failed")),
+            "{:?}",
+            probed.result
+        );
+        assert_ne!(state.store.chain_state_meta().best_full_block_id, mined.id);
+        let error = state.executor.last_block_apply_error();
+        assert!(
+            format!("{error:?}").contains("background persist failed at h=1"),
+            "apply must see the pending persistence failure, got {error:?}"
+        );
     }
 
     #[test]

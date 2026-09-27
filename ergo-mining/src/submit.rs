@@ -84,9 +84,11 @@ impl MinedBlock {
     /// Whether every section of the block is in `state`. When a resubmitted
     /// solution's header is already stored, missing sections are what a
     /// failed [`store_mined_sections`] leaves, and the caller writes them.
+    /// Reads without draining persistence results, so a pending persistence
+    /// failure still reaches the apply that follows.
     pub fn sections_stored(&self, state: &StateStore) -> Result<bool, StateError> {
         for section in &self.sections {
-            if state.get_block_section(&section.id)?.is_none() {
+            if state.read_section_for_serving(&section.id, 1)?.is_none() {
                 return Ok(false);
             }
         }

@@ -81,6 +81,10 @@ fn stored(store: &StateStore, id: &[u8; 32]) -> bool {
 // ----- happy path -----
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "copies the open redb file, which Windows locks while the store is open"
+)]
 fn block_sections_durable_crash_image_holds_every_section() {
     let dir = tempfile::tempdir().unwrap();
     let mut store =
@@ -104,6 +108,10 @@ fn block_sections_durable_crash_image_holds_every_section() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "copies the open redb file, which Windows locks while the store is open"
+)]
 fn block_section_typed_crash_image_lacks_section() {
     // The single-section write commits with `Durability::None`, which a
     // crash image does not hold: the loss the durable write exists to close.
