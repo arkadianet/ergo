@@ -10781,10 +10781,18 @@ components:
       - blockId
       - height
       - parentId
+      - headerBytes
       - transactions
       properties:
         blockId:
           type: string
+        headerBytes:
+          type: string
+          description: |-
+            The canonical serialized header, PoW solution included, as lowercase
+            hex. `blake2b256(headerBytes)` is `blockId`, and the decoded header
+            carries `height` and `parentId`. Transactions are wallet-relevant parts
+            and are not bound to the header's transactions root.
         height:
           type: integer
           format: int32
@@ -10903,7 +10911,14 @@ components:
       - headerId
       - parentId
       - timestampUnixMs
+      - headerBytes
       properties:
+        headerBytes:
+          type: string
+          description: |-
+            The canonical serialized header, PoW solution included, as lowercase
+            hex. `blake2b256(headerBytes)` is `headerId`, and the decoded header
+            carries `height`, `parentId` and `timestampUnixMs`.
         headerId:
           type: string
         height:

@@ -66,8 +66,9 @@ shadow harness"). They never enter the released binary's dependency graph;
   sync budgets".
 - `src/chain_http.rs` — blocking `reqwest` client for
   `api/v1/chain/{tip,snapshot,blocks-since,boxes/:id}` with body-size caps,
-  timeouts, and status-code → typed-error mapping. Its response validation is
-  bounded by what the wire can prove — see "Known deviations" §1.
+  timeouts, and status-code → typed-error mapping. It authenticates every
+  block and snapshot header against its raw bytes and re-derives every box —
+  see "What the daemon verifies".
 - `src/api.rs` — axum router, read handlers, DTO projection.
 - `src/socket.rs` (unix) — Unix-socket claim/cleanup and `0o600` permissions.
 - `src/tip.rs` — node-tip cache with a capped fallback probe.
@@ -168,33 +169,44 @@ unbounded page ⇒ one request and the named bounded error.
 `tests/it/sync.rs` pins the worst-case arithmetic above against the real cap
 constant.
 
+## What the daemon verifies
+
+The node is authenticated by its API key, but its answers are still checked.
+
+- **Block and header identity.** Every block on a `blocks-since` page and every
+  header in a snapshot carries its raw serialized header (`headerBytes`).
+  `chain_http` decodes it as exactly one header with no trailing bytes,
+  recomputes the id as `blake2b256(headerBytes)`, and requires the claimed
+  `blockId` / `headerId`, `height` and `parentId` (and, for snapshot headers,
+  `timestampUnixMs`) to be the ones the header carries
+  (`ergo_wallet_service::authenticate_header`). The id is hashed over the bytes
+  as received, never over a re-encoding, because the decoder drops the unparsed
+  section of v2-v4 headers. Pages are additionally checked for parent linkage
+  against the wallet cursor, height contiguity, uniqueness, and agreement with
+  the reported tip.
+- **Boxes.** Every `ErgoBox` is parsed canonically and re-serialized; `box_id`,
+  embedded `transaction_id`, output index, value, assets, and creation height
+  are recomputed (`chain_http::neutral_block` / `WalletService::convert_block`).
+
+What remains trusted:
+
+- **Transactions inside a block.** The protocol carries the wallet-relevant
+  parts of each transaction (inputs and output boxes), not full transaction
+  bytes. Transaction ids are cross-checked against the ids embedded in their own
+  output boxes, but a block's transactions are not bound to its header's
+  `transactionsRoot`, so a node holding the API key could omit or invent
+  wallet-relevant transactions inside a genuine block.
+- **Chain validity.** Proof-of-work and difficulty are not checked. The daemon
+  follows the chain its node presents; what it rules out is a block served
+  under an id its header does not hash to, or at a height or parent its header
+  does not carry.
+
 ## Known deviations
 
-These are real gaps in what this daemon can verify or report. They are not
-hidden behind a passing test suite.
+This is a real gap in what this daemon reports. It is not hidden behind a
+passing test suite.
 
-### 1. A block's protocol id is not recomputed from raw header bytes
-
-The chain protocol carries structured block, transaction, and box fields but
-**no raw header bytes**. A block's `block_id` is therefore taken from the node
-and checked for *consistency*, not *recomputed*: parent linkage against the
-wallet cursor, height contiguity, uniqueness within a page, and agreement with
-the reported tip. `chain_http::neutral_block` never hashes a header, so a node
-that reports a wrong `blockId` for a block whose bytes this build never sees is
-**not** caught at this layer.
-
-What *is* recomputed: every `ErgoBox` — canonical parse, re-serialization
-equality, `box_id`, embedded `transaction_id`, output index, value, assets, and
-creation height (`chain_http::neutral_block` / `WalletService::convert_block`).
-Transaction ids are cross-checked against the ids embedded in their own output
-boxes, but likewise cannot be recomputed from raw transaction bytes.
-
-Closing this needs raw header bytes on the chain protocol (a node-side change),
-not a client change. Until then, the block-identity trust boundary is the node's
-API key: whoever holds it can serve a chain the daemon will accept, subject to
-the continuity and box-level checks above.
-
-### 2. Balance and status values are confirmed-only, not byte-identical to the
+### 1. Balance and status values are confirmed-only, not byte-identical to the
 ### embedded values
 
 Every read route is a **projection the daemon computes from blocks it has
@@ -265,7 +277,7 @@ the node and this daemon now reach the same tables by two different routes:
 `tests/it/shadow.rs` runs both against the same blocks and compares the
 **normalized `WalletRead` state** of the two stores. It does **not** compare
 daemon DTOs: `/balance`'s `reserved == "0"` and `/status`'s cached tip are
-documented projections ("Known deviations" §2), so comparing them would report
+documented projections ("Known deviations" §1), so comparing them would report
 differences that are not divergences. Both sides write their state through the
 same service functions, so the persisted result *is* comparable.
 
@@ -380,7 +392,7 @@ reached the limiter and needs no change.
   `confirmed == available` and `reserved == immature == "0"`; `unconfirmed` and
   `reemission` are `null`. There is no route that can change a balance. These
   are values the daemon *computes* from applied blocks, not the embedded wallet's
-  values re-served verbatim — see "Known deviations" §2 for the exact
+  values re-served verbatim — see "Known deviations" §1 for the exact
   differences and what they mean for comparison against an embedded wallet.
 - **No-secret boundary.** The daemon reads public data only. The descriptor file
   carries compressed public keys, derivation paths, and labels — anything else
@@ -419,7 +431,5 @@ reached the limiter and needs no change.
 - **Idle ticks do not write.** A pass publishes `running` only after it knows it
   has work, i.e. below the at-tip check, so a caught-up daemon costs the single
   `idle` write per tick instead of `running` followed by `idle`.
-
-Block ids are checked for internal consistency but are not recomputed from header bytes. Phase 3 requires header bytes in the blocks-since response so the daemon can independently recompute block ids.
 
 A pass that exhausts its block budget continues immediately. Completed passes and retryable errors wait for `sync_interval`; terminal errors stop syncing while `/status` remains available. `shutdown_timeout_secs` (default 5) bounds shutdown waiting, with cancellation checked between blocks, retries, and HTTP requests. An in-flight blocking HTTP request may finish after this deadline, but cancellation prevents subsequent block application.

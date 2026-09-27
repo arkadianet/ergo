@@ -152,6 +152,7 @@ fn chain_block(height: u32, fork: u8, transactions: Vec<ChainTransaction>) -> Ch
         block_id: block_id(height, fork),
         height,
         parent_id: block_id(height.saturating_sub(1), fork),
+        header_bytes: Vec::new(),
         transactions,
     }
 }
@@ -169,6 +170,7 @@ fn forked_block(
         block_id: block_id(height, fork),
         height,
         parent_id: parent,
+        header_bytes: Vec::new(),
         transactions,
     }
 }

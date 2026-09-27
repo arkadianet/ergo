@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use ergo_api::traits::{WalletChain, WalletChainError};
 use ergo_api::types::{SubmitError as ApiSubmitError, SubmitMode};
-use ergo_primitives::digest::ModifierId;
+use ergo_primitives::digest::{blake2b256, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::block_transactions::read_stored_block_transactions;
 use ergo_ser::ergo_box::read_ergo_box;
@@ -225,14 +225,31 @@ impl InProcessChainClient {
         Ok(actual)
     }
 
-    fn header(&self, header_id: &[u8; 32]) -> Result<Header, ChainClientError> {
+    /// The raw stored bytes of the header `header_id` names. Headers are
+    /// content-addressed, so a read outside a snapshot's transaction still
+    /// returns that snapshot's header; the hash check makes sure the node never
+    /// serves bytes a wallet would reject as not being that header.
+    fn header_bytes(&self, header_id: &[u8; 32]) -> Result<Vec<u8>, ChainClientError> {
         let bytes = self
             .reader
             .get_header(header_id)
             .map_err(|error| Self::state_error("header read", error))?
             .ok_or_else(|| ChainClientError::Failure(format!("header {header_id:?} is missing")))?;
+        if blake2b256(&bytes).as_bytes() != header_id {
+            return Err(Self::state_error(
+                "stored header bytes do not hash to their id",
+                hex::encode(header_id),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn header(&self, header_id: &[u8; 32]) -> Result<(Header, Vec<u8>), ChainClientError> {
+        let bytes = self.header_bytes(header_id)?;
         let mut reader = VlqReader::new(&bytes);
-        read_header(&mut reader).map_err(|error| Self::state_error("header decode", error))
+        let header =
+            read_header(&mut reader).map_err(|error| Self::state_error("header decode", error))?;
+        Ok((header, bytes))
     }
 
     fn block_from_state(&self, height: u32) -> Result<ChainBlock, ChainClientError> {
@@ -243,7 +260,7 @@ impl InProcessChainClient {
             .ok_or_else(|| {
                 ChainClientError::Failure(format!("no committed header at height {height}"))
             })?;
-        let header = self.header(&block_id)?;
+        let (header, header_bytes) = self.header(&block_id)?;
         if header.height != height {
             return Err(ChainClientError::Failure(format!(
                 "header height {} does not match applied height {height}",
@@ -267,7 +284,12 @@ impl InProcessChainClient {
                     "block transaction header mismatch at height {height}"
                 )));
             }
-            return self.chain_block_from_transactions(block_id, header, transactions.transactions);
+            return self.chain_block_from_transactions(
+                block_id,
+                header,
+                header_bytes,
+                transactions.transactions,
+            );
         }
         if let Some(state) = &self.state {
             let block = state
@@ -276,7 +298,7 @@ impl InProcessChainClient {
                 .ok_or_else(|| {
                     ChainClientError::Failure(format!("no committed block at height {height}"))
                 })?;
-            return self.chain_block_from_rescan(block_id, header, block);
+            return self.chain_block_from_rescan(block_id, header, header_bytes, block);
         }
         Err(ChainClientError::Failure(format!(
             "block transaction section is missing at height {height}"
@@ -287,6 +309,7 @@ impl InProcessChainClient {
         &self,
         block_id: [u8; 32],
         header: Header,
+        header_bytes: Vec<u8>,
         transactions: Vec<ergo_ser::transaction::Transaction>,
     ) -> Result<ChainBlock, ChainClientError> {
         let transactions: Vec<ChainTransaction> = transactions
@@ -346,6 +369,7 @@ impl InProcessChainClient {
             block_id,
             height: header.height,
             parent_id: *header.parent_id.as_bytes(),
+            header_bytes,
             transactions,
         })
     }
@@ -354,6 +378,7 @@ impl InProcessChainClient {
         &self,
         block_id: [u8; 32],
         header: Header,
+        header_bytes: Vec<u8>,
         block: ergo_wallet_service::wallet::scan::RescanBlock,
     ) -> Result<ChainBlock, ChainClientError> {
         let transactions: Vec<ChainTransaction> = block
@@ -391,6 +416,7 @@ impl InProcessChainClient {
             block_id,
             height: header.height,
             parent_id: *header.parent_id.as_bytes(),
+            header_bytes,
             transactions,
         })
     }
@@ -710,6 +736,7 @@ fn wire_snapshot(snapshot: ChainSnapshot) -> Result<wire::ChainSnapshot, WalletC
                 header_id: hex::encode(header.header_id),
                 parent_id: hex::encode(header.parent_id),
                 timestamp_unix_ms: header.timestamp_unix_ms,
+                header_bytes: hex::encode(header.header_bytes),
             })
             .collect(),
         active_parameters: snapshot.active_parameters,
@@ -748,6 +775,7 @@ fn wire_blocks_since(
                             block_id: hex::encode(block.block_id),
                             height: block.height,
                             parent_id: hex::encode(block.parent_id),
+                            header_bytes: hex::encode(block.header_bytes),
                             transactions: block
                                 .transactions
                                 .into_iter()
@@ -978,13 +1006,16 @@ impl ChainClient for InProcessChainClient {
             .headers()
             .iter()
             .zip(snapshot.header_ids())
-            .map(|(header, header_id)| ChainHeader {
-                height: header.height,
-                header_id: *header_id,
-                parent_id: *header.parent_id.as_bytes(),
-                timestamp_unix_ms: header.timestamp,
+            .map(|(header, header_id)| {
+                Ok(ChainHeader {
+                    height: header.height,
+                    header_id: *header_id,
+                    parent_id: *header.parent_id.as_bytes(),
+                    timestamp_unix_ms: header.timestamp,
+                    header_bytes: self.header_bytes(header_id)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ChainClientError>>()?;
         let active_parameters = snapshot.active_params();
         let active_parameters = serde_json::json!({
             "epochStartHeight": active_parameters.epoch_start_height,
@@ -1483,6 +1514,12 @@ mod tests {
                 assert_eq!(forward.blocks.len(), 3);
                 assert_eq!(forward.blocks[0].height, 1);
                 assert_eq!(forward.blocks[2].height, 3);
+                // Every block carries the stored header it is identified by,
+                // so a remote wallet can recompute its id.
+                for (block, expected_id) in forward.blocks.iter().zip(&ids) {
+                    assert_eq!(&block.block_id, expected_id);
+                    block.authenticate_header().unwrap();
+                }
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -1491,6 +1528,9 @@ mod tests {
         assert_eq!(snapshot.headers.len(), 10);
         assert_eq!(snapshot.headers[0].height, 12);
         assert_eq!(snapshot.snapshot_id, ids[11]);
+        for header in &snapshot.headers {
+            header.authenticate().unwrap();
+        }
     }
 
     #[test]
