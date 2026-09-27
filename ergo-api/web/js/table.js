@@ -1,4 +1,4 @@
-// Reusable card-row table — clip-proof (fixed flex widths + ellipsis),
+// Reusable card-row table with wrapping values and responsive detail cards,
 // sortable, with an optional expand-to-detail drawer. Built from DOM
 // nodes / textContent only (never innerHTML of caller/server data).
 //
@@ -48,7 +48,7 @@ export function makeTable(container, columns, opts = {}) {
     const d = document.createElement('span');
     d.className = 'dtable__c' + (c.align === 'right' ? ' dtable__c--r' : '');
     d.setAttribute('role', 'cell');
-    d.style.flex = c.width ? `0 0 ${c.width}px` : '1';
+    d.style.flex = c.width ? `0 1 ${c.width}px` : '1 1 140px';
     d.dataset.label = c.label; // mobile card label
     const v = c.render ? c.render(row) : row[c.key];
     if (v instanceof Node) d.append(v);
@@ -63,7 +63,7 @@ export function makeTable(container, columns, opts = {}) {
     for (const c of columns) {
       const column = document.createElement('span');
       column.className = 'dtable__heading';
-      column.style.flex = c.width ? `0 0 ${c.width}px` : '1';
+      column.style.flex = c.width ? `0 1 ${c.width}px` : '1 1 140px';
       column.setAttribute('role', 'columnheader');
       column.setAttribute('aria-sort', sort.key === c.key ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none');
       const s = document.createElement('button');

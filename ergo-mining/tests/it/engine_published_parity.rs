@@ -330,6 +330,14 @@ fn synced_store_with_parent_interlinks(
     regime: &Regime,
     interlinks_fields: impl Fn(&[u8; 32]) -> Vec<(Vec<u8>, Vec<u8>)>,
 ) -> (tempfile::TempDir, StateStore, [u8; 32]) {
+    synced_store_with_inputs(regime, &[], interlinks_fields)
+}
+
+fn synced_store_with_inputs(
+    regime: &Regime,
+    extra_boxes: &[ErgoBox],
+    interlinks_fields: impl Fn(&[u8; 32]) -> Vec<(Vec<u8>, Vec<u8>)>,
+) -> (tempfile::TempDir, StateStore, [u8; 32]) {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();
 
@@ -338,9 +346,13 @@ fn synced_store_with_parent_interlinks(
     let em_box_id = *em_box.box_id().expect("emission box id").as_bytes();
     let em_box_bytes = write_box_bytes(&em_box);
 
-    store
-        .initialize_genesis(&[(em_box_id, em_box_bytes)])
-        .unwrap();
+    let mut genesis_boxes = vec![(em_box_id, em_box_bytes)];
+    genesis_boxes.extend(
+        extra_boxes
+            .iter()
+            .map(|b| (*b.box_id().unwrap().as_bytes(), write_box_bytes(b))),
+    );
+    store.initialize_genesis(&genesis_boxes).unwrap();
     let committed_root = store.root_digest();
 
     // Parent header's roots are chosen freely (they only key the stored
@@ -503,6 +515,141 @@ fn serialize_txs(txs: &[Transaction]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn assert_candidate_metrics(c: &Candidate, w: &WorkMessage, selected: u32, fees: u64) {
+    let m = &w.metrics;
+    assert_eq!(m.transaction_count as usize, c.transactions.len());
+    assert_eq!(m.selected_transaction_count, selected);
+    assert_eq!(m.fees_nano_erg, fees);
+    let mut encoded = VlqWriter::new();
+    write_block_transactions_with_version(
+        &mut encoded,
+        &BlockTransactions {
+            header_id: ModifierId::from_bytes([0; 32]),
+            transactions: c.transactions.clone(),
+        },
+        c.header.version,
+    )
+    .unwrap();
+    assert_eq!(m.transactions_size_bytes, encoded.result().len() as u64);
+    assert!(m.transactions_size_bytes <= m.max_block_size_bytes);
+    assert!(m.validation_cost > 0 && m.validation_cost <= m.max_block_cost);
+}
+
+#[test]
+fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
+    use ergo_mempool::{pool::Entry, types::TxSource};
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+    };
+    let regime = Regime::pre_eip27();
+    let tree = ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        constants: vec![],
+        body: Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        },
+    };
+    let input = ErgoBox {
+        candidate: ErgoBoxCandidate::new(
+            100_000_000,
+            tree.clone(),
+            0,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        transaction_id: ModifierId::from_bytes([0xCC; 32]),
+        index: 0,
+    };
+    let (_dir, store, _tip) =
+        synced_store_with_inputs(&regime, std::slice::from_ref(&input), |tip| {
+            pack_interlinks(&[ModifierId::from_bytes(*tip)])
+        });
+    let fee = 1_100_000;
+    let fee_tree = read_ergo_tree(&mut VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+    ))
+    .unwrap();
+    let tx = Transaction {
+        inputs: vec![Input {
+            box_id: input.box_id().unwrap(),
+            spending_proof: SpendingProof::new(vec![], ContextExtension::empty()).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![
+            ErgoBoxCandidate::new(
+                100_000_000 - fee,
+                tree,
+                regime.parent_height + 1,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            ErgoBoxCandidate::new(
+                fee,
+                fee_tree,
+                regime.parent_height + 1,
+                vec![],
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+        ],
+    };
+    let raw = serialize_txs(std::slice::from_ref(&tx)).pop().unwrap();
+    let entry = Entry {
+        tx_id: Digest32::from_bytes([0xDD; 32]),
+        size_bytes: raw.len() as u32,
+        bytes: Arc::from(raw.into_boxed_slice()),
+        inputs: vec![input.box_id().unwrap()],
+        outputs: vec![],
+        parents_in_pool: vec![],
+        output_boxes: vec![],
+        // Deliberately stale admission metadata: the metric must use the final
+        // fee transaction and fresh validation, not these cached values.
+        fee: 999,
+        weight: 999,
+        cost: 1,
+        source: TxSource::Api,
+        created_at: std::time::Instant::now(),
+        last_checked_at: std::time::Instant::now(),
+    };
+    let (empty_c, empty_w) = on_loop_build(&store, &regime);
+    assert_candidate_metrics(&empty_c, &empty_w, 0, 0);
+    let (c, w, _) = generate_candidate(
+        &store,
+        ergo_chain_spec::Network::Mainnet,
+        BuildMode::Full,
+        // The duplicate input conflicts with the first entry and must be
+        // skipped; selected count must describe the template, not pool size.
+        MempoolReadSnapshot::from_entries(vec![entry.clone(), entry]),
+        &MINER_PK,
+        &MonetarySettings::mainnet(),
+        None,
+        None,
+        &DifficultyParams::mainnet(),
+        &[],
+        &std::collections::BTreeMap::new(),
+        &ergo_validation::VotingSettings::mainnet(),
+        &[],
+        &mut Vec::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_candidate_metrics(&c, &w, 1, fee);
+    assert_eq!(
+        w.metrics.transaction_count, 3,
+        "emission, selected tx, fee collection"
+    );
+    assert!(w.metrics.validation_cost > empty_w.metrics.validation_cost + 1);
+    assert!(w.metrics.transactions_size_bytes > empty_w.metrics.transactions_size_bytes);
+}
+
 // ----- happy path -----
 
 #[test]
@@ -663,6 +810,10 @@ fn publish_and_serve_under(regime: &Regime) {
     );
     assert_eq!(served.height, regime.candidate_height());
     assert_eq!(served.pk, MINER_PK);
+    assert_eq!(
+        served.metrics, oracle_w.metrics,
+        "served metrics belong to the published template"
+    );
 }
 
 /// handle → engine → candidate propagation of an operator-configured custom
@@ -837,6 +988,10 @@ fn build_and_publish_base_cache_cold_then_hit_matches_uncached() {
         );
         assert_eq!(served.height, oracle_w.height, "cached {pass}: height");
         assert_eq!(served.pk, oracle_w.pk, "cached {pass}: pk");
+        assert_eq!(
+            served.metrics, oracle_w.metrics,
+            "cached {pass}: template metrics"
+        );
     }
 }
 
@@ -857,6 +1012,7 @@ struct FullSurface {
     work_target: BigUint,
     work_height: u32,
     work_pk: [u8; 33],
+    metrics: ergo_mining::work_message::CandidateMetrics,
 }
 
 impl FullSurface {
@@ -873,6 +1029,7 @@ impl FullSurface {
             work_target: w.target.clone(),
             work_height: w.height,
             work_pk: w.pk,
+            metrics: w.metrics.clone(),
         }
     }
 }
@@ -1208,7 +1365,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
         .expect("committed state present");
 
     // Minimal build: emission-only, no mempool, no rent.
-    let (min_c, _min_w, _) = generate_candidate(
+    let (min_c, min_w, _) = generate_candidate(
         &snap,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Minimal,
@@ -1228,7 +1385,7 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     .expect("minimal candidate is Some");
 
     // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
-    let (full_c, _full_w, _) = generate_candidate(
+    let (full_c, full_w, _) = generate_candidate(
         &snap,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
@@ -1246,6 +1403,10 @@ fn minimal_build_equals_full_build_on_quiet_chain() {
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
+
+    assert_candidate_metrics(&min_c, &min_w, 0, 0);
+    assert_candidate_metrics(&full_c, &full_w, 0, 0);
+    assert_eq!(min_w.metrics, full_w.metrics);
 
     // Minimal must carry exactly the coinbase (emission) tx — the emission-only
     // prefix is the contract for a Minimal build. Full with an empty mempool
@@ -1398,7 +1559,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
         .expect("committed state present");
 
     // Minimal build: emission-only, no mempool, no rent.
-    let (min_c, _min_w, _) = generate_candidate(
+    let (min_c, min_w, _) = generate_candidate(
         &snap,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Minimal,
@@ -1418,7 +1579,7 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
     .expect("minimal candidate is Some");
 
     // Full build: same snapshot, empty mempool, no rent — enrichment is a no-op.
-    let (full_c, _full_w, _) = generate_candidate(
+    let (full_c, full_w, _) = generate_candidate(
         &snap,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
@@ -1436,6 +1597,10 @@ fn minimal_build_equals_full_build_on_quiet_chain_post_eip27() {
     )
     .expect("full generate_candidate ok")
     .expect("full candidate is Some");
+
+    assert_candidate_metrics(&min_c, &min_w, 0, 0);
+    assert_candidate_metrics(&full_c, &full_w, 0, 0);
+    assert_eq!(min_w.metrics, full_w.metrics);
 
     assert_eq!(
         min_c.transactions.len(),

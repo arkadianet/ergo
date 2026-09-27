@@ -420,6 +420,15 @@ impl NodeReadState for SnapshotReadState {
         (*self.handle.load().events).clone()
     }
 
+    fn activity(
+        &self,
+        session: Option<&str>,
+        since: u64,
+        limit: usize,
+    ) -> Option<ergo_api::types::ApiActivityPage> {
+        crate::activity::page(session, since, limit)
+    }
+
     fn reorgs(&self) -> ergo_api::types::ApiReorgHistory {
         (*self.handle.load().reorgs).clone()
     }
