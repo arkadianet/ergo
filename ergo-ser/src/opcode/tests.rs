@@ -586,8 +586,19 @@ fn roundtrip_tuple() {
 #[test]
 fn roundtrip_select_field() {
     let input = Expr::Op(IrNode {
-        opcode: 0xA7,
-        payload: Payload::Zero,
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![
+                Expr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(1),
+                },
+                Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(2),
+                },
+            ],
+        },
     });
     let body = Expr::Op(IrNode {
         opcode: 0x8C,
@@ -1838,4 +1849,119 @@ fn preorder_visits_block_items_before_the_result_and_counts_every_node() {
             (6, 0x00),
         ]
     );
+}
+
+// ----- oracle parity (numeric-cast type constraints) -----
+
+/// Scala `NumericCastSerializer.parse`
+/// (`transformers/NumericCastSerializer.scala:20-24`) reads the target type as
+/// `r.getType().asNumType`, i.e. `asInstanceOf[SNumericType]` on a concrete
+/// type, so a NON-NUMERIC target throws `ClassCastException` — not a
+/// `ValidationException`, so a size-delimited tree does not soft-fork-wrap it
+/// either. We accepted these, which made us more permissive than consensus.
+///
+/// Found by the nightly fuzzer as a round-trip artifact rather than as an
+/// accept-invalid: for a pre-v3 tree the write-side `Upcast(Const)` strip
+/// re-emitted just the constant, whose re-parse then failed rule 1001 and landed
+/// as `Unparsed`. The drift was the symptom; accepting the cast was the bug.
+#[test]
+fn numeric_cast_non_numeric_target_hard_rejects() {
+    // Body bytes only (no tree header): Upcast (0x7E) | Const(SInt, -1) |
+    // target type SSigmaProp (0x08).
+    for (name, hex) in [("upcast", "7e040108"), ("downcast", "7d040108")] {
+        let bytes = hex::decode(hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let err = parse_body(&mut r, 0)
+            .expect_err(&format!("{name}: a non-numeric target must not parse"));
+        assert!(
+            matches!(&err, ReadError::HardReject(m) if m.contains("target type must be numeric")),
+            "{name}: expected a hard reject naming the target type, got {err:?}"
+        );
+    }
+}
+
+/// Scala's `Upcast` / `Downcast` case classes carry
+/// `require(input.tpe.isInstanceOf[SNumericType], ...)` (`ast/trees.scala:398`
+/// and `:431`), so a non-numeric INPUT throws `IllegalArgumentException`, which
+/// `deserializeErgoTree` rethrows as a `SerializerException` — again not a
+/// `ValidationException`, so again a hard failure.
+///
+/// The input type is only checked when this parser inferred it precisely: Scala
+/// always has the parsed value's `tpe`, we may not, and rejecting an
+/// indeterminate input would refuse scripts the reference accepts.
+#[test]
+fn numeric_cast_non_numeric_input_hard_rejects() {
+    // Body bytes only: Upcast | Const(Coll[SInt], [1, 2]) | target SInt.
+    let bytes = hex::decode("7e1002020404").unwrap();
+    let mut r = VlqReader::new(&bytes);
+    let err = parse_body(&mut r, 0).expect_err("a Coll input must not parse");
+    assert!(
+        matches!(&err, ReadError::HardReject(m) if m.contains("input type must be numeric")),
+        "expected a hard reject naming the input type, got {err:?}"
+    );
+}
+
+/// The constraint must not narrow what the reference accepts: every numeric
+/// target is covered by the oracle fixtures below, including both opcodes.
+/// These `Upcast(Upcast(Const))` chains exercise the
+/// pre-v3 strip behaviour the difftest harness models.
+#[test]
+fn numeric_cast_numeric_types_still_parse() {
+    // Upcast(Const(SByte, 1)) -> SInt, and the two chains from the fuzz corpus.
+    for (name, hex) in [
+        ("byte_to_int", "7e020304"),
+        ("two_level_chain", "d17e7e02050304"),
+        ("three_level_chain", "d17e7e7e0205030405"),
+    ] {
+        let bytes = hex::decode(hex).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            parse_body(&mut r, 0).is_ok(),
+            "{name}: a numeric cast must still parse"
+        );
+    }
+}
+
+/// Actual JVM verdicts, including the wrapped inner tree that changes Scala's
+/// constant store. The capture program and provenance are beside the fixtures.
+#[test]
+fn numeric_cast_and_select_field_match_scala_oracle() {
+    for line in
+        include_str!("../../../test-vectors/scala/sigma/numeric_select_validation.tsv").lines()
+    {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let bytes = hex::decode(fields[4]).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let result = match fields[1] {
+            "tree" => crate::ergo_tree::read_ergo_tree(&mut r).map(|tree| {
+                assert_eq!(
+                    matches!(tree.body, Expr::Unparsed(_)),
+                    fields[0].contains("prior_wrap"),
+                    "{}: unexpected wrap classification",
+                    fields[0]
+                );
+            }),
+            "constant" => crate::sigma_value::read_constant(&mut r).map(|_| ()),
+            surface => panic!("unknown surface {surface}"),
+        };
+        if fields[2] == "ACCEPT" {
+            result.unwrap_or_else(|e| panic!("{}: {e:?}", fields[0]));
+            assert_eq!(
+                r.position(),
+                fields[3].parse::<usize>().unwrap(),
+                "{}",
+                fields[0]
+            );
+            assert!(r.is_empty(), "{}: trailing bytes", fields[0]);
+        } else {
+            assert!(
+                matches!(result, Err(ReadError::HardReject(_))),
+                "{}: {result:?}",
+                fields[0]
+            );
+        }
+    }
 }
