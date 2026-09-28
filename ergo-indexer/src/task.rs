@@ -169,6 +169,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         let worker_cancel = Arc::clone(&cancel);
         let thread = std::thread::Builder::new()
             .name("extra-indexer".into())
+            .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
             .spawn(move || self.run(worker_cancel, poll_idle))?;
         Ok(IndexerWorker {
             cancel,

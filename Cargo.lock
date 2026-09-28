@@ -902,6 +902,7 @@ dependencies = [
  "maxminddb",
  "num-bigint",
  "parking_lot",
+ "rayon",
  "redb",
  "reqwest",
  "serde",

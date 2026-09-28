@@ -108,24 +108,8 @@ fn harden_sizeless_inner_error(e: ReadError) -> ReadError {
     }
 }
 
-/// Skip past a nested box's proposition. `depth` is the expression depth of the
-/// `SBox` constant that carries this box, so the inner script continues the ONE
-/// `MaxTreeDepth` budget Scala keeps on the reader (`CoreByteReader.lvl`, never
-/// reset by `ErgoTreeSerializer.deserializeErgoTree(r, _)`) instead of starting
-/// a fresh one. The inner script's root value is one level below the constant
-/// (Scala increments the level in `ValueSerializer.deserialize` for the constant
-/// and again for the inner root), hence the `+ 1`. Without this the
-/// box -> tree -> `SBox` constant -> box cycle recursed until the native stack
-/// overflowed: reachable from any peer-supplied transaction.
-fn skip_ergo_tree(r: &mut VlqReader, depth: usize) -> Result<(), ReadError> {
-    let previous_base = r.nesting_depth_base();
-    r.set_nesting_depth_base(previous_base.saturating_add(depth).saturating_add(1));
-    let result = skip_ergo_tree_inner(r);
-    r.set_nesting_depth_base(previous_base);
-    result
-}
-
-fn skip_ergo_tree_inner(r: &mut VlqReader) -> Result<(), ReadError> {
+/// Read the proposition with the enclosing box's nesting base still active.
+fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     let tree_start = r.position();
     let header = r.get_u8()?;
     let version = header & 0x07;
@@ -211,6 +195,24 @@ const MAX_BOX_SIZE: usize = 4 * 1024;
 /// rejected. The limit is restored before the ref tail (txId + index), which
 /// Scala reads after `positionLimit` is reset, so the tail is unbounded.
 pub(super) fn read_opaque_box(r: &mut VlqReader, depth: usize) -> Result<SigmaValue, ReadError> {
+    // DataSerializer keeps its SBox level active through BOTH the proposition
+    // and registers. Registers can contain further SBox constants, even when
+    // every proposition is shallow. Restoring the base after just the script
+    // would let that cycle start a fresh budget on every box.
+    let previous_base = r.nesting_depth_base();
+    let base = previous_base.saturating_add(depth).saturating_add(1);
+    if base > crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
+    r.set_nesting_depth_base(base);
+    let result = read_opaque_box_inner(r);
+    r.set_nesting_depth_base(previous_base);
+    result
+}
+
+fn read_opaque_box_inner(r: &mut VlqReader) -> Result<SigmaValue, ReadError> {
     let start = r.position();
 
     let previous_limit = r.position_limit();
@@ -219,7 +221,7 @@ pub(super) fn read_opaque_box(r: &mut VlqReader, depth: usize) -> Result<SigmaVa
         // value (nanoErgs) - VLQ u64
         let _ = r.get_u64()?;
         // ergo tree - skip past without full body parse (for size-delimited trees)
-        skip_ergo_tree(r, depth)?;
+        skip_ergo_tree(r)?;
         // creation height - VLQ u32
         let _ = r.get_u32_exact()?;
         // token count + tokens (full 32-byte token IDs for inline constants)
@@ -536,7 +538,7 @@ mod tests {
         // header 08 | size 05 | body 08d3 (2 bytes) | trailing aabbcc (3 bytes)
         let bytes = hex::decode("080508d3aabbcc").unwrap();
         let mut r = VlqReader::new(&bytes);
-        super::skip_ergo_tree(&mut r, 0).expect("nested size-delimited tree must skip");
+        super::skip_ergo_tree(&mut r).expect("nested size-delimited tree must skip");
         assert_eq!(
             r.remaining(),
             3,
@@ -565,7 +567,7 @@ mod tests {
             b.extend_from_slice(tree); // proposition
             b.extend_from_slice(&[0x00, 0x00, 0x00]); // height, 0 tokens, 0 registers
             b.extend_from_slice(&[0u8; 32]); // transaction id
-            b.extend_from_slice(&[0x00, 0x00]); // output index
+            b.push(0x00); // output index (VLQ u16)
             b
         }
         let mut tree = inner.to_vec();
@@ -614,7 +616,7 @@ mod tests {
     /// These lengths (5-21 KiB) are past `MAX_BOX_SIZE`, so they assert only
     /// that such input is rejected and bounded — not WHICH cap rejects it. The
     /// depth boundary itself is pinned by
-    /// `nested_box_sigma_chain_boundary_is_one_level_per_box`, whose shapes stay
+    /// `nested_box_sigma_chain_boundary_matches_scala_reader_levels`, whose shapes stay
     /// under the byte cap on purpose.
     #[test]
     fn nested_sbox_chain_depth_is_shared_across_box_boundary() {
@@ -701,8 +703,7 @@ mod tests {
     }
 
     /// The `SigmaBoolean` axis draws from the SAME budget as the box chain, so
-    /// the two compose exactly one level per box: with `b` nested boxes the
-    /// deepest accepted chain is `MAX - 1 - b`, and one deeper is rejected.
+    /// each inline box adds an expression level and a data-value level.
     /// Scala keeps all of this on `CoreByteReader.lvl`, so the sum is what it
     /// bounds; before the base was shared, the chain was measured from 0 inside
     /// every box and `b` boxes plus a just-under-the-bound chain was ACCEPTED
@@ -713,13 +714,11 @@ mod tests {
     /// budget being consumed at the wrong rate — which would reject chains the
     /// reference accepts, the more dangerous direction.
     #[test]
-    fn nested_box_sigma_chain_boundary_is_one_level_per_box() {
+    fn nested_box_sigma_chain_boundary_matches_scala_reader_levels() {
         for boxes in [0usize, 1, 2, 5, 10, 50] {
-            // `- 2`: one level for each wrap, plus one for reading the
-            // OUTERMOST box as an `SBox` constant here — Scala counts that
-            // constant on the same counter (`ValueSerializer.deserialize` ->
-            // `DataSerializer`), so it is part of the sum.
-            let deepest_accepted = MAX_SIGMA_TREE_DEPTH - 2 - boxes;
+            // Outer box data + inner constant expression/data + sigma leaf,
+            // then two levels per nested inline box (expression and data).
+            let deepest_accepted = MAX_SIGMA_TREE_DEPTH - 4 - 2 * boxes;
 
             let ok = nested_sbox_chain_around(boxes, &sigma_chain_tree(deepest_accepted));
             // Assert, rather than assume, that this shape is bounded by the
@@ -756,7 +755,7 @@ mod tests {
     }
 
     /// Regression for the accept-invalid the shared base closes: 50 nested boxes
-    /// plus a 105-deep sigma chain sits near Scala level 155 and is rejected
+    /// plus a 105-deep sigma chain exceeds Scala's shared level and is rejected
     /// there, but was accepted here while the sigma check read only its local
     /// counter.
     #[test]
@@ -773,18 +772,18 @@ mod tests {
     }
 
     /// A top-level sigma chain is unaffected by the base (which is 0 there), so
-    /// the long-standing 109-accept / 110-reject boundary still holds.
+    /// the data-value level plus the SigmaBoolean nodes determine the boundary.
     #[test]
     fn top_level_sigma_chain_boundary_unchanged_by_shared_base() {
         // `[2..]`: drop the tree header AND the SSigmaProp type code, leaving
         // the bare SigmaBoolean bytes `read_value` expects for a known type.
-        let ok = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH - 1);
+        let ok = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH - 2);
         let mut r = VlqReader::new(&ok[2..]);
         assert!(
             read_value(&mut r, &SigmaType::SSigmaProp).is_ok(),
-            "109 Cands must still parse at the top level"
+            "108 Cands must still parse at the top level"
         );
-        let bad = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH);
+        let bad = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH - 1);
         let mut r = VlqReader::new(&bad[2..]);
         assert!(matches!(
             read_value(&mut r, &SigmaType::SSigmaProp),
