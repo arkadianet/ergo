@@ -99,6 +99,8 @@ pub struct VlqReader<'a> {
     /// mempool / P2P transaction parse from the tip's activated version.
     activated_script_version: Option<u8>,
     strict_method_resolution: bool,
+    /// Opt-in header byte ranges for codec diagnostics; absent in node readers.
+    header_spans: Option<Vec<(usize, usize)>>,
 }
 
 /// Errors produced while decoding a Scorex-style byte stream.
@@ -169,6 +171,7 @@ impl<'a> VlqReader<'a> {
             pos: 0,
             position_limit: None,
             nesting_depth_base: 0,
+            header_spans: None,
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
@@ -238,6 +241,28 @@ impl<'a> VlqReader<'a> {
 
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Enable retained header-slice observations for differential checks.
+    pub fn enable_header_spans(&mut self) {
+        self.header_spans = Some(Vec::new());
+    }
+
+    /// Whether nested readers should collect the same diagnostic observations.
+    pub fn collects_header_spans(&self) -> bool {
+        self.header_spans.is_some()
+    }
+
+    /// Observe a successfully parsed header independently of SHeader ID hashing.
+    pub fn record_header_span(&mut self, start: usize, end: usize) {
+        if let Some(spans) = &mut self.header_spans {
+            spans.push((start, end));
+        }
+    }
+
+    /// Observed header boundaries in this reader's input coordinate space.
+    pub fn header_spans(&self) -> &[(usize, usize)] {
+        self.header_spans.as_deref().unwrap_or(&[])
     }
 
     /// Record a group-element encoding seen during the parse (the raw 33 bytes,

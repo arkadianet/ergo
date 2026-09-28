@@ -16,6 +16,43 @@ Generates and mutates bytes, runs them through the decoders, and checks:
 * **parse → serialize fixed point** — decode, re-encode, re-decode must reach a
   byte-stable fixed point (catches non-canonical / echo-trap re-encoding).
 
+The structural comparison checks each serialization step against two Scala
+behaviours, without normalizing either serialized byte sequence:
+
+* In trees with version **< 3**, an opcode `0x7e` with `NumericCast` payload and
+  an immediate `Expr::Const` input is stripped by Scala's serializer. A chain
+  ending in a constant converges one level per round trip; comparison predicts
+  exactly one pass and compares it with the next decoded structure. Remaining
+  cast targets and premature removal of multiple levels stay observable. Extra rounds run
+  only while the decoded tree still has a pending direct Upcast(Const) strip,
+  checking normalized structure each round, with a 110-round bound matching
+  Scala's MaxTreeDepth. Otherwise `b1 == b2` stays mandatory. Other casts/nodes,
+  Unparsed bodies and all v3+ casts remain compared as-is
+  (`ValueSerializer.scala:154-166,359-370`).
+* Every `SigmaValue::Header` first has its ID independently checked against
+  Blake2b256 of a consumed header slice observed by the header parser. Missing,
+  mismatched or ambiguous wire provenance is a Bug. Verified IDs are then zeroed for comparison, including
+  constants nested in collections, tuples, options, trees, registers and context
+  extensions. All header fields remain compared. Scala hashes the retained input
+  slice (`ErgoHeader.scala:132-140,167-180`), so canonicalizing an identity-point
+  encoding can change this derived id without changing the header.
+
+Known-bug-catalog **#19** retains the existing `WriteRejected` classification
+when re-decoding a value containing an opaque tree fails. A successful
+opaque-to-structural transition gets no exemption. Opaque trees compare their
+bytes exactly, excluding only validation-error provenance; unrelated fields in
+the containing value remain compared. Byte fixed point `b1 == b2` remains
+mandatory except for the bounded pending-Upcast convergence described above.
+The existing type-depth guard exclusion is unchanged. Structural comparison applies through
+every containing surface, including boxes,
+transactions, block transactions and `ctx_expr`; cached bytes remain compared.
+Only ErgoTree AST codecs (`ergo_tree` and `sigma_expr`) follow extra strip rounds;
+boxes, transactions and blocks re-emit retained tree bytes verbatim.
+The `parity_*` corpus seeds and the embedded `surfaces.rs` regressions cover
+the nightly failures. JVM captures reject the invalid block-item and unknown-method
+seeds; their expectations are Rejected, not normalized acceptance. The candidate
+seed still yields WriteRejected because its re-decode fails the SelectField check.
+
 Phase 1 covers **every standalone** `ergo-ser` wire decoder: the block/header
 sections (`header`, `block_transactions`, `extension`, `popow_header`,
 `nipopow_proof`), the transaction tree (`transaction`, `unsigned_transaction`,

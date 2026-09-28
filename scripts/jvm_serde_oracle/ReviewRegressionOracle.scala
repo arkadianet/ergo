@@ -17,6 +17,7 @@ object ReviewOracle {
             case "tree" => ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(r, 4096)
             case "constant" => ConstantSerializer(DeserializationSigmaBuilder).deserialize(r)
             case "expr" => r.getValue()
+            case "candidate" => org.ergoplatform.ErgoBoxCandidate.serializer.parse(r)
           }
           "ACCEPT " + r.position
         }
