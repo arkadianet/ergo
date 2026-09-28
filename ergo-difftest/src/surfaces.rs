@@ -30,6 +30,10 @@ pub struct Surface {
     pub run: RunFn,
 }
 
+/// Scala SigmaConstants.MaxTreeDepth is 110, also enforced by ergo-ser's
+/// private opcode::types::MAX_EXPR_DEPTH. Each strip round removes a level.
+const MAX_UPCAST_STRIP_ROUNDS: usize = 110;
+
 /// read+write fixed-point check shared by every (decode, encode) pair.
 ///
 /// `is_soft_fork_opaque` marks values whose body is a size-delimited
@@ -98,14 +102,42 @@ where
         return Outcome::WriteRejected;
     }
 
-    // ...and re-encoding it must reach a byte fixed point.
-    let mut w2 = VlqWriter::new();
-    if let Err(e) = encode(&mut w2, &v2) {
-        return Outcome::bug(format!("re-encode of own output failed: {e:?}"), &b1);
-    }
-    let b2 = w2.result();
-    if b1 != b2 {
-        return Outcome::bug("serialize is not a fixed point (b1 != b2)".into(), input);
+    // Follow Scala's one-level-per-pass Upcast stripping to a byte fixed point.
+    let mut bytes = b1;
+    let mut value = &v2;
+    let mut owned_value;
+    let mut rounds = 0;
+    loop {
+        let mut writer = VlqWriter::new();
+        if let Err(e) = encode(&mut writer, value) {
+            return Outcome::bug(format!("re-encode of own output failed: {e:?}"), &bytes);
+        }
+        let next_bytes = writer.result();
+        if next_bytes == bytes {
+            break;
+        }
+        if !value.has_pending_upcast_strip() {
+            return Outcome::bug("serialize is not a fixed point (b1 != b2)".into(), input);
+        }
+        rounds += 1;
+        if rounds > MAX_UPCAST_STRIP_ROUNDS {
+            return Outcome::bug("Upcast strip did not converge".into(), input);
+        }
+        let next = match decode(&mut VlqReader::new(&next_bytes)) {
+            Ok(next) => next,
+            Err(e) => {
+                return Outcome::bug(
+                    format!("re-decode of own output failed: {e:?}"),
+                    &next_bytes,
+                );
+            }
+        };
+        if value.parity_normalized() != next.parity_normalized() {
+            return Outcome::bug("structure changed across re-encode".into(), input);
+        }
+        bytes = next_bytes;
+        owned_value = next;
+        value = &owned_value;
     }
     // A wrapped tree preserves only its declared byte region, even when the
     // parser reached beyond that region before throwing. Re-reading that
@@ -554,6 +586,50 @@ mod tests {
         after
     }
 
+    fn cast_chain(version: u8, opcode: u8, levels: usize) -> ergo_ser::ergo_tree::ErgoTree {
+        let mut tree = cast_tree(version, opcode);
+        for _ in 1..levels {
+            let mut outer = cast_tree(version, opcode);
+            let ergo_ser::opcode::Expr::Op(ergo_ser::opcode::IrNode {
+                payload: ergo_ser::opcode::Payload::NumericCast { input, .. },
+                ..
+            }) = &mut outer.body
+            else {
+                unreachable!()
+            };
+            **input = tree.body;
+            tree = outer;
+        }
+        tree
+    }
+
+    // Every encode changes the byte, independently of the synthetic AST. The
+    // decode count makes both accidental early acceptance and endless loops fail.
+    fn drifting_tree_outcome(
+        tree_at: impl Fn(usize) -> ergo_ser::ergo_tree::ErgoTree,
+    ) -> (Outcome, usize) {
+        let encodes = std::cell::Cell::new(0usize);
+        let decodes = std::cell::Cell::new(0usize);
+        let outcome = rw_check(
+            &[0],
+            |_| {
+                let round = decodes.get();
+                decodes.set(round + 1);
+                assert!(round <= MAX_UPCAST_STRIP_ROUNDS + 1);
+                Ok(tree_at(round))
+            },
+            |w, _| {
+                let round = encodes.get() + 1;
+                encodes.set(round);
+                assert!(round <= MAX_UPCAST_STRIP_ROUNDS + 2);
+                w.put_u8(round as u8);
+                Ok(())
+            },
+            |_| false,
+        );
+        (outcome, encodes.get())
+    }
+
     // ----- round-trips -----
 
     #[test]
@@ -669,9 +745,148 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rw_check_no_pending_strip_byte_drift_bug() {
+        let tree = strip_cast(&cast_tree(0, 0x7e));
+        let (outcome, encodes) = drifting_tree_outcome(|_| tree.clone());
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("b1 != b2")));
+        assert_eq!(encodes, 2);
+    }
+
+    #[test]
+    fn rw_check_v3_chain_byte_drift_bug() {
+        let (outcome, encodes) = drifting_tree_outcome(|_| cast_chain(3, 0x7e, 3));
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("b1 != b2")));
+        assert_eq!(encodes, 2);
+    }
+
+    #[test]
+    fn rw_check_pending_strip_value_drift_bug() {
+        let (outcome, encodes) = drifting_tree_outcome(|round| {
+            let tree = cast_chain(0, 0x7e, 2);
+            if round < 2 {
+                return tree;
+            }
+            let mut next = strip_cast(&strip_cast(&tree));
+            let ergo_ser::opcode::Expr::Const { val, .. } = &mut next.body else {
+                unreachable!()
+            };
+            *val = ergo_ser::sigma_value::SigmaValue::Int(2);
+            next
+        });
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("structure changed")));
+        assert_eq!(encodes, 2);
+    }
+
+    #[test]
+    fn rw_check_pending_strip_nonconvergence_bug() {
+        let (outcome, encodes) = drifting_tree_outcome(|_| cast_chain(0, 0x7e, 2));
+        assert!(
+            matches!(outcome, Outcome::Bug(detail) if detail.contains("Upcast strip did not converge"))
+        );
+        assert_eq!(encodes, MAX_UPCAST_STRIP_ROUNDS + 2);
+    }
+
+    #[test]
+    fn rw_check_downcast_chain_strip_bug() {
+        // A synthetic writer removes one level each pass, even for Downcast.
+        let outcome = rw_check(
+            &[3],
+            |r| Ok(cast_chain(0, 0x7d, usize::from(r.get_u8()?))),
+            |w, tree| {
+                let mut levels = 0;
+                let mut expr = &tree.body;
+                while let ergo_ser::opcode::Expr::Op(ergo_ser::opcode::IrNode {
+                    payload: ergo_ser::opcode::Payload::NumericCast { input, .. },
+                    ..
+                }) = expr
+                {
+                    levels += 1;
+                    expr = input;
+                }
+                w.put_u8(levels - 1);
+                Ok(())
+            },
+            |_| false,
+        );
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("b1 != b2")));
+    }
+
+    // ----- normalization -----
+
+    #[test]
+    fn normalizer_pre_v3_constant_chains_collapsed() {
+        for version in 0..3 {
+            for levels in [2, 3] {
+                let tree = cast_chain(version, 0x7e, levels);
+                assert!(tree.has_pending_upcast_strip());
+                assert_eq!(
+                    parity::normalized_tree(&tree),
+                    strip_cast(&cast_tree(version, 0x7e))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalizer_nonconstant_downcast_v3_chains_unchanged() {
+        use ergo_ser::opcode::{Expr, IrNode, Payload};
+        let mut height = cast_chain(0, 0x7e, 2);
+        let mut expr = &mut height.body;
+        while let Expr::Op(IrNode {
+            payload: Payload::NumericCast { input, .. },
+            ..
+        }) = expr
+        {
+            expr = input;
+        }
+        *expr = Expr::Op(IrNode {
+            opcode: 0xa3,
+            payload: Payload::Zero,
+        });
+        for tree in [height, cast_chain(0, 0x7d, 3), cast_chain(3, 0x7e, 3)] {
+            assert!(!tree.has_pending_upcast_strip());
+            // Compare the normalized tree directly against the raw tree,
+            // avoiding normalization of both sides that could hide a rewrite.
+            assert_eq!(parity::normalized_tree(&tree), tree);
+        }
+    }
+
+    #[test]
+    fn normalizer_unparsed_body_unchanged() {
+        let mut tree = cast_tree(0, 0x7e);
+        tree.body = ergo_ser::opcode::Expr::Unparsed(vec![0x7e, 0x02, 5, 3].into());
+        assert!(!tree.has_pending_upcast_strip());
+        assert_eq!(parity::normalized_tree(&tree), tree);
+    }
+
     // ----- oracle parity -----
 
-    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-365 preserves v3+
+    /// Scala ValueSerializer.scala:154-166 and 359-370 remove one Upcast level
+    /// per pass. Scala's fixed point accepts this two-level chain on both surfaces.
+    #[test]
+    fn tree_surfaces_two_level_upcast_chain_accepted() {
+        for surface in ["ergo_tree", "sigma_expr"] {
+            let bytes = hex::decode("00d17e7e02050304").unwrap();
+            assert_eq!((registry(Some(surface))[0].run)(&bytes), Outcome::Accepted);
+        }
+    }
+
+    /// Scala ValueSerializer.scala:154-166 and 359-370 likewise require several
+    /// passes for Byte -> Short -> Int -> Long; Scala predicts acceptance.
+    #[test]
+    fn tree_surfaces_three_level_upcast_chain_accepted() {
+        let bytes = hex::decode("00d17e7e7e0205030405").unwrap();
+        let mut reader = VlqReader::new(&bytes);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut reader).unwrap();
+        assert!(!tree_is_unparsed(&tree));
+        assert!(tree.has_pending_upcast_strip());
+        for surface in ["ergo_tree", "sigma_expr"] {
+            assert_eq!((registry(Some(surface))[0].run)(&bytes), Outcome::Accepted);
+        }
+    }
+
+    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-370 preserves v3+
     /// trees but strips Upcast(Const) before v3. Expected from Scala, not Rust output.
     #[test]
     fn ergo_tree_upcast_crash_accepted() {
@@ -682,7 +897,7 @@ mod tests {
         );
     }
 
-    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-365 applies the same
+    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-370 applies the same
     /// pre-v3 Upcast(Const) rule recursively at serialization of each expression.
     #[test]
     fn sigma_expr_upcast_crash_accepted() {
@@ -715,7 +930,7 @@ mod tests {
         );
     }
 
-    /// Scala ValueSerializer.scala:154-166,359-365: only pre-v3 Upcast(Const) is stripped.
+    /// Scala ValueSerializer.scala:154-166,359-370: only pre-v3 Upcast(Const) is stripped.
     #[test]
     fn rw_check_pre_v3_upcast_strip_accepted() {
         for version in 0..3 {

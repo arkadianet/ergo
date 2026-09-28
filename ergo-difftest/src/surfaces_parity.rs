@@ -20,6 +20,12 @@ use ergo_ser::{
 
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self) -> impl PartialEq;
+
+    // Only ErgoTree re-serializes its AST. Containing boxes/transactions/blocks
+    // re-emit retained tree bytes verbatim, so every other type keeps false.
+    fn has_pending_upcast_strip(&self) -> bool {
+        false
+    }
 }
 
 macro_rules! unchanged {
@@ -76,19 +82,6 @@ impl ParityNormalize for SigmaValue {
 }
 
 fn normalize_expr(expr: &mut Expr, version: u8) {
-    // Match before descending, exactly like ValueSerializer.serializable / write.rs.
-    // In particular, do not collapse an outer cast whose input was another cast.
-    if version < 3 {
-        if let Expr::Op(IrNode {
-            opcode: 0x7e,
-            payload: Payload::NumericCast { input, .. },
-        }) = expr
-        {
-            if matches!(input.as_ref(), Expr::Const { .. }) {
-                *expr = *input.clone();
-            }
-        }
-    }
     let node = match expr {
         Expr::Const { val, .. } => {
             normalize_value(val);
@@ -149,15 +142,91 @@ fn normalize_expr(expr: &mut Expr, version: u8) {
     for child in children {
         normalize_expr(child, version);
     }
+    // ValueSerializer.scala:154-166 and 359-370 strip only Upcast(Const)
+    // per serialize pass. Descend first to compare the fixed point of repeated
+    // round trips: each pass removes one level of a chain ending in a Const.
+    if version < 3 {
+        if let Expr::Op(IrNode {
+            opcode: 0x7e,
+            payload: Payload::NumericCast { input, .. },
+        }) = expr
+        {
+            if matches!(input.as_ref(), Expr::Const { .. }) {
+                *expr = *input.clone();
+            }
+        }
+    }
+}
+fn has_pending_strip(expr: &Expr) -> bool {
+    let Expr::Op(node) = expr else {
+        return false; // Never inspect retained Expr::Unparsed bytes.
+    };
+    // Exactly the direct-input predicate in ergo-ser opcode/write.rs:183-190.
+    if let IrNode {
+        opcode: 0x7e,
+        payload: Payload::NumericCast { input, .. },
+    } = node
+    {
+        if matches!(input.as_ref(), Expr::Const { .. }) {
+            return true;
+        }
+    }
+    let children: Vec<&Expr> = match &node.payload {
+        Payload::One(a) => vec![a],
+        Payload::Two(a, b) => vec![a, b],
+        Payload::Three(a, b, c) => vec![a, b, c],
+        Payload::Four(a, b, c, d) => vec![a, b, c, d],
+        Payload::ValDef { rhs, .. } | Payload::FunDef { rhs, .. } => vec![rhs],
+        Payload::BlockValue { items, result } => {
+            let mut children: Vec<&Expr> = items.iter().collect();
+            children.push(result);
+            children
+        }
+        Payload::FuncValue { body, .. } => vec![body],
+        Payload::MethodCall { obj, args, .. } => {
+            let mut children = vec![obj.as_ref()];
+            children.extend(args.iter());
+            children
+        }
+        Payload::ConcreteCollection { items, .. }
+        | Payload::Tuple { items }
+        | Payload::SigmaCollection { items } => items.iter().collect(),
+        Payload::SelectField { input, .. }
+        | Payload::ExtractRegisterAs { input, .. }
+        | Payload::NumericCast { input, .. } => vec![input],
+        Payload::DeserializeRegister { default, .. } => default.as_deref().into_iter().collect(),
+        Payload::ByIndex {
+            input,
+            index,
+            default,
+        } => {
+            let mut children = vec![input.as_ref(), index.as_ref()];
+            children.extend(default.as_deref());
+            children
+        }
+        Payload::FuncApply { func, args } => {
+            let mut children = vec![func.as_ref()];
+            children.extend(args.iter());
+            children
+        }
+        Payload::Zero
+        | Payload::ValUse { .. }
+        | Payload::ConstPlaceholder { .. }
+        | Payload::TaggedVar { .. }
+        | Payload::BoolCollection { .. }
+        | Payload::GetVar { .. }
+        | Payload::DeserializeContext { .. }
+        | Payload::NoneValue { .. } => vec![],
+    };
+    children.into_iter().any(has_pending_strip)
 }
 impl ParityNormalize for ErgoTree {
+    fn has_pending_upcast_strip(&self) -> bool {
+        self.version < 3 && has_pending_strip(&self.body)
+    }
+
     fn parity_normalized(&self) -> impl PartialEq {
-        let mut tree = self.clone();
-        for (_, value) in &mut tree.constants {
-            normalize_value(value);
-        }
-        normalize_expr(&mut tree.body, tree.version);
-        tree
+        normalized_tree(self)
     }
 }
 
@@ -245,3 +314,12 @@ view!(
     v,
     (v.header_id, v.transactions.parity_normalized())
 );
+
+pub(super) fn normalized_tree(tree: &ErgoTree) -> ErgoTree {
+    let mut tree = tree.clone();
+    for (_, value) in &mut tree.constants {
+        normalize_value(value);
+    }
+    normalize_expr(&mut tree.body, tree.version);
+    tree
+}

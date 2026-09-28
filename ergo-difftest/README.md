@@ -20,9 +20,14 @@ The structural comparison normalizes both decoded values for two Scala parity
 behaviours, without normalizing either serialized byte sequence:
 
 * In trees with version **< 3**, an opcode `0x7e` with `NumericCast` payload and
-  an immediate `Expr::Const` input compares as that input, throughout the AST.
-  Other casts/nodes and all v3+ casts remain compared as-is
-  (`ValueSerializer.scala:154-166,359-365`).
+  an immediate `Expr::Const` input is stripped by Scala's serializer. A chain
+  ending in a constant converges one level per round trip; comparison normalizes
+  children first to obtain that fixed point. The harness follows extra rounds
+  only while the decoded tree still has a pending direct Upcast(Const) strip,
+  checking normalized structure each round, with a 110-round bound matching
+  Scala's MaxTreeDepth. Otherwise `b1 == b2` stays mandatory. Other casts/nodes,
+  Unparsed bodies and all v3+ casts remain compared as-is
+  (`ValueSerializer.scala:154-166,359-370`).
 * Every `SigmaValue::Header` compares with its retained-wire id zeroed, including
   constants nested in collections, tuples, options, trees, registers and context
   extensions. All header fields remain compared. Scala hashes the retained input
@@ -36,11 +41,14 @@ can cross the declared size after a following VLQ field canonicalizes, changing
 stream boundaries. This extends the existing opaque re-decode-failure exclusion.
 If both values remain opaque, differing bytes are **still a Bug** (only opaque
 error provenance is excluded from structural equality). Byte fixed point
-`b1 == b2` remains mandatory for every successful re-decode except that
-opaque-to-structural transition. The existing type-depth guard exclusion is
-unchanged. These rules apply through every containing surface, including boxes,
+`b1 == b2` remains mandatory except for that opaque-to-structural transition
+and the bounded pending-Upcast convergence described above. The existing
+type-depth guard exclusion is unchanged. Structural comparison applies through
+every containing surface, including boxes,
 transactions, block transactions and `ctx_expr`; cached bytes remain compared.
-The four `parity_*` corpus seeds and the embedded `surfaces.rs` regressions cover
+Only ErgoTree AST codecs (`ergo_tree` and `sigma_expr`) follow extra strip rounds;
+boxes, transactions and blocks re-emit retained tree bytes verbatim.
+The `parity_*` corpus seeds and the embedded `surfaces.rs` regressions cover
 the nightly failures that motivated these exclusions.
 
 Phase 1 covers **every standalone** `ergo-ser` wire decoder: the block/header
