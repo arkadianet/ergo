@@ -60,7 +60,7 @@ function modeName(mode) {
 function retention(mode) {
   if (!mode) return 'Not advertised';
   const n = mode.blocks_to_keep;
-  return n === -1 ? 'All blocks' : n === -2 ? 'UTXO bootstrap' : n > 0 ? `Last ${num(n)} blocks` : `Unknown (${n})`;
+  return n === -1 ? 'All blocks' : n === -2 ? 'UTXO bootstrap' : n === 0 ? 'Headers-only' : n > 0 ? `Last ${num(n)} blocks` : `Unknown (${n})`;
 }
 
 function chainLabel(status) {
@@ -85,7 +85,7 @@ function peerLookupNote(peers) {
 function peerMatches(p, query) {
   const n = p.network || {};
   return [p.addr, p.agent, p.version, p.node_name, p.declared_address, p.rest_api_url,
-    n.hostname, n.country, n.country_code, n.city, n.region, n.organization,
+    n.hostname, n.country, n.country_code, n.city, n.region, n.organization, n.network_cidr,
     n.asn == null ? null : `AS${n.asn}`, modeName(p.details?.mode)]
     .some((v) => String(v || '').toLowerCase().includes(query));
 }
