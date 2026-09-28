@@ -112,11 +112,50 @@ jobs:
       - name: Resolve tag
         id: tag
         shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_TAG" ]; then
+            if ! [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"
+              exit 1
+            fi
+            echo "name=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
             echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+          path: src
+
+      # The release body is the tag's CHANGELOG section. An existing non-empty body is
+      # never replaced, so notes edited by hand survive a re-run; a missing section only
+      # warns, because it must not block publishing the binaries.
+      - name: Release notes from CHANGELOG
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${TAG#v}"
+          awk -v h="## [$version]" 'index($0, h) == 1 { on = 1; next } on && /^## \[/ { exit } on' \
+            src/CHANGELOG.md > release-notes.md
+          if grep -q '[^[:space:]]' release-notes.md; then
+            echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::CHANGELOG.md has no section for $version; publishing without release notes"
+            echo "path=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create / update release
@@ -125,7 +164,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
           # Pre-1.0 releases are pre-release only when the tag carries an
-          # -alpha / -beta / -rc suffix. The release body is managed manually
-          # (not overwritten here) so curated notes survive a re-run.
+          # -alpha / -beta / -rc suffix.
           prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
+          body_path: ${{ steps.notes.outputs.path }}
           files: artifacts/**/*

@@ -16,6 +16,65 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-28
+
+Decoder depth and type-validation fixes for Scala parity, protection against
+stack exhaustion from peer transactions, and expanded peer diagnostics with
+optional local IP metadata and reverse DNS.
+
+### Security
+
+- Bound recursive decoding through nested box scripts and registers to address
+  peer-supplied transactions that could exhaust the stack and abort the node.
+  Startup and store recovery, Tokio workers and blocking tasks, Rayon, mining
+  and indexing threads now request 8 MiB stacks as additional protection
+  (#429, #432).
+
+### Added
+
+- Add optional `details` and `network` objects to peer responses from
+  `GET /api/v1/peers`, `GET /api/v1/network/peers` and
+  `GET /api/v1/network/connected`. Details include peer-reported handshake
+  mode, delivery health, sync observation age and height source, and connection
+  setup time in `connection_setup_ms`. Setup time measures TCP and handshake
+  completion, not ping latency; `session_id` is a decimal string. Height source
+  distinguishes `reported_header` from `inferred_from_overlap`, which can
+  understate the remote tip (#430).
+- Expand the Peers dashboard with searchable client and network details, a
+  connection detail drawer, and traffic rates calculated from snapshot
+  timestamps alongside cumulative byte counts (#430).
+- Add `[api.peer_details]` with `auto_download = false` and
+  `reverse_dns = false` as separate opt-ins. Optional `geoip_db` and `asn_db`
+  paths default to absent, resolve relative to the data directory, and override
+  automatic downloads. Local MMDB files provide approximate location and ASN
+  data; existing cached databases remain usable with downloads disabled.
+  Enrichment is for display and does not affect peer selection or scoring.
+  Reverse DNS uses the OS resolver, disclosing public peer IPs to it; local and
+  special addresses are excluded from DNS and database lookups (#430).
+- With `auto_download` enabled and the API running, download monthly DB-IP Lite
+  City and ASN datasets over HTTPS, checking at startup and every 24 hours.
+  Validated updates take effect without restarting; failed updates retain the
+  previous database (#430).
+
+### Changed
+
+- Tighten the differential test harness to check Scala's serialization steps
+  and verify header IDs against consumed wire bytes before excluding them from
+  structural comparisons (#428).
+
+### Fixed
+
+- Reject nested box scripts and registers that exceed the shared decoding
+  depth budget of 110, matching the Scala reference node. Keep the budget
+  active across the entire inline box and count expression and data-value
+  levels separately, including constants in registers and context extensions
+  (#429, #432).
+- Reject numeric casts with nonnumeric targets or reliably inferred nonnumeric
+  inputs, `SelectField` on a known non-tuple, and `BlockValue` items other than
+  `ValDef` or `FunDef`, matching the Scala reference node. Type inference after
+  inline boxes no longer relies on outer bindings or constant-pool types that
+  nested parsing may have changed (#431).
+
 ## [0.9.1] - 2026-09-28
 
 Block relay and mining reliability release: Scala-parity block announcements,
