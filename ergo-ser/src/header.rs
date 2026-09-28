@@ -140,6 +140,7 @@ pub fn serialize_header_without_pow(h: &Header) -> Result<Vec<u8>, WriteError> {
 /// For v5+ (anything `> INTERPRETER_60_VERSION`) the bytes are
 /// preserved verbatim so unknown future fields round-trip.
 pub fn read_header(r: &mut VlqReader) -> Result<Header, ReadError> {
+    let start = r.position();
     let version = r.get_u8()?;
     let parent_id = ModifierId::from_bytes(r.get_array::<32>()?);
     let ad_proofs_root = Digest32::from_bytes(r.get_array::<32>()?);
@@ -166,6 +167,8 @@ pub fn read_header(r: &mut VlqReader) -> Result<Header, ReadError> {
     };
 
     let solution = read_solution(r, version)?;
+
+    r.record_header_span(start, r.position());
 
     Ok(Header {
         version,

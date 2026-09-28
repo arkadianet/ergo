@@ -49,10 +49,17 @@ where
     F: Fn(&T) -> bool,
 {
     let mut r1 = VlqReader::new(input);
+    r1.enable_header_spans();
     let v1 = match decode(&mut r1) {
         Ok(v) => v,
         Err(_) => return Outcome::Rejected, // rejecting malformed input is correct
     };
+    if !parity::header_ids_match_wire(&v1, &r1) {
+        return Outcome::bug(
+            "header id does not have an unambiguous retained-wire hash".into(),
+            input,
+        );
+    }
 
     // Re-encode the parsed value. An intentional WriteError (e.g. a name/count
     // that overflows the single-byte wire field, or non-self-delimiting
@@ -65,6 +72,7 @@ where
 
     // We must be able to read back our own output.
     let mut r2 = VlqReader::new(&b1);
+    r2.enable_header_spans();
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
@@ -93,13 +101,14 @@ where
         }
     };
 
-    // Known-bug-catalog #19: Scala's ErgoTreeSerializer.scala:179 uses
-    // `treeSize = r.position - startPos`, allowing a structural body to read
-    // past its declared size. Canonicalizing a following field can therefore
-    // flip a retained opaque region into a structural parse and desync even
-    // when re-decode succeeds. Only opaque -> structural gets this exclusion.
-    if is_soft_fork_opaque(&v1) && !is_soft_fork_opaque(&v2) {
-        return Outcome::WriteRejected;
+    if !parity::header_ids_match_wire(&v2, &r2) {
+        return Outcome::bug(
+            "re-decoded header id does not match retained wire".into(),
+            &b1,
+        );
+    }
+    if v1.parity_normalized(true) != v2.parity_normalized(false) {
+        return Outcome::bug("structure changed across re-encode".into(), input);
     }
 
     // Follow Scala's one-level-per-pass Upcast stripping to a byte fixed point.
@@ -114,6 +123,9 @@ where
         }
         let next_bytes = writer.result();
         if next_bytes == bytes {
+            if value.has_pending_upcast_strip() {
+                return Outcome::bug("pending Upcast strip did not change bytes".into(), &bytes);
+            }
             break;
         }
         if !value.has_pending_upcast_strip() {
@@ -123,7 +135,9 @@ where
         if rounds > MAX_UPCAST_STRIP_ROUNDS {
             return Outcome::bug("Upcast strip did not converge".into(), input);
         }
-        let next = match decode(&mut VlqReader::new(&next_bytes)) {
+        let mut next_reader = VlqReader::new(&next_bytes);
+        next_reader.enable_header_spans();
+        let next = match decode(&mut next_reader) {
             Ok(next) => next,
             Err(e) => {
                 return Outcome::bug(
@@ -132,22 +146,18 @@ where
                 );
             }
         };
-        if value.parity_normalized() != next.parity_normalized() {
+        if !parity::header_ids_match_wire(&next, &next_reader) {
+            return Outcome::bug(
+                "re-decoded header id does not match retained wire".into(),
+                &next_bytes,
+            );
+        }
+        if value.parity_normalized(true) != next.parity_normalized(false) {
             return Outcome::bug("structure changed across re-encode".into(), input);
         }
         bytes = next_bytes;
         owned_value = next;
         value = &owned_value;
-    }
-    // A wrapped tree preserves only its declared byte region, even when the
-    // parser reached beyond that region before throwing. Re-reading that
-    // region can therefore retain a different validation error. Both opaque
-    // values must still satisfy the byte fixed point above; parsed values also
-    // require structural equality. Error provenance is not serialized data.
-    if !(is_soft_fork_opaque(&v1) && is_soft_fork_opaque(&v2))
-        && v1.parity_normalized() != v2.parity_normalized()
-    {
-        return Outcome::bug("structure changed across re-encode".into(), input);
     }
     Outcome::Accepted
 }
@@ -764,8 +774,11 @@ mod tests {
     fn rw_check_pending_strip_value_drift_bug() {
         let (outcome, encodes) = drifting_tree_outcome(|round| {
             let tree = cast_chain(0, 0x7e, 2);
-            if round < 2 {
+            if round == 0 {
                 return tree;
+            }
+            if round == 1 {
+                return cast_chain(0, 0x7e, 1);
             }
             let mut next = strip_cast(&strip_cast(&tree));
             let ergo_ser::opcode::Expr::Const { val, .. } = &mut next.body else {
@@ -779,12 +792,10 @@ mod tests {
     }
 
     #[test]
-    fn rw_check_pending_strip_nonconvergence_bug() {
+    fn rw_check_pending_strip_without_progress_bug() {
         let (outcome, encodes) = drifting_tree_outcome(|_| cast_chain(0, 0x7e, 2));
-        assert!(
-            matches!(outcome, Outcome::Bug(detail) if detail.contains("Upcast strip did not converge"))
-        );
-        assert_eq!(encodes, MAX_UPCAST_STRIP_ROUNDS + 2);
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("structure changed")));
+        assert_eq!(encodes, 1);
     }
 
     #[test]
@@ -809,20 +820,133 @@ mod tests {
             },
             |_| false,
         );
-        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("b1 != b2")));
+        assert!(matches!(outcome, Outcome::Bug(_)));
     }
 
     // ----- normalization -----
 
     #[test]
-    fn normalizer_pre_v3_constant_chains_collapsed() {
+    fn rw_check_premature_chain_collapse_and_surviving_target_drift_are_bugs() {
+        use ergo_ser::opcode::{Expr, IrNode, Payload};
+        let before = cast_chain(0, 0x7e, 3);
+        let collapsed = strip_cast(&cast_tree(0, 0x7e));
+        assert!(matches!(
+            structural_outcome(before.clone(), collapsed),
+            Outcome::Bug(_)
+        ));
+        let mut after = cast_chain(0, 0x7e, 2);
+        let Expr::Op(IrNode {
+            payload: Payload::NumericCast { tpe, .. },
+            ..
+        }) = &mut after.body
+        else {
+            unreachable!()
+        };
+        *tpe = ergo_ser::sigma_type::SigmaType::SInt;
+        assert!(matches!(structural_outcome(before, after), Outcome::Bug(_)));
+    }
+
+    #[test]
+    fn rw_check_opaque_exclusion_preserves_unrelated_fields() {
+        use ergo_ser::opcode::{Expr, UnparsedErgoTree};
+        let mut before = cast_tree(0, 0x7e);
+        before.body = Expr::Unparsed(UnparsedErgoTree {
+            bytes: vec![8, 1, 0xff],
+            validation_error: Some((1001, vec![])),
+        });
+        let mut after = before.clone();
+        let Expr::Unparsed(opaque) = &mut after.body else {
+            unreachable!()
+        };
+        opaque.validation_error = Some((1016, vec![0xff]));
+        assert_eq!(
+            structural_outcome(before.clone(), after.clone()),
+            Outcome::Accepted
+        );
+        // Both aggregate values contain an opaque tree, but the integer drifts.
+        let outcome = rw_check(
+            &[0],
+            |r| {
+                Ok(if r.get_u8()? == 0 {
+                    (1u8, before.clone())
+                } else {
+                    (2u8, after.clone())
+                })
+            },
+            |w, _| {
+                w.put_u8(1);
+                Ok(())
+            },
+            |_| true,
+        );
+        assert!(matches!(outcome, Outcome::Bug(_)));
+        // A successful opaque-to-structural transition is compared too.
+        assert!(matches!(
+            structural_outcome(before, cast_tree(0, 0x7e)),
+            Outcome::Bug(_)
+        ));
+    }
+
+    #[test]
+    fn rw_check_header_hash_is_verified_before_normalization() {
+        let bytes = hex::decode(CONSTANT_CRASH).unwrap();
+        let outcome = rw_check(
+            &bytes,
+            |r| {
+                let (tpe, mut value) = ergo_ser::sigma_value::read_constant(r)?;
+                let ergo_ser::sigma_value::SigmaValue::Header(_, id) = &mut value else {
+                    unreachable!()
+                };
+                *id = [42; 32];
+                Ok((tpe, value))
+            },
+            |w, (tpe, value)| ergo_ser::sigma_value::write_constant(w, tpe, value),
+            |_| false,
+        );
+        assert!(matches!(outcome, Outcome::Bug(detail) if detail.contains("header id")));
+    }
+
+    #[test]
+    fn header_wire_observations_cross_sized_tree_readers() {
+        let header = hex::decode(CONSTANT_CRASH).unwrap();
+        let mut body = vec![1]; // segregated constant count
+        body.extend_from_slice(&header);
+        body.extend_from_slice(&[8, 0xd3]);
+        let mut bytes = vec![0x1b]; // v3, sized, segregated
+        ergo_primitives::vlq::encode_vlq_into(body.len() as u64, &mut bytes);
+        bytes.extend_from_slice(&body);
+        assert_eq!(
+            (registry(Some("ergo_tree"))[0].run)(&bytes),
+            Outcome::Accepted
+        );
+    }
+
+    #[test]
+    fn invalid_casts_and_tuple_projections_cannot_be_normalized_away() {
+        for bytes in [
+            "00d17e010104",
+            "00d17d010104",
+            "00d17e040208",
+            "00d18c010108",
+        ] {
+            for surface in ["ergo_tree", "sigma_expr"] {
+                assert_eq!(
+                    (registry(Some(surface))[0].run)(&hex::decode(bytes).unwrap()),
+                    Outcome::Rejected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalizer_pre_v3_constant_chains_strip_one_level() {
         for version in 0..3 {
             for levels in [2, 3] {
                 let tree = cast_chain(version, 0x7e, levels);
                 assert!(tree.has_pending_upcast_strip());
                 assert_eq!(
-                    parity::normalized_tree(&tree),
-                    strip_cast(&cast_tree(version, 0x7e))
+                    parity::normalized_tree(&tree, true),
+                    cast_chain(version, 0x7e, levels - 1)
                 );
             }
         }
@@ -848,7 +972,7 @@ mod tests {
             assert!(!tree.has_pending_upcast_strip());
             // Compare the normalized tree directly against the raw tree,
             // avoiding normalization of both sides that could hide a rewrite.
-            assert_eq!(parity::normalized_tree(&tree), tree);
+            assert_eq!(parity::normalized_tree(&tree, true), tree);
         }
     }
 
@@ -857,10 +981,44 @@ mod tests {
         let mut tree = cast_tree(0, 0x7e);
         tree.body = ergo_ser::opcode::Expr::Unparsed(vec![0x7e, 0x02, 5, 3].into());
         assert!(!tree.has_pending_upcast_strip());
-        assert_eq!(parity::normalized_tree(&tree), tree);
+        assert_eq!(parity::normalized_tree(&tree, true), tree);
     }
 
     // ----- oracle parity -----
+
+    #[test]
+    fn fuzz_seed_decoding_matches_captured_jvm_verdicts() {
+        for line in
+            include_str!("../../test-vectors/scala/sigma/fuzz_parity_validation.tsv").lines()
+        {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let bytes = hex::decode(fields[4]).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let result = match fields[1] {
+                "tree" => ergo_ser::ergo_tree::read_ergo_tree(&mut r).map(|_| ()),
+                "constant" => ergo_ser::sigma_value::read_constant(&mut r).map(|_| ()),
+                "candidate" => ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map(|_| ()),
+                surface => panic!("unknown surface {surface}"),
+            };
+            assert_eq!(
+                result.is_ok(),
+                fields[2] == "ACCEPT",
+                "{}: {result:?}",
+                fields[0]
+            );
+            if result.is_ok() {
+                assert_eq!(
+                    r.position(),
+                    fields[3].parse::<usize>().unwrap(),
+                    "{}",
+                    fields[0]
+                );
+            }
+        }
+    }
 
     /// Scala ValueSerializer.scala:154-166 and 359-370 remove one Upcast level
     /// per pass. Scala's fixed point accepts this two-level chain on both surfaces.
@@ -886,25 +1044,23 @@ mod tests {
         }
     }
 
-    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-370 preserves v3+
-    /// trees but strips Upcast(Const) before v3. Expected from Scala, not Rust output.
+    /// JVM 6.0.2 rejects a constant in the BlockValue item list (ClassCastException).
     #[test]
-    fn ergo_tree_upcast_crash_accepted() {
+    fn ergo_tree_invalid_block_item_crash_rejected() {
         let bytes = hex::decode(ERGO_TREE_CRASH).unwrap();
         assert_eq!(
             (registry(Some("ergo_tree"))[0].run)(&bytes),
-            Outcome::Accepted
+            Outcome::Rejected
         );
     }
 
-    /// Scala sigma/serialization/ValueSerializer.scala:154-166,359-370 applies the same
-    /// pre-v3 Upcast(Const) rule recursively at serialization of each expression.
+    /// JVM 6.0.2 rejects the unknown SBox method in this sizeless tree.
     #[test]
-    fn sigma_expr_upcast_crash_accepted() {
+    fn sigma_expr_unknown_method_crash_rejected() {
         let bytes = hex::decode(SIGMA_EXPR_CRASH).unwrap();
         assert_eq!(
             (registry(Some("sigma_expr"))[0].run)(&bytes),
-            Outcome::Accepted
+            Outcome::Rejected
         );
     }
 
@@ -943,7 +1099,7 @@ mod tests {
     /// Scala ErgoHeader.scala:132-140,167-180: serializedId derives from the
     /// retained slice even when nested; all actual header fields remain data.
     #[test]
-    fn rw_check_nested_header_ids_accepted() {
+    fn rw_check_nested_header_id_corruption_is_a_bug() {
         use ergo_ser::{
             block_transactions::BlockTransactions,
             ergo_box::{ErgoBox, ErgoBoxCandidate},
@@ -954,7 +1110,9 @@ mod tests {
             transaction::{Transaction, UnsignedTransaction},
         };
         let bytes = hex::decode(CONSTANT_CRASH).unwrap();
-        let (_, value) = ergo_ser::sigma_value::read_constant(&mut VlqReader::new(&bytes)).unwrap();
+        let mut reader = VlqReader::new(&bytes);
+        reader.enable_header_spans();
+        let (_, value) = ergo_ser::sigma_value::read_constant(&mut reader).unwrap();
         let mut other = value.clone();
         let SigmaValue::Header(_, id) = &mut other else {
             panic!("expected header");
@@ -970,10 +1128,15 @@ mod tests {
                 },
             ])
         };
-        assert_eq!(
+        assert!(parity::header_ids_match_wire(&wrap(value.clone()), &reader));
+        assert!(!parity::header_ids_match_wire(
+            &wrap(other.clone()),
+            &reader
+        ));
+        assert!(matches!(
             structural_outcome(wrap(value.clone()), wrap(other.clone())),
-            Outcome::Accepted
-        );
+            Outcome::Bug(_)
+        ));
         let make = |value: SigmaValue| {
             let mut tree = cast_tree(3, 0x7e);
             tree.constant_segregation = true;
@@ -1037,12 +1200,14 @@ mod tests {
         let a = make(value);
         let b = make(other);
         macro_rules! check { ($($field:tt),*) => { $(
-            assert_eq!(structural_outcome(a.$field.clone(), b.$field.clone()), Outcome::Accepted);
+            assert!(parity::header_ids_match_wire(&a.$field, &reader));
+            assert!(!parity::header_ids_match_wire(&b.$field, &reader));
+            assert!(matches!(structural_outcome(a.$field.clone(), b.$field.clone()), Outcome::Bug(_)));
         )* }; }
         check!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-        assert_eq!(
+        assert!(matches!(
             structural_outcome((a.2, a.6), (b.2, b.6)),
-            Outcome::Accepted
-        );
+            Outcome::Bug(_)
+        ));
     }
 }

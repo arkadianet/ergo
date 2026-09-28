@@ -145,9 +145,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // boundary byte-for-byte. The limit, relative to the inner view that
         // starts at `body_start`, is `MaxPropositionSize - (header + size length)`.
         let body_budget = MAX_PROPOSITION_BYTES.saturating_sub(body_start - tree_start);
-        let (parsed, unresolved_checkpoint, body_consumed, inner_ges) = {
+        let (parsed, unresolved_checkpoint, body_consumed, inner_ges, header_spans) = {
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
+            if r.collects_header_spans() {
+                inner.enable_header_spans();
+            }
             inner.set_position_limit(Some(body_budget));
             // Propagate trust into the body sub-reader so a high-version tree
             // nested in this size-delimited tree's body / segregated constants
@@ -184,8 +187,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 inner.unresolved_method_checkpoint(),
                 inner.position(),
                 inner.take_group_elements(),
+                inner.header_spans().to_vec(),
             )
         };
+        for (start, end) in header_spans {
+            r.record_header_span(body_start + start, body_start + end);
+        }
         // A size-delimited tree carrying a method the tree's registry cannot resolve
         // is wrapped by Scala as `UnparsedErgoTree`: `MethodCallSerializer.parse`
         // throws a method-resolution `ValidationException`, caught under has_size.
