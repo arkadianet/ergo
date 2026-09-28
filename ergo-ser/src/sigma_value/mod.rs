@@ -464,7 +464,10 @@ pub(crate) fn read_value_at_depth(
             let v = read_unsigned_bigint_value(r)?;
             Ok(SigmaValue::BigInt(v))
         }
-        SigmaType::SBox => read_opaque_box(r),
+        // Carry the shared budget into the box's script: Scala's reader level
+        // does not reset when `DataSerializer` parses an SBox, so a box<->tree
+        // nesting chain is bounded by MaxTreeDepth there and must be here too.
+        SigmaType::SBox => read_opaque_box(r, depth),
         // SHeader: full block-header data format (Scala DataSerializer ->
         // ErgoHeader.sigmaSerializer.parse). This decoder is version-agnostic;
         // the v3+ (isV3OrLaterErgoTreeVersion) gate is applied by the callers

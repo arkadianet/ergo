@@ -170,6 +170,14 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // version rather than version 0. Byte-inert on every consensus caller
             // (the override is `None`, falling back to the header version).
             inner.set_embeddable_activated_version(r.embeddable_activated_version());
+            // Scala parses this body on the SAME reader, so its nesting level
+            // (`CoreByteReader.lvl`) keeps climbing across the boundary. This
+            // view is a separate reader, so carry the level base over by hand:
+            // otherwise a size-delimited tree nested inside an `SBox` constant
+            // restarts the MaxTreeDepth budget at 0 and the
+            // box -> tree -> constant -> box cycle recurses until the native
+            // stack overflows. Inert for a top-level tree, where the base is 0.
+            inner.set_nesting_depth_base(r.nesting_depth_base());
             let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
             (
                 parsed,
