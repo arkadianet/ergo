@@ -304,7 +304,22 @@ fn parse_node(
             }
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let item = parse_typed_expr(r, next, _tree_version, types, children)?;
+                // BlockValueSerializer casts each parsed item to BlockItem
+                // before reading the next item/result. Only ValDef/FunDef are
+                // BlockItems; the ClassCastException cannot soft-fork-wrap.
+                if !matches!(
+                    &item,
+                    Expr::Op(IrNode {
+                        payload: Payload::ValDef { .. } | Payload::FunDef { .. },
+                        ..
+                    })
+                ) {
+                    return Err(ReadError::HardReject(
+                        "BlockValue item must be a ValDef or FunDef".into(),
+                    ));
+                }
+                items.push(item);
             }
             let result = parse_typed_expr(r, next, _tree_version, types, children)?;
             Payload::BlockValue {
