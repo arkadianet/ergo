@@ -13,6 +13,18 @@ pub struct VlqReader<'a> {
     /// Set only for scoped sub-parses (e.g. an SBox candidate body bounded to
     /// `start + MaxBoxSize`); leaves all other parsing unaffected.
     position_limit: Option<usize>,
+    /// Depth already consumed by ENCLOSING nested-value parses, i.e. the base
+    /// the current expression's 0-based depth counts from. Mirrors Scala's
+    /// `CoreByteReader.lvl`, which lives on the READER and is therefore shared
+    /// across every serializer that parse reaches through the same reader —
+    /// including an `SBox` constant whose box carries another ErgoTree, whose
+    /// body can carry another `SBox` constant (`DataSerializer` SBox ->
+    /// `ErgoBoxCandidate.parse` -> `ErgoTreeSerializer.deserializeErgoTree(r, _)`
+    /// -> `ValueSerializer.deserialize(r)`, all on ONE reader). Without this
+    /// base, each nested box would restart the `MaxTreeDepth` budget at 0 and
+    /// the box<->tree cycle would recurse until the native stack overflowed.
+    /// Saved and restored around a scoped sub-parse like `position_limit`.
+    nesting_depth_base: usize,
     /// Sideband: every group-element encoding (raw 33 bytes) seen during the
     /// parse. Crypto-free — just bytes. The Scala reference curve-checks each
     /// group element while deserializing; this crate is crypto-free, so the
@@ -156,6 +168,7 @@ impl<'a> VlqReader<'a> {
             data,
             pos: 0,
             position_limit: None,
+            nesting_depth_base: 0,
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
@@ -311,6 +324,21 @@ impl<'a> VlqReader<'a> {
     /// self-check; byte-inert for consensus callers (which never touch it).
     pub fn set_embeddable_activated_version(&mut self, version: Option<u8>) {
         self.embeddable_activated_version = version;
+    }
+
+    /// Depth consumed by enclosing nested-value parses (Scala
+    /// `CoreByteReader.level` at the point the current parse started). Save
+    /// before setting a scoped base so it can be restored afterwards.
+    pub fn nesting_depth_base(&self) -> usize {
+        self.nesting_depth_base
+    }
+
+    /// Set the base the current expression's 0-based depth counts from. Set only
+    /// when crossing into a nested value that re-enters the expression parser on
+    /// this reader (an `SBox` constant's box script); `0` is the default for a
+    /// top-level parse and leaves depth accounting exactly as it was.
+    pub fn set_nesting_depth_base(&mut self, base: usize) {
+        self.nesting_depth_base = base;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped

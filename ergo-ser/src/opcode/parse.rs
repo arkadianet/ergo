@@ -102,7 +102,15 @@ fn parse_node(
     // reader level is incremented BEFORE parsing each nested value, so Rust
     // `depth` == Scala `level - 1`. Rejecting at `depth >= MAX_EXPR_DEPTH`
     // therefore matches Scala's `level > MaxTreeDepth` boundary exactly.
-    if depth >= MAX_EXPR_DEPTH {
+    //
+    // `depth` is local to the tree being parsed, so it is measured from the
+    // reader's nesting base: Scala's level lives on the reader and keeps
+    // climbing when an `SBox` constant's box script re-enters this parser on
+    // the SAME reader, rather than restarting at 0 (see
+    // `VlqReader::nesting_depth_base`). The base is 0 for every top-level
+    // parse, so this is inert outside a nested box script.
+    let effective_depth = r.nesting_depth_base().saturating_add(depth);
+    if effective_depth >= MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: MAX_EXPR_DEPTH,
         });
