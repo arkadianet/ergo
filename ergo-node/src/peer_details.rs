@@ -489,6 +489,10 @@ mod tests {
     async fn timeout_retains_worker_permit_until_os_call_finishes() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let worker_started = Arc::clone(&started);
+        let (release, finish) = std::sync::mpsc::channel();
+        let finish = Mutex::new(finish);
         let mut resolver = PeerResolver::new(
             &PeerLookupConfig {
                 reverse_dns: true,
@@ -500,13 +504,24 @@ mod tests {
         inner.workers = Arc::new(Semaphore::new(1));
         inner.lookup = Arc::new(move |_| {
             counter.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(DNS_TIMEOUT + Duration::from_secs(1));
+            worker_started.notify_one();
+            // Keep the OS call blocked until the test explicitly releases it.
+            // Dropping the sender on a failed assertion also unblocks shutdown.
+            let _ = finish.lock().recv();
             Some("late.example.test".into())
         });
         let ip = "8.8.8.8".parse().unwrap();
         assert_eq!(resolver.resolve(ip).hostname_status, "pending");
-        tokio::time::sleep(DNS_TIMEOUT + Duration::from_millis(100)).await;
-        assert_eq!(resolver.resolve(ip).hostname_status, "timeout");
+        tokio::time::timeout(Duration::from_secs(10), started.notified())
+            .await
+            .expect("blocking lookup should start");
+        tokio::time::timeout(DNS_TIMEOUT + Duration::from_secs(10), async {
+            while resolver.resolve(ip).hostname_status != "timeout" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("DNS deadline should publish a cached timeout");
         assert_eq!(resolver.workers.available_permits(), 0);
         for n in 1..20 {
             assert_eq!(
@@ -517,7 +532,15 @@ mod tests {
             );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        release.send(()).expect("lookup is still blocked");
+        let permit = tokio::time::timeout(
+            Duration::from_secs(10),
+            resolver.workers.clone().acquire_owned(),
+        )
+        .await
+        .expect("worker should return its permit after the lookup finishes")
+        .expect("worker semaphore stays open");
+        drop(permit);
         assert_eq!(resolver.workers.available_permits(), 1);
         assert_eq!(
             resolver.resolve(ip).hostname_status,
