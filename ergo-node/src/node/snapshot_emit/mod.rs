@@ -317,6 +317,16 @@ pub(super) fn publish_snapshot(state: &mut NodeState, now: Instant) {
                     crate::snapshot::PeerSyncProjection {
                         status,
                         peer_height: snap.peer_height,
+                        height_source: snap.peer_height.map(|_| {
+                            if snap.height_from_header {
+                                "reported_header"
+                            } else {
+                                "inferred_from_overlap"
+                            }
+                        }),
+                        last_sync_seconds: now
+                            .saturating_duration_since(snap.observed_at)
+                            .as_secs(),
                     },
                 )
             })

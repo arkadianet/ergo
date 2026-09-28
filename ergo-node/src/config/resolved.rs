@@ -170,6 +170,8 @@ pub struct NodeConfig {
     /// Operator HTTP API bind address. `None` disables the API server.
     /// Default: `127.0.0.1:9099`.
     pub api_bind: Option<SocketAddr>,
+    /// Optional local IP databases and background reverse DNS for peer details.
+    pub peer_details: crate::peer_details::PeerLookupConfig,
     /// `[api.security].api_key_hash` — lowercase Base16 (hex) of the
     /// Blake2b-256 of the operator's secret API key. Optional: absence
     /// keeps public routes available and privileged routes closed.

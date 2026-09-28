@@ -135,6 +135,67 @@ beyond loopback.
 | `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
+### `[api.peer_details]`
+
+The Peers dashboard shows handshake identity and mode, sync relationship,
+delivery health, connection setup time, traffic totals/rates, and IP metadata.
+Handshake values are peer-reported. Connection setup includes TCP/accept through
+handshake completion and is not ping latency. V2 supplies a tip-header height;
+V1 heights (and V2 fallback observations) are inferred from shared header IDs,
+which can understate the remote tip. The drawer shows the actual height source
+and age of the last sync observation.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `auto_download` | bool | `false` | Opt in to HTTPS downloads of the free DB-IP Lite City and ASN databases when the API is enabled. Checks on startup and every 24 hours; downloads each monthly release once per dataset. Validated updates take effect without restarting. Explicit file overrides are never downloaded or overwritten. |
+| `reverse_dns` | bool | `false` | Separately opt in to resolving public peer IPs using the OS DNS resolver when the peer API is read. This discloses peer IPs to the resolver. Four concurrent workers, a five-second response deadline, and a bounded 1,024-IP cache. Successful results expire after 24 hours; failures after 15 minutes. |
+| `geoip_db` | path | absent | Local DB-IP or compatible MaxMind City/Country `.mmdb` override. City adds region, city and approximate coordinates; time zone and accuracy radius appear only when supplied by the database. Relative paths use the node data directory. Without an override, uses an existing `geoip/dbip-city-lite.mmdb` cache. |
+| `asn_db` | path | absent | Local DB-IP or compatible MaxMind ASN `.mmdb` override for ASN, network organization and network prefix. Relative paths use the node data directory. Without an override, uses an existing `geoip/dbip-asn-lite.mmdb` cache. |
+
+**Default privacy behavior:** native peer details and installed local database
+lookups remain available. Neither dataset downloads nor reverse-DNS queries run
+unless explicitly enabled. No peer IP is sent to a geolocation service. Turning
+downloads off and restarting stops update requests while keeping cached local
+data usable. Other normal node networking (P2P, seed discovery, etc.) is unaffected.
+
+To enable free location and ASN data, edit the settings in your existing config
+and restart (in the shipped templates these are dotted keys under `[api]`):
+
+```toml
+[api.peer_details]
+auto_download = true
+reverse_dns = false
+```
+
+The [DB-IP Lite City](https://db-ip.com/db/download/ip-to-city-lite) and
+[DB-IP Lite ASN](https://db-ip.com/db/download/ip-to-asn-lite) datasets require no
+account or API key and are distributed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The Peers dashboard
+includes the required DB-IP attribution link when showing their data. Applications
+reusing this data from the peer API must also retain attribution. The data is
+optional and is not bundled with the node binary.
+
+Downloads contact `download.db-ip.com` over HTTPS, revealing the node's outbound
+IP to the provider, but never include peer addresses. Redirects are rejected.
+Compressed/decompressed size caps are 128/512 MiB for City and 32/128 MiB for ASN;
+each request has a three-minute deadline. Gzip integrity, MMDB structure, database
+type and build-date regression are checked before atomic replacement. Temporary
+files share the cache directory, so allow space for old and new copies during
+updates. The `.release` sidecars record the installed month. Failed updates keep
+the prior database and retry after 24 hours; the node continues syncing throughout.
+If there is no prior data, the WebUI shows downloading or unavailable status.
+
+For offline setup, configure `geoip_db` and `asn_db` to files you install yourself,
+leaving both booleans false. Local overrides also support
+[MaxMind databases](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
+obtained under their terms. Overrides load at startup; restart after replacing
+them or changing config. An invalid override reports an error and does not fall
+back to a network download. Local/special IPs are excluded from DNS and database
+lookups. Database type and build date appear in the peer drawer. Country and city
+describe an approximate network endpoint, not a verified operator location. An
+ASN organization is the network operator and need not be the node operator or
+retail ISP. These display-only details never affect peer selection or scoring.
+
 ### `[api.security]`
 
 | Key | Type | Default | Description |

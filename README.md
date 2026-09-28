@@ -112,6 +112,11 @@ docs at `/swagger` and RUST API docs at `/swagger/native`. Dashboard and public
 REST work without a key. Wallet, mining controls, voting writes and admin routes
 stay locked until you set `[api.security] api_key_hash` and restart; see
 [API configuration](docs/configuration.md#apisecurity) for key generation. For a ~20-minute clean-DB boot, enable Mode 2 + NiPoPoW.
+The Peers page includes connection, traffic, sync and handshake details by default.
+Optional DB-IP database downloads and reverse DNS are both off by default;
+installed IP databases are queried locally. See
+[peer details configuration](docs/configuration.md#apipeer_details) to opt in or
+use your own offline databases.
 The full build / test / run / configuration surface — profiles, feature-gated
 tests, the config reference, observability — is in
 [`docs/overview.md`](./docs/overview.md).

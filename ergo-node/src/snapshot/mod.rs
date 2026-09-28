@@ -154,9 +154,10 @@ pub struct PeerSyncProjection {
     /// / `"Fork"` / `"Unknown"`. String form so the bridge passes it
     /// through without depending on `ergo-p2p::sync::PeerChainStatus`.
     pub status: &'static str,
-    /// Peer's reported (V1) or inferred-from-overlap (V2) best
-    /// height, or `None` when we have no overlap with our chain.
+    /// Parsed peer tip-header height or an inferred shared-header height.
     pub peer_height: Option<u32>,
+    pub height_source: Option<&'static str>,
+    pub last_sync_seconds: u64,
 }
 
 /// Aggregated delivery-tracker counters at snapshot time.

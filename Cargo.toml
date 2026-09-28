@@ -66,6 +66,7 @@ num-traits  = "0.2"
 
 # Encoding / parsing
 flate2 = "1"
+time = "0.3"
 bincode    = "1.3"
 hex        = "0.4"
 subtle     = "2"
@@ -125,6 +126,9 @@ tracing-appender   = "0.2"
 # `/api/v1/host` endpoint (RSS, DB sizes, disk space). Pinned at a stable
 # minor; default features only.
 sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"] }
+# Optional local IP metadata and bounded background reverse DNS for peer details.
+maxminddb = "0.29"
+dns-lookup = "3"
 
 # Test infrastructure
 tempfile = "3"

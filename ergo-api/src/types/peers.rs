@@ -12,6 +12,7 @@ pub struct ApiPeer {
     pub score: i32,
     pub agent: Option<String>,
     pub node_name: Option<String>,
+    /// Version advertised in the peer handshake (not a verified build version).
     pub version: Option<String>,
     pub sync_version: String,
     pub connected_seconds: u64,
@@ -26,8 +27,8 @@ pub struct ApiPeer {
     /// Cumulative post-handshake framed-message bytes sent to this peer.
     /// Same accounting as [`Self::bytes_in`].
     pub bytes_out: Option<u64>,
-    /// Peer's own best-block height as advertised in the most recent
-    /// `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+    /// Height parsed from a peer tip header or inferred from shared header IDs.
+    /// The latter can understate the remote tip. `None` without an observation.
     pub peer_height: Option<u32>,
     /// Peer's advertised REST API URL (the `RestApiUrl` handshake
     /// feature), verbatim as the peer sent it. `None` when the peer
@@ -40,6 +41,77 @@ pub struct ApiPeer {
     /// address (anonymous / not gossipable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_address: Option<String>,
+    /// Additional local observations and peer-reported handshake metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ApiPeerDetails>,
+    /// IP metadata, resolved independently of the P2P/sync loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<ApiPeerNetwork>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiPeerDetails {
+    pub last_progress_seconds: u64,
+    /// Score after time decay; lower is better. `ApiPeer.score` is the raw score.
+    pub effective_score: i32,
+    pub delivery_failure_streak: u32,
+    pub preferred_for_downloads: bool,
+    /// TCP connection/accept through completed handshake, including scheduling.
+    /// This is connection setup time, NOT ping or request round-trip latency.
+    pub connection_setup_ms: Option<u64>,
+    pub chain_status: Option<String>,
+    pub last_sync_seconds: Option<u64>,
+    /// `reported_header` or `inferred_from_overlap`, only with a known height.
+    pub height_source: Option<String>,
+    /// Clock for comparing successive traffic snapshots.
+    pub sampled_at_unix_ms: u64,
+    pub mode: Option<ApiPeerMode>,
+    pub local_address: Option<String>,
+    /// Decimal string preserves all signed 64-bit session IDs in JavaScript.
+    pub session_id: Option<String>,
+    pub network_magic: Option<String>,
+    pub feature_ids: Vec<u8>,
+}
+
+/// Peer-reported settings, not independently verified capabilities.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiPeerMode {
+    /// Wire value: 0 = UTXO, 1 = digest; unknown values are preserved.
+    pub state_type: u8,
+    pub verifies_transactions: bool,
+    pub nipopow_bootstrap: Option<i32>,
+    /// -1 = all, -2 = UTXO bootstrap, positive = retained suffix.
+    pub blocks_to_keep: i32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct ApiPeerNetwork {
+    pub ip: String,
+    pub ip_version: String,
+    pub scope: String,
+    pub hostname: Option<String>,
+    /// `pending`, `resolved`, `unavailable`, `timeout`, `disabled`, `not_public`.
+    pub hostname_status: String,
+    pub hostname_checked_at_unix_ms: Option<u64>,
+    /// `available`, `not_found`, `not_configured`, `downloading`, `error`, `not_public`.
+    pub geo_status: String,
+    pub asn_status: String,
+    pub country_code: Option<String>,
+    pub country: Option<String>,
+    pub continent: Option<String>,
+    pub region: Option<String>,
+    pub city: Option<String>,
+    pub time_zone: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub accuracy_radius_km: Option<u16>,
+    pub asn: Option<u32>,
+    pub organization: Option<String>,
+    pub network_cidr: Option<String>,
+    pub geo_database: Option<String>,
+    pub geo_database_built_at_unix_seconds: Option<u64>,
+    pub asn_database: Option<String>,
+    pub asn_database_built_at_unix_seconds: Option<u64>,
 }
 
 /// Which side initiated the peer connection.

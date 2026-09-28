@@ -1586,6 +1586,7 @@ fn cfg_with_mode(
         header_checkpoint: None,
         genesis_id: None,
         api_bind: None,
+        peer_details: Default::default(),
         api_key_hash: None,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,

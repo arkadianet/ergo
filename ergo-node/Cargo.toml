@@ -40,7 +40,7 @@ indexmap        = { workspace = true }
 num-bigint      = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
 serde_json         = { workspace = true, features = ["arbitrary_precision"] } # v1 d = arbitrary-precision JSON number (api_bridge::compat relies on this; do not remove)
-tokio           = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio           = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time", "signal"] }
 toml            = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -51,13 +51,17 @@ async-trait        = { workspace = true }
 reqwest            = { workspace = true, features = ["rustls-tls", "json"] }
 thiserror          = { workspace = true }
 sysinfo            = { workspace = true }
+maxminddb          = { workspace = true }
+dns-lookup         = { workspace = true }
+flate2             = { workspace = true }
+tempfile           = { workspace = true }
+time               = { workspace = true }
 k256               = { workspace = true }
 zeroize            = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-tempfile           = { workspace = true }
 ergo-api           = { workspace = true }
 ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }

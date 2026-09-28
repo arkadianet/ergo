@@ -664,6 +664,18 @@
 .drawer-grid .ov-kv {
   margin-top: var(--space-2);
 }
+.peer-stack { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.peer-stack > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peer-stack > span + span { font-size: var(--fs-small); }
+.peer-detail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.peer-detail section { min-width: 0; }
+.peer-detail .ov-kv { align-items: baseline; gap: 16px; padding-block: 5px; border-bottom: 1px solid var(--bd2); }
+.peer-detail .ov-kv > :first-child { flex: 0 0 42%; }
+.peer-detail .ov-kv > :last-child { overflow-wrap: anywhere; min-width: 0; text-align: right; }
+.peer-note { color: var(--tx3); font-size: var(--fs-small); line-height: 1.6; margin: 8px 0 16px; }
+@media (max-width: 1080px) {
+  .drawer-grid.peer-detail { grid-template-columns: 1fr; grid-template-areas: none; }
+}
 
 /* Mempool */
 .mp-cap {

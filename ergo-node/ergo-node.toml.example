@@ -131,6 +131,19 @@ download_window = 384
 disabled = false
 bind = "127.0.0.1:9099"
 public_bind = false
+# Native peer details and installed local databases work without external lookups.
+# Opt in to HTTPS downloads of free DB-IP Lite City + ASN (CC BY 4.0, db-ip.com).
+# No account/API key; downloads never include peer IPs. Cached under data_dir/geoip;
+# checks daily for the monthly release, reloads on success, keeps old data on failure.
+# Downloading exposes this node's outbound IP to the provider. Disabled by default.
+peer_details.auto_download = false
+# Separate opt-in: sends public peer IPs to the OS DNS resolver. Disabled by default.
+peer_details.reverse_dns = false
+# Advanced local MMDB overrides: DB-IP or compatible MaxMind City/Country and ASN.
+# Each override disables automatic downloads for that dataset. Paths are relative
+# to data_dir; restart after changing config or replacing an override file.
+# peer_details.geoip_db = "geoip/my-city.mmdb"
+# peer_details.asn_db = "geoip/my-asn.mmdb"
 # local_reverse_proxy = false  # set true when a proxy connects to this loopback API.
 # All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
 # bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator

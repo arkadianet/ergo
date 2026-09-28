@@ -297,11 +297,63 @@ fn default_api_bind_is_loopback() {
     let cli = minimal_cli(Some(&toml));
     let cfg = NodeConfig::load(cli).expect("load");
     let addr = cfg.api_bind.expect("default bind set");
+    assert!(!cfg.peer_details.reverse_dns);
+    assert!(!cfg.peer_details.auto_download);
+    assert!(cfg.peer_details.geoip_db.is_none());
+    assert!(cfg.peer_details.asn_db.is_none());
     assert!(
         addr.ip().is_loopback(),
         "default api bind must be loopback, got {addr}"
     );
     assert_eq!(addr.port(), 9099);
+}
+
+#[test]
+fn peer_details_config_preserves_paths_and_rejects_typos() {
+    let config: super::toml_sections::TomlConfig = toml::from_str(
+        r#"
+[api.peer_details]
+reverse_dns = true
+auto_download = true
+geoip_db = "geoip/city.mmdb"
+asn_db = "geoip/asn.mmdb"
+"#,
+    )
+    .unwrap();
+    assert!(config.api.peer_details.reverse_dns);
+    assert!(config.api.peer_details.auto_download);
+    assert_eq!(
+        config.api.peer_details.geoip_db.unwrap(),
+        std::path::PathBuf::from("geoip/city.mmdb")
+    );
+    assert_eq!(
+        config.api.peer_details.asn_db.unwrap(),
+        std::path::PathBuf::from("geoip/asn.mmdb")
+    );
+    assert!(toml::from_str::<super::toml_sections::TomlConfig>(
+        "[api.peer_details]\nreverse_dns_typo = false"
+    )
+    .is_err());
+}
+
+#[test]
+fn peer_details_external_options_are_independent_and_opt_in() {
+    for source in [
+        "",
+        "[api]",
+        "[api.peer_details]",
+        "[api.peer_details]\ngeoip_db = 'city.mmdb'",
+    ] {
+        let config = parse(source);
+        assert!(!config.api.peer_details.auto_download);
+        assert!(!config.api.peer_details.reverse_dns);
+    }
+    let config = parse("[api.peer_details]\nauto_download = true");
+    assert!(config.api.peer_details.auto_download);
+    assert!(!config.api.peer_details.reverse_dns);
+    let config = parse("[api.peer_details]\nreverse_dns = true");
+    assert!(!config.api.peer_details.auto_download);
+    assert!(config.api.peer_details.reverse_dns);
 }
 
 #[test]
@@ -460,6 +512,8 @@ fn shipped_ready_template_parses_without_api_credentials() {
     let cfg = parse(source);
     assert_eq!(cfg.api.disabled, Some(false));
     assert!(cfg.api.security.is_none());
+    assert!(!cfg.api.peer_details.reverse_dns);
+    assert!(!cfg.api.peer_details.auto_download);
     assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
     let path = temp_toml(source);
     let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");
@@ -477,6 +531,8 @@ fn shipped_example_template_parses_with_one_api_table() {
         1
     );
     assert!(cfg.api.security.is_none());
+    assert!(!cfg.api.peer_details.reverse_dns);
+    assert!(!cfg.api.peer_details.auto_download);
     assert!(!source.contains(TEST_DEFAULT_API_KEY_HASH));
     let path = temp_toml(source);
     let resolved = NodeConfig::load(minimal_cli(Some(&path))).expect("template resolves");

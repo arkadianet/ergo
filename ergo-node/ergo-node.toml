@@ -41,6 +41,16 @@ max_connections = 384
 disabled = false
 bind = "127.0.0.1:9099"          # loopback only. To expose on the network add
                                  # `public_bind = true` (and read the note below).
+# Peer enrichment makes no external requests by default. Native peer details
+# and installed local IP databases remain available in the Peers dashboard.
+# Set auto_download = true to fetch/update free DB-IP Lite City + ASN datasets
+# over HTTPS (no account or API key). Downloads never include peer IPs.
+peer_details.auto_download = false
+# Separate opt-in: reverse DNS sends public peer IPs to the OS DNS resolver.
+peer_details.reverse_dns = false
+# Advanced local MMDB overrides; paths are relative to data_dir. Restart to load.
+# peer_details.geoip_db = "geoip/my-city.mmdb"
+# peer_details.asn_db = "geoip/my-asn.mmdb"
 # local_reverse_proxy = false  # set true when a proxy connects to this loopback API.
 # All clients on the proxy peer IP (127.0.0.1 or ::1) share one v1 governor
 # bucket: burst 40, refill 20 tokens/s, Compute cost 10. Direct local operator

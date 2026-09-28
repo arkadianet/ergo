@@ -610,6 +610,31 @@ companion gauge explaining it.
 | Tip frozen forever, headers far ahead | `/api/v1/node/status .sync_wedged` | Deep-fork wedge: below the rollback window only a resync recovers (see Troubleshooting). |
 | Mempool looks dead | `ergo_node_mempool_size`, admit/reject counters | Rejections climbing = admission policy at work, not a hang. |
 
+## Optional peer location and network details
+
+The Peers dashboard shows native connection, traffic, sync and handshake details
+without external enrichment. Both `[api.peer_details] auto_download` and
+`reverse_dns` default to `false`, including in the shipped configs.
+
+For automatic country/city and ASN data, set `auto_download = true` and restart.
+The node fetches free DB-IP Lite datasets over HTTPS and checks daily for the next
+monthly release. The provider sees the node's outbound IP; peer IPs stay local.
+The cached databases under `data_dir/geoip/` remain usable after disabling downloads
+and restarting. To remain fully offline for enrichment, install compatible MMDB
+files and configure `geoip_db` / `asn_db` instead.
+
+Reverse DNS is a separate choice: `reverse_dns = true` sends public peer IPs to
+the OS DNS resolver. It is unnecessary for country/city/ASN details. Neither option
+changes peer selection, scoring, or sync behavior. Enrichment is visible through
+the existing public peer read API, so it shares that API's exposure.
+
+The drawer identifies database type and build date. A failed automatic update
+keeps the last working copy and retries after 24 hours; missing initial data shows
+as unavailable. Check the node log for download, validation or filesystem errors.
+Manual overrides take precedence and require a restart after replacement. See the
+[configuration reference](configuration.md#apipeer_details) for privacy, cache,
+limits and attribution details.
+
 ## API security posture
 
 The default posture is **safe by default for a single-host operator**:

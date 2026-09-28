@@ -100,6 +100,11 @@ pub(super) fn build_scaffold(
     // Keep potentially blocking filesystem probes separate from wedge telemetry.
     let live_storage =
         crate::node::storage_probe::spawn(host_paths, std::time::Duration::from_secs(10));
+    let peer_details =
+        crate::peer_details::PeerResolver::new(&config.peer_details, &config.data_dir);
+    if config.api_bind.is_some() {
+        peer_details.start_updates(&config.peer_details, &config.data_dir);
+    }
     let read_state: Arc<dyn ergo_api::NodeReadState> = SnapshotReadState::new(
         snapshot_publisher.handle(),
         identity_slot.clone(),
@@ -108,6 +113,7 @@ pub(super) fn build_scaffold(
         executor.apply_phase_metrics(),
         live_telemetry,
     )
+    .with_peer_details(peer_details)
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())

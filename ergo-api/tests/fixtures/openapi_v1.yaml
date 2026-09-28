@@ -5919,12 +5919,22 @@ components:
             Peer's declared public address (`ip:port`) from its `PeerSpec`,
             what it advertises as reachable. `None` when the peer declared no
             address (anonymous / not gossipable).
+        details:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerDetails'
+            description: Additional local observations and peer-reported handshake metadata.
         direction:
           $ref: '#/components/schemas/ApiPeerDirection'
         last_seen_seconds:
           type: integer
           format: int64
           minimum: 0
+        network:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerNetwork'
+            description: IP metadata, resolved independently of the P2P/sync loop.
         node_name:
           type:
           - string
@@ -5935,8 +5945,8 @@ components:
           - 'null'
           format: int32
           description: |-
-            Peer's own best-block height as advertised in the most recent
-            `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+            Height parsed from a peer tip header or inferred from shared header IDs.
+            The latter can understate the remote tip. `None` without an observation.
           minimum: 0
         rest_api_url:
           type:
@@ -5958,12 +5968,221 @@ components:
           type:
           - string
           - 'null'
+          description: Version advertised in the peer handshake (not a verified build version).
+    ApiPeerDetails:
+      type: object
+      required:
+      - last_progress_seconds
+      - effective_score
+      - delivery_failure_streak
+      - preferred_for_downloads
+      - sampled_at_unix_ms
+      - feature_ids
+      properties:
+        chain_status:
+          type:
+          - string
+          - 'null'
+        connection_setup_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            TCP connection/accept through completed handshake, including scheduling.
+            This is connection setup time, NOT ping or request round-trip latency.
+          minimum: 0
+        delivery_failure_streak:
+          type: integer
+          format: int32
+          minimum: 0
+        effective_score:
+          type: integer
+          format: int32
+          description: Score after time decay; lower is better. `ApiPeer.score` is the raw score.
+        feature_ids:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+        height_source:
+          type:
+          - string
+          - 'null'
+          description: '`reported_header` or `inferred_from_overlap`, only with a known height.'
+        last_progress_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        last_sync_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        local_address:
+          type:
+          - string
+          - 'null'
+        mode:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ApiPeerMode'
+        network_magic:
+          type:
+          - string
+          - 'null'
+        preferred_for_downloads:
+          type: boolean
+        sampled_at_unix_ms:
+          type: integer
+          format: int64
+          description: Clock for comparing successive traffic snapshots.
+          minimum: 0
+        session_id:
+          type:
+          - string
+          - 'null'
+          description: Decimal string preserves all signed 64-bit session IDs in JavaScript.
     ApiPeerDirection:
       type: string
       description: Which side initiated the peer connection.
       enum:
       - inbound
       - outbound
+    ApiPeerMode:
+      type: object
+      description: Peer-reported settings, not independently verified capabilities.
+      required:
+      - state_type
+      - verifies_transactions
+      - blocks_to_keep
+      properties:
+        blocks_to_keep:
+          type: integer
+          format: int32
+          description: -1 = all, -2 = UTXO bootstrap, positive = retained suffix.
+        nipopow_bootstrap:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        state_type:
+          type: integer
+          format: int32
+          description: 'Wire value: 0 = UTXO, 1 = digest; unknown values are preserved.'
+          minimum: 0
+        verifies_transactions:
+          type: boolean
+    ApiPeerNetwork:
+      type: object
+      required:
+      - ip
+      - ip_version
+      - scope
+      - hostname_status
+      - geo_status
+      - asn_status
+      properties:
+        accuracy_radius_km:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        asn_database:
+          type:
+          - string
+          - 'null'
+        asn_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        asn_status:
+          type: string
+        city:
+          type:
+          - string
+          - 'null'
+        continent:
+          type:
+          - string
+          - 'null'
+        country:
+          type:
+          - string
+          - 'null'
+        country_code:
+          type:
+          - string
+          - 'null'
+        geo_database:
+          type:
+          - string
+          - 'null'
+        geo_database_built_at_unix_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        geo_status:
+          type: string
+          description: '`available`, `not_found`, `not_configured`, `downloading`, `error`, `not_public`.'
+        hostname:
+          type:
+          - string
+          - 'null'
+        hostname_checked_at_unix_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        hostname_status:
+          type: string
+          description: '`pending`, `resolved`, `unavailable`, `timeout`, `disabled`, `not_public`.'
+        ip:
+          type: string
+        ip_version:
+          type: string
+        latitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        longitude:
+          type:
+          - number
+          - 'null'
+          format: double
+        network_cidr:
+          type:
+          - string
+          - 'null'
+        organization:
+          type:
+          - string
+          - 'null'
+        region:
+          type:
+          - string
+          - 'null'
+        scope:
+          type: string
+        time_zone:
+          type:
+          - string
+          - 'null'
     ApiPeerState:
       type: string
       description: Connection lifecycle state observed by the peer manager.
@@ -7008,12 +7227,22 @@ components:
                   Peer's declared public address (`ip:port`) from its `PeerSpec`,
                   what it advertises as reachable. `None` when the peer declared no
                   address (anonymous / not gossipable).
+              details:
+                oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/ApiPeerDetails'
+                  description: Additional local observations and peer-reported handshake metadata.
               direction:
                 $ref: '#/components/schemas/ApiPeerDirection'
               last_seen_seconds:
                 type: integer
                 format: int64
                 minimum: 0
+              network:
+                oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/ApiPeerNetwork'
+                  description: IP metadata, resolved independently of the P2P/sync loop.
               node_name:
                 type:
                 - string
@@ -7024,8 +7253,8 @@ components:
                 - 'null'
                 format: int32
                 description: |-
-                  Peer's own best-block height as advertised in the most recent
-                  `SyncInfo` exchange. `None` until the sync layer plumbs it through.
+                  Height parsed from a peer tip header or inferred from shared header IDs.
+                  The latter can understate the remote tip. `None` without an observation.
                 minimum: 0
               rest_api_url:
                 type:
@@ -7047,6 +7276,7 @@ components:
                 type:
                 - string
                 - 'null'
+                description: Version advertised in the peer handshake (not a verified build version).
         page:
           $ref: '#/components/schemas/Page'
     Collection_BlacklistedPeer:

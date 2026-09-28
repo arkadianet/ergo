@@ -1118,6 +1118,7 @@ impl NodeConfig {
             header_checkpoint,
             genesis_id,
             api_bind,
+            peer_details: toml_cfg.api.peer_details,
             api_key_hash,
             api_allowed_hosts,
             api_local_reverse_proxy,
