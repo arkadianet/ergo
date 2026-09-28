@@ -1,5 +1,6 @@
 use clap::Parser;
 use ergo_node::config::{Cli, LoggingConfig, LoggingFormat, NodeConfig};
+use ergo_node::decode_stack::DECODE_THREAD_STACK_BYTES;
 use tracing::{error, info};
 use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling::Rotation;
@@ -7,8 +8,39 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Block validation fans out over Rayon (`ergo-validation`'s
+    // `into_par_iter`), and script evaluation deserializes on those threads
+    // (`DeserializeContext` / `DeserializeRegister`, `Global.deserialize`), so
+    // the global pool needs the floor too — Tokio's setting does not reach it.
+    // Only main calls this, before any pool use, so `build_global` cannot race.
+    if let Err(e) = rayon::ThreadPoolBuilder::new()
+        .stack_size(DECODE_THREAD_STACK_BYTES)
+        .build_global()
+    {
+        eprintln!("rayon global pool init failed: {e}");
+        std::process::exit(1);
+    }
+
+    // `thread_stack_size` covers both the worker threads and the blocking pool
+    // (tokio `runtime::blocking::pool` takes it from the same builder field),
+    // so one setting reaches every thread the runtime spawns. The main thread's
+    // own stack comes from the OS (RLIMIT_STACK), not from here.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(DECODE_THREAD_STACK_BYTES)
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("tokio runtime init failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(run());
+}
+
+async fn run() {
     // Config load runs before tracing init so the subscriber knows
     // whether `[logging.file]` was requested. Errors here predate the
     // subscriber and go to stderr directly. The single warn emitted

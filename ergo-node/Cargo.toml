@@ -34,6 +34,7 @@ redb            = { workspace = true, features = ["logging"] }
 bincode         = { workspace = true }
 arc-swap        = { workspace = true }
 parking_lot     = { workspace = true }
+rayon           = { workspace = true }
 clap            = { workspace = true, features = ["derive"] }
 hex             = { workspace = true }
 indexmap        = { workspace = true }
