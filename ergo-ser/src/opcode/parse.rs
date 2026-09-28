@@ -650,6 +650,42 @@ fn parse_node(
         ArgPattern::NumericCast => {
             let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let tpe = read_type(r)?;
+            // Scala `NumericCastSerializer.parse`
+            // (transformers/NumericCastSerializer.scala:20-24) is
+            //     val input = r.getValue().asNumValue
+            //     val tpe   = r.getType().asNumType
+            //     cons(input, tpe)
+            // `asNumType` is `asInstanceOf[SNumericType]` on a CONCRETE type, so
+            // a non-numeric target throws `ClassCastException`; `asNumValue` is
+            // erased and throws nothing, but `cons` then hits
+            // `require(input.tpe.isInstanceOf[SNumericType])` on `Upcast` /
+            // `Downcast` (ast/trees.scala:398, :417) and throws
+            // `IllegalArgumentException`. Neither is a `ValidationException`, so
+            // neither is soft-fork-wrapped into an `UnparsedErgoTree`: both are
+            // hard deserialization failures. Accepting them made us more
+            // permissive than consensus, and (for a pre-v3 tree) the write-side
+            // `Upcast(Const)` strip then re-emitted bytes whose re-parse failed
+            // rule 1001 — how the nightly fuzzer found this.
+            if !tpe.is_numeric() {
+                return Err(ReadError::HardReject(format!(
+                    "numeric cast target type must be numeric, got {tpe:?} \
+                     (Scala asNumType ClassCastException)"
+                )));
+            }
+            // The input's type is checked only when this parser could infer it
+            // precisely. Scala always has the parsed value's `tpe`; we may not
+            // (a placeholder resolved later, an opaque subtree), and rejecting
+            // on an unknown type would refuse scripts the reference accepts —
+            // the more dangerous direction. So an indeterminate input is left
+            // alone, which stays at worst as permissive as before.
+            if let Some(Some(input_tpe)) = children.last() {
+                if !input_tpe.is_numeric() {
+                    return Err(ReadError::HardReject(format!(
+                        "numeric cast input type must be numeric, got {input_tpe:?} \
+                         (Scala Upcast/Downcast require)"
+                    )));
+                }
+            }
             Payload::NumericCast {
                 input: Box::new(input),
                 tpe,
