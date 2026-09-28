@@ -60,6 +60,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         header_checkpoint: None,
         genesis_id: None,
         api_bind: Some("127.0.0.1:0".parse().unwrap()),
+        peer_details: Default::default(),
         // Scala-parity Blake2b256("hello") test oracle. The integration
         // harness does not exercise the auth gate but `api_bind = Some`
         // implies a configured hash per the load-time invariant; we

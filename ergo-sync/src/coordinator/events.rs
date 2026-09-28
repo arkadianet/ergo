@@ -98,11 +98,9 @@ impl SyncCoordinator {
         // publisher — sourced from the same status decision the
         // action dispatch below uses, so the API surface always
         // reflects the last classification the coordinator acted
-        // on. V2 peer_height inference: if the newest peer header
-        // is on our chain, look up its height (peer's tip from
-        // OUR view); otherwise leave None and let consumers treat
-        // it as "no overlap yet". V1 carries peer_height directly
-        // via `peer_height` already destructured above.
+        // on. V2 provides the parsed tip-header height. For V1 (and a
+        // V2 parse failure), infer height from the newest advertised ID
+        // on our best chain. Keep the source of the actual observation.
         let inferred_peer_height: Option<u32> = match peer_height {
             Some(h) => Some(h),
             None => peer_header_ids
@@ -122,6 +120,7 @@ impl SyncCoordinator {
             PeerSyncSnapshot {
                 status,
                 peer_height: inferred_peer_height,
+                height_from_header: peer_height.is_some(),
                 observed_at: now,
                 observed_best_header_id: chain.best_header_id(),
             },

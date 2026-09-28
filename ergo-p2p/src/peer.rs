@@ -256,6 +256,8 @@ pub struct PeerInfo {
     pub state: ConnectionState,
     pub score: PeerScore,
     pub connected_at: Instant,
+    /// Time from starting/accepting the connection to finishing its handshake.
+    pub connection_setup: Option<Duration>,
     /// Wall-clock of the last *valid frame* of any kind from this peer.
     /// Reported as `lastMessage` / `lastSeenMessageTime` on the API and
     /// used for address-book recency ranking — the Scala analogue is
@@ -323,6 +325,7 @@ impl PeerInfo {
             state: ConnectionState::Connecting,
             score: PeerScore::new(now),
             connected_at: now,
+            connection_setup: None,
             last_seen: now,
             last_progress: now,
             delivery_failure_streak: 0,
@@ -345,6 +348,7 @@ impl PeerInfo {
             state: ConnectionState::Handshaking,
             score: PeerScore::new(now),
             connected_at: now,
+            connection_setup: None,
             last_seen: now,
             last_progress: now,
             delivery_failure_streak: 0,
@@ -391,6 +395,7 @@ impl PeerInfo {
         }
         self.sync_version = SyncVersion::for_peer(&spec.version);
         self.peer_spec = Some(spec);
+        self.connection_setup = Some(now.saturating_duration_since(self.connected_at));
         self.state = ConnectionState::Active;
         // A completed handshake is progress in its own right, and it is
         // the point at which the peer enters the `INACTIVE_TIMEOUT`

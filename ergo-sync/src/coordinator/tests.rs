@@ -3153,6 +3153,7 @@ fn seed_peer_status(
         PeerSyncSnapshot {
             status,
             peer_height: Some(100),
+            height_from_header: false,
             observed_at: now,
             observed_best_header_id: [0u8; 32],
         },
@@ -3469,6 +3470,54 @@ fn on_sync_info_v2_empty_headers_classifies_younger() {
     );
     let status2 = coord2.peer_sync.get(&p2).expect("snapshot recorded").status;
     assert_eq!(status2, ergo_p2p::sync::PeerChainStatus::Unknown);
+}
+
+#[test]
+fn peer_height_source_follows_observed_message_not_negotiated_version() {
+    let mut chain = MockChain::new(100, 100);
+    let (_, local_id) = parseable_header_at(100, 0x11);
+    chain.best_header_id = local_id;
+    chain.add_best_chain_header(100, local_id);
+    let (remote_header, _) = parseable_header_at(101, 0x22);
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9050);
+    let now = Instant::now();
+    coord.on_sync_info(
+        p,
+        SyncVersion::V2,
+        &SyncInfo::V1 {
+            header_ids: vec![local_id],
+        },
+        &chain,
+        now,
+    );
+    let observation = coord.peer_sync.get(&p).unwrap();
+    assert_eq!(observation.peer_height, Some(100));
+    assert!(!observation.height_from_header);
+    coord.on_sync_info(
+        p,
+        SyncVersion::V1,
+        &SyncInfo::V2 {
+            headers: vec![remote_header],
+        },
+        &chain,
+        now,
+    );
+    let observation = coord.peer_sync.get(&p).unwrap();
+    assert_eq!(observation.peer_height, Some(101));
+    assert!(observation.height_from_header);
+    coord.on_sync_info(
+        p,
+        SyncVersion::V2,
+        &SyncInfo::V1 {
+            header_ids: vec![[99; 32]],
+        },
+        &chain,
+        now,
+    );
+    let observation = coord.peer_sync.get(&p).unwrap();
+    assert_eq!(observation.peer_height, None);
+    assert!(!observation.height_from_header);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! Implements `ergo_api::NodeReadState` against the snapshot handle
-//! the main loop publishes. Lock-free read path: `arc_swap.load()`.
+//! the main loop publishes. Snapshot reads use `arc_swap.load()`; optional
+//! peer IP enrichment uses a separate bounded cache outside the main loop.
 //!
 //! The newtype wrapping the handle is what makes the trait impl legal —
 //! both the trait and `ArcSwap` are foreign, so a direct impl on
@@ -59,6 +60,7 @@ pub type IdentitySlot = Arc<arc_swap::ArcSwap<ApiIdentity>>;
 
 pub struct SnapshotReadState {
     handle: SnapshotHandle,
+    peer_details: Option<Arc<crate::peer_details::PeerResolver>>,
     /// Lock-free slot the action loop publishes to whenever
     /// boot, `install_snapshot_state`, or `apply_popow_proof`
     /// changes the bootstrap-derived identity fields. Each
@@ -235,11 +237,18 @@ impl SnapshotReadState {
         Self {
             handle,
             identity,
+            peer_details: None,
             storage,
             voting_targets,
             apply_phase,
             telemetry,
         }
+    }
+
+    /// Attach the independent, cached IP metadata resolver.
+    pub fn with_peer_details(mut self, resolver: Arc<crate::peer_details::PeerResolver>) -> Self {
+        self.peer_details = Some(resolver);
+        self
     }
 
     /// Wrap as an `Arc<dyn NodeReadState>` for `ergo_api::serve`.
@@ -412,7 +421,15 @@ impl NodeReadState for SnapshotReadState {
     }
 
     fn peers(&self) -> Vec<ApiPeer> {
-        self.handle.load().peers.clone()
+        let mut peers = self.handle.load().peers.clone();
+        if let Some(resolver) = &self.peer_details {
+            for peer in &mut peers {
+                if let Ok(addr) = peer.addr.parse::<std::net::SocketAddr>() {
+                    peer.network = Some(resolver.resolve(addr.ip()));
+                }
+            }
+        }
+        peers
     }
 
     fn events(&self) -> ergo_api::types::ApiNodeEvents {

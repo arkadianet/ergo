@@ -172,6 +172,8 @@ fn peer(addr: &str, state: ApiPeerState) -> ApiPeer {
         peer_height: None,
         rest_api_url: None,
         declared_address: None,
+        details: None,
+        network: None,
     }
 }
 

@@ -164,6 +164,7 @@ pub(super) struct TomlIndexer {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
 pub(super) struct TomlApi {
+    pub(super) peer_details: crate::peer_details::PeerLookupConfig,
     /// Bind address for the HTTP API. Default `127.0.0.1:9099`.
     pub(super) bind: Option<String>,
     /// Disable the API server entirely.

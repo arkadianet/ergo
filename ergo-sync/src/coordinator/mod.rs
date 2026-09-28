@@ -189,11 +189,12 @@ pub struct PeerSyncSnapshot {
     /// Chain-comparison classification from the latest SyncInfo.
     /// `Equal` / `Younger` / `Older` / `Fork` / `Unknown`.
     pub status: ergo_p2p::sync::PeerChainStatus,
-    /// Peer's reported best-block height. V1 SyncInfo carries this
-    /// directly; V2 SyncInfo (post-v4) sends raw headers instead and
-    /// we infer the height by looking up the newest peer-header that
-    /// sits on our best chain (None when no overlap or pre-handshake).
+    /// Height from a parsed V2 tip header, or inferred by finding a
+    /// peer-advertised header ID on our best chain (V1 / fallback).
     pub peer_height: Option<u32>,
+    /// True only when the height came from a parsed peer header, rather
+    /// than an overlap lookup. Do not infer this from negotiated version.
+    pub height_from_header: bool,
     /// Last update timestamp (monotonic). Lets observers age out
     /// stale entries after the peer disconnects.
     pub observed_at: std::time::Instant,

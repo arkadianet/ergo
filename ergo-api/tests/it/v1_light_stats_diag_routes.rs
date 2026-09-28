@@ -144,6 +144,8 @@ fn peer(
         peer_height: height,
         rest_api_url: None,
         declared_address: None,
+        details: None,
+        network: None,
     }
 }
 
