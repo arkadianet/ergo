@@ -291,10 +291,8 @@ mod tests {
 
     #[test]
     fn read_sigma_boolean_depth_boundary_matches_scala() {
-        // Scala rejects the 110-deep chain (level reaches 111 before the leaf)
-        // and accepts the 109-deep one. With a 0-based counter and `depth >=
-        // MAX`, our leaf sits at depth == (#Cand), so 110 Cands reject and 109
-        // accept — the exact Scala boundary.
+        // DataSerializer consumes one level before SigmaBoolean's own nodes.
+        // Captured sigma-state 6.0.2 verdicts: decode_depth.tsv.
         let chain = |n: usize| {
             let mut sb = SigmaBoolean::TrivialProp(true);
             for _ in 0..n {
@@ -304,11 +302,10 @@ mod tests {
             write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
             w.result()
         };
-        // 109 Cands: accepted.
-        let ok = chain(MAX_SIGMA_TREE_DEPTH - 1);
+        // 108 Cands plus DataSerializer and the leaf: 110 levels.
+        let ok = chain(MAX_SIGMA_TREE_DEPTH - 2);
         assert!(read_value(&mut VlqReader::new(&ok), &SigmaType::SSigmaProp).is_ok());
-        // 110 Cands: rejected (matches Scala level 111 > MaxTreeDepth).
-        let bad = chain(MAX_SIGMA_TREE_DEPTH);
+        let bad = chain(MAX_SIGMA_TREE_DEPTH - 1);
         assert!(matches!(
             read_value(&mut VlqReader::new(&bad), &SigmaType::SSigmaProp).unwrap_err(),
             ReadError::DepthLimitExceeded { .. }

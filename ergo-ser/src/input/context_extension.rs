@@ -10,7 +10,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{read_constant, write_constant, CollValue, SigmaValue};
+use crate::sigma_value::{write_constant, CollValue, SigmaValue};
 
 /// Context variables supplied to script evaluation alongside an input.
 ///
@@ -190,7 +190,7 @@ fn read_extension_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), Re
     // (`ValueSerializer.deserialize` makes the same split). Same discrimination
     // the register reader uses — see `crate::register::read_register_value`.
     if r.peek_u8()? <= 0x70 {
-        return read_constant(r);
+        return crate::sigma_value::read_constant_as_expr(r);
     }
     // Extension bytes carry no tree header, so parse at `tree_version = 0`
     // (as the register reader does — the version does not affect the wire

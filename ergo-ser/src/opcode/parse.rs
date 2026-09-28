@@ -123,7 +123,7 @@ fn parse_node(
         // Thread the current expression depth into the constant's value so a
         // nested SigmaProp continues the shared MaxTreeDepth budget (Scala's
         // single CoreByteReader.level across expr + value + SigmaBoolean).
-        let val = read_value_at_depth(r, &tpe, depth)?;
+        let val = read_value_at_depth(r, &tpe, depth + 1)?;
         // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
         // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
         // materialized header, so a constant that actually CARRIES a header

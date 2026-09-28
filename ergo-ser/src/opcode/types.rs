@@ -11,7 +11,7 @@ pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
 /// stay consensus-compatible (Scala does not soft-fork this into an
 /// `UnparsedErgoTree`), as well as to bound stack use. No real ErgoTree comes
 /// close to this depth.
-pub(super) const MAX_EXPR_DEPTH: usize = 110;
+pub(crate) const MAX_EXPR_DEPTH: usize = 110;
 
 /// Convenience alias used at the [`crate::ergo_tree`] boundary, where
 /// the body of a tree is just a single root [`Expr`].

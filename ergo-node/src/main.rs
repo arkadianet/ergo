@@ -9,6 +9,23 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer, Registry};
 
 fn main() {
+    // block_on polls startup on its calling thread. Store recovery can decode
+    // transactions before the async action loop exists, so it needs the same
+    // stack as the runtime workers. This thread owns and drops the runtime.
+    let thread = std::thread::Builder::new()
+        .name("node-main".into())
+        .stack_size(DECODE_THREAD_STACK_BYTES)
+        .spawn(run_node)
+        .unwrap_or_else(|e| {
+            eprintln!("node startup thread failed: {e}");
+            std::process::exit(1);
+        });
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn run_node() {
     // Block validation fans out over Rayon (`ergo-validation`'s
     // `into_par_iter`), and script evaluation deserializes on those threads
     // (`DeserializeContext` / `DeserializeRegister`, `Global.deserialize`), so
@@ -24,8 +41,7 @@ fn main() {
 
     // `thread_stack_size` covers both the worker threads and the blocking pool
     // (tokio `runtime::blocking::pool` takes it from the same builder field),
-    // so one setting reaches every thread the runtime spawns. The main thread's
-    // own stack comes from the OS (RLIMIT_STACK), not from here.
+    // so one setting reaches every thread the runtime spawns.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(DECODE_THREAD_STACK_BYTES)

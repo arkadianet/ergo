@@ -173,6 +173,7 @@ pub(super) fn spawn_engine(
         let worker_handle = handle.clone();
         std::thread::Builder::new()
             .name("mining-build-worker".to_string())
+            .stack_size(crate::decode_stack::DECODE_THREAD_STACK_BYTES)
             .spawn(move || {
                 tracing::dispatcher::with_default(&dispatch, || {
                     super::super::mining_engine::run_build_worker(

@@ -4,7 +4,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::WriteError;
 use crate::opcode::{parse_expr, write_expr, Expr, IrNode, Payload};
 use crate::sigma_type::SigmaType;
-use crate::sigma_value::{read_constant, write_constant, CollValue, SigmaValue};
+use crate::sigma_value::{write_constant, CollValue, SigmaValue};
 
 /// Non-mandatory register identifier (R4 through R9). The discriminant
 /// is the slot index inside [`AdditionalRegisters`] — `R4 == 0`,
@@ -171,10 +171,18 @@ pub(crate) fn type_has_v6_only_type(tpe: &SigmaType) -> bool {
 /// Read a single register value. Handles both plain Constants (type <= 0x70)
 /// and expression opcodes (> 0x70) like CreateTuple.
 fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
+    if r.nesting_depth_base() >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
     let first = r.peek_u8()?;
     if first <= 0x70 {
         // Plain constant: type code + value data
-        read_constant(r)
+        // Scala calls r.getValue(), adding a ValueSerializer level before
+        // ConstantSerializer/DataSerializer. Keep the constant-specific version
+        // gates here; parse_expr's inline-tree gates do not apply to registers.
+        crate::sigma_value::read_constant_as_expr(r)
     } else {
         // Expression opcode — parse the full expression and extract type + value.
         // Register bytes carry no tree header, so pass `tree_version=0`.

@@ -34,6 +34,7 @@ pub mod address;
 pub mod autolykos;
 pub mod batch_merkle_proof;
 pub mod block_transactions;
+pub mod decode_stack;
 pub mod difficulty;
 pub mod ergo_box;
 pub mod ergo_tree;

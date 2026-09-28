@@ -282,6 +282,21 @@ pub fn read_constant(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadE
     Ok((tpe, val))
 }
 
+/// A constant reached through Scala's `r.getValue()` (registers/extensions),
+/// which enters ValueSerializer before ConstantSerializer/DataSerializer.
+pub(crate) fn read_constant_as_expr(
+    r: &mut VlqReader,
+) -> Result<(SigmaType, SigmaValue), ReadError> {
+    if r.nesting_depth_base() >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
+    let tpe = read_type(r)?;
+    let val = read_value_at_depth(r, &tpe, 1)?;
+    Ok((tpe, val))
+}
+
 // -- Value-only serialization --
 
 /// Write value data for a known type. The caller is responsible for ensuring
@@ -393,6 +408,13 @@ pub(crate) fn read_value_at_depth(
     tpe: &SigmaType,
     depth: usize,
 ) -> Result<SigmaValue, ReadError> {
+    // DataSerializer increments the same reader level as ValueSerializer.
+    // This includes primitive values and every composite-value child.
+    if r.nesting_depth_base().saturating_add(depth) >= crate::opcode::MAX_EXPR_DEPTH {
+        return Err(ReadError::DepthLimitExceeded {
+            max: crate::opcode::MAX_EXPR_DEPTH,
+        });
+    }
     match tpe {
         SigmaType::SBoolean => {
             let b = r.get_u8()?;
@@ -421,7 +443,7 @@ pub(crate) fn read_value_at_depth(
         SigmaType::SGroupElement => Ok(SigmaValue::GroupElement(read_group_element(r)?)),
         SigmaType::SSigmaProp => {
             // Continue the shared depth budget into the SigmaBoolean tree.
-            let sb = read_sigma_boolean_at_depth(r, depth)?;
+            let sb = read_sigma_boolean_at_depth(r, depth + 1)?;
             Ok(SigmaValue::SigmaProp(sb))
         }
         SigmaType::SAvlTree => {
