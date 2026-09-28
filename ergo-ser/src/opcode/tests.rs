@@ -1871,7 +1871,7 @@ fn numeric_cast_non_numeric_target_hard_rejects() {
 
 /// Scala's `Upcast` / `Downcast` case classes carry
 /// `require(input.tpe.isInstanceOf[SNumericType], ...)` (`ast/trees.scala:398`
-/// and `:417`), so a non-numeric INPUT throws `IllegalArgumentException`, which
+/// and `:431`), so a non-numeric INPUT throws `IllegalArgumentException`, which
 /// `deserializeErgoTree` rethrows as a `SerializerException` — again not a
 /// `ValidationException`, so again a hard failure.
 ///

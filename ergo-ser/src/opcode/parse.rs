@@ -659,7 +659,7 @@ fn parse_node(
             // a non-numeric target throws `ClassCastException`; `asNumValue` is
             // erased and throws nothing, but `cons` then hits
             // `require(input.tpe.isInstanceOf[SNumericType])` on `Upcast` /
-            // `Downcast` (ast/trees.scala:398, :417) and throws
+            // `Downcast` (ast/trees.scala:398, :431) and throws
             // `IllegalArgumentException`. Neither is a `ValidationException`, so
             // neither is soft-fork-wrapped into an `UnparsedErgoTree`: both are
             // hard deserialization failures. Accepting them made us more
