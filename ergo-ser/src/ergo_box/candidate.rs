@@ -38,6 +38,14 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
 /// For parsing real mainnet box bytes (which may have non-size-delimited trees),
 /// use `parse_ergo_box_bytes` which handles tree boundary detection.
 pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    // Top-level entry: the nesting budget must start unconsumed. See the same
+    // backstop in `read_transaction` — a leaked base shows up as a node
+    // rejecting valid input with a depth error nothing explains.
+    debug_assert_eq!(
+        r.nesting_depth_base(),
+        0,
+        "nesting depth base leaked into a top-level box-candidate parse"
+    );
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;

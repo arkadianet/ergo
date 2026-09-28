@@ -610,6 +610,12 @@ mod tests {
     /// the box boundary each nested box restarted it at 0, so no chain was ever
     /// rejected however deep. A chain well past the bound that still parses is
     /// the regression this guards.
+    ///
+    /// These lengths (5-21 KiB) are past `MAX_BOX_SIZE`, so they assert only
+    /// that such input is rejected and bounded — not WHICH cap rejects it. The
+    /// depth boundary itself is pinned by
+    /// `nested_box_sigma_chain_boundary_is_one_level_per_box`, whose shapes stay
+    /// under the byte cap on purpose.
     #[test]
     fn nested_sbox_chain_depth_is_shared_across_box_boundary() {
         for levels in [120usize, 200, 500] {
@@ -716,6 +722,19 @@ mod tests {
             let deepest_accepted = MAX_SIGMA_TREE_DEPTH - 2 - boxes;
 
             let ok = nested_sbox_chain_around(boxes, &sigma_chain_tree(deepest_accepted));
+            // Assert, rather than assume, that this shape is bounded by the
+            // DEPTH budget and not by bytes: a box level costs ~42 bytes, so a
+            // chain of them alone reaches MAX_BOX_SIZE at ~97 levels, before the
+            // 110-level budget is ever consulted. Mixing in 2-byte sigma nodes
+            // is what keeps the boundary in depth-space. If the box encoding or
+            // MAX_BOX_SIZE ever changes, this fails loudly instead of silently
+            // re-pinning the boundary against the position cap.
+            assert!(
+                ok.len() < MAX_BOX_SIZE,
+                "{boxes} boxes + {deepest_accepted} sigma levels is {} bytes, at or past \
+                 the {MAX_BOX_SIZE}-byte cap: the boundary would be bounded by bytes, not depth",
+                ok.len()
+            );
             let mut r = VlqReader::new(&ok);
             read_value(&mut r, &SigmaType::SBox).unwrap_or_else(|e| {
                 panic!(
