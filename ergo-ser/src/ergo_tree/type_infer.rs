@@ -11,7 +11,7 @@ use super::root_type::{type_is_precise, ValDefTypeStore};
 /// Exact static type for embedded-script substitution. Unknown types and
 /// imprecision sentinels cannot establish substitution compatibility.
 pub fn substitution_type_of(body: &crate::opcode::Expr) -> Option<crate::sigma_type::SigmaType> {
-    let mut store = ValDefTypeStore::new();
+    let mut store = ValDefTypeStore::default();
     infer_type(body, &mut store, &[]).filter(type_is_precise)
 }
 
@@ -272,7 +272,7 @@ mod tests {
         body: &crate::opcode::Expr,
         constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
     ) -> Option<crate::sigma_type::SigmaType> {
-        infer_type(body, &mut ValDefTypeStore::new(), constants)
+        infer_type(body, &mut ValDefTypeStore::default(), constants)
     }
 
     fn exact(body: &Expr) -> Option<SigmaType> {

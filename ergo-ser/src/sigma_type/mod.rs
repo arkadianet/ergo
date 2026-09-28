@@ -156,6 +156,25 @@ pub enum SigmaType {
 }
 
 impl SigmaType {
+    /// Is this one of Scala's `SNumericType`s?
+    ///
+    /// Exactly the six types that extend `SNumericType` in
+    /// `SType.scala:412-547`: `SByte`, `SShort`, `SInt`, `SLong`, `SBigInt` and
+    /// `SUnsignedBigInt`. Numeric-ness is version-independent — whether
+    /// `SUnsignedBigInt` may appear at all is decided separately, by the
+    /// embeddable type-code gate.
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            SigmaType::SByte
+                | SigmaType::SShort
+                | SigmaType::SInt
+                | SigmaType::SLong
+                | SigmaType::SBigInt
+                | SigmaType::SUnsignedBigInt
+        )
+    }
+
     /// Returns the primitive type code if this type is embeddable (1..=11), or None.
     fn embeddable_code(&self) -> Option<u8> {
         match self {
