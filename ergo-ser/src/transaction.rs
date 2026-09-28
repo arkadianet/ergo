@@ -178,6 +178,16 @@ pub fn write_transaction(w: &mut VlqWriter, tx: &Transaction) -> Result<(), Writ
 
 /// Decode the wire form produced by [`write_transaction`].
 pub fn read_transaction(r: &mut VlqReader) -> Result<Transaction, ReadError> {
+    // A transaction is always a top-level parse, so the nesting budget must
+    // start unconsumed. The base is scoped state restored by the nested box
+    // reader on both its paths; this catches a future path that sets it without
+    // restoring, where the symptom would otherwise be a node that rejects valid
+    // input with a depth error it can never explain.
+    debug_assert_eq!(
+        r.nesting_depth_base(),
+        0,
+        "nesting depth base leaked into a top-level transaction parse"
+    );
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {

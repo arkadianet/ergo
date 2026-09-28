@@ -88,7 +88,7 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
 /// that bound here so a deeply nested `Cand`/`Cor`/`Cthreshold` chain from peer
 /// data (a box register or context-extension `SigmaProp` constant) is rejected
 /// rather than overflowing the worker-thread stack.
-const MAX_SIGMA_TREE_DEPTH: usize = 110;
+pub(super) const MAX_SIGMA_TREE_DEPTH: usize = 110;
 
 pub(super) fn read_sigma_boolean_at_depth(
     r: &mut VlqReader,
@@ -97,7 +97,19 @@ pub(super) fn read_sigma_boolean_at_depth(
     // `>=`: depth is 0-based (root enters at 0) while Scala increments the
     // shared reader level BEFORE parsing each nested node, so Rust `depth` ==
     // Scala `level - 1`; `depth >= MAX` matches Scala's `level > MaxTreeDepth`.
-    if depth >= MAX_SIGMA_TREE_DEPTH {
+    //
+    // `depth` carries the enclosing EXPRESSION depth (threaded in by
+    // `parse_node` via the constant's value), but not the depth consumed by an
+    // enclosing nested BOX script, which lives on the reader. Scala keeps all
+    // three on one counter, so a sigma chain inside a nested box must continue
+    // from the reader's base too: without it, N nested boxes plus a chain just
+    // under the bound is accepted here and rejected by the reference.
+    // Compared, not substituted: `depth` stays LOCAL so the `next = depth + 1`
+    // recursion below adds one level per node. Folding the base into `depth`
+    // here would re-add it at every level, growing the effective depth twice as
+    // fast as the reference and rejecting chains Scala accepts.
+    let effective_depth = r.nesting_depth_base().saturating_add(depth);
+    if effective_depth >= MAX_SIGMA_TREE_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: MAX_SIGMA_TREE_DEPTH,
         });

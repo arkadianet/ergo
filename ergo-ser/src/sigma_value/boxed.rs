@@ -249,6 +249,7 @@ pub(super) fn read_opaque_box(r: &mut VlqReader, depth: usize) -> Result<SigmaVa
 mod tests {
     use super::*;
     use crate::sigma_type::SigmaType;
+    use crate::sigma_value::sigma_boolean::MAX_SIGMA_TREE_DEPTH;
     use crate::sigma_value::{read_value, write_value};
     use ergo_primitives::writer::VlqWriter;
 
@@ -552,6 +553,13 @@ mod tests {
     /// box -> tree -> constant -> box cycle, which re-enters the expression
     /// parser once per level.
     fn nested_sbox_chain(levels: usize) -> Vec<u8> {
+        // innermost proposition: v0 sizeless `sigmaProp(true)`
+        nested_sbox_chain_around(levels, &[0x00u8, 0x08, 0xD3])
+    }
+
+    /// As [`nested_sbox_chain`], with `inner` as the innermost proposition, so a
+    /// test can put a deep `SigmaBoolean` chain at the bottom of the box chain.
+    fn nested_sbox_chain_around(levels: usize, inner: &[u8]) -> Vec<u8> {
         fn box_bytes(tree: &[u8]) -> Vec<u8> {
             let mut b = vec![0x01u8]; // value = 1 nanoErg
             b.extend_from_slice(tree); // proposition
@@ -560,7 +568,7 @@ mod tests {
             b.extend_from_slice(&[0x00, 0x00]); // output index
             b
         }
-        let mut tree = vec![0x00u8, 0x08, 0xD3]; // v0 sizeless sigmaProp(true)
+        let mut tree = inner.to_vec();
         for _ in 0..levels {
             let mut body = vec![0x63u8]; // SBox type code (inline constant)
             body.extend_from_slice(&box_bytes(&tree));
@@ -669,5 +677,99 @@ mod tests {
                 .expect("the parse must not overflow the stack"),
             "deep nested box chain must reject with the depth limit"
         );
+    }
+
+    /// A `SigmaProp` constant holding `chain_len` nested `Cand` nodes, as the
+    /// body of a v0 sizeless tree: `Cand` is `0x96` + a VLQ child count
+    /// (Scala `putUShort`), the leaf is `TrivialProp(true)` (`0xD3`).
+    fn sigma_chain_tree(chain_len: usize) -> Vec<u8> {
+        let mut sb = vec![0xD3u8];
+        for _ in 0..chain_len {
+            let mut next = vec![0x96u8, 0x01];
+            next.extend_from_slice(&sb);
+            sb = next;
+        }
+        let mut tree = vec![0x00u8, 0x08]; // v0 sizeless, SSigmaProp constant
+        tree.extend_from_slice(&sb);
+        tree
+    }
+
+    /// The `SigmaBoolean` axis draws from the SAME budget as the box chain, so
+    /// the two compose exactly one level per box: with `b` nested boxes the
+    /// deepest accepted chain is `MAX - 1 - b`, and one deeper is rejected.
+    /// Scala keeps all of this on `CoreByteReader.lvl`, so the sum is what it
+    /// bounds; before the base was shared, the chain was measured from 0 inside
+    /// every box and `b` boxes plus a just-under-the-bound chain was ACCEPTED
+    /// here while the reference rejected it.
+    ///
+    /// Two-sided on purpose: the value of this change is the specific boundary,
+    /// so a test that only checks "deep enough rejects" would not notice the
+    /// budget being consumed at the wrong rate — which would reject chains the
+    /// reference accepts, the more dangerous direction.
+    #[test]
+    fn nested_box_sigma_chain_boundary_is_one_level_per_box() {
+        for boxes in [0usize, 1, 2, 5, 10, 50] {
+            // `- 2`: one level for each wrap, plus one for reading the
+            // OUTERMOST box as an `SBox` constant here — Scala counts that
+            // constant on the same counter (`ValueSerializer.deserialize` ->
+            // `DataSerializer`), so it is part of the sum.
+            let deepest_accepted = MAX_SIGMA_TREE_DEPTH - 2 - boxes;
+
+            let ok = nested_sbox_chain_around(boxes, &sigma_chain_tree(deepest_accepted));
+            let mut r = VlqReader::new(&ok);
+            read_value(&mut r, &SigmaType::SBox).unwrap_or_else(|e| {
+                panic!(
+                    "{boxes} boxes + a {deepest_accepted}-deep chain is within the budget: {e:?}"
+                )
+            });
+
+            let bad = nested_sbox_chain_around(boxes, &sigma_chain_tree(deepest_accepted + 1));
+            let mut r = VlqReader::new(&bad);
+            let err = read_value(&mut r, &SigmaType::SBox).expect_err(&format!(
+                "{boxes} boxes + a {}-deep chain must exhaust the budget",
+                deepest_accepted + 1
+            ));
+            assert!(
+                matches!(err, ReadError::DepthLimitExceeded { .. }),
+                "expected the shared budget to reject, got {err:?}"
+            );
+        }
+    }
+
+    /// Regression for the accept-invalid the shared base closes: 50 nested boxes
+    /// plus a 105-deep sigma chain sits near Scala level 155 and is rejected
+    /// there, but was accepted here while the sigma check read only its local
+    /// counter.
+    #[test]
+    fn nested_box_deep_sigma_chain_rejects_like_the_reference() {
+        let bytes = nested_sbox_chain_around(50, &sigma_chain_tree(105));
+        let mut r = VlqReader::new(&bytes);
+        assert!(
+            matches!(
+                read_value(&mut r, &SigmaType::SBox),
+                Err(ReadError::DepthLimitExceeded { .. })
+            ),
+            "a deep sigma chain under deep box nesting must reject"
+        );
+    }
+
+    /// A top-level sigma chain is unaffected by the base (which is 0 there), so
+    /// the long-standing 109-accept / 110-reject boundary still holds.
+    #[test]
+    fn top_level_sigma_chain_boundary_unchanged_by_shared_base() {
+        // `[2..]`: drop the tree header AND the SSigmaProp type code, leaving
+        // the bare SigmaBoolean bytes `read_value` expects for a known type.
+        let ok = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH - 1);
+        let mut r = VlqReader::new(&ok[2..]);
+        assert!(
+            read_value(&mut r, &SigmaType::SSigmaProp).is_ok(),
+            "109 Cands must still parse at the top level"
+        );
+        let bad = sigma_chain_tree(MAX_SIGMA_TREE_DEPTH);
+        let mut r = VlqReader::new(&bad[2..]);
+        assert!(matches!(
+            read_value(&mut r, &SigmaType::SSigmaProp),
+            Err(ReadError::DepthLimitExceeded { .. })
+        ));
     }
 }
