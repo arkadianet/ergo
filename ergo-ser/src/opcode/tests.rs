@@ -586,8 +586,19 @@ fn roundtrip_tuple() {
 #[test]
 fn roundtrip_select_field() {
     let input = Expr::Op(IrNode {
-        opcode: 0xA7,
-        payload: Payload::Zero,
+        opcode: 0x86,
+        payload: Payload::Tuple {
+            items: vec![
+                Expr::Const {
+                    tpe: SigmaType::SInt,
+                    val: SigmaValue::Int(1),
+                },
+                Expr::Const {
+                    tpe: SigmaType::SLong,
+                    val: SigmaValue::Long(2),
+                },
+            ],
+        },
     });
     let body = Expr::Op(IrNode {
         opcode: 0x8C,
@@ -1891,7 +1902,8 @@ fn numeric_cast_non_numeric_input_hard_rejects() {
 }
 
 /// The constraint must not narrow what the reference accepts: every numeric
-/// target stays parseable, and so do the `Upcast(Upcast(Const))` chains whose
+/// target is covered by the oracle fixtures below, including both opcodes.
+/// These `Upcast(Upcast(Const))` chains exercise the
 /// pre-v3 strip behaviour the difftest harness models.
 #[test]
 fn numeric_cast_numeric_types_still_parse() {
@@ -1907,5 +1919,49 @@ fn numeric_cast_numeric_types_still_parse() {
             parse_body(&mut r, 0).is_ok(),
             "{name}: a numeric cast must still parse"
         );
+    }
+}
+
+/// Actual JVM verdicts, including the wrapped inner tree that changes Scala's
+/// constant store. The capture program and provenance are beside the fixtures.
+#[test]
+fn numeric_cast_and_select_field_match_scala_oracle() {
+    for line in
+        include_str!("../../../test-vectors/scala/sigma/numeric_select_validation.tsv").lines()
+    {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let bytes = hex::decode(fields[4]).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let result = match fields[1] {
+            "tree" => crate::ergo_tree::read_ergo_tree(&mut r).map(|tree| {
+                assert_eq!(
+                    matches!(tree.body, Expr::Unparsed(_)),
+                    fields[0].contains("prior_wrap"),
+                    "{}: unexpected wrap classification",
+                    fields[0]
+                );
+            }),
+            "constant" => crate::sigma_value::read_constant(&mut r).map(|_| ()),
+            surface => panic!("unknown surface {surface}"),
+        };
+        if fields[2] == "ACCEPT" {
+            result.unwrap_or_else(|e| panic!("{}: {e:?}", fields[0]));
+            assert_eq!(
+                r.position(),
+                fields[3].parse::<usize>().unwrap(),
+                "{}",
+                fields[0]
+            );
+            assert!(r.is_empty(), "{}: trailing bytes", fields[0]);
+        } else {
+            assert!(
+                matches!(result, Err(ReadError::HardReject(_))),
+                "{}: {result:?}",
+                fields[0]
+            );
+        }
     }
 }

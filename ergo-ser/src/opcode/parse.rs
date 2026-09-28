@@ -330,7 +330,7 @@ fn parse_node(
                 let id = r.get_uint_to_i32()? as u32;
                 // FuncValue always writes arg types (they define the function signature).
                 let tpe = Some(read_type(r)?);
-                types.bindings.insert(id, tpe.clone());
+                types.bindings.bindings.insert(id, tpe.clone());
                 args.push((id, tpe));
             }
             let body = parse_typed_expr(r, next, _tree_version, types, children)?;
@@ -523,6 +523,14 @@ fn parse_node(
             }
             let literal_arity = match children.last().and_then(Option::as_ref) {
                 Some(SigmaType::STuple(items)) => Some(items.len()),
+                Some(tpe) => {
+                    // SelectField's constructor eagerly reads input.tpe.items.
+                    // A known non-tuple throws ClassCastException in Scala,
+                    // which is not eligible for an ErgoTree soft-fork wrap.
+                    return Err(ReadError::HardReject(format!(
+                        "SelectField input must be a tuple, got {tpe:?}"
+                    )));
+                }
                 _ => match &input {
                     Expr::Op(IrNode {
                         payload: Payload::Tuple { items },

@@ -35,7 +35,7 @@ pub fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],
 ) -> Option<crate::sigma_type::SigmaType> {
-    let mut store = ValDefTypeStore::new();
+    let mut store = ValDefTypeStore::default();
     infer_type(body, &mut store, constants)
 }
 
@@ -69,8 +69,11 @@ pub fn determinable_root_type_of(
 ///    store\[y\]=SigmaProp; then store\[x\]=SLong (rebind); the result
 ///    `ValUse(y)` reads SigmaProp → ACCEPT (Scala accepts — `y` was fixed
 ///    BEFORE the rebind; rejecting this shape would be a reject-valid = stall).
-pub(crate) type ValDefTypeStore =
-    std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>;
+#[derive(Default)]
+pub(crate) struct ValDefTypeStore {
+    pub(crate) bindings: std::collections::HashMap<u32, Option<crate::sigma_type::SigmaType>>,
+    constants_invalidated: bool,
+}
 
 /// `true` if `val` MATERIALIZES at least one box value (possibly nested in a
 /// collection / option / tuple). A box value is the only constant whose bytes embed
@@ -155,15 +158,25 @@ pub(crate) fn infer_node_type(
                 // id — every entry written so far is now untrusted. (An id it
                 // may have FRESHLY bound stays absent here and resolves
                 // lenient, which is the same safe direction.)
-                for t in store.values_mut() {
+                for t in store.bindings.values_mut() {
                     *t = None;
                 }
+                // ErgoTreeSerializer restores constantStore only on a successful
+                // structural parse. A sized inner tree that wraps a validation
+                // failure can leave its constants installed on Scala's reader.
+                // Our retained box bytes do not expose that store, so subsequent
+                // placeholders must not be inferred from the outer constants.
+                store.constants_invalidated = true;
             }
             Some(tpe.clone())
         }
         crate::opcode::Expr::Op(node) => match &node.payload {
             Payload::ConstPlaceholder { index } => {
-                constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
+                if store.constants_invalidated {
+                    None
+                } else {
+                    constants.get(*index as usize).map(|(tpe, _)| tpe.clone())
+                }
             }
             // Payloads carrying their result type EXPLICITLY in the IR.
             // `Deserialize{Context,Register}[T]` return `T` DIRECTLY, so they CAN
@@ -266,13 +279,13 @@ pub(crate) fn infer_node_type(
             // SigmaProp-RHS binding accepting (oracle-verified).
             Payload::ValDef { id, rhs, .. } | Payload::FunDef { id, rhs, .. } => {
                 let t = child_type(rhs, store, constants);
-                store.insert(*id, t.clone());
+                store.bindings.insert(*id, t.clone());
                 t
             }
             // ValUse: `store(id)` at this parse position (see
             // [`ValDefTypeStore`]). An untrusted (`None`) entry or an id with
             // no prior write resolves lenient (see [`infer_type`] residuals).
-            Payload::ValUse { id } => store.get(id).cloned().flatten(),
+            Payload::ValUse { id } => store.bindings.get(id).cloned().flatten(),
             // FuncValue (`FuncValueSerializer.parse`): each arg's DECLARED
             // type is written to the store BEFORE the body is parsed — and
             // never popped. Scala `FuncValue.tpe = SFunc(args.map(_.tpe),
@@ -288,7 +301,7 @@ pub(crate) fn infer_node_type(
             Payload::FuncValue { args, body } => {
                 if !parse_time {
                     for (id, tpe) in args {
-                        store.insert(*id, tpe.clone());
+                        store.bindings.insert(*id, tpe.clone());
                     }
                 }
                 let body_t = child_type(body, store, constants);
