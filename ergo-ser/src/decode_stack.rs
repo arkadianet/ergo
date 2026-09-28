@@ -139,12 +139,19 @@ mod tests {
 
     #[test]
     fn register_descent_fits_half_the_decode_stack_floor() {
-        let err = decode_on_stack(
-            register_transaction(400, &[4, 2]),
-            DECODE_THREAD_STACK_BYTES / 2,
-        )
-        .expect_err("register nesting must consume the shared budget");
-        assert!(matches!(err, ReadError::DepthLimitExceeded { max: 110 }));
+        // Include the reported deep transaction shapes. Input depth must not
+        // turn into call-stack depth after the shared budget is exhausted.
+        for levels in [400, 800, 3_000] {
+            let err = decode_on_stack(
+                register_transaction(levels, &[4, 2]),
+                DECODE_THREAD_STACK_BYTES / 2,
+            )
+            .expect_err("register nesting must consume the shared budget");
+            assert!(
+                matches!(err, ReadError::DepthLimitExceeded { max: 110 }),
+                "{levels}-level register chain must stop at the shared depth limit: {err:?}"
+            );
+        }
     }
 
     #[test]
