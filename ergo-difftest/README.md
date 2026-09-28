@@ -16,6 +16,33 @@ Generates and mutates bytes, runs them through the decoders, and checks:
 * **parse → serialize fixed point** — decode, re-encode, re-decode must reach a
   byte-stable fixed point (catches non-canonical / echo-trap re-encoding).
 
+The structural comparison normalizes both decoded values for two Scala parity
+behaviours, without normalizing either serialized byte sequence:
+
+* In trees with version **< 3**, an opcode `0x7e` with `NumericCast` payload and
+  an immediate `Expr::Const` input compares as that input, throughout the AST.
+  Other casts/nodes and all v3+ casts remain compared as-is
+  (`ValueSerializer.scala:154-166,359-365`).
+* Every `SigmaValue::Header` compares with its retained-wire id zeroed, including
+  constants nested in collections, tuples, options, trees, registers and context
+  extensions. All header fields remain compared. Scala hashes the retained input
+  slice (`ErgoHeader.scala:132-140,167-180`), so canonicalizing an identity-point
+  encoding can change this derived id without changing the header.
+
+Known-bug-catalog **#19** also permits `WriteRejected` when an initially
+soft-fork-opaque value re-decodes successfully as entirely structural. Scala's
+`ErgoTreeSerializer.scala:179` uses `treeSize = r.position - startPos`: parsing
+can cross the declared size after a following VLQ field canonicalizes, changing
+stream boundaries. This extends the existing opaque re-decode-failure exclusion.
+If both values remain opaque, differing bytes are **still a Bug** (only opaque
+error provenance is excluded from structural equality). Byte fixed point
+`b1 == b2` remains mandatory for every successful re-decode except that
+opaque-to-structural transition. The existing type-depth guard exclusion is
+unchanged. These rules apply through every containing surface, including boxes,
+transactions, block transactions and `ctx_expr`; cached bytes remain compared.
+The four `parity_*` corpus seeds and the embedded `surfaces.rs` regressions cover
+the nightly failures that motivated these exclusions.
+
 Phase 1 covers **every standalone** `ergo-ser` wire decoder: the block/header
 sections (`header`, `block_transactions`, `extension`, `popow_header`,
 `nipopow_proof`), the transaction tree (`transaction`, `unsigned_transaction`,

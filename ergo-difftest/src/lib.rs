@@ -42,7 +42,8 @@ pub enum Outcome {
     ///   (JVM throws on the same overflow), or
     /// * re-decode of own output failed for a **documented Scala-shared**
     ///   reshape hazard (Bug #19 size-delimited soft-fork wrap / type-depth
-    ///   soft cap). Not a Rust-only codec inconsistency.
+    ///   soft cap), or #19 re-decode succeeded but flipped opaque to structural.
+    ///   Not a Rust-only codec inconsistency.
     WriteRejected,
     /// An invariant was violated (or the decode panicked). Carries a
     /// human-readable detail including the offending bytes.
