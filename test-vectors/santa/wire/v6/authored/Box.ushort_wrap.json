@@ -1,0 +1,55 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Box.ushort_wrap",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "box-index-2-32-accept#0",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose index is written as 2^32 (80 80 80 80 10). The index is a getUShort (ErgoBox.scala:218), which scorex-util reads as getULong().toInt and only then checks 0..65535: 2^32 reads as 0. The box parses and keeps the bytes as received for its id (:222); the round-trip re-serializes it with the index 00. NON-IDENTITY. An impl that range-checks the full value rejects it: the over-reject.",
+      "bytes_hex" : "c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d6648080808010",
+      "expected_bytes_hex" : "c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-index-2-32-plus-1-accept#1",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose index is written as 2^32 + 1 (8180808010): it reads as 1 and is written back as 01. NON-IDENTITY.",
+      "bytes_hex" : "c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d6648180808010",
+      "expected_bytes_hex" : "c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66401",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-index-wraps-to-65536-reject#2",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose index is written as 2^32 + 2^16 (8080848010): truncated to 32 bits it is 65536, outside the unsigned short range: the JVM rejects. An impl that keeps the low 16 bits reads 0 and accepts: the over-accept.",
+      "bytes_hex" : "c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d6648080848010",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-r4-coll-length-wraps-accept#3",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box (value 1000000, SigmaProp(true), height 1, no tokens) whose R4 is a Coll[Byte] with its length written as 2^32 + 1 (8180808010), then the byte ab. A collection's length in data is a getUShort too (CoreDataSerializer.scala:132): it reads as 1, and the register is written back as 0e 01 ab. NON-IDENTITY.",
+      "bytes_hex" : "c0843d0008d30100010e8180808010ab1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "expected_bytes_hex" : "c0843d0008d30100010e01ab1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

@@ -119,10 +119,10 @@ pub enum ReadError {
     #[error("VLQ decoding error: {0}")]
     Vlq(#[from] VlqError),
     /// VLQ decoded successfully but the value does not fit in the
-    /// caller-requested integer width. Mirrors Scala's
-    /// `getUIntExact` / `getUShortExact` (`toIntExact` throws
-    /// `ArithmeticException`) and sigma-rust's
-    /// `u32::try_from(u64)` / `u16::try_from(u64)`.
+    /// caller-requested integer width. Mirrors Scala's range checks:
+    /// `getUIntExact` (`toIntExact` throws `ArithmeticException`) and
+    /// `getUShort` (`require(0 <= x && x <= 0xFFFF)` on the value narrowed
+    /// to 32 bits).
     #[error("VLQ value {got} too large for {type_name}")]
     ValueTooLarge {
         /// Name of the requested integer type (`"u32"` / `"u16"`).
@@ -583,14 +583,19 @@ impl<'a> VlqReader<'a> {
         Ok(val)
     }
 
-    /// Decode a VLQ-encoded `u16`. Returns
-    /// [`ReadError::ValueTooLarge`] if the VLQ-decoded `u64` does
-    /// not fit in `u16` — matches Scala `getUShortExact` and
-    /// sigma-rust `u16::try_from(u64)`.
+    /// Decode a VLQ-encoded unsigned short with Scala's `getUShort`
+    /// semantics (scorex-util 0.2.1 `VLQReader.getUShort`): read a full
+    /// `getULong`, narrow it with `.toInt` (keep the low 32 bits, two's
+    /// complement), and only then require `0..=0xFFFF`. So `2^32 + 1` reads
+    /// as 1, while `2^32 + 2^16` narrows to 65536 and is refused with
+    /// [`ReadError::ValueTooLarge`]. Every count, length and index the
+    /// reference reads with `getUShort` goes through here: transaction
+    /// input / data-input / output counts, box index, proof length,
+    /// collection and BigInt sizes, SigmaBoolean child counts.
     pub fn get_u16(&mut self) -> Result<u16, ReadError> {
         self.check_position_limit()?;
         let (val, consumed) = vlq::decode_vlq(&self.data[self.pos..])?;
-        let narrowed = u16::try_from(val).map_err(|_| ReadError::ValueTooLarge {
+        let narrowed = u16::try_from(val as u32 as i32).map_err(|_| ReadError::ValueTooLarge {
             type_name: "u16",
             got: val,
         })?;
@@ -603,7 +608,7 @@ impl<'a> VlqReader<'a> {
     /// header fields.
     ///
     /// **Not the same as [`Self::get_u16`]**, which is VLQ-decoded
-    /// (Scala-parity with `getUShortExact`). A caller reaching for raw
+    /// (Scala-parity with `getUShort`). A caller reaching for raw
     /// BE here when they wanted VLQ — or vice versa — silently
     /// corrupts the wire format.
     ///
@@ -921,7 +926,55 @@ mod tests {
         );
     }
 
-    // ----- oracle parity (Scala getUIntExact / getUShortExact) -----
+    // ----- oracle parity (Scala getUIntExact / getUShort) -----
+
+    /// Scala `getUShort` narrows the full `getULong` to 32 bits BEFORE its
+    /// `0..=0xFFFF` check. JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6,
+    /// `constant` surface, a `Coll[Byte]` whose length is the VLQ):
+    /// `0e 8180808010 ab` (2^32 + 1) -> `ACCEPT 0e01ab`; `0e 8100 ab`
+    /// (over-long 1) -> `ACCEPT 0e01ab`; `0e 81808080808080808002 ab`
+    /// (a tenth byte `02`) -> `ACCEPT 0e01ab`; `0e 8080808080808080807f`
+    /// (only bit 63 set) -> `ACCEPT 0e00`.
+    #[test]
+    fn get_u16_narrows_to_32_bits_before_the_range_check() {
+        let cases: [(Vec<u8>, u16); 7] = [
+            (vlq((1 << 32) | 1), 1),
+            (vlq(1 << 32), 0),
+            (vlq((1 << 32) | 0xFFFF), 0xFFFF),
+            (vlq(0xFFFF), 0xFFFF),
+            (vec![0x81, 0x00], 1),
+            (
+                vec![0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02],
+                1,
+            ),
+            (
+                vec![0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f],
+                0,
+            ),
+        ];
+        for (bytes, want) in cases {
+            let mut r = VlqReader::new(&bytes);
+            assert_eq!(r.get_u16().unwrap(), want, "{bytes:02x?}");
+            assert!(r.is_empty(), "{bytes:02x?}: the whole VLQ is consumed");
+        }
+    }
+
+    /// The narrowed value must still be an unsigned short. JVM (as above):
+    /// `0e 8080848010` (2^32 + 2^16, narrowing to 65536) -> `REJECT
+    /// IllegalArgumentException`. 2^31 narrows to a negative `Int` and is
+    /// refused the same way.
+    #[test]
+    fn get_u16_narrowed_value_out_of_range_errors() {
+        for v in [(1u64 << 32) | (1 << 16), 1 << 16, 1 << 31, u32::MAX as u64] {
+            let bytes = vlq(v);
+            let mut r = VlqReader::new(&bytes);
+            assert!(
+                matches!(r.get_u16(), Err(ReadError::ValueTooLarge { got, .. }) if got == v),
+                "{v:#x}"
+            );
+            assert_eq!(r.position(), 0, "{v:#x}: a failed read must not advance");
+        }
+    }
 
     #[test]
     fn get_u32_above_i32_max_returns_value_too_large_no_advance() {
