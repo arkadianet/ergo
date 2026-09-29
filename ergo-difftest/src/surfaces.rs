@@ -100,6 +100,15 @@ where
             {
                 return Outcome::WriteRejected;
             }
+            // Pre-v3, both writers strip `Upcast(Const)` to the bare constant,
+            // so an operand keeps its pre-cast type on re-read and can fail a
+            // type check the cast satisfied (a collection item's type, a
+            // comparison's operand types). sigma-state 6.0.2 re-serializes such
+            // an input to our exact bytes and rejects them. Only a hard type
+            // rejection is exempt; truncation or misframing is still a Bug.
+            if v1.has_pending_upcast_strip() && matches!(e, ReadError::HardReject(_)) {
+                return Outcome::WriteRejected;
+            }
             // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
             // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
             // limit (only the 4096-byte proposition cap), so the node deliberately
@@ -836,6 +845,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             (registry(Some("transaction"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
+    /// CI fuzz find (run 36561954936): a pre-v3 `Upcast(Const)` item in a
+    /// `ConcreteCollection`. Both writers strip the cast, leaving a constant of
+    /// the item's pre-cast type, which the per-item assertion then rejects.
+    /// sigma-state 6.0.2 accepts the input, re-serializes it to exactly our
+    /// 166 bytes, and rejects those.
+    #[test]
+    fn pre_v3_upcast_strip_breaking_reparse_is_write_rejected() {
+        let bytes = hex::decode(
+            "00d1999999999999999999999999990f270000d9999999990001999999060606de0604020400040004060404080404000002040204040500050005020100d808d6ffffa4d602c2a7d603c606060606060606060606060606060606060606090000000000008006060606060606060606060606d17e7e93027e05030283020606060000008006067e020606060606060606060606060606060606060606060606060606060606060606060606060b0606060606060606ad06060606060600d1937e7e0206060606060606060606060606e6060606060606060606060606060606060606060606060606069a066a00999900990099999999999906999999",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("ergo_tree"))[0].run)(&bytes),
             Outcome::WriteRejected
         );
     }
