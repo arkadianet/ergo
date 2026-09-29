@@ -1,40 +1,40 @@
 {
   "manifest": {
     "scala": {
-      "ergo_version": "6.0.2",
-      "ergo_wallet_version": "6.0.2",
-      "sigmastate_version": "6.0.2",
+      "ergo_version": "6.0.6",
+      "ergo_wallet_version": "6.0.6",
+      "sigmastate_version": "6.0.6",
       "node_app_version": "not used (standalone JVM)",
       "source_shas": {
-        "ergo": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
-        "sigmastate": "23dd29f612249c169d09fae9bca76d7cc02e144c"
+        "ergo": "23aabead88774d27f2c9190ace3c9abbc8f1d5cb",
+        "sigmastate": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
       },
       "artifacts": [
         {
           "file": "ergo-core_2.12.jar",
-          "sha256": "d1b96ea02cf9a4434d31aa24bf43d3828bba0daf8b414161844bb7e7fa178272"
+          "sha256": "1573c2c96eab4632744531bcb34a41bf3b10bf5db71241a8ab5bdd989a7fb7fc"
         },
         {
           "file": "ergo-wallet_2.12.jar",
-          "sha256": "dfa0ce2760ee471d23354f032a68b1b9b0dcf986b239805ecda9aef156617425"
+          "sha256": "8c5b856e10051827ebb7ca8eeddeccb2b701f9f4430661d3d4db7405f9476a86"
         },
         {
-          "file": "sigma-state_2.12-6.0.2.jar",
-          "sha256": "0dbd3b31ef94affec83f8f0f6c5a9891c45da1e975ff6016a0574fc5aa1418e6"
+          "file": "sigma-state_2.12-6.0.6.jar",
+          "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898"
         }
       ]
     },
     "rust": {
-      "git_sha": "9aee724f9397abd7dbf87a7c54735f570ee56613",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
       "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
       "features": []
     },
     "tool": {
       "script": "scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala",
-      "git_sha": "9aee724f9397abd7dbf87a7c54735f570ee56613",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
       "working_tree_script_sha256": {
-        "scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala": "636f2afe90e6f250a7335e1509e1ecff9528079096f6612e4457a611f3c4b825",
-        "scripts/jvm_crypto_cost_oracle/generate.py": "6af263634b272ef783062c0bab6242a5ff8bf5445b0bb78d2c7b7a1136cdaa26"
+        "scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala": "0703493c5b96a87059c58cb23d4c0ac19ec6bd5cda4491390bd08a911966b3be",
+        "scripts/jvm_crypto_cost_oracle/generate.py": "0b36690bd58b27629d0df4eec1aac4b5f73f80d2b027494ce841969514e596fe"
       },
       "scala_cli_version": "1.12.1",
       "jvm_version": "17.0.17+10-LTS"
@@ -72,11 +72,12 @@
       "command": "python3 scripts/jvm_crypto_cost_oracle/generate.py",
       "scala_command": "scala-cli run scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala --server=false -- /home/rkadias/coding/reference/ergo-core/ergo/src/main/resources <temporary output.json>",
       "seeds": "Three fresh DLog secrets and fresh prover randomness; replay uses captured public bytes",
-      "timestamp": "2026-09-15T13:04:22.090107+00:00",
+      "timestamp": "2026-09-29T17:43:42.802268+00:00",
       "selected": 8,
       "executed": 8,
       "skipped": 0,
-      "failed": 0
+      "failed": 0,
+      "recapture": "sigma-state/ergo-core/ergo-wallet 6.0.6: the captured tx and box bytes were replayed through ErgoTransaction.validateStateful at every sweep limit (the IMPORTED_ORACLE in scripts/gen_cost_sweep.py) and reproduced every verdict, detail and total; a fresh CryptoCostOracle.scala run reproduced crypto_jit_per_input, block_cost and the sweep verdicts. The bytes are kept so the imported sweeps stay byte-identical. config_sha256 is the ergo v6.0.6 tag's application.conf and mainnet.conf used for these runs (mainnet.conf is unchanged from v6.0.2)."
     },
     "evidence": {
       "input_sha256": {
@@ -90,7 +91,7 @@
         "TX-B.input_boxes[3].bytes": "307fb00ecff1bd7f9681164887b69d62475f4d8fec81e5266e7eb3528c18379e"
       },
       "config_sha256": {
-        "application.conf": "2348654f74dd9f5ba8dcbc8e7415ee02d1f7f8fddc2be43ccddc45e0fce92727",
+        "application.conf": "9c707935c8ef4e0f215a4fcfba2ebc9f4112ea8e66f2f7d975b7cbd9086c79cf",
         "mainnet.conf": "81b7c666a9b105e6038cbcc4ee1945a1f8496f941dd08c669737586c7b2ef66d"
       },
       "cases_sha256": "10781d43646bb97464f02a937115d7bb1f57701bb3980ec16493ea4fbfa61010",

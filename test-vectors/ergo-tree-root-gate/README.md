@@ -1,7 +1,7 @@
 # Rule-1001 root classification regressions
 
 These 28 hand-serialized trees use the existing ErgoSerdeOracle `ergo_tree`
-surface with sigma-state and ergo-core 6.0.2. `requests.txt` and `responses.txt`
+surface with sigma-state and ergo-core 6.0.6. `requests.txt` and `responses.txt`
 retain the exact JVM exchange; `cases.json` names the corresponding inputs.
 The reproduction command and hashes are in `manifest.json`.
 

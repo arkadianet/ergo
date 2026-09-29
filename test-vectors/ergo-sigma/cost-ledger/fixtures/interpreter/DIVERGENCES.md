@@ -34,7 +34,7 @@ used. Every embedded byte belongs to the expression; there is no trailing paddin
 
 All cases return Accept, crypto cost 0, and no failure class on both sides.
 JVM expectations were generated only by `scripts/gen-cost-fixture.sh`, using
-its pinned sigma-state/ergo 6.0.2 verify oracle. The JSON manifest includes source
+its pinned sigma-state/ergo 6.0.6 verify oracle. The JSON manifest includes source
 pins, tool versions, input/output hashes, command, and execution counts.
 
 The source-backed decomposition explains both measurements: JVM eval includes

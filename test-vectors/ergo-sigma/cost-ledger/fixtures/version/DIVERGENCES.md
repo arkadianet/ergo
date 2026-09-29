@@ -1,6 +1,6 @@
 # Version parser parity
 
-Oracle: pinned sigma-state 6.0.2, `scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala`.
+Oracle: pinned sigma-state 6.0.6, `scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala`.
 
 The 14 marked cases for VERSION-G008, VERSION-G016 and VERSION-G018 now match the JVM.
 `parser-data-gates.json.gz` and `subst-bytes.json.gz` retain the original JVM expectations,

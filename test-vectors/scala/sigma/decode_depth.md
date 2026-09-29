@@ -1,9 +1,9 @@
 # Decode depth reference fixtures
 
-`decode_depth.tsv` records actual sigma-state **6.0.2** JVM results captured
-2026-09-28 with Scala 2.12.20, activated version 3 and tree version 3.
+`decode_depth.tsv` records actual sigma-state **6.0.6** JVM results captured
+2026-09-30 with Scala 2.12.20, activated version 3 and tree version 3.
 The oracle is `scripts/jvm_serde_oracle/ReviewRegressionOracle.scala` and uses
-the published `org.scorexfoundation:sigma-state_2.12:6.0.2` artifact.
+the published `org.scorexfoundation:sigma-state_2.12:6.0.6` artifact.
 
 To replay, convert each non-comment TSV row to `name surface hex` (columns
 1, 2, 5), then run:
