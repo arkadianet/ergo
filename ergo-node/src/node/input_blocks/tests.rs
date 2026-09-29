@@ -5560,7 +5560,81 @@ mod sync_refresh {
         );
     }
 
+    fn supplier_refresh(supplied_height: u32, ordering: bool, disconnect: bool) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer_with_mode(
+            &mut state,
+            19740,
+            Version::SUBBLOCKS,
+            Some(utxo_mode()),
+            now,
+        );
+        set_peer_height(&mut state, peer, 2);
+        let (other, _other_rx) = handshake_peer(&mut state, 19741, Version::SUBBLOCKS, now);
+        let (code, payload) = if ordering {
+            let ann = ts::ordering_announcement([0; 32], supplied_height, 1, Vec::new());
+            (
+                message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+                message::serialize_ordering_block_announcement_msg(&ann).unwrap(),
+            )
+        } else {
+            let ann = ts::announcement([0; 32], supplied_height, 1, None);
+            (
+                message::CODE_INPUT_BLOCK,
+                message::serialize_input_block(&ann).unwrap(),
+            )
+        };
+        let actions = send_to(&mut state, peer, code, &payload);
+        crate::node::flush_actions(&mut state, actions);
+        assert_eq!(
+            state.sync_refresh.suppliers.get(&peer).copied(),
+            (supplied_height.abs_diff(4) <= 2).then_some(supplied_height)
+        );
+        if disconnect {
+            crate::node::cleanup_disconnected_peer(&mut state, &peer);
+            assert!(!state.sync_refresh.suppliers.contains_key(&peer));
+            let (tx, new_rx) = crate::peer_loop::outbound::channel(64);
+            state.registry.peers.insert(
+                peer,
+                crate::node::state::PeerRuntime {
+                    sync_version: ergo_p2p::peer::SyncVersion::V2,
+                    outbound_tx: tx,
+                },
+            );
+            rx = new_rx;
+        }
+        let block = &blocks[4];
+        announce(&mut state, other, block);
+        persist_sections(&mut state, block);
+        let actions = state.executor.execute(
+            Action::AssembleBlock {
+                header_id: block.header_id,
+            },
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        crate::node::flush_actions(&mut state, actions);
+        assert_eq!(state.store.chain_state_meta().best_full_block_height, 5);
+        assert!(!crate::node::input_blocks::effects::relay_peers(&state).contains(&peer));
+        pump(&mut state, Instant::now() + Duration::from_secs(2));
+        let syncs = drain_sync_infos(&mut rx);
+        assert!(syncs.len() <= 1);
+        !syncs.is_empty()
+    }
+
     // ----- happy path -----
+
+    #[test]
+    fn sync_refresh_stale_tracked_supplier_receives_refresh() {
+        for ordering in [false, true] {
+            assert!(supplier_refresh(3, ordering, false));
+        }
+    }
 
     #[test]
     fn sync_refresh_announcer_spaced_live_tip() {
@@ -5881,6 +5955,43 @@ mod sync_refresh {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn sync_refresh_unregistered_supplier_leaves_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = mainnet_state_before(dir.path(), 5);
+        let peer = "10.200.0.1:9030".parse().unwrap();
+        let ann = ts::announcement([0; 32], 4, 1, None);
+        let actions = send_to(
+            &mut state,
+            peer,
+            message::CODE_INPUT_BLOCK,
+            &message::serialize_input_block(&ann).unwrap(),
+        );
+        crate::node::flush_actions(&mut state, actions);
+        assert!(!state.sync_refresh.suppliers.contains_key(&peer));
+    }
+
+    #[test]
+    fn sync_refresh_aged_out_supplier_receives_nothing() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(2, ordering, false));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_outside_window_supplier_receives_nothing() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(7, ordering, false));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_disconnected_supplier_record_cleared() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(3, ordering, true));
+        }
+    }
 
     #[test]
     fn sync_refresh_ibd_and_lighter_fork_do_not_schedule() {

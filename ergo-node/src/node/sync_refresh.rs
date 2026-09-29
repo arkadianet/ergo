@@ -17,6 +17,8 @@ const MESH_REFRESH_DELAY: Duration = Duration::from_secs(1);
 
 pub(super) struct SyncRefresh {
     pending: HashMap<PeerId, (Instant, u64)>,
+    /// Most recent announcement height per peer, after the processor height window.
+    pub(super) suppliers: HashMap<PeerId, u32>,
     generation: u64,
     tips: HashMap<PeerId, [u8; 32]>,
     score: Vec<u8>,
@@ -26,6 +28,7 @@ impl SyncRefresh {
     pub(super) fn new(score: Vec<u8>) -> Self {
         Self {
             pending: HashMap::new(),
+            suppliers: HashMap::new(),
             generation: 0,
             tips: HashMap::new(),
             score,
@@ -38,6 +41,7 @@ impl SyncRefresh {
 
     pub(super) fn forget(&mut self, peer: &PeerId) {
         self.pending.remove(peer);
+        self.suppliers.remove(peer);
         self.tips.remove(peer);
     }
 
@@ -96,7 +100,26 @@ pub(super) fn collect_progress(state: &mut NodeState, now: Instant) {
         .sync_refresh
         .advance(state.store.chain_state_meta().best_header_score);
     if state.executor.take_full_block_applied() {
-        for peer in super::input_blocks::effects::relay_peers(state) {
+        let minimum = state
+            .store
+            .chain_state_meta()
+            .best_full_block_height
+            .saturating_sub(2);
+        let suppliers = super::input_blocks::effects::capable_peers(state)
+            .into_iter()
+            .filter(|peer| {
+                state
+                    .sync_refresh
+                    .suppliers
+                    .get(peer)
+                    .is_some_and(|height| *height >= minimum)
+            });
+        let recipients: std::collections::HashSet<_> =
+            super::input_blocks::effects::relay_peers(state)
+                .into_iter()
+                .chain(suppliers)
+                .collect();
+        for peer in recipients {
             schedule(state, peer, MESH_REFRESH_DELAY, now);
         }
     }

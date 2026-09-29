@@ -188,6 +188,13 @@ pub const NO_INPUT_CHAIN: &str = "no_chain";
 /// Effects the node acts on (spec 7.2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// An announcement passed the height window, independently of later validation.
+    SupplierHeight {
+        /// Peer that delivered the announcement.
+        from: PeerTag,
+        /// Header height in the delivered announcement.
+        height: u32,
+    },
     /// `RequestModifier` for modifier type −123.
     RequestInputBlock {
         /// The input block to download.
@@ -1307,6 +1314,7 @@ impl Processor {
             });
             return;
         }
+        out.push(Effect::SupplierHeight { from, height });
         // Step 2: input blocks need a UTXO set.
         if !ctx.utxo_mode {
             out.push(Effect::Dropped {
@@ -3221,6 +3229,7 @@ impl Processor {
             });
             return;
         }
+        out.push(Effect::SupplierHeight { from, height });
         if (ctx.header_known)(&header_id) || self.ordering.get(&header_id).is_some() {
             out.push(Effect::Dropped {
                 id: header_id,
