@@ -1,7 +1,7 @@
 # Numeric cast and tuple projection reference fixtures
 
-Captured **2026-09-28** by `scripts/jvm_serde_oracle/ReviewRegressionOracle.scala`
-using the published sigma-state **6.0.2** artifact and Scala **2.12.20**. These
+Captured **2026-09-30** by `scripts/jvm_serde_oracle/ReviewRegressionOracle.scala`
+using the published sigma-state **6.0.6** artifact and Scala **2.12.20**. These
 are JVM deserialization results, not predictions from the Rust implementation.
 The activated version is 3; each tree supplies its own version. ACCEPT details
 are consumed-byte counts, and REJECT details name the thrown exception.

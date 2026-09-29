@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path("scripts/jvm_crypto_cost_oracle/CryptoCostOracle.scala")
 OUTPUT = Path("test-vectors/scala/multi_input_conjunction_cost.json")
 ERGO = Path.home() / "coding/reference/ergo-core/ergo"
-SIGMA = Path.home() / "coding/reference/ergo-core/sigmastate-interpreter-v6.0.2"
+SIGMA = Path.home() / "coding/reference/ergo-core/sigmastate-interpreter-v6.0.6"
 SOURCE_SHAS = {
-    "ergo": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
-    "sigmastate": "23dd29f612249c169d09fae9bca76d7cc02e144c",
+    "ergo": "23aabead88774d27f2c9190ace3c9abbc8f1d5cb",
+    "sigmastate": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
 }
 
 
@@ -33,9 +33,9 @@ def sha(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ergo", type=Path, default=ERGO,
-                        help="Ergo v6.0.2 source checkout (configuration resources)")
+                        help="Ergo v6.0.6 source checkout (configuration resources)")
     parser.add_argument("--sigmastate", type=Path, default=SIGMA,
-                        help="sigmastate-interpreter v6.0.2 source checkout")
+                        help="sigmastate-interpreter v6.0.6 source checkout")
     args = parser.parse_args()
     source_shas = {}
     for name, checkout in (("ergo", args.ergo), ("sigmastate", args.sigmastate)):
@@ -44,7 +44,7 @@ def main():
         except (OSError, subprocess.CalledProcessError) as error:
             parser.error(f"{name}: cannot read checkout {checkout}: {error}")
         if revision != SOURCE_SHAS[name]:
-            parser.error(f"{name}: expected v6.0.2 commit {SOURCE_SHAS[name]}, got {revision}")
+            parser.error(f"{name}: expected v6.0.6 commit {SOURCE_SHAS[name]}, got {revision}")
         source_shas[name] = revision
     resources = args.ergo.resolve() / "src/main/resources"
     for name in ("application.conf", "mainnet.conf"):
@@ -64,8 +64,8 @@ def main():
     scripts = [SCRIPT, Path(__file__).resolve().relative_to(ROOT)]
     manifest = {
         "scala": {
-            "ergo_version": "6.0.2", "ergo_wallet_version": "6.0.2",
-            "sigmastate_version": "6.0.2", "node_app_version": "not used (standalone JVM)",
+            "ergo_version": "6.0.6", "ergo_wallet_version": "6.0.6",
+            "sigmastate_version": "6.0.6", "node_app_version": "not used (standalone JVM)",
             "source_shas": source_shas,
             "artifacts": vector.pop("artifacts"),
         },

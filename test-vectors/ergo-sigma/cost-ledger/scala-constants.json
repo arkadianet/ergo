@@ -723,20 +723,20 @@
     "evidence" : {
       "artifacts" : [
         {
-          "file" : "sigma-state_2.12-6.0.2.jar",
-          "sha256" : "0dbd3b31ef94affec83f8f0f6c5a9891c45da1e975ff6016a0574fc5aa1418e6"
+          "file" : "sigma-state_2.12-6.0.6.jar",
+          "sha256" : "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898"
         },
         {
           "file" : "ergo-wallet_2.12.jar",
-          "sha256" : "dfa0ce2760ee471d23354f032a68b1b9b0dcf986b239805ecda9aef156617425"
+          "sha256" : "8c5b856e10051827ebb7ca8eeddeccb2b701f9f4430661d3d4db7405f9476a86"
         },
         {
           "file" : "ergo-core_2.12.jar",
-          "sha256" : "d1b96ea02cf9a4434d31aa24bf43d3828bba0daf8b414161844bb7e7fa178272"
+          "sha256" : "1573c2c96eab4632744531bcb34a41bf3b10bf5db71241a8ab5bdd989a7fb7fc"
         },
         {
-          "file" : "circe-core_2.12-0.13.0.jar",
-          "sha256" : "20a179d6de105a6ad48242aaec153696beabdff14e4903ad44b3a0c13dcad558"
+          "file" : "circe-core_2.12-0.14.15.jar",
+          "sha256" : "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1"
         }
       ],
       "input_vectors" : [
@@ -750,38 +750,38 @@
     "excluded" : [
     ],
     "run" : {
-      "command_line" : "scala-cli run scripts/jvm_cost_constants_extractor/CostConstants.scala --server=false --jvm system -- ee7fa548eefbef5653221a6571e34721c067d848 2026-09-20T04:04:32Z",
+      "command_line" : "scala-cli run scripts/jvm_cost_constants_extractor/CostConstants.scala --server=false --jvm system -- d3c7de477ddd56044aa5044774156c17be1760c4 2026-09-29T17:36:00Z",
       "executed" : 608,
       "failed" : 0,
       "seeds" : [
       ],
       "selected" : 608,
       "skipped" : 0,
-      "timestamp" : "2026-09-20T04:04:32Z",
+      "timestamp" : "2026-09-29T17:36:00Z",
       "timestamp_basis" : "explicit capture timestamp; reuse for byte-identical regeneration"
     },
     "rust" : {
       "features" : [
       ],
-      "git_sha" : "ee7fa548eefbef5653221a6571e34721c067d848",
+      "git_sha" : "d3c7de477ddd56044aa5044774156c17be1760c4",
       "toolchain" : "rustc 1.95.0 (59807616e 2026-04-14)"
     },
     "scala" : {
-      "ergo_version" : "6.0.2",
+      "ergo_version" : "6.0.6",
       "node_app_version" : null,
-      "sigmastate_version" : "6.0.2",
+      "sigmastate_version" : "6.0.6",
       "source_shas" : {
-        "ergo" : "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1",
-        "sigmastate" : "23dd29f612249c169d09fae9bca76d7cc02e144c"
+        "ergo" : "23aabead88774d27f2c9190ace3c9abbc8f1d5cb",
+        "sigmastate" : "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"
       }
     },
     "tool" : {
-      "git_sha" : "ee7fa548eefbef5653221a6571e34721c067d848",
+      "git_sha" : "d3c7de477ddd56044aa5044774156c17be1760c4",
       "jvm_version" : "17.0.17+10-LTS",
       "scala_cli_version" : "1.12.1",
       "scala_version" : "2.12.21",
       "script" : "scripts/jvm_cost_constants_extractor/CostConstants.scala",
-      "script_sha256" : "9068376240cdc98e199bc7af6426fa2cd20dffae1767807d4c7354ed216f1bd9",
+      "script_sha256" : "0cb7cc9b6f3c5b35027ffe768a8cc8bbd9c16ec74627baedf2b0ca5bc0aef79c",
       "source_state" : "working-tree"
     }
   },

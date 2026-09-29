@@ -1,4 +1,4 @@
-# sigma-state_2.12 6.0.2, Scala 2.12.20, activated version 3, captured 2026-09-28
+# sigma-state_2.12 6.0.6, Scala 2.12.20, activated version 3, captured 2026-09-30
 # name surface verdict consumed-bytes-or-exception hex
 cast_7d_v0_type2	tree	ACCEPT	11	00d801d6017d02010208d3
 cast_7d_v0_type3	tree	ACCEPT	11	00d801d6017d03020308d3

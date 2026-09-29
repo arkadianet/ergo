@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2).",
+    "Ground truth from the Scala reference stack (sigma-state 6.0.6 + ergo-core 6.0.6; source line numbers cite the v6.0.2 tag).",
     "Pins EVERY EvaluatedValue form the reference accepts as a stored value in a box",
     "register and in a ContextExtension entry, on both the serde and the reduce surfaces.",
     "",
@@ -23,8 +23,8 @@
     "the reference for a box the reference accepts."
   ],
   "source": {
-    "sigma_state": "6.0.2",
-    "ergo_core": "6.0.2",
+    "sigma_state": "6.0.6",
+    "ergo_core": "6.0.6",
     "activated_script_version": 3,
     "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
   },
@@ -160,15 +160,17 @@
   },
   "context_extension_key_domain": {
     "_comment": [
-      "sigma-state 6.0.2 has NO `k < 0` guard in ContextExtension.serializer.parse (that",
-      "check exists only in later revisions), so a key byte with the high bit set parses",
-      "and lands as a negative Scala Byte. The rejection happens at context build:",
+      "Since sigma-state 6.0.5, ContextExtension.serializer.parse rejects a negative id",
+      "(`if (k < 0) error(...)` -> SerializerException) before reading its value, so a key byte",
+      "with the high bit set fails the parse (sigma-state 6.0.2 accepted it as key -128).",
+      "reduce_with_sigmaprop_true_script is the generator's in-memory extension (key -128 bound",
+      "without the parser): it still fails at context build, where",
       "ErgoLikeContext.toSigmaContext sizes the var array from keys.max."
     ],
     "hex": "01800405",
-    "scala_parse": "ACCEPT",
-    "scala_parsed_keys": [-128],
-    "scala_reserialized_hex": "01800405",
+    "scala_parse": "REJECT",
+    "scala_parse_exception": "SerializerException",
+    "scala_parse_message": "Negative id of context extension variable: -128",
     "reduce_with_sigmaprop_true_script": "REJECT",
     "scala_exception": "NegativeArraySizeException",
     "scala_message": "-127"

@@ -22,13 +22,12 @@
 //
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
-//> using dep org.ergoplatform::ergo-wallet:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
 
-// verify manifest: sigma-state/ergo-core/ergo-wallet = 6.0.2 fallback.
-// Requested 6.0.6/6.0.5/6.0.5: core 6.0.5 absent from Ivy/coursier and
-// returns HTTP 404 from Maven Central and the pinned GitLab repository.
+// verify manifest: sigma-state/ergo-core/ergo-wallet = 6.0.6 (ergo-core and
+// ergo-wallet are not on Maven Central; publishLocal them from the v6.0.6 tag).
 // Usage: scala-cli run <this file> --server=false -- verify < requests.jsonl
 // Self-test: scala-cli run <this file> --server=false -- verify_self_test
 // Direct probes: jitcost_probe, accumulator_probe, raw_coll_equals, serialize_expr.
@@ -712,7 +711,7 @@ object EvaluatedValueOracle {
           "same_representation_equals" -> Json.fromBoolean(pair.equals(pair) && array.equals(array)))
       }
     }
-    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / raw_coll_equals"),
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.6 / raw_coll_equals"),
       "cases" -> Json.arr(cases: _*))
   }
 
@@ -750,7 +749,7 @@ object EvaluatedValueOracle {
         "delta" -> Json.fromInt(delta), "before" -> Json.fromInt(before),
         "after" -> Json.fromInt(accumulator.totalCost.value), "exception" -> exception)
     }
-    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / accumulator_probe"),
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.6 / accumulator_probe"),
       "cases" -> Json.arr(cases: _*))
   }
 
@@ -767,7 +766,7 @@ object EvaluatedValueOracle {
         Json.obj("operation" -> Json.fromString(op), "a" -> Json.fromInt(a),
           "b" -> Json.fromInt(b), "result" -> result)
     }
-    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / jitcost_probe"),
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.6 / jitcost_probe"),
       "cases" -> Json.arr(cases: _*))
   }
 
@@ -798,7 +797,7 @@ object EvaluatedValueOracle {
         "value_length" -> vl.map(Json.fromInt).getOrElse(Json.Null),
         "proof_hex" -> Json.fromString(hex(proof)), "result" -> result)
     }
-    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.2 / scrypto:3.0.0"),
+    Json.obj("oracle" -> Json.fromString("sigma-state:6.0.6 / scrypto:3.1.1"),
       "cases" -> Json.arr(cases: _*))
   }
 
@@ -955,7 +954,7 @@ object EvaluatedValueOracle {
     out("height_value_hex", hex(ValueSerializer.serialize(Height)))
     out("ctxext_height_parse", parseCtxExtHex("0101" + hex(ValueSerializer.serialize(Height))))
 
-    // ── context-extension key domain: 6.0.2 has no `k < 0` guard at parse ────
+    // ── context-extension key domain: 6.0.5+ rejects a `k < 0` id at parse ────
     out("ctxext_negative_key_parse", parseCtxExtHex("0180" + "0405"))
     out("reduce_negative_key_true_script",
       reduce(trueTree, extOf((-128: Byte) -> IntConstant(2)), Map.empty))

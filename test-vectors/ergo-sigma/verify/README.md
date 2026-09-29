@@ -1,7 +1,7 @@
 # Full verification fixtures
 
 Oracle: `scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala`,
-commit `2210c764` (sigma-state, ergo-core and ergo-wallet 6.0.2;
+commit `d3c7de47` (sigma-state, ergo-core and ergo-wallet 6.0.6;
 Scala 2.12, scala-cli 1.12). `cases.json` stores the exact requests and JVM
 response objects; `requests.jsonl` is the same request sequence for regeneration:
 
@@ -30,7 +30,7 @@ cover shortcut success and fallback for TX-storage-rent.
 ## Reproducibility manifest
 
 [`manifest.json`](manifest.json) records the script revision and SHA-256,
-exact sigma-state/ergo-core/ergo-wallet dependency versions (all 6.0.2),
+exact sigma-state/ergo-core/ergo-wallet dependency versions (all 6.0.6),
 Scala CLI and JVM versions, source anchors, Rust toolchain/features, synthetic
 context, run counts, timestamp, and hashes of every input and output artifact.
 The standalone artifact fallback is explicit: these are not 6.0.5 node results.
@@ -48,13 +48,13 @@ P2PK `rent_expired` box and on a 1 ERG `sigmaProp(true)` box. Where
 `checkExpiredBox` is false the JVM reports `rent_block_cost` 50, but
 `ErgoTransaction.verifyInput` rejects before adding it, so
 `ergo-validation/tests/it/cost_storage_rent.rs` compares only the verdict
-there. The difftest `verify` tests do not read this file. The cases were
-recorded against ergo-core and ergo-wallet 6.0.2 published locally from ergo
-`2cdbb8cf` (tag v6.0.2) with
+there. The difftest `verify` tests do not read this file. All three files were
+re-captured against ergo-core and ergo-wallet 6.0.6 published locally from ergo
+`23aabead` (tag v6.0.6) with
 `sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"`.
-With the same setup, regenerating `requests.jsonl` and `fix-requests.jsonl`
-reproduces every checked-in field of all 22 responses; the current script only
-adds `wrapped_rule_id`, `wrapped_rule_args` and `evaluator_failure_block_cost`.
+A 6.0.2 run of the same requests differs only in the request-decoding
+`failure_class`/`rejection_detail` of `rent-enabled-storage-factor-string`
+(circe 0.13 vs 0.14 class name); every verdict and cost is unchanged.
 
 Regenerate the raw JVM responses from the checked-in requests:
 

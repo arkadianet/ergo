@@ -33,7 +33,7 @@
 # process cannot overwrite another's evidence.
 #
 # Requires `scala-cli` on PATH and the oracle's dependencies resolvable
-# (sigma-state 6.0.2 from Maven, ergo-core 6.0.2 from a local `sbt
+# (sigma-state 6.0.6 from Maven, ergo-core 6.0.6 from a local `sbt
 # ergoCore/publishLocal` — see ergo-difftest/README.md "Oracle setup").
 
 set -euo pipefail

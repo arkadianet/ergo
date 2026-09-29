@@ -15,12 +15,12 @@
 // `src/main/resources` (application.conf + mainnet.conf provide the
 // mainnet ChainSettings exactly as the Scala node reads them).
 //
-// Dependency pinning matches scripts/jvm_serde_oracle (node = 6.0.2).
+// Dependency pinning matches scripts/jvm_serde_oracle (node = 6.0.6).
 //
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
 
 import java.io.File
 import java.nio.file.{Files, Paths}

@@ -141,6 +141,33 @@ fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
     Ok(raw as usize)
 }
 
+/// Read one ContextExtension variable id with Scala's SIGNED semantics.
+///
+/// Consensus parity (sigma-state 6.0.6): Scala
+/// `ContextExtension.serializer.parse`
+/// (`data/.../sigma/interpreter/ContextExtension.scala:58-60`) reads each id
+/// with `r.getByte()` — a signed byte — and rejects a negative one before
+/// reading its value (`if (k < 0) error("Negative id of context extension
+/// variable: $k")` → `SerializerException`). An id byte in `0x80..=0xFF`
+/// decodes to `-128..=-1` and rejects the whole transaction at parse. The
+/// guard landed in sigma-state 6.0.5 (commit e4ef1b203) and is not
+/// version-gated: it applies at every height and activated version. Before it,
+/// Scala accepted these ids; `getVar` could never reach them, since its id is
+/// a non-negative `Byte` too.
+///
+/// Scala's writer does not refuse a negative id, so the writer here keeps
+/// accepting any `u8` key; only the read side rejects.
+fn read_extension_key(r: &mut VlqReader) -> Result<u8, ReadError> {
+    let raw = r.get_u8()?;
+    if raw > 0x7f {
+        return Err(ReadError::InvalidData(format!(
+            "negative context-extension variable id: {} (Scala reads the id as a signed byte and rejects a negative one)",
+            raw as i8
+        )));
+    }
+    Ok(raw)
+}
+
 /// Read one ContextExtension entry value — any `EvaluatedValue` encoding the
 /// Scala reference accepts, not just a `Constant`.
 ///
@@ -448,7 +475,7 @@ pub fn read_context_extension(r: &mut VlqReader) -> Result<ContextExtension, Rea
     let count = read_extension_count(r)?;
     let mut values = IndexMap::with_capacity(count);
     for _ in 0..count {
-        let key = r.get_u8()?;
+        let key = read_extension_key(r)?;
         let (tpe, val) = read_extension_value(r)?;
         // Rule 1019 CheckV6Type: reject at parse, matching Scala's
         // per-entry `CheckV6Type(v)`. Version-independent, fires whether
@@ -482,7 +509,7 @@ pub fn split_context_extension_bytes(
     let count = read_extension_count(&mut r)?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
-        let key = r.get_u8()?;
+        let key = read_extension_key(&mut r)?;
         let (tpe, val) = read_extension_value(&mut r)?;
         let mut w = VlqWriter::new();
         write_extension_value(&mut w, &tpe, &val)
@@ -632,7 +659,7 @@ mod tests {
         // the ascending-min: they MUST diverge for some test keyset
         // (otherwise we'd silently regress to ascending).
         let mut ext = ContextExtension::empty();
-        for key in [3u8, 17, 42, 99, 200] {
+        for key in [3u8, 17, 42, 99, 120] {
             ext.values
                 .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
         }
@@ -665,7 +692,7 @@ mod tests {
         // order), and the writer must reproduce the same HAMT-
         // ordered bytes — otherwise `bytes_to_sign(tx)` desyncs.
         let mut ext = ContextExtension::empty();
-        for key in [11u8, 23, 47, 89, 137, 199, 251] {
+        for key in [11u8, 23, 47, 89, 101, 113, 127] {
             ext.values
                 .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
         }
@@ -689,13 +716,14 @@ mod tests {
     }
 
     #[test]
-    fn context_extension_n_5_high_bit_keys_round_trip() {
+    fn context_extension_n_5_high_bit_keys_write_in_hamt_order_and_fail_to_parse() {
         // Sign-extension regression: keys ≥ 128 (i8 negative when
-        // cast `as i8`). If `hamt_sort_key_for_byte_key` ever drops
-        // the `as i8` cast, the order changes for high-bit keys but
-        // the idempotency property here still holds. To distinguish:
-        // assert the high-bit-only and low-bit-only key sets produce
-        // DIFFERENT first-on-wire keys.
+        // cast `as i8`). Scala's writer still emits them (it never checks
+        // the id), so the writer must order them as Scala's HAMT does; if
+        // `hamt_sort_key_for_byte_key` ever drops the `as i8` cast, the
+        // order changes for high-bit keys. To distinguish: assert the
+        // high-bit-only and low-bit-only key sets produce DIFFERENT
+        // first-on-wire keys.
         let mut low_only = ContextExtension::empty();
         for key in [3u8, 17, 42, 65, 99] {
             low_only
@@ -717,19 +745,21 @@ mod tests {
         let high_bytes = w2.result();
 
         // First key on wire for each set — must be present in the
-        // respective input keyset (sanity), and round-trip cleanly.
+        // respective input keyset (sanity).
         let low_first = low_bytes[1];
         let high_first = high_bytes[1];
         assert!([3u8, 17, 42, 65, 99].contains(&low_first));
         assert!([131u8, 145, 170, 193, 227].contains(&high_first));
 
-        // Round-trip idempotency for the high-bit set (the case the
-        // sign-extension would break first).
-        let mut r = VlqReader::new(&high_bytes);
+        // The low-bit set round-trips; the high-bit set is refused on read,
+        // because each of its ids is negative as a signed byte.
+        let mut r = VlqReader::new(&low_bytes);
         let parsed = read_context_extension(&mut r).unwrap();
         let mut w3 = VlqWriter::new();
         write_context_extension(&mut w3, &parsed).unwrap();
-        assert_eq!(w3.result(), high_bytes);
+        assert_eq!(w3.result(), low_bytes);
+        let mut r = VlqReader::new(&high_bytes);
+        assert!(read_context_extension(&mut r).is_err());
     }
 
     // ----- error paths -----
@@ -1328,28 +1358,39 @@ mod tests {
         );
     }
 
-    /// sigma-state 6.0.2 has NO `k < 0` guard in
-    /// `ContextExtension.serializer.parse` (the check exists only in later
-    /// revisions), so a key byte with the high bit set parses fine and lands
-    /// as a negative Scala `Byte`. Oracle: `ACCEPT keys=-128 01800405`. The
-    /// rejection happens later, when `toSigmaContext` sizes the var array from
-    /// `keys.max` and throws `NegativeArraySizeException(-127)` — which the
-    /// evaluator's pre-reduction check mirrors
-    /// (`reduce.rs::trivial_p2pk_extension_key_high_bit_rejects`). Parse must
-    /// therefore ACCEPT, or the node would stall on a block the reference
-    /// merely fails to spend.
+    /// sigma-state 6.0.5 added a `k < 0` guard to
+    /// `ContextExtension.serializer.parse` (commit e4ef1b203): an id byte with
+    /// the high bit set is a negative Scala `Byte` and rejects at parse, before
+    /// its value is read. JVM oracle (`EvaluatedValueOracle.scala`,
+    /// `ctxext_negative_key_parse`): 6.0.2 `ACCEPT keys=-128 01800405`,
+    /// 6.0.6 rejects. The top id 0x7f still parses.
     #[test]
-    fn context_extension_high_bit_key_parses_and_round_trips() {
-        let bytes = from_hex("01800405");
+    fn read_context_extension_negative_id_rejects() {
+        for hex in ["01800405", "01ff0405"] {
+            let bytes = from_hex(hex);
+            let mut r = VlqReader::new(&bytes);
+            match read_context_extension(&mut r) {
+                Err(ReadError::InvalidData(msg)) => assert!(
+                    msg.contains("negative context-extension variable id"),
+                    "{hex}: got {msg}"
+                ),
+                other => panic!("{hex}: expected a negative-id reject, got {other:?}"),
+            }
+            let err = split_context_extension_bytes(&bytes).unwrap_err();
+            assert!(
+                matches!(&err, ReadError::InvalidData(m) if m.contains("negative context-extension variable id")),
+                "{hex}: split must refuse the same id, got {err:?}"
+            );
+        }
+        let bytes = from_hex("017f0405");
         let mut r = VlqReader::new(&bytes);
-        let ext = read_context_extension(&mut r).expect("6.0.2 parses a high-bit key");
+        let ext = read_context_extension(&mut r).expect("id 0x7f is the largest valid id");
         assert!(r.is_empty());
-        assert_eq!(ext.values.len(), 1);
         assert_eq!(
-            ext.values.get(&0x80),
+            ext.values.get(&0x7f),
             Some(&(SigmaType::SInt, SigmaValue::Int(-3)))
         );
-        assert_eq!(to_hex(&serialize_ext(&ext)), "01800405");
+        assert_eq!(to_hex(&serialize_ext(&ext)), "017f0405");
     }
 
     /// A node that is not an `EvaluatedValue` — `Height` (`0xa3`) — must be

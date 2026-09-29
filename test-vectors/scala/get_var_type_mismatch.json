@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2)",
+    "Ground truth from the Scala reference stack (sigma-state 6.0.6 + ergo-core 6.0.6)",
     "for getVar / getReg type-mismatch semantics -- an accept-invalid fork vector.",
     "",
     "CContext.getVar (sigmastate/eval/CContext.scala:60-74), reached from GetVar.eval",
@@ -17,8 +17,8 @@
     "`case _ => None`, so a mismatch there is None, not a throw."
   ],
   "source": {
-    "sigma_state": "6.0.2",
-    "ergo_core": "6.0.2",
+    "sigma_state": "6.0.6",
+    "ergo_core": "6.0.6",
     "activated_script_version": 3,
     "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
   },

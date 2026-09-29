@@ -57,9 +57,9 @@ def scala(script, args, requests=None):
 # The replay helper lives here so the imported-only capture has one tracked source.
 IMPORTED_ORACLE = r'''//> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
-//> using dep org.ergoplatform::ergo-wallet:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
 import java.io.File
 import java.nio.file.{Files, Paths}
 import com.typesafe.config.ConfigFactory

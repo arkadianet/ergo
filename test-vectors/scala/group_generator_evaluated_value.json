@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Ground truth from the Scala reference stack (sigma-state 6.0.2 + ergo-core 6.0.2).",
+    "Ground truth from the Scala reference stack (sigma-state 6.0.6 + ergo-core 6.0.6; source line numbers cite the v6.0.2 tag).",
     "Pins the fourth EvaluatedValue subclass -- GroupGenerator, sigma/ast/values.scala:709 --",
     "appearing as a stored VALUE in a box register and in a ContextExtension entry.",
     "ValueSerializer writes it as its bare one-byte opcode 0x82, not as the 34-byte",
@@ -9,8 +9,8 @@
     "and the JVM reduces it identically to a group-element constant of that point."
   ],
   "source": {
-    "sigma_state": "6.0.2",
-    "ergo_core": "6.0.2",
+    "sigma_state": "6.0.6",
+    "ergo_core": "6.0.6",
     "activated_script_version": 3,
     "generator": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
   },
