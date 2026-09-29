@@ -729,6 +729,59 @@ mod tests {
 
     // ----- oracle parity -----
 
+    /// Scala writes a transaction's outputs back from their parsed trees and
+    /// registers, so its id commits to the canonical bytes even when the wire
+    /// carries a non-canonical form the reference accepts. Vectors from SANTA
+    /// `Transaction.tree_count_wrap` #0-#2 and `Transaction.tree_parse_acceptance`
+    /// #2/#3 (https://github.com/mwaddip/santa, MIT), plus a TrueLeaf register;
+    /// every expected value is our own sigma-state 6.0.6 JVM run
+    /// (`SantaWireOracle.scala`, and `ErgoTransactionSerializer` for the id).
+    #[test]
+    fn transaction_with_non_canonical_outputs_writes_and_hashes_the_canonical_form() {
+        let prefix =
+            "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d";
+        for (name, output, canonical) in [
+            (
+                "constants count 2^32-1",
+                "1807ffffffff0f08d3010000",
+                "18030008d3010000",
+            ),
+            (
+                "constants count 2^31",
+                "1807808080800808d3010000",
+                "18030008d3010000",
+            ),
+            (
+                "unsized count 2^32-1",
+                "10ffffffff0f08d3010000",
+                "100008d3010000",
+            ),
+            ("TrueLeaf body", "00d17f010000", "00d10101010000"),
+            ("FalseLeaf body", "00d180010000", "00d10100010000"),
+            ("TrueLeaf R4", "0008d30100017f", "0008d30100010101"),
+        ] {
+            let bytes = hex::decode(format!("{prefix}{output}")).unwrap();
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let tx = read_transaction(&mut r).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(r.is_empty(), "{name}");
+            let mut w = VlqWriter::new();
+            write_transaction(&mut w, &tx).unwrap();
+            assert_eq!(
+                hex::encode(w.result()),
+                format!("{prefix}{canonical}"),
+                "{name}"
+            );
+        }
+        // The TrueLeaf-register transaction's id, as the JVM computes it.
+        let bytes = hex::decode(format!("{prefix}0008d30100017f")).unwrap();
+        let tx =
+            read_transaction(&mut VlqReader::new(&bytes).with_activated_script_version(3)).unwrap();
+        assert_eq!(
+            hex::encode(transaction_id(&tx).unwrap().as_bytes()),
+            "9aa2fdeccef1976c7b7dd004a38a51d74429fd9f47486121c8b204b0d6f5650c"
+        );
+    }
+
     /// Scala oracle vector: a 1-in / 1-out transaction whose input's
     /// ContextExtension carries a `Tuple` node (`0x86`) at var 1 and a
     /// `ConcreteCollection` (`0x83`) at var 2. `ErgoTransactionSerializer`

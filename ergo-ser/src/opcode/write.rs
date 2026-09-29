@@ -66,9 +66,31 @@ fn concrete_bool_collection(node: &IrNode) -> Option<Vec<bool>> {
                 tpe: SigmaType::SBoolean,
                 val: SigmaValue::Boolean(b),
             } => Some(*b),
-            _ => None,
+            other => boolean_leaf(other),
         })
         .collect()
+}
+
+/// `TrueLeaf` / `FalseLeaf` (opcodes 0x7F / 0x80) as the Boolean they are.
+///
+/// Scala declares both as `ConstantNode`s (`values.scala:771`, `:782`), so the
+/// parser accepts the bare opcode while every write treats them as constants:
+/// `ValueSerializer.serialize` sends a `Constant` through `ConstantSerializer`
+/// or the segregation store (`ValueSerializer.scala:362-370`), and a
+/// `Coll[Boolean]` of them counts as constants for the packed `0x85` form
+/// (`values.scala:871`). The writer never emits the opcode form.
+fn boolean_leaf(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Op(IrNode {
+            opcode: 0x7F,
+            payload: Payload::Zero,
+        }) => Some(true),
+        Expr::Op(IrNode {
+            opcode: 0x80,
+            payload: Payload::Zero,
+        }) => Some(false),
+        _ => None,
+    }
 }
 
 /// Constant sink for the segregation write pass — the Rust analogue of Scala's
@@ -190,6 +212,17 @@ fn write_expr_inner(
         }
     } else {
         expr
+    };
+    let leaf;
+    let expr = match boolean_leaf(expr) {
+        Some(b) => {
+            leaf = Expr::Const {
+                tpe: SigmaType::SBoolean,
+                val: SigmaValue::Boolean(b),
+            };
+            &leaf
+        }
+        None => expr,
     };
     match expr {
         Expr::Const { tpe, val } => match sink {

@@ -3,6 +3,7 @@ mod ergotrees_roundtrip;
 mod headers_roundtrip;
 mod nipopow_scala_oracle;
 mod roundtrip_triage;
+mod santa_wire;
 mod sbigint_cap_oracle;
 mod sigma_type_golden;
 mod stypevar_utf8_parity;

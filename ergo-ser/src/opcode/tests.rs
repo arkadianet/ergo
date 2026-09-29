@@ -154,13 +154,57 @@ fn roundtrip_zero_arg_opcodes() {
     // 0x81 UnitConstant intentionally absent from this set: SUnit
     // values roundtrip through the constant-encoding path, not a
     // dispatch arm.
-    for &op in &[0x7F, 0x80, 0x82, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xAC, 0xFE] {
+    // 0x7F TrueLeaf / 0x80 FalseLeaf are absent too: they parse as opcodes but
+    // are written back as Boolean constants, see
+    // `true_leaf_and_false_leaf_write_back_as_boolean_constants`.
+    for &op in &[0x82, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xAC, 0xFE] {
         let body = Expr::Op(IrNode {
             opcode: op,
             payload: Payload::Zero,
         });
         roundtrip(&body, false);
     }
+}
+
+/// `TrueLeaf` / `FalseLeaf` are Scala `ConstantNode`s: the opcode form parses,
+/// and every write sends them through `ConstantSerializer` (`01 01` / `01 00`),
+/// into the segregation store, or into the packed `0x85` form of a
+/// `Coll[Boolean]`. JVM (`ErgoSerdeOracle.scala`, sigma-state 6.0.6,
+/// `ergo_box_candidate` surface, from SANTA `Box.tree_parse_acceptance` #2/#3):
+/// the tree `00 d1 7f` comes back as `00 d1 01 01`, `00 d1 80` as `00 d1 01 00`.
+#[test]
+fn true_leaf_and_false_leaf_write_back_as_boolean_constants() {
+    let write = |expr: &Expr| {
+        let mut w = VlqWriter::new();
+        write_expr(&mut w, expr, false).unwrap();
+        hex::encode(w.result())
+    };
+    let parse = |hex_in: &str| {
+        let bytes = hex::decode(hex_in).unwrap();
+        let mut r = VlqReader::new(&bytes);
+        let expr = parse_expr(&mut r, 0, 0).unwrap();
+        assert!(r.is_empty());
+        expr
+    };
+    assert_eq!(write(&parse("7f")), "0101");
+    assert_eq!(write(&parse("80")), "0100");
+    // BoolToSigmaProp(TrueLeaf) / (FalseLeaf)
+    assert_eq!(write(&parse("d17f")), "d10101");
+    assert_eq!(write(&parse("d180")), "d10100");
+    // Coll[Boolean](TrueLeaf, FalseLeaf) as 0x83 packs to 0x85 [true, false].
+    assert_eq!(
+        write(&parse("830201 7f80".replace(' ', "").as_str())),
+        "850201"
+    );
+    // Segregation extracts them like any constant.
+    let mut sink = ConstantSink::default();
+    let mut w = VlqWriter::new();
+    write_expr_segregating(&mut w, &parse("d17f"), &mut sink).unwrap();
+    assert_eq!(hex::encode(w.result()), "d17300");
+    assert_eq!(
+        sink.into_constants(),
+        vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))]
+    );
 }
 
 #[test]
@@ -198,10 +242,10 @@ fn roundtrip_two_arg_opcode() {
 #[test]
 fn roundtrip_three_arg_opcode() {
     // If(True, Height, Height)
-    let cond = Expr::Op(IrNode {
-        opcode: 0x7F,
-        payload: Payload::Zero,
-    });
+    let cond = Expr::Const {
+        tpe: SigmaType::SBoolean,
+        val: SigmaValue::Boolean(true),
+    };
     let h1 = Expr::Op(IrNode {
         opcode: 0xA3,
         payload: Payload::Zero,
@@ -580,10 +624,10 @@ fn roundtrip_tuple() {
             opcode: 0xA3,
             payload: Payload::Zero,
         }),
-        Expr::Op(IrNode {
-            opcode: 0x7F,
-            payload: Payload::Zero,
-        }),
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
     ];
     let body = Expr::Op(IrNode {
         opcode: 0x86,
@@ -693,14 +737,14 @@ fn roundtrip_deserialize_register_with_default() {
 #[test]
 fn roundtrip_sigma_and() {
     let items = vec![
-        Expr::Op(IrNode {
-            opcode: 0x7F,
-            payload: Payload::Zero,
-        }),
-        Expr::Op(IrNode {
-            opcode: 0x80,
-            payload: Payload::Zero,
-        }),
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(true),
+        },
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(false),
+        },
     ];
     let body = Expr::Op(IrNode {
         opcode: 0xEA,

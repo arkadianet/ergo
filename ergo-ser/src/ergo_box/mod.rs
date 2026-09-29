@@ -32,9 +32,11 @@ pub use whole::{
 
 /// Parsed box candidate with a structured ErgoTree.
 ///
-/// The ErgoTree is stored in parsed form AND as raw bytes. The raw bytes
-/// are used for wire-compatible serialization (the tree is written directly
-/// into the box byte stream, matching Scala/sigma-rust behavior).
+/// The ErgoTree is stored in parsed form AND as the bytes it was read from
+/// ([`ErgoBoxCandidate::ergo_tree_bytes`], Scala's `propositionBytes`). The box
+/// is written with the canonical re-serialization of the parsed tree
+/// ([`ErgoBoxCandidate::serialized_ergo_tree_bytes`]), which is the same bytes
+/// for every canonically encoded tree.
 ///
 /// # Standalone parsing limitation
 ///
@@ -55,6 +57,9 @@ pub struct ErgoBoxCandidate {
     pub value: u64,
     ergo_tree: ErgoTree,
     ergo_tree_bytes: Vec<u8>,
+    /// The canonical re-serialization of `ergo_tree`, kept only when it differs
+    /// from `ergo_tree_bytes`. See [`ErgoBoxCandidate::serialized_ergo_tree_bytes`].
+    canonical_tree_bytes: Option<Vec<u8>>,
     /// Block height at which this candidate is created (consensus
     /// rejects boxes whose `creation_height` is greater than the
     /// containing block's height).
@@ -85,6 +90,7 @@ impl ErgoBoxCandidate {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes: None,
             creation_height,
             tokens,
             additional_registers,
@@ -123,6 +129,7 @@ impl ErgoBoxCandidate {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes: None,
             creation_height,
             tokens,
             additional_registers,
@@ -210,6 +217,7 @@ impl ErgoBoxCandidate {
             value,
             ergo_tree,
             ergo_tree_bytes,
+            canonical_tree_bytes: None,
             creation_height,
             tokens,
             additional_registers,
@@ -222,20 +230,36 @@ impl ErgoBoxCandidate {
         &self.ergo_tree
     }
 
-    /// Verbatim canonical bytes of the `ErgoTree`. Preserved across
-    /// parse so callers needing byte-exact roundtrip — including
-    /// `box_id` computation — don't have to re-serialize through the
-    /// writer.
+    /// The `ErgoTree` bytes as received: Scala's `ErgoTree.bytes`, which is
+    /// what a script reads as `propositionBytes` and what the proposition-size
+    /// and storage-rent checks compare. For a tree parsed off the wire these
+    /// are the exact input bytes, even where they are not canonical.
     pub fn ergo_tree_bytes(&self) -> &[u8] {
         &self.ergo_tree_bytes
     }
 
-    /// Verbatim bytes the parser preserved for `additional_registers`.
+    /// The `ErgoTree` bytes a box is written with, and so the bytes its id and
+    /// its transaction's id commit to.
     ///
-    /// Returned slice is the raw `count(u8) || concat(register_bytes)` wire
-    /// form — feed it to `split_register_bytes` to recover per-register
-    /// hex without round-tripping through the structured representation.
-    /// Byte-equal to what came in off the wire.
+    /// Scala writes a box's tree back from the parsed structure
+    /// (`ErgoBoxCandidate.serializeBodyWithIndexedDigests` calls
+    /// `DefaultSerializer.serializeErgoTree`, `ErgoBoxCandidate.scala:142`),
+    /// never from the bytes it read. So a tree the reference accepts in a
+    /// non-canonical form (a declared size that is not the body's length, a
+    /// constants count that wraps negative, a `TrueLeaf` opcode, an over-long
+    /// VLQ) is written back canonically, while `propositionBytes` keeps the
+    /// input. A soft-fork-wrapped tree is written back as it was read.
+    pub fn serialized_ergo_tree_bytes(&self) -> &[u8] {
+        self.canonical_tree_bytes
+            .as_deref()
+            .unwrap_or(&self.ergo_tree_bytes)
+    }
+
+    /// The serialized `additional_registers`: the `count(u8) ||
+    /// concat(register_bytes)` wire form, feed it to `split_register_bytes` to
+    /// recover per-register hex. A parsed box keeps the CANONICAL
+    /// re-serialization of its registers, as Scala writes a box back from its
+    /// parsed register values.
     pub fn register_bytes(&self) -> &[u8] {
         &self.register_bytes
     }
@@ -264,6 +288,16 @@ impl ErgoBox {
         let bytes = serialize_ergo_box(self)?;
         Ok(blake2b256(&bytes))
     }
+}
+
+/// The canonical re-serialization of a parsed tree, when it differs from the
+/// bytes it was read from; see [`ErgoBoxCandidate::serialized_ergo_tree_bytes`].
+/// A tree the writer cannot re-serialize keeps its input bytes.
+pub(crate) fn canonical_tree_bytes(tree: &ErgoTree, input: &[u8]) -> Option<Vec<u8>> {
+    let mut w = VlqWriter::new();
+    write_ergo_tree(&mut w, tree).ok()?;
+    let canonical = w.result();
+    (canonical != input).then_some(canonical)
 }
 
 /// Scala writes the per-box token count as a single unsigned byte;

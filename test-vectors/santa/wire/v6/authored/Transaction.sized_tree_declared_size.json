@@ -1,0 +1,42 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.sized_tree_declared_size",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-sized-tree-control#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-declared-size",
+      "description" : "A transaction whose only output has the size-flagged v1 tree 09 02 08 d3 (sigmaProp(true)); the declared size 2 is the body's. Round-trip identity: the control for the two mismatches.",
+      "bytes_hex" : "010f9267b537544e9f57a5b1d67dc0da2c6dfd706f28359b7c9021988a7e5b20c000000000018094ebdc03090208d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sized-tree-declared-over#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-declared-size",
+      "description" : "A transaction whose only output has the tree declared as 3 bytes while its body 08 d3 takes 2. The JVM ignores the declared size when the body parses (ErgoTreeSerializer.scala:141-215; the size is read only for the degrade branch), reads the next byte as the creation height as usual, and re-serializes with the recomputed size 2. An impl that consumes exactly the declared size swallows the creation-height byte and misreads every later field.",
+      "bytes_hex" : "010f9267b537544e9f57a5b1d67dc0da2c6dfd706f28359b7c9021988a7e5b20c000000000018094ebdc03090308d3010000",
+      "expected_bytes_hex" : "010f9267b537544e9f57a5b1d67dc0da2c6dfd706f28359b7c9021988a7e5b20c000000000018094ebdc03090208d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-sized-tree-declared-under#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-declared-size",
+      "description" : "A transaction whose only output has the tree declared as 1 byte while its body 08 d3 takes 2. The JVM parses the whole body anyway and re-serializes with the recomputed size 2. An impl that consumes exactly the declared size runs out of body bytes: it rejects the object, or degrades the tree and misreads the rest.",
+      "bytes_hex" : "010f9267b537544e9f57a5b1d67dc0da2c6dfd706f28359b7c9021988a7e5b20c000000000018094ebdc03090108d3010000",
+      "expected_bytes_hex" : "010f9267b537544e9f57a5b1d67dc0da2c6dfd706f28359b7c9021988a7e5b20c000000000018094ebdc03090208d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}
