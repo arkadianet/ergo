@@ -510,7 +510,21 @@ fn parse_node(
             let elem_type = read_type(r)?;
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
-                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let item = parse_typed_expr(r, next, _tree_version, types, children)?;
+                // `ConcreteCollectionSerializer.parse` asserts
+                // `v.tpe == tItem` per item. An `AssertionError` is not a
+                // `ValidationException`, so even a sized tree hard-rejects.
+                // Only a constant's wire type is checked here: it is exactly
+                // Scala's `tpe`, while an inferred type may not be.
+                if let Expr::Const { tpe, .. } = &item {
+                    if *tpe != elem_type {
+                        return Err(ReadError::HardReject(format!(
+                            "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} \
+                             (Scala AssertionError)"
+                        )));
+                    }
+                }
+                items.push(item);
             }
             Payload::ConcreteCollection { elem_type, items }
         }

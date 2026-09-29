@@ -121,6 +121,13 @@ where
         );
     }
     if v1.parity_normalized(true) != v2.parity_normalized(false) {
+        // Bug #19 can also re-decode successfully: the rewritten bytes after a
+        // size-delimited wrap become its lookahead and now parse structurally.
+        // Scala re-serializes these inputs identically, so only that
+        // wrap→structural flip is exempt.
+        if is_soft_fork_opaque(&v1) && !is_soft_fork_opaque(&v2) {
+            return Outcome::WriteRejected;
+        }
         return Outcome::bug("structure changed across re-encode".into(), input);
     }
 
@@ -706,6 +713,47 @@ mod tests {
         ));
     }
 
+    /// The Bug #19 reshape can also re-decode successfully: the canonical
+    /// rewrite hands the size-delimited body new lookahead bytes, and the
+    /// soft-fork wrap becomes a structural parse. Only that wrap→structural
+    /// flip is exempt; a change that keeps or gains opacity is still a Bug.
+    #[test]
+    fn rw_check_opaque_to_structural_flip_write_rejected() {
+        fn decode(r: &mut VlqReader) -> Result<u8, ReadError> {
+            r.get_u8()
+        }
+        fn encode_next(w: &mut VlqWriter, v: &u8) -> Result<(), WriteError> {
+            w.put_u8(v + 1);
+            Ok(())
+        }
+        assert_eq!(
+            rw_check(&[5], decode, encode_next, |v| *v == 5),
+            Outcome::WriteRejected
+        );
+        for opaque in [|_: &u8| true, |_: &u8| false, |v: &u8| *v == 6] {
+            assert!(matches!(
+                rw_check(&[5], decode, encode_next, opaque),
+                Outcome::Bug(_)
+            ));
+        }
+    }
+
+    /// Nightly 2026-09-29 (main `bd9c1172`): a v3 sized tree declares a
+    /// 0-byte body, and its lookahead into an overlong creation height wraps
+    /// as rule 1002. sigma-state 6.0.2 accepts the input (43 bytes, tree
+    /// `Unparsed(eb00)`) and re-serializes it to the same bytes we write.
+    #[test]
+    fn nightly_20260929_box_candidate_reshape_write_rejected() {
+        let bytes = hex::decode(
+            "00eb00e4daff81000100000000000000002e01000006b7b72e000000000000000001fd261000000000000000f0f0",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
     #[test]
     fn rw_check_both_opaque_byte_drift_bug() {
         assert!(matches!(
@@ -1069,6 +1117,7 @@ mod tests {
                 continue;
             }
             let fields: Vec<_> = line.split_whitespace().collect();
+            assert!(fields.len() > 4, "malformed fixture row: {line}");
             let surface = fields[0].strip_prefix("nightly_20260929_").unwrap();
             let bytes = hex::decode(fields[4]).unwrap();
             let expected = if surface == "constant" {
@@ -1099,6 +1148,7 @@ mod tests {
                 "tree" => ergo_ser::ergo_tree::read_ergo_tree(&mut r).map(|_| ()),
                 "constant" => ergo_ser::sigma_value::read_constant(&mut r).map(|_| ()),
                 "candidate" => ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map(|_| ()),
+                "tx" => ergo_ser::transaction::read_transaction(&mut r).map(|_| ()),
                 surface => panic!("unknown surface {surface}"),
             };
             assert_eq!(
