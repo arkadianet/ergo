@@ -710,7 +710,9 @@ fn parse_node(
             // ByIndex.tpe casts the receiver's type to SCollection after the
             // default has been parsed. Unknown types stay lenient.
             if let Some(Some(tpe)) = children.first() {
-                if !matches!(tpe, SigmaType::SColl(_)) {
+                // Scala STuple extends SCollection[SAny], so dynamic tuple
+                // indexing also reaches this constructor.
+                if !matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)) {
                     return Err(ReadError::HardReject(format!(
                         "ByIndex input must be a collection, got {tpe:?}"
                     )));
