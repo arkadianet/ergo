@@ -1,0 +1,167 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.tree_bool_pair_form",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-plus-on-bool-collections-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Plus(C, C), C)), C = Coll[Boolean](true) (85 01 01). Only the nine relations read an 85 after their opcode as a packed Boolean pair; for Plus it is the start of a Boolean collection constant. The builder does not check an arithmetic operation's operand types at parse, so the tree parses. Round-trip identity. An impl that reads the pair form here consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1939a850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-minus-on-bool-collections-accept#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is the same with Minus (99). Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d19399850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-eq-bool-pair-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(true, true)) in the relation's packed pair form, 93 85 03. Round-trip identity.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1938503010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-multiply-on-bool-collections-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Multiply(C, C), C)), C = Coll[Boolean](true) (85 01 01). Multiply (9c) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1939c850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-division-on-bool-collections-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Division(C, C), C)), C = Coll[Boolean](true) (85 01 01). Division (9d) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1939d850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-modulo-on-bool-collections-accept#5",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Modulo(C, C), C)), C = Coll[Boolean](true) (85 01 01). Modulo (9e) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d1939e850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-min-on-bool-collections-accept#6",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Min(C, C), C)), C = Coll[Boolean](true) (85 01 01). Min (a1) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193a1850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-max-on-bool-collections-accept#7",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(Max(C, C), C)), C = Coll[Boolean](true) (85 01 01). Max (a2) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193a2850101850101850101010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitor-on-bool-collections-reject#8",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(BitOr(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitOr (f2) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193f2850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitand-on-bool-collections-reject#9",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(BitAnd(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitAnd (f3) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193f3850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitxor-on-bool-collections-reject#10",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction output whose tree is BoolToSigmaProp(EQ(BitXor(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitXor (f5) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d00d193f5850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitor-on-bool-collections-sized-reject#11",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A transaction output whose tree is the same BitOr, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080cd193f2850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitand-on-bool-collections-sized-reject#12",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A transaction output whose tree is the same BitAnd, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080cd193f3850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-bitxor-on-bool-collections-sized-reject#13",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A transaction output whose tree is the same BitXor, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d080cd193f5850101850101850101010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}
