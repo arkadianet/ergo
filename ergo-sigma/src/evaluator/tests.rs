@@ -4130,6 +4130,60 @@ fn opcode_extract_amount_sbox_constant_sizeless_tree() {
     assert_eq!(run_eval(&expr), Value::Long(1_000_000));
 }
 
+/// Output (0 txid, index 0) holding 1,000,000 nanoErgs under the sized v0
+/// tree `08 02 72 01`: its body is `ValUse(1)`, which only an enclosing tree
+/// that binds val 1 can resolve.
+fn box_bytes_using_val_1() -> Vec<u8> {
+    build_box(
+        1_000_000,
+        &[0x08, 0x02, 0x72, 0x01],
+        100,
+        &[],
+        &reg_none(),
+        &[0; 32],
+        0,
+    )
+}
+
+/// Scala parses an `SBox` constant on the enclosing tree's reader, so its
+/// script may use a val the enclosing tree bound, and it keeps the parsed
+/// `ErgoBox` rather than parsing the bytes again. Materializing the constant
+/// must not run a standalone box parse, whose empty binding store rejects
+/// that `ValUse`. JVM (ErgoSerdeOracle `ergo_tree`, sigma-state 6.0.6):
+/// `{ val v1 = sigmaProp(true); sigmaProp(<box>.value > 0L) }` ACCEPT, the
+/// same box without the binding REJECT NoSuchElementException.
+#[test]
+fn sbox_constant_using_enclosing_val_materializes() {
+    let mut tree = hex::decode("00d801d60108d3d191c163").unwrap();
+    tree.extend_from_slice(&box_bytes_using_val_1());
+    tree.extend_from_slice(&[0x05, 0x00]);
+    let mut r = ergo_primitives::reader::VlqReader::new(&tree);
+    let parsed = ergo_ser::ergo_tree::read_ergo_tree(&mut r).expect("JVM accepts");
+    assert!(r.is_empty());
+    assert_eq!(
+        run_eval(&parsed.body),
+        Value::SigmaProp(SigmaBoolean::TrivialProp(true))
+    );
+
+    let mut unbound = hex::decode("00d191c163").unwrap();
+    unbound.extend_from_slice(&box_bytes_using_val_1());
+    unbound.extend_from_slice(&[0x05, 0x00]);
+    let mut r = ergo_primitives::reader::VlqReader::new(&unbound);
+    assert!(
+        ergo_ser::ergo_tree::read_ergo_tree(&mut r).is_err(),
+        "JVM rejects"
+    );
+}
+
+/// `SGlobal.serialize` charges an `SBox` by walking its bytes; like
+/// materializing it, that walk must not reparse the box standalone.
+#[test]
+fn serialize_put_cost_box_using_enclosing_val() {
+    // 3(value) + chunk(4)=7(tree) + 0(height) + 1(nTok) + 1(nRegs)
+    // + 35(txId) + 3(index) = 50.
+    assert_eq!(ser_box_cost(box_bytes_using_val_1()), 50);
+}
+
 /// An SBox materialized from a constant must keep the real transaction id
 /// and output index from the serialized box tail (read_ergo_box parses
 /// both), not zero them. ExtractCreationInfo (0xC7) surfaces them as the R3

@@ -46,7 +46,15 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     read_ergo_box_candidate_parts(r)
 }
 
-fn read_ergo_box_candidate_parts(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+/// Read the candidate of a box already accepted inside an enclosing parse,
+/// such as an `SBox` constant's bytes; see [`super::read_accepted_ergo_box`].
+pub fn read_accepted_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    read_ergo_box_candidate_parts(r)
+}
+
+pub(super) fn read_ergo_box_candidate_parts(
+    r: &mut VlqReader,
+) -> Result<ErgoBoxCandidate, ReadError> {
     // Top-level entry: the nesting budget must start unconsumed. See the same
     // backstop in `read_transaction` — a leaked base shows up as a node
     // rejecting valid input with a depth error nothing explains.

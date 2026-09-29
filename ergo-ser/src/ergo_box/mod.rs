@@ -24,10 +24,13 @@ mod candidate;
 mod candidate_indexed;
 mod whole;
 
-pub use candidate::{read_ergo_box_candidate, write_ergo_box_candidate};
+pub use candidate::{
+    read_accepted_ergo_box_candidate, read_ergo_box_candidate, write_ergo_box_candidate,
+};
 pub use candidate_indexed::{read_ergo_box_candidate_indexed, write_ergo_box_candidate_indexed};
 pub use whole::{
-    box_id_with, parse_ergo_box_bytes, read_ergo_box, serialize_ergo_box, write_ergo_box,
+    box_id_with, parse_ergo_box_bytes, read_accepted_ergo_box, read_ergo_box, serialize_ergo_box,
+    write_ergo_box,
 };
 
 /// Parsed box candidate with a structured ErgoTree.
