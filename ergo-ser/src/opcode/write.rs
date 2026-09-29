@@ -23,19 +23,16 @@ fn relation2_bool_pair(opcode: u8, a: &Expr, b: &Expr) -> Option<(bool, bool)> {
     if !matches!(opcode_pattern(opcode), Some(ArgPattern::Relation2)) {
         return None;
     }
-    match (a, b) {
-        (
-            Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(left),
-            },
-            Expr::Const {
-                tpe: SigmaType::SBoolean,
-                val: SigmaValue::Boolean(right),
-            },
-        ) => Some((*left, *right)),
-        _ => None,
-    }
+    // `TrueLeaf` / `FalseLeaf` are Boolean constants here too, so a relation
+    // over them packs like one over `01 01` / `01 00` (see [`boolean_leaf`]).
+    let boolean = |e: &Expr| match e {
+        Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(b),
+        } => Some(*b),
+        other => boolean_leaf(other),
+    };
+    Some((boolean(a)?, boolean(b)?))
 }
 
 /// The packed bit values if `node` is a `ConcreteCollection` (`0x83`) whose

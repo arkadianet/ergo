@@ -186,11 +186,20 @@ fn true_leaf_and_false_leaf_write_back_as_boolean_constants() {
         assert!(r.is_empty());
         expr
     };
+    let true_const = Expr::Const {
+        tpe: SigmaType::SBoolean,
+        val: SigmaValue::Boolean(true),
+    };
+    assert_eq!(parse("7f"), true_const, "TrueLeaf parses as the constant");
     assert_eq!(write(&parse("7f")), "0101");
     assert_eq!(write(&parse("80")), "0100");
     // BoolToSigmaProp(TrueLeaf) / (FalseLeaf)
     assert_eq!(write(&parse("d17f")), "d10101");
     assert_eq!(write(&parse("d180")), "d10100");
+    // EQ(TrueLeaf, FalseLeaf) packs its operands like EQ(true, false). JVM
+    // (`ergo_box_candidate` surface): `c0843d00d1937f80010000` writes back as
+    // `c0843d00d1938501010000`.
+    assert_eq!(write(&parse("d1937f80")), "d1938501");
     // Coll[Boolean](TrueLeaf, FalseLeaf) as 0x83 packs to 0x85 [true, false].
     assert_eq!(
         write(&parse("830201 7f80".replace(' ', "").as_str())),

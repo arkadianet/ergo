@@ -175,6 +175,17 @@ fn parse_node(
         return Ok(Expr::Const { tpe, val });
     }
 
+    // `TrueLeaf` / `FalseLeaf` are `ConstantNode`s in Scala (`values.scala:
+    // 771-790`): the parser accepts the bare opcode, but the node it builds is
+    // the Boolean constant, with `Constant.costKind`, and every write treats it
+    // as one. Parse it as the constant so evaluation, typing and the canonical
+    // re-encoding (`01 01` / `01 00`) all see the same node.
+    if first == 0x7F || first == 0x80 {
+        return Ok(Expr::Const {
+            tpe: SigmaType::SBoolean,
+            val: SigmaValue::Boolean(first == 0x7F),
+        });
+    }
     let pattern = opcode_pattern(first).ok_or_else(|| ReadError::SigmaValidation {
         rule_id: 1002,
         args: vec![first],

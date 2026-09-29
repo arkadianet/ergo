@@ -414,7 +414,10 @@ view!(
     (
         v.value,
         v.ergo_tree().parity_normalized(false),
-        v.ergo_tree_bytes().to_vec(),
+        // The bytes the box is written with, which its id commits to. The
+        // bytes as read (`ergo_tree_bytes`) legitimately change when a
+        // non-canonical tree is re-encoded.
+        v.serialized_ergo_tree_bytes().to_vec(),
         v.creation_height,
         v.tokens.clone(),
         v.additional_registers.parity_normalized(false),

@@ -758,6 +758,11 @@ mod tests {
             ),
             ("TrueLeaf body", "00d17f010000", "00d10101010000"),
             ("FalseLeaf body", "00d180010000", "00d10100010000"),
+            (
+                "EQ(TrueLeaf, FalseLeaf)",
+                "00d1937f80010000",
+                "00d1938501010000",
+            ),
             ("TrueLeaf R4", "0008d30100017f", "0008d30100010101"),
         ] {
             let bytes = hex::decode(format!("{prefix}{output}")).unwrap();

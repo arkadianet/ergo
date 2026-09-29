@@ -305,6 +305,7 @@ mod tests {
             ("10ffffffff0f08d3", "100008d3"),
             ("00d17f", "00d10101"),
             ("00d180", "00d10100"),
+            ("00d1937f80", "00d1938501"),
         ] {
             let bytes = hex::decode(format!("c0843d{tree}{tail}")).unwrap();
             let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
