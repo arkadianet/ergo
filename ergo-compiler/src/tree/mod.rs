@@ -834,6 +834,35 @@ mod tests {
         assert_eq!(err.class(), "SerializerException");
     }
 
+    // ----- error paths -----
+
+    #[test]
+    fn serialize_mismatched_if_branches_rejects_assertion_error() {
+        // compile_seed.json (6.0.6): REJECT 0:0 AssertionError.
+        let err = compile(
+            &ScriptEnv::new(),
+            "serialize(if (HEIGHT > 5) SELF.value else SELF.id)",
+            3,
+            NetworkPrefix::Testnet,
+        )
+        .unwrap_err();
+        assert_eq!(err.class(), "AssertionError");
+        assert_eq!(err.pos(), 0);
+    }
+
+    #[test]
+    fn graph_building_missing_method_reports_selector_position() {
+        // compile_seed.json (6.0.6): the graph phase inherits Select's context.
+        for (src, version, col) in [
+            ("Coll(1, 2, 3).map", 3, 15),
+            ("sigmaProp(1.toBytes.size == 1)", 2, 13),
+        ] {
+            let err = compile(&ScriptEnv::new(), src, version, NetworkPrefix::Testnet).unwrap_err();
+            assert_eq!(err.class(), "GraphBuildingException", "{src}");
+            assert_eq!(crate::span::line_col(src, err.pos()), (1, col), "{src}");
+        }
+    }
+
     // ----- error paths: GraphBuilding parity gates (lib.rs D-C5) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries

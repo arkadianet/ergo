@@ -274,20 +274,8 @@ fn assert_err(result: Result<String, CompileError>, verb: &str, src: &str) -> Co
 /// The oracle's `REJECT <line>:<col>` token is advisory (E5) — this test pins
 /// the advisory channel so positions stay USEFUL for tooling, without making
 /// them consensus-graded facts.
-const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[
-    // Scala's MethodNotFound cites `obj.sourceContext` (SigmaTyper.scala:93) —
-    // the Height CASE-OBJECT singleton's write-once SourceContext
-    // (values.scala:81-90, TyperOracle.scala Risk R1). That slot is JVM-global
-    // mutable state: its value depends on which source touched the singleton
-    // first (in batch mode the position CHANGES across sources; the fresh-JVM
-    // capture records 1:5, an artifact of the singleton mechanism itself).
-    // This port deliberately does not replicate write-once singletons — the
-    // error cites the Ident's real offset (1:1) instead.
-    (
-        "HEIGHT.foo",
-        "cites the Height case-object singleton's write-once SourceContext (Risk R1)",
-    ),
-];
+// SigmaTyper.scala:145-147 (v6.0.6) cites the selector, including HEIGHT.foo.
+const POSITION_DEVIATION_SOURCES: &[(&str, &str)] = &[];
 
 /// Every `REJECT` record with a non-`0:0` oracle position: our
 /// `CompileError::pos()` must convert (span::line_col) to the SAME `line:col`
@@ -344,20 +332,20 @@ fn seed_reject_records_position_parity() {
         .iter()
         .map(|&(s, reason)| format!("{s:?} ({reason})"))
         .collect();
-    // 22 through §26; §27 (issue #332) adds 8 positioned typer rejects.
+    // The 6.0.6 seed has 31 positioned rejects, including the val ascription.
     assert_eq!(
         positioned,
-        30,
+        31,
         "swept {positioned} positioned reject records (pre-deviation-filter), \
-         expected exactly 30 — seed may have shrunk/grown. Currently excluded \
+         expected exactly 31 — seed may have shrunk/grown. Currently excluded \
          from the exact-match count: [{}]",
         deviation_notes.join(", ")
     );
     assert_eq!(
         checked,
-        29,
+        31,
         "checked {checked} positioned reject records for EXACT line:col parity \
-         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 29 — \
+         (positioned minus POSITION_DEVIATION_SOURCES), expected exactly 31 — \
          a POSITION_DEVIATION_SOURCES entry was added/removed. Currently \
          excluded: [{}]",
         deviation_notes.join(", ")

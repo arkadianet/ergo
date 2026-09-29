@@ -2748,19 +2748,19 @@ fn r6_product_select_type_fails_the_numeric_guard() {
     // parse-time-typed product object; a FOUND method makes the Select an `SFunc`
     // (its `m.stype`), which is non-numeric and fails the mkUnaryOp/mkBinaryOp guard.
     // A tuple literal `(a,b)._i` (i in range) and a numeric-constant cast/bitwise
-    // method are the reachable cases. oracle: ParserOracle sigma-state 6.0.2 — REJECT.
-    fail_at("-((1,2)._1)", 1, 3); // Negation guard, tuple `_1` → SFunc
-    fail_at("~((1,2)._1)", 1, 3); // BitInversion guard, same
-    fail_at("-((1,2)._2)", 1, 3); // in-range on a 2-tuple
-    fail_at("-((1,2,3)._3)", 1, 3); // in-range on a 3-tuple
-    fail_at("-((1,2).size)", 1, 3); // inherited Coll `size`
-    fail_at("~((1,2).apply)", 1, 3); // inherited Coll `apply`
-    fail_at("((1,true)._2) | 1", 1, 2); // `|` guard, tuple `_2` → SFunc
-    fail_at("((1,2)._1) & 1", 1, 2); // `&` guard, tuple `_1` → SFunc
-    fail_at("-(5.toByte)", 1, 3); // SInt cast method → SFunc
-    fail_at("-(5L.toByte)", 1, 3); // SLong cast method → SFunc
+    // method are the reachable cases. oracle: ParserOracle sigma-state 6.0.6 — REJECT.
+    fail_at("-((1,2)._1)", 1, 9); // Negation guard, tuple `_1` → SFunc
+    fail_at("~((1,2)._1)", 1, 9); // BitInversion guard, same
+    fail_at("-((1,2)._2)", 1, 9); // in-range on a 2-tuple
+    fail_at("-((1,2,3)._3)", 1, 11); // in-range on a 3-tuple
+    fail_at("-((1,2).size)", 1, 9); // inherited Coll `size`
+    fail_at("~((1,2).apply)", 1, 9); // inherited Coll `apply`
+    fail_at("((1,true)._2) | 1", 1, 11); // `|` guard, tuple `_2` → SFunc
+    fail_at("((1,2)._1) & 1", 1, 8); // `&` guard, tuple `_1` → SFunc
+    fail_at("-(5.toByte)", 1, 5); // SInt cast method → SFunc
+    fail_at("-(5L.toByte)", 1, 6); // SLong cast method → SFunc
     fail_at("-(5.toBytes(0))", 1, 3); // Apply of `.toBytes` → SColl[SByte], non-numeric
-    fail_at("-(5.bitwiseOr)", 1, 3); // v6-only numeric method (tree_version=3) → SFunc
+    fail_at("-(5.bitwiseOr)", 1, 5); // v6-only numeric method (tree_version=3) → SFunc
                                      // `-(1,2)._1`: the prefix `-` binds the `(1,2)` atom FIRST (a tuple, non-numeric),
                                      // so the guard rejects at the tuple `1:2` before `._1` is ever reached.
     fail_at("-(1,2)._1", 1, 2);

@@ -2445,8 +2445,8 @@ mod tests {
     }
 
     #[test]
-    fn residual_select_returns_unsupported_node_naming_the_field() {
-        // Outside the lowering catalog → UnsupportedNode carrying the field
+    fn residual_select_reports_graph_building_error_naming_the_field() {
+        // GraphBuilding.scala:549,1315-1316 (v6.0.6): reject and name the field
         // name.
         let node = TypedExpr::Select {
             obj: Box::new(tc("SELF")),
@@ -2456,19 +2456,27 @@ mod tests {
             pos: 0,
         };
         match emit(&node).unwrap_err() {
-            EmitError::UnsupportedNode(msg) => {
+            EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: msg,
+                ..
+            } => {
                 assert!(msg.contains("getRegV5"), "message names the field: {msg}")
             }
-            other => panic!("expected UnsupportedNode, got {other:?}"),
+            other => panic!("expected GraphBuildingException, got {other:?}"),
         }
         // Bare `SELF.R4` (function-typed, no `[T]`) is also residual: the
         // register arm requires a resolved Option res_type.
         let bare_reg = tc("SELF.R4");
         match emit(&bare_reg).unwrap_err() {
-            EmitError::UnsupportedNode(msg) => {
+            EmitError::GraphBuildingReject {
+                class: "GraphBuildingException",
+                what: msg,
+                ..
+            } => {
                 assert!(msg.contains("R4"), "message names the field: {msg}")
             }
-            other => panic!("expected UnsupportedNode, got {other:?}"),
+            other => panic!("expected GraphBuildingException, got {other:?}"),
         }
     }
 

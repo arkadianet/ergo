@@ -1,7 +1,7 @@
 {
-  "_captured": "2026-09-07",
+  "_captured": "2026-09-30",
   "_format": "verb: cc|cce|ccs; oracle reply fields verbatim (never hand-edited); settings pinned per-record",
-  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.2, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 188 vectors (37 compile-ACCEPT, 151 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 112 vectors (62 compile-ACCEPT, 50 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
+  "_source": "TyperOracle.scala cc/cce/ccs verbs, scala-cli sigma-state 6.0.6, ORACLE_TREE_VERSION per-record (one oracle spawn per version) ORACLE_NETWORK=testnet; golden_seed.txt typecheck-ACCEPT sources: 187 vectors (37 compile-ACCEPT, 150 compile-REJECT recorded verbatim); corpus: 79 sources fed under cc, 18 compile-ACCEPT kept, 61 compile-REJECT excluded (counted here per the Task-10 brief); compile_probes.txt (Task-11 wave-1 GraphBuilding gate): 112 vectors (62 compile-ACCEPT, 50 compile-REJECT recorded verbatim); M4 Task-1 (gap F2, recon-gap.md Finding 2): `sigmaProp(col1.slice[Long](0, 1).size == 1)` moved from `ccs` to `cce` — the `ccs` capture bound `col1` to a per-element ConcreteCollection SValue (TyperOracle.scala:176), an oracle-harness artifact our EnvValue cannot represent and the real compile API never produces; `cce`'s `col1` is a single LongArrayConstant (TyperOracle.scala:141), API-reachable and now a genuine same-shape probe",
   "vectors": [
     {
       "network": "testnet",
@@ -353,18 +353,6 @@
       "reject_class": null,
       "source": "PK(\"3WwXpssaZwcNzaGMv3AgxBdTPJQBt5gCmqBsg3DykQ39bYdhJBsN\")",
       "tree_hex": "0008cd0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-      "tree_version": 3,
-      "verb": "cc"
-    },
-    {
-      "network": "testnet",
-      "oracle": "REJECT",
-      "p2s_address": null,
-      "p2sh_address": null,
-      "reject_class": "Exception",
-      "reject_pos": "0:0",
-      "source": "{ val x: Long = 1; x }",
-      "tree_hex": null,
       "tree_version": 3,
       "verb": "cc"
     },
@@ -1577,7 +1565,7 @@
       "p2s_address": null,
       "p2sh_address": null,
       "reject_class": "GraphBuildingException",
-      "reject_pos": "1:1",
+      "reject_pos": "1:15",
       "source": "Coll(1, 2, 3).map",
       "tree_hex": null,
       "tree_version": 3,
@@ -1696,7 +1684,7 @@
       "oracle": "REJECT",
       "p2s_address": null,
       "p2sh_address": null,
-      "reject_class": "Exception",
+      "reject_class": "AssertionError",
       "reject_pos": "0:0",
       "source": "serialize(if (HEIGHT > 5) SELF.value else SELF.id)",
       "tree_hex": null,
@@ -2756,7 +2744,7 @@
       "p2s_address": null,
       "p2sh_address": null,
       "reject_class": "GraphBuildingException",
-      "reject_pos": "1:11",
+      "reject_pos": "1:13",
       "source": "sigmaProp(1.toBytes.size == 1)",
       "tree_hex": null,
       "tree_version": 2,
