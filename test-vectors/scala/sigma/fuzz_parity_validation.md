@@ -31,3 +31,8 @@ the sized variant is rejected rather than wrapped. `nightly_20260929_transaction
 is the scheduled-run crash that exposed it: a context-extension collection of
 `Coll[Boolean]` holding an empty `Coll[Short]` constant. `scheduled_20260929_constant`
 is the same run's constant crash, which both implementations reject.
+
+The `tagged_var_*` rows pin `TaggedVariableSerializer` reading a type after the
+id. The `option_get_apply_xor`, `apply_*`, `box_reshape_reencoded` and
+`pr435_fuzz_*` rows pin Scala's `Apply.tpe`, where a callee that is not a
+function or collection gives `NoType`.

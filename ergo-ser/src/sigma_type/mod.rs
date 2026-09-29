@@ -141,6 +141,11 @@ pub enum SigmaType {
     SOption(Box<SigmaType>),
     /// Heterogeneous tuple of two or more elements.
     STuple(Vec<SigmaType>),
+    /// Scala `NoType`: the type of an `Apply` whose callee is neither a
+    /// function nor a collection. It has no type code, so it is only ever
+    /// inferred, never read or written. Every cast-checking parent and rule
+    /// 1001 reject it, as Scala does.
+    NoType,
     /// Function type: a list of domain types and a single range type.
     SFunc {
         /// Domain (parameter) types in declaration order.

@@ -264,10 +264,11 @@ fn parse_node(
             // (`0xFFFF_FF80..0xFFFF_FFFF`). Reading VLQ-u32 would
             // alias raw byte only for `id < 128`.
             let id = (r.get_u8()? as i8) as u32;
-            // Scala's SigmaByteReader always has constantStore set (even when
-            // cseg=false it uses ConstantStore.empty), so the type is NEVER
-            // read from the byte stream during deserialization.
-            Payload::TaggedVar { id, tpe: None }
+            // TaggedVariableSerializer.parse reads the type unconditionally
+            // (unlike ValDef, it has no constantStore branch). An unsupported
+            // code fails rule 1018 like any other type read.
+            let tpe = read_type(r)?;
+            Payload::TaggedVar { id, tpe: Some(tpe) }
         }
 
         ArgPattern::ValDef => {

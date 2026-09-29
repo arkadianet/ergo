@@ -527,6 +527,9 @@ pub(crate) fn read_value_at_depth(
             args: vec![112],
             message: "SFunc value deserialization is not supported".into(),
         }),
+        SigmaType::NoType => Err(ReadError::InvalidData(
+            "NoType has no data representation".into(),
+        )),
         SigmaType::SReserved10 | SigmaType::SReserved11 => Err(ReadError::InvalidData(format!(
             "reserved type value deserialization not supported: {tpe:?}"
         ))),

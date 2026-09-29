@@ -28,6 +28,11 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
         // wire. Unreachable from parsing (the reader rejects codes 10/11);
         // error defensively so a programmatically-built value can't emit a
         // type descriptor the reference rejects.
+        SigmaType::NoType => {
+            return Err(WriteError::InvalidData(
+                "NoType has no type code; it is only ever inferred".into(),
+            ));
+        }
         SigmaType::SReserved10 | SigmaType::SReserved11 => {
             return Err(WriteError::InvalidData(
                 "reserved embeddable type codes 10/11 are not serializable \

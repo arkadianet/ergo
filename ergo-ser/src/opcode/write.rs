@@ -323,7 +323,7 @@ fn write_payload(
             w.put_u32(*index);
         }
 
-        Payload::TaggedVar { id, .. } => {
+        Payload::TaggedVar { id, tpe } => {
             // 1-byte write to mirror Scala TaggedVariableSerializer.scala:12
             // (`w.put(varId)`). For the round-trip to be byte-faithful
             // with our `id: u32` field that sign-extends on read, we
@@ -338,7 +338,11 @@ fn write_payload(
                  valid ids are 0..=127 or 0xFFFF_FF80..=0xFFFF_FFFF"
             );
             w.put_u8(as_byte);
-            // Type is never written (see parse comment above).
+            // TaggedVariableSerializer.serialize always writes the type.
+            let tpe = tpe.as_ref().ok_or_else(|| {
+                WriteError::InvalidData("TaggedVar requires its type on the wire".into())
+            })?;
+            write_type(w, tpe)?;
         }
 
         Payload::ValDef { id, rhs, .. } => {

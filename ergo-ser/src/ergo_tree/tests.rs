@@ -807,6 +807,7 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
         "007d050004",     // Downcast (numeric)
         "00d40500",       // deserializeContext[Long]
         "00d5040500",     // deserializeRegister[Long]
+        "00da010100",     // Apply(true)(): non-function callee -> NoType
     ] {
         assert!(
             check_sigma_prop_root(&parse(op)).is_err(),
@@ -821,6 +822,7 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
             "00d40801",   // deserializeContext[SigmaProp] — type tag = SigmaProp
             "00d5040800", // deserializeRegister[SigmaProp]
             "00710108",   // TaggedVar[SigmaProp] (type-tag dependent → lenient)
+            "00da1401d3010400", // Coll[SigmaProp] literal applied to 0 -> element type
             // P2PK (ProveDlog) root.
             "0008cd02000a518dc9761306f048c70ad44e1a7fc9e4ce2ceeea529646f73aada1ea6640",
             // SigmaAnd / SigmaOr / AtLeast of ProveDlogs — common multisig roots.

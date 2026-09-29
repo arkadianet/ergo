@@ -388,15 +388,26 @@ pub(crate) fn infer_node_type(
                     )
                 }
             }
-            // Apply's result is the callee's range; kept lenient (as before the
-            // store rework) — the children are still walked for their bindings.
+            // Scala `Apply.tpe`: a function callee gives its range, a
+            // collection callee its element type, and any other callee
+            // `NoType`. A constant callee's type is exact in either mode;
+            // otherwise only a precise parse-time type is trusted.
             Payload::FuncApply { func, args } => {
                 let t = child_type(func, store, constants);
                 for a in args {
                     child_type(a, store, constants);
                 }
+                let exact = precise_types || matches!(**func, crate::opcode::Expr::Const { .. });
                 match t {
                     Some(SigmaType::SFunc { t_range, .. }) if precise_types => Some(*t_range),
+                    Some(SigmaType::SColl(elem)) if exact => Some(*elem),
+                    Some(t)
+                        if exact
+                            && type_is_precise(&t)
+                            && !matches!(t, SigmaType::SFunc { .. }) =>
+                    {
+                        Some(SigmaType::NoType)
+                    }
                     _ => None,
                 }
             }
