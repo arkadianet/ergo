@@ -54,29 +54,30 @@ const SHEADER_CODE: u8 = 104;
 const SPREHEADER_CODE: u8 = 105;
 const SGLOBAL_CODE: u8 = 106;
 
-/// Maximum nesting depth for `read_type` recursion — a stack-overflow guard,
-/// NOT a faithful consensus boundary. Scala applies NO type-descriptor depth
-/// limit: `TypeSerializer.deserialize` threads a `depth` parameter but never
-/// checks it, and the `CoreByteReader.level` / `SigmaConstants.MaxTreeDepth`
-/// (=110) mechanism is incremented only by the value/expression serializers
-/// (`ValueSerializer`, `DataSerializer`, `SigmaBoolean`), never by
-/// `TypeSerializer`. The only real Scala bound on type-descriptor nesting is
-/// the reader position limit = `SigmaConstants.MaxPropositionBytes` (4096),
-/// since each `Coll`/`Option` level costs one type byte. The guard counts
-/// nesting levels, not bytes: the compact `Coll[Coll[T]]` and
-/// `Option[Coll[T]]` codes are charged two levels, matching the one-byte-per-
-/// level form both writers emit.
+/// Maximum nesting depth of a type descriptor.
 ///
-/// We deliberately keep a *conservative* recursion bound rather than the true
-/// 4096 ceiling: `read_type` is recursive descent, and ~4096-deep recursion
-/// overflows the native stack (a worse failure than the reject-valid it would
-/// cure). So a type descriptor nested 101..4096 deep — which Scala accepts —
-/// is rejected here. That divergence is theoretical (no consensus-reachable
-/// mainnet box nests type descriptors anywhere near this deep) and strictly
-/// safer than crashing. Full parity needs an iterative (heap-stack) `read_type`
-/// that can absorb a 4 KB-deep chain without native recursion; that rewrite is
-/// tracked as a follow-up, not attempted here.
-const MAX_TYPE_DEPTH: usize = 100;
+/// Scala has no explicit limit: `TypeSerializer.deserialize` threads a `depth`
+/// parameter but never checks it, and the `CoreByteReader.level` /
+/// `SigmaConstants.MaxTreeDepth` (= 110) counter is charged only by the value
+/// serializers, never by `TypeSerializer`. Its real limit is the JVM thread
+/// stack its recursive reader runs on: with the default 1 MiB stack
+/// (the official Docker image sets none) sigma-state 6.0.6 reads a
+/// `Coll[Coll[...]]` chain about 9,800 levels deep before a
+/// `StackOverflowError`. Inside a box or a tree the 4096-byte position limit
+/// binds first, one byte per level; a context extension has no such limit.
+///
+/// The guard sits above what a default JVM accepts, so the node refuses no
+/// descriptor a default-configured reference node reads. Our reader is
+/// iterative, and the recursive walks over a parsed type (clone, equality,
+/// drop, the writer, `Debug`) each stay under ~3 MiB of stack at this depth in
+/// release builds, well inside the node's 8 MiB thread stacks. A reference node run
+/// with a larger `-Xss` reads deeper descriptors in a context extension; those
+/// remain refused here.
+///
+/// The guard counts nesting levels, not bytes: the compact `Coll[Coll[T]]`
+/// and `Option[Coll[T]]` codes are charged two levels, matching the
+/// one-byte-per-level form both writers emit.
+const MAX_TYPE_DEPTH: usize = 16_384;
 
 /// Sigma type descriptors used by the Ergo protocol for serializing
 /// typed values.

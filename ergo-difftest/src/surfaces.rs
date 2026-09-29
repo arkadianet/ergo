@@ -109,20 +109,7 @@ where
             if v1.has_pending_upcast_strip() && matches!(e, ReadError::HardReject(_)) {
                 return Outcome::WriteRejected;
             }
-            // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
-            // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
-            // limit (only the 4096-byte proposition cap), so the node deliberately
-            // rejects 101..4096-deep *type descriptors* Scala accepts (documented,
-            // not fixed — see ergo-ser sigma_type.rs MAX_TYPE_DEPTH). A
-            // re-decode that trips ONLY that conservative cap is that documented
-            // divergence firing on a near-boundary re-encoding, not a codec
-            // inconsistency — so it is not a Bug. NOTE: this excludes the *type*
-            // guard only; the value/expression tree-depth guard (Scala MaxTreeDepth
-            // = 110) IS a real consensus limit and still counts as a Bug.
             let msg = format!("{e:?}");
-            if msg.contains("type recursion depth") {
-                return Outcome::WriteRejected;
-            }
             // Bug #19 (known-bug-catalog): size-delimited soft-fork wrap +
             // canonical rewrite of subsequent VLQ fields can flip wrap→structural
             // on re-parse and desync the stream. Scala shares the hazard; the
