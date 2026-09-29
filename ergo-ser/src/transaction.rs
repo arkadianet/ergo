@@ -196,7 +196,7 @@ pub fn read_transaction(r: &mut VlqReader) -> Result<Transaction, ReadError> {
 /// with an empty `valDefTypeStore`: a binding in an earlier tree or context
 /// extension of the same transaction resolves a later `ValUse`, one from
 /// another transaction does not. The caller's store is restored afterwards.
-fn with_fresh_binding_store<T>(
+pub(crate) fn with_fresh_binding_store<T>(
     r: &mut VlqReader,
     read: impl FnOnce(&mut VlqReader) -> Result<T, ReadError>,
 ) -> Result<T, ReadError> {

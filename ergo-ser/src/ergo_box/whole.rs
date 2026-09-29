@@ -28,6 +28,17 @@ pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> 
 /// trees, use `parse_ergo_box_bytes` (which requires the caller to supply the
 /// exact ErgoTree bytes so the parser can locate the tree/body boundary).
 pub fn read_ergo_box(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
+    // `ErgoBox.sigmaSerializer.parse` on a fresh reader starts with an empty
+    // `valDefTypeStore`, so a `ValUse` its tree does not bind is a
+    // `NoSuchElementException` (hard). A box read that starts a top-level
+    // reader starts that store here too.
+    if r.position() == 0 && r.nesting_depth_base() == 0 {
+        return crate::transaction::with_fresh_binding_store(r, read_ergo_box_parts);
+    }
+    read_ergo_box_parts(r)
+}
+
+fn read_ergo_box_parts(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
     let candidate = read_ergo_box_candidate(r)?;
     let transaction_id = ModifierId::from_bytes(r.get_array::<32>()?);
     let index = r.get_u16()?;
