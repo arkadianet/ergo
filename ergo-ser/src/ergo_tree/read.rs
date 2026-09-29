@@ -413,32 +413,9 @@ fn parse_body(
         let mut consts = Vec::with_capacity(count.min(CONSTANTS_VEC_SOFT_CAP));
         for _ in 0..count {
             let (tpe, val) = read_constant(r)?;
-            // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
-            // (Scala DataSerializer.deserialize(SHeader)), per materialized
-            // header: a segregated constant carrying a header in a pre-v3 tree
-            // is rejected; an empty Coll[Header] is accepted. Scala's SHeader
-            // arm throws a SerializerException (NOT a ValidationException), so
-            // it escapes the deserializeErgoTree catch — HARD reject, never
-            // wrap (SANTA wire/v6 `Box.softfork_header_constant_reject`: the
-            // JVM rejects the whole box; we accepted while this funneled into
-            // the generic body-error wrap).
-            if version < 3 && val.contains_header() {
-                return Err(ReadError::HardReject(format!(
-                    "SHeader value requires ErgoTree version >= 3 (got {version})"
-                )));
-            }
-            // SOption data is gated on isV3OrLaterErgoTreeVersion too
-            // (CheckSerializableTypeCode rejects SOption pre-v3, Some AND None);
-            // a segregated Option constant in a pre-v3 tree is rejected.
-            if version < 3 && val.contains_option() {
-                return Err(ReadError::SigmaValidation {
-                    rule_id: 1009,
-                    args: vec![36],
-                    message: format!(
-                        "SOption value requires ErgoTree version >= 3 (got {version})"
-                    ),
-                });
-            }
+            // The pre-v3 `SHeader` / `SOption` data gates fire inside
+            // `read_constant`, at the point Scala throws: the reader carries
+            // this tree's version.
             consts.push((tpe, val));
         }
         consts

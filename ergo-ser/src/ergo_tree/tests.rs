@@ -575,6 +575,38 @@ fn funcvalue_arg_id_overflow_roundtrips() {
 
 // ----- oracle parity -----
 
+/// Below tree v3 an Option's data is refused by `CheckSerializableTypeCode`
+/// (rule 1009, a `ValidationException`) before its content is read, so a
+/// size-flagged tree degrades even when that content is malformed. At v3 the
+/// content is read and a malformed point is a hard reject. JVM
+/// (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `ergo_tree`, activated 3):
+///
+/// ```text
+/// 1926012b01c4(11 x32)7300   (v1, segregated Some(bad point))  ACCEPT, wrapped
+/// 09232b01c4(11 x32)         (v1, inline Some(bad point))      ACCEPT, wrapped
+/// 1b26012b01c4(11 x32)7300   (v3, the same)                    REJECT SerializerException
+/// ```
+#[test]
+fn pre_v3_option_constant_degrades_before_its_content_is_read() {
+    let point = format!("c4{}", "11".repeat(32));
+    for (tree, wraps) in [
+        (format!("1926012b01{point}7300"), true),
+        (format!("09232b01{point}"), true),
+        (format!("1b26012b01{point}7300"), false),
+    ] {
+        let bytes = hex::decode(&tree).unwrap();
+        let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+        let result = read_ergo_tree(&mut r);
+        if wraps {
+            let parsed = result.unwrap_or_else(|e| panic!("{tree}: {e:?}"));
+            assert!(matches!(parsed.body, Expr::Unparsed(_)), "{tree}: wraps");
+            assert!(r.is_empty(), "{tree}");
+        } else {
+            assert!(result.is_err(), "{tree}: a v3 tree reads the point and rejects");
+        }
+    }
+}
+
 // -- Size-flagged malformed tree (Scala UnparsedErgoTree parity) --
 
 /// Block 1,702,686 tx #3 output[0] on mainnet carries an ErgoTree with

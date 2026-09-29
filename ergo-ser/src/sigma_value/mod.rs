@@ -455,6 +455,17 @@ pub(crate) fn read_value_at_depth(
             Ok(SigmaValue::Coll(coll))
         }
         SigmaType::SOption(elem_type) => {
+            // Inside a pre-v3 tree `CoreDataSerializer` has no `SOption` case
+            // (`CoreDataSerializer.scala:140`): its fallback runs
+            // `CheckSerializableTypeCode` on code 36, a `ValidationException`
+            // (rule 1009) thrown before the option's tag or content is read.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: "SOption value requires ErgoTree version >= 3".into(),
+                });
+            }
             let opt = read_option(r, elem_type, depth)?;
             Ok(SigmaValue::Opt(opt))
         }
@@ -507,6 +518,16 @@ pub(crate) fn read_value_at_depth(
         // a v3 SHeader constant whose pk carries an invalid SEC1 prefix; we
         // accepted while this surfaced as a wrap-able InvalidData.
         SigmaType::SHeader => {
+            // Inside a pre-v3 tree `DataSerializer`'s `SHeader` case is gated
+            // off (`DataSerializer.scala:39`) and the fallback's
+            // `CheckSerializableTypeCode` passes code 104, so it throws a
+            // `SerializerException` before the header is read: a hard reject.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::HardReject(
+                    "SHeader value requires ErgoTree version >= 3 (Scala SerializerException)"
+                        .into(),
+                ));
+            }
             let start = r.position();
             let h = crate::header::read_header(r)
                 .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}")))?;

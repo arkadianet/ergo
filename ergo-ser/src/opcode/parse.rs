@@ -132,45 +132,28 @@ fn parse_node(
         // nested SigmaProp continues the shared MaxTreeDepth budget (Scala's
         // single CoreByteReader.level across expr + value + SigmaBoolean).
         let val = read_value_at_depth(r, &tpe, depth + 1)?;
-        // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
-        // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
-        // materialized header, so a constant that actually CARRIES a header
-        // (incl. nested) in a pre-v3 (version < 3) tree is rejected by the
-        // reference at parse time — but an empty Coll[Header] (no header
-        // materialized) is accepted. Match that value-based behavior.
-        //
-        // HARD reject: the reference's pre-v3 SHeader arm falls through to
-        // `CoreDataSerializer` and throws a `SerializerException`, which
-        // `deserializeErgoTree` does NOT catch — so it escapes the
-        // size-delimited soft-fork wrap and rejects the whole tree. This is the
-        // same verdict the SEGREGATED-constant path already applies
-        // (`ergo_tree::read::parse_body`); emitting a soft `InvalidData` here
-        // funneled an INLINE pre-v3 header constant into the generic body-error
-        // wrap and accepted a tree the reference rejects (cargo-fuzz #304).
-        if _tree_version < 3 && val.contains_header() {
-            return Err(ReadError::HardReject(format!(
-                "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
-            )));
-        }
-        // SOption data is likewise gated on isV3OrLaterErgoTreeVersion
-        // (CoreDataSerializer matches `SOption` only when v3+, otherwise falls
-        // through to CheckSerializableTypeCode and throws — for Some AND None).
-        // This is the PARSE-TIME companion to the value-materialization gate in
-        // `ergo-sigma` (`sigma_to_value_versioned`): here it rejects a
-        // materialized Option constant that appears INLINE in the parsed tree
-        // body, which carries the real tree version, so a pre-v3 (version < 3)
-        // tree is rejected exactly as the reference rejects it. Plain register /
-        // context-var constants do NOT reach this path (they are read via
-        // `read_constant`); those are gated at materialization instead. An empty
-        // Coll[Option] materializes no Option and is accepted here.
-        if _tree_version < 3 && val.contains_option() {
-            return Err(ReadError::SigmaValidation {
-                rule_id: 1009,
-                args: vec![36],
-                message: format!(
-                    "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
-                ),
-            });
+        // Inside a tree the value reader applies the pre-v3 `SHeader` /
+        // `SOption` data gates at the point Scala throws, against the tree
+        // version the reader carries (`read_value_at_depth`). A headerless
+        // payload (a register or context-extension expression, `Deserialize*`
+        // bytes) has no tree version on the reader and is judged against the
+        // version passed in, once the value is read: a Header is Scala's hard
+        // `SerializerException`, an Option its rule-1009 `ValidationException`.
+        if r.ergo_tree_version().is_none() && _tree_version < 3 {
+            if val.contains_header() {
+                return Err(ReadError::HardReject(format!(
+                    "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
+                )));
+            }
+            if val.contains_option() {
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: format!(
+                        "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
+                    ),
+                });
+            }
         }
         return Ok(Expr::Const { tpe, val });
     }
