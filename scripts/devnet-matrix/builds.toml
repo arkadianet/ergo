@@ -155,3 +155,15 @@ work_dir = ".work-syncfix-plus-2566"
 ergo_ref = "91c1c08237fe810c238aee8396528fc8537812ca"
 branch = "tmp/sync-refresh-plus-2566"
 description = "#2597 composed with #2566, including composition tests"
+
+[builds.syncfix2]
+work_dir = ".work-syncfix2"
+ergo_ref = "93c756df46c51d6678e8985907ecdb5e277ede42"
+branch = "upstream/post-progress-sync-refresh"
+description = "#2597 final: syncfix plus refreshing recent input-block / ordering-announcement suppliers whatever our stale view of their height"
+
+[builds."syncfix2+2566"]
+work_dir = ".work-syncfix2-plus-2566"
+ergo_ref = "322e2cbfced22a46fb308926cfbd6dfbcf1ee645"
+branch = "tmp/sync-refresh-plus-2566"
+description = "syncfix2 composed with #2566 (squash-integrated), including composition tests"

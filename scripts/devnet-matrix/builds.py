@@ -40,7 +40,8 @@ BUILDS_TOML = HERE / 'builds.toml'
 # reconstruction build, and `soak` is the integration build of every
 # patch we filed.
 BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all',
-               'base', 'base+2506', '2563f', '2563f+2506', '2562f', 'soak', 'syncfix', '2566', 'syncfix+2566')
+               'base', 'base+2506', '2563f', '2563f+2506', '2562f', 'soak', 'syncfix', '2566', 'syncfix+2566',
+               'syncfix2', 'syncfix2+2566')
 
 # A registry entry's `ergo_ref`: a full commit id, never a branch name,
 # so a later branch move cannot change what a rerun provisions.
@@ -532,7 +533,8 @@ def _self_test():
     by_commit = {'stock': '.work-62c10315', 'base': '.work-a1bd938e',
                  'base+2506': '.work-base-2506-f7cc55dd',
                  '2563f+2506': '.work-2563f-plus-2506',
-                 'syncfix+2566': '.work-syncfix-plus-2566'}
+                 'syncfix+2566': '.work-syncfix-plus-2566',
+                 'syncfix2+2566': '.work-syncfix2-plus-2566'}
     for name in BUILD_NAMES:
         assert known[name].work_dir.name == by_commit.get(
             name, f'.work-{name}'), known[name]
