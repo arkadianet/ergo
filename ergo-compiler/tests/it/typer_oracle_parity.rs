@@ -493,6 +493,27 @@ fn v2_gated_sources_reject_method_not_found() {
     }
 }
 
+/// `g.exp(u)` with an `UnsignedBigInt` argument is typed through a Select
+/// renamed to `expUnsigned`, which the typer synthesizes without a source
+/// context (SigmaTyper.scala:240-246, v6.0.6). At tree_version 2, where
+/// `expUnsigned` does not exist, its MethodNotFound therefore has no position,
+/// wherever the receiver sits. JVM TyperOracle (fresh JVM,
+/// ORACLE_TREE_VERSION=2): `REJECT 0:0 MethodNotFound` for every source below.
+#[test]
+fn v2_exp_unsigned_rename_method_not_found_has_no_position() {
+    let sources = [
+        "groupGenerator.exp(unsignedBigInt(\"5\"))",
+        "{ val u = unsignedBigInt(\"5\"); groupGenerator.exp(u) }",
+        "   groupGenerator.exp(unsignedBigInt(\"5\"))",
+        "{ val g = groupGenerator; val u = unsignedBigInt(\"5\")\n  g.exp(u) }",
+    ];
+    for src in sources {
+        let err = assert_err(typecheck_verb("tc", src, 2), "tc", src);
+        assert_eq!(err.class(), "MethodNotFound", "v2 class for {src:?}");
+        assert_eq!(err.pos(), 0, "no source context for {src:?}");
+    }
+}
+
 /// B4 (wave B): numeric `toBytes`/`toBits` print `%SNumericType.<m>` at tree_version < 3
 /// (shared `SNumericTypeMethods` container) and the concrete `%Int`/`%Long.<m>` at V6.
 /// The §21 seed records pin the v2 owner (byte-swept here); the same sources are pinned

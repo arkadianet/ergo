@@ -201,7 +201,7 @@ pub(crate) fn assign_apply_select(
     ctx: &TyperCtx,
 ) -> Result<TypedExpr, TyperError> {
     let new_args = type_all(env, args, ctx)?;
-    // exp -> expUnsigned rename (SigmaTyper.scala:188-193).
+    // exp -> expUnsigned rename (SigmaTyper.scala:240-245, v6.0.6).
     let renamed = n_original == "exp"
         && new_args
             .first()
@@ -212,9 +212,10 @@ pub(crate) fn assign_apply_select(
         n_original
     };
     // newSel = assignType(Select(obj, n, resType)) — re-runs §1.5.
-    // SigmaTyper.scala:240-247 (v6.0.6): retain the original selector except
-    // when expUnsigned is synthesized under the enclosing application's context.
-    let sel_pos = if renamed { node_pos(&obj) } else { sel_pos };
+    // SigmaTyper.scala:240-246 (v6.0.6): the synthesized `expUnsigned` Select
+    // carries no source context, so every error citing it has no position
+    // (the JVM oracle records `0:0`); otherwise the original selector's.
+    let sel_pos = if renamed { 0 } else { sel_pos };
     let sel = TypedExpr::Select {
         obj: Box::new(obj.clone()),
         field: n.clone(),
