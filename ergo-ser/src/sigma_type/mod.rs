@@ -62,7 +62,10 @@ const SGLOBAL_CODE: u8 = 106;
 /// (`ValueSerializer`, `DataSerializer`, `SigmaBoolean`), never by
 /// `TypeSerializer`. The only real Scala bound on type-descriptor nesting is
 /// the reader position limit = `SigmaConstants.MaxPropositionBytes` (4096),
-/// since each `Coll`/`Option` level costs one type byte.
+/// since each `Coll`/`Option` level costs one type byte. The guard counts
+/// nesting levels, not bytes: the compact `Coll[Coll[T]]` and
+/// `Option[Coll[T]]` codes are charged two levels, matching the one-byte-per-
+/// level form both writers emit.
 ///
 /// We deliberately keep a *conservative* recursion bound rather than the true
 /// 4096 ceiling: `read_type` is recursive descent, and ~4096-deep recursion

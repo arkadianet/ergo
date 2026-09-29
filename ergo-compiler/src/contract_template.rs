@@ -378,6 +378,7 @@ impl ContractTemplate {
             version: tree_version,
             has_size: tree_version > 0,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants,
             body: self.expression_tree.clone(),
         })

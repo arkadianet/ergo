@@ -11,7 +11,7 @@ use crate::sigma_value::read_constant;
 use super::root_type::determinable_root_type;
 use super::{
     ErgoTree, CONSTANTS_VEC_SOFT_CAP, CONSTANT_SEGREGATION_FLAG, MAX_PROPOSITION_BYTES,
-    MAX_SUPPORTED_TREE_VERSION, SIZE_FLAG, VERSION_MASK,
+    MAX_SUPPORTED_TREE_VERSION, RESERVED_HEADER_MASK, SIZE_FLAG, VERSION_MASK,
 };
 
 /// Deserialize an ErgoTree from bytes.
@@ -181,7 +181,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // box -> tree -> constant -> box cycle recurses until the native
             // stack overflows. Inert for a top-level tree, where the base is 0.
             inner.set_nesting_depth_base(r.nesting_depth_base());
-            let parsed = parse_body(&mut inner, version, has_size, constant_segregation);
+            let parsed = parse_body(&mut inner, header, has_size, constant_segregation);
             (
                 parsed,
                 inner.unresolved_method_checkpoint(),
@@ -333,7 +333,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // Scala re-raising the uncaught `ValidationException` as a hard reject.
         let saved_v = r.ergo_tree_version();
         r.set_ergo_tree_version(Some(version));
-        let parsed = parse_body(r, version, has_size, constant_segregation);
+        let parsed = parse_body(r, header, has_size, constant_segregation);
         r.set_ergo_tree_version(saved_v);
         parsed.map(|tree| (tree, false))
     }
@@ -361,6 +361,9 @@ fn unparsed_soft_fork_tree(
         version,
         has_size,
         constant_segregation,
+        reserved_header_bits: full_tree_bytes
+            .first()
+            .map_or(0, |h| h & RESERVED_HEADER_MASK),
         constants: vec![],
         body: crate::opcode::Expr::Unparsed(crate::opcode::UnparsedErgoTree {
             bytes: full_tree_bytes,
@@ -398,10 +401,11 @@ fn method_validation_rule(
 
 fn parse_body(
     r: &mut VlqReader,
-    version: u8,
+    header: u8,
     has_size: bool,
     constant_segregation: bool,
 ) -> Result<ErgoTree, ReadError> {
+    let version = header & VERSION_MASK;
     let constants = if constant_segregation {
         // Scala `deserializeConstants` reads the count via `getUInt().toInt`
         // (ErgoTreeSerializer.scala:248) — NOT `getUIntExact`. A value past
@@ -456,6 +460,7 @@ fn parse_body(
         version,
         has_size,
         constant_segregation,
+        reserved_header_bits: header & RESERVED_HEADER_MASK,
         constants,
         body,
     })

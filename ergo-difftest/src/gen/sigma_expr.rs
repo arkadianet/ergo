@@ -220,6 +220,7 @@ fn tree_bytes(body: Expr) -> Vec<u8> {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body,
     };

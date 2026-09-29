@@ -34,6 +34,9 @@ pub struct Surface {
 /// private opcode::types::MAX_EXPR_DEPTH. Each strip round removes a level.
 const MAX_UPCAST_STRIP_ROUNDS: usize = 110;
 
+/// Mainnet's activated script version (protocol 6.0).
+const CURRENT_ACTIVATED_VERSION: u8 = 3;
+
 /// read+write fixed-point check shared by every (decode, encode) pair.
 ///
 /// `is_soft_fork_opaque` marks values whose body is a size-delimited
@@ -48,7 +51,10 @@ where
     E: Fn(&mut VlqWriter, &T) -> Result<(), WriteError>,
     F: Fn(&T) -> bool,
 {
-    let mut r1 = VlqReader::new(input);
+    // Parse under mainnet's activated script version, as the JVM fixtures
+    // are captured. The default context is pre-JIT, where a future-version
+    // nested tree is wrapped rather than parsed; that is not today's rule.
+    let mut r1 = VlqReader::new(input).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
     r1.enable_header_spans();
     let v1 = match decode(&mut r1) {
         Ok(v) => v,
@@ -71,7 +77,7 @@ where
     let b1 = w1.result();
 
     // We must be able to read back our own output.
-    let mut r2 = VlqReader::new(&b1);
+    let mut r2 = VlqReader::new(&b1).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
     r2.enable_header_spans();
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
@@ -160,7 +166,8 @@ where
         if rounds > MAX_UPCAST_STRIP_ROUNDS {
             return Outcome::bug("Upcast strip did not converge".into(), input);
         }
-        let mut next_reader = VlqReader::new(&next_bytes);
+        let mut next_reader =
+            VlqReader::new(&next_bytes).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
         next_reader.enable_header_spans();
         let next = match decode(&mut next_reader) {
             Ok(next) => next,
@@ -231,6 +238,25 @@ pub fn names() -> Vec<&'static str> {
     registry(None).into_iter().map(|s| s.name).collect()
 }
 
+/// `read_ergo_tree` is deliberately lenient; the consensus box-script readers
+/// apply these gates after it (`ergo_ser::ergo_tree::gates`). A standalone tree
+/// surface must apply them too, or it fuzzes trees no consensus path accepts
+/// (a sizeless or above-activation version) against a reference that rejects
+/// them.
+fn read_ergo_tree_gated(r: &mut VlqReader) -> Result<ergo_ser::ergo_tree::ErgoTree, ReadError> {
+    use ergo_ser::ergo_tree as t;
+    let tree = t::read_ergo_tree(r)?;
+    t::check_tree_version_supported(
+        &tree,
+        r.activated_script_version()
+            .unwrap_or(t::DEFAULT_ACTIVATED_SCRIPT_VERSION),
+    )?;
+    t::check_header_size_bit(&tree)?;
+    t::check_resolvable_methods(&tree)?;
+    t::check_sigma_prop_root(&tree)?;
+    Ok(tree)
+}
+
 /// Build the surface registry. Optionally filter to a single surface by name.
 pub fn registry(only: Option<&str>) -> Vec<Surface> {
     use ergo_ser::{
@@ -245,7 +271,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         rw!("constant", sigma_value::read_constant, write_constant_pair),
         rw!(
             "ergo_tree",
-            ergo_tree::read_ergo_tree,
+            read_ergo_tree_gated,
             ergo_tree::write_ergo_tree,
             soft_fork = tree_is_unparsed
         ),
@@ -256,7 +282,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         // generator emits no-panic, byte-stable trees.
         rw!(
             "sigma_expr",
-            ergo_tree::read_ergo_tree,
+            read_ergo_tree_gated,
             ergo_tree::write_ergo_tree,
             soft_fork = tree_is_unparsed
         ),
@@ -593,6 +619,7 @@ mod tests {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: Expr::Op(IrNode {
                 opcode,
@@ -752,6 +779,44 @@ mod tests {
             (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
             Outcome::WriteRejected
         );
+    }
+
+    /// Local fuzz find (2026-09-29): a constant type written with compact
+    /// `Coll[Coll[T]]` codes stays under the type-depth guard, but the
+    /// canonical re-encode (one `Coll` byte per level, as Scala writes it)
+    /// did not, flipping the sized tree to an opaque wrap on re-decode. The
+    /// guard now charges both levels, so both reads wrap alike.
+    #[test]
+    fn compact_nested_coll_type_depth_is_stable_across_reencode() {
+        let bytes = hex::decode(
+            "2800d1c6ff181818181818181850505050505050505050505050505050505050505050505050505050505050505050505050505050505050501818181818181818181818181818181818181818181818181c01000004000000000fff",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("sigma_expr"))[0].run)(&bytes),
+            Outcome::Accepted
+        );
+    }
+
+    /// Local cargo-fuzz finds (2026-09-29). Each hides a nested tree whose
+    /// verdict depends on lookahead past a retained box, so a canonical
+    /// rewrite after the box flipped the re-decode. sigma-state 6.0.2 rejects
+    /// all three at activated version 3: the constant for a tree version above
+    /// activation, the two trees for rule 1012 (a sizeless version above 0).
+    #[test]
+    fn local_fuzz_20260929_rejected_under_consensus_context() {
+        for (surface, hex) in [
+            ("constant", "4d4d4d4d4f4d6300f83c4d4d4d6300f83c3c0e0e0e0e0e0e0e0e0e0e0e5454571f4d4d4d4d4d6300f84d4d4d630e0e4d00000e2500000e0e0e000045450100d40000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000000000f94d4d4d4d4d4d4d4d4d4d4d4dff"),
+            ("ergo_tree", "4463f7049b6d7e68686868686868686868030193a3686868686868686868686868686868680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006868686868686868686868686868686868686868686868686868686868686868686868680303030303030303030303030303030303001000000303030303030303030303030303030303030000006868686868ab48484848333333333333330348484848484800ffffffffffffff4900000000000031f81798ea02d192a39a8cc7a701730073761001020402d19683030193a38cc7a5738303016868686868686868686868686868686868686868686868686868686868686803030393a358a57300000007fffffffd2e070200000000b2a57383030193a38cc7b2a573000705040004000e36104204a00b08cd0279be66ce28d959f2815b101010101010101010101010101010101003036810"),
+            ("sigma_expr", "474949494949494949494963494949494949494949494949494949494949494949494949634949494949494949634949494949494949494949490d0d720e01000000000000000000000100000500000000000000fc0000000000000000000000e1e1e1e1e1e1e1010504010303030ed60f95720d0b730000000000001000000000000000000000007208d70b10b25e8472"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                Outcome::Rejected,
+                "{surface}"
+            );
+        }
     }
 
     #[test]
@@ -1143,7 +1208,8 @@ mod tests {
             }
             let fields: Vec<_> = line.split_whitespace().collect();
             let bytes = hex::decode(fields[4]).unwrap();
-            let mut r = VlqReader::new(&bytes);
+            let mut r =
+                VlqReader::new(&bytes).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
             let result = match fields[1] {
                 "tree" => ergo_ser::ergo_tree::read_ergo_tree(&mut r).map(|_| ()),
                 "constant" => ergo_ser::sigma_value::read_constant(&mut r).map(|_| ()),

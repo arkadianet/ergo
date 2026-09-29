@@ -111,6 +111,7 @@ pub(crate) fn build_tree(root: Expr) -> Result<ErgoTree, WriteError> {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: root,
         })
@@ -120,6 +121,7 @@ pub(crate) fn build_tree(root: Expr) -> Result<ErgoTree, WriteError> {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants,
             body,
         })

@@ -9763,6 +9763,7 @@ fn subst_constants_none_preserves_template_option_type() {
         version: 3,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(
             opt_ty.clone(),
             SigmaValue::Opt(Some(Box::new(SigmaValue::Coll(CollValue::Bytes(vec![

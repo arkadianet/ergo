@@ -515,9 +515,18 @@ fn parse_node(
                 // `ConcreteCollectionSerializer.parse` asserts
                 // `v.tpe == tItem` per item. An `AssertionError` is not a
                 // `ValidationException`, so even a sized tree hard-rejects.
-                // Only a constant's wire type is checked here: it is exactly
+                // Only types the IR states explicitly are checked: a
+                // constant's wire type and a numeric cast's target are exactly
                 // Scala's `tpe`, while an inferred type may not be.
-                if let Expr::Const { tpe, .. } = &item {
+                let explicit = match &item {
+                    Expr::Const { tpe, .. } => Some(tpe),
+                    Expr::Op(IrNode {
+                        payload: Payload::NumericCast { tpe, .. },
+                        ..
+                    }) => Some(tpe),
+                    _ => None,
+                };
+                if let Some(tpe) = explicit {
                     if *tpe != elem_type {
                         return Err(ReadError::HardReject(format!(
                             "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} \

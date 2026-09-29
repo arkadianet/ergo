@@ -1209,6 +1209,7 @@ fn serializer_upcast_versions_match_jvm() -> Result<()> {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: root.clone(),
         };

@@ -459,6 +459,7 @@ fn p2pk_tree(pubkey: [u8; 33]) -> (ErgoTree, Vec<u8>) {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,

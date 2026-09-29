@@ -209,6 +209,15 @@ jobs:
       # (SER-003) so it will not spuriously fail this.
       - name: fuzz ${{ matrix.target }} (bounded run, 10 min)
         working-directory: ergo-difftest
+        # ASan records the allocation stack of every malloc in a depot it never
+        # frees. The recursive parsers produce new stacks with nearly every
+        # input, so RSS grew ~330 B per execution (live heap ~33 MB) and
+        # sigma_expr crossed the 2048 MB limit at ~6.5M executions. Without
+        # allocation stacks RSS stays flat (~650 MB at 5.3M locally). A memory
+        # error report then omits the alloc/free stacks: replay the uploaded
+        # artifact locally with default ASAN_OPTIONS to get them back.
+        env:
+          ASAN_OPTIONS: malloc_context_size=0
         run: |
           cargo +nightly fuzz run "${{ matrix.target }}" -- \
             -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1

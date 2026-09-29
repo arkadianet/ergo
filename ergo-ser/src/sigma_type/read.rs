@@ -199,7 +199,9 @@ fn decode_constructor_at_depth(
         // constrId 2: Coll[Coll[T]]
         2 => {
             let inner = if prim_id == 0 {
-                read_type_at_depth(r, next)?
+                // Two levels in one byte; both writers expand this form to one
+                // byte per level, so charge both to keep the guard's verdict.
+                read_type_at_depth(r, depth + 2)?
             } else {
                 prim_from_code(prim_id, gate_v)?
             };
@@ -221,7 +223,9 @@ fn decode_constructor_at_depth(
         // constrId 4: Option[Coll[T]]
         4 => {
             let inner = if prim_id == 0 {
-                read_type_at_depth(r, next)?
+                // Two levels in one byte; both writers expand this form to one
+                // byte per level, so charge both to keep the guard's verdict.
+                read_type_at_depth(r, depth + 2)?
             } else {
                 prim_from_code(prim_id, gate_v)?
             };
@@ -543,6 +547,27 @@ mod tests {
 
     // NB: type code 0 is covered by `read_type_prefix_zero_hard_rejects` in the
     // oracle-parity section — it is a HARD reject, not a soft `InvalidData`.
+
+    /// `Coll[Coll[T]]` (24) and `Option[Coll[T]]` (48) with a non-embeddable
+    /// `T` hold two levels in one byte. Neither writer emits them: both expand
+    /// to one `Coll` byte per level. The depth guard must give the compact
+    /// form the verdict of that canonical form, or a re-encode flips it.
+    #[test]
+    fn compact_two_level_codes_count_both_levels() {
+        for (compact, expanded) in [(0x18u8, [0x0Cu8, 0x0C]), (0x30, [0x24, 0x0C])] {
+            for pairs in [50, 51] {
+                let mut short = vec![compact; pairs];
+                short.push(0x01);
+                let mut long: Vec<u8> = std::iter::repeat_n(expanded, pairs).flatten().collect();
+                long.push(0x01);
+                assert_eq!(
+                    read_type(&mut VlqReader::new(&short)).is_ok(),
+                    read_type(&mut VlqReader::new(&long)).is_ok(),
+                    "code {compact:#x} x{pairs}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn read_type_above_max_depth_returns_error_not_stack_overflow() {
