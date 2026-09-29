@@ -1036,6 +1036,41 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    /// A spending proof whose extension holds `{1: Coll^5000[Byte]()}`, a type
+    /// fifty times deeper than the node's former 100-level guard. sigma-state
+    /// 6.0.6 has no type-depth limit of its own, only its JVM stack: with
+    /// `-Xss16m` (`ErgoSerdeOracle.scala`, `transaction` surface) it accepts
+    /// this transaction and writes it back with the innermost `Coll[Coll[Byte]]`
+    /// folded into 0x1A, while a cold JVM on a 1 MiB stack overflows. A warm
+    /// default JVM reads about 9,800 levels, so a node that stopped at 100 split
+    /// from the reference on a few kilobytes of unused extension data.
+    #[test]
+    fn transaction_with_5000_deep_extension_type_round_trips_canonically() {
+        let tx = |ext_type: &str| {
+            from_hex(&format!(
+                "01{}000101{ext_type}00{}",
+                "14db43174f498723e4acb7e056e309f446b02c3da0c2572f3ab77ce86ec58116",
+                "000002c0ecfab5120008d3c094400000c0f79c1a0008d3c094400000"
+            ))
+        };
+        let input = tx(&format!("{}0e", "0c".repeat(4999)));
+        let canonical = tx(&format!("{}1a", "0c".repeat(4998)));
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let mut r = VlqReader::new(&input).with_activated_script_version(3);
+                let parsed = crate::transaction::read_transaction(&mut r)
+                    .expect("sigma-state 6.0.6 accepts a 5000-deep extension type");
+                assert!(r.is_empty());
+                let mut w = VlqWriter::new();
+                crate::transaction::write_transaction(&mut w, &parsed).unwrap();
+                assert_eq!(w.result(), canonical);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
     //
     // The ATTACK/CONTROL verdicts below come from the sigma-state 6.0.2
     // Scala reference (scripts/jvm_serde_oracle, surface `transaction`).

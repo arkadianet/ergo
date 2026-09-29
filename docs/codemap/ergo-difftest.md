@@ -185,11 +185,6 @@ the node binary
   `run_one` wraps every surface call in `catch_unwind`; a decoder panic becomes
   `Outcome::Bug("PANIC: …")`, never aborts the process. The selftest confirms this
   machinery has teeth (`src/lib.rs:206`,`:219`).
-- **SER-003 type-depth exclusion.** The `MAX_TYPE_DEPTH = 100` guard in `ergo-ser` is
-  a conservative stack-overflow safeguard that Scala's `TypeSerializer` does not
-  apply (the JVM's limit is the 4096-byte proposition cap). A re-decode that trips
-  ONLY this guard is not a `Bug`; the exclusion is documented inline so it cannot
-  silently hide a real codec inconsistency (`src/surfaces.rs:56-70`).
 - **`fuzz_one` panics on Bug, silent otherwise.** libFuzzer treats a panic as a
   crash and saves the input; non-Bug outcomes (`Accepted`, `Rejected`,
   `WriteRejected`) and unknown surface names return `()` without a false-positive
