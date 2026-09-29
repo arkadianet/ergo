@@ -1,8 +1,8 @@
 //> using scala 2.12
 //> using options -Xfatal-warnings
-//> using dep org.scorexfoundation::sigma-state:6.0.2
-//> using dep org.ergoplatform::ergo-wallet:6.0.2
-//> using dep org.ergoplatform::ergo-core:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
+//> using dep org.ergoplatform::ergo-core:6.0.6
 //> using dep io.circe::circe-core:0.13.0
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 
@@ -165,10 +165,10 @@ object CostConstants {
       "methods" -> arr(methods), "tupleMethods" -> arr(tupleMethods), "constants" -> Json.obj(constants: _*))
     val count = opcodes.size + methods.size + tupleMethods.size + constants.size
     val manifest = Json.obj(
-      "scala" -> Json.obj("ergo_version" -> str("6.0.2"), "sigmastate_version" -> str("6.0.2"),
+      "scala" -> Json.obj("ergo_version" -> str("6.0.6"), "sigmastate_version" -> str("6.0.6"),
         "node_app_version" -> Json.Null, "source_shas" -> Json.obj(
-          "sigmastate" -> str("23dd29f612249c169d09fae9bca76d7cc02e144c"),
-          "ergo" -> str("2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"))),
+          "sigmastate" -> str("ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042"),
+          "ergo" -> str("23aabead88774d27f2c9190ace3c9abbc8f1d5cb"))),
       "rust" -> Json.obj("git_sha" -> str(revision), "toolchain" -> str(command("rustc", "--version")),
         "features" -> Json.arr()),
       "tool" -> Json.obj("script" -> str(script), "git_sha" -> str(revision),
