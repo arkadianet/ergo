@@ -575,6 +575,30 @@ fn funcvalue_arg_id_overflow_roundtrips() {
 
 // ----- oracle parity -----
 
+/// Issue #436: a constant whose nested box carries a sized version-6 tree that
+/// fails on a `SerializerException` must be rejected at activated version 1
+/// too, where the version gate is inert and the body is parsed: only a
+/// `ValidationException` degrades a sized tree. JVM (`ErgoSerdeOracle.scala`,
+/// sigma-state 6.0.6): `constant@1` -> `REJECT InvalidTypePrefix`,
+/// `constant@3` -> `REJECT SerializerException`.
+#[test]
+fn issue_436_nested_v6_sized_tree_rejects_at_every_activated_version() {
+    let bytes = hex::decode(
+        "4d4d4d4d4f4d6300f83c4d4d4d6300f83c3c0e0e0e0e0e0e0e0e0e0e0e5454571f4d4d4d4d4d6300f84d4d4d630e0e4d00000e2500000e0e0e000045450100d40000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000",
+    )
+    .unwrap();
+    for activated in [None, Some(1u8), Some(3)] {
+        let mut r = VlqReader::new(&bytes);
+        if let Some(a) = activated {
+            r = r.with_activated_script_version(a);
+        }
+        assert!(
+            crate::sigma_value::read_constant(&mut r).is_err(),
+            "activated {activated:?}: the JVM rejects"
+        );
+    }
+}
+
 /// Below tree v3 an Option's data is refused by `CheckSerializableTypeCode`
 /// (rule 1009, a `ValidationException`) before its content is read, so a
 /// size-flagged tree degrades even when that content is malformed. At v3 the
