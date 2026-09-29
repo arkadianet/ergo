@@ -626,7 +626,10 @@ fn pre_v3_option_constant_degrades_before_its_content_is_read() {
             assert!(matches!(parsed.body, Expr::Unparsed(_)), "{tree}: wraps");
             assert!(r.is_empty(), "{tree}");
         } else {
-            assert!(result.is_err(), "{tree}: a v3 tree reads the point and rejects");
+            assert!(
+                result.is_err(),
+                "{tree}: a v3 tree reads the point and rejects"
+            );
         }
     }
 }
