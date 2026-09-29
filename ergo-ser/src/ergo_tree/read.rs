@@ -3,7 +3,7 @@
 //! version scoping, and the shared depth/position budgets.
 //! Oracle: test-vectors/scala/const_placeholder_bounds.json
 
-use ergo_primitives::reader::{ReadError, VlqReader};
+use ergo_primitives::reader::{ReadError, UnresolvedMethodCheckpoint, VlqReader};
 
 use crate::opcode;
 use crate::sigma_value::read_constant;
@@ -150,7 +150,17 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // boundary byte-for-byte. The limit, relative to the inner view that
         // starts at `body_start`, is `MaxPropositionSize - (header + size length)`.
         let body_budget = MAX_PROPOSITION_BYTES.saturating_sub(body_start - tree_start);
-        let (parsed, unresolved_checkpoint, body_consumed, inner_ges, header_spans) = {
+        // The body's reader level starts where `r`'s is; the frames it leaves
+        // open at a throw that degrades the tree are counted below.
+        let entry_level = r.scala_level();
+        let (
+            parsed,
+            unresolved_checkpoint,
+            body_consumed,
+            inner_ges,
+            header_spans,
+            (level_after, leaked_after),
+        ) = {
             let body_view = r.data_slice(body_start, body_start + r.remaining());
             let mut inner = VlqReader::new(body_view);
             if r.collects_header_spans() {
@@ -186,6 +196,8 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // box -> tree -> constant -> box cycle recurses until the native
             // stack overflows. Inert for a top-level tree, where the base is 0.
             inner.set_nesting_depth_base(r.nesting_depth_base());
+            inner.set_scala_level(entry_level);
+            inner.set_leaked_levels(r.leaked_levels());
             // The body shares Scala's reader, and with it the binding store,
             // including bindings made before a failure that is then wrapped.
             inner.set_val_bindings(r.val_bindings().cloned());
@@ -197,6 +209,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 inner.position(),
                 inner.take_group_elements(),
                 inner.header_spans().to_vec(),
+                (inner.scala_level(), inner.leaked_levels()),
             )
         };
         for (start, end) in header_spans {
@@ -207,8 +220,8 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // throws a method-resolution `ValidationException`, caught under has_size.
         // The parser keyed that on the tree-header version (v6-only method in a
         // pre-v3 tree, or a genuinely unknown id at any version) and recorded the
-        // group-element sideband length at the exact throw point (after the method's
-        // receiver + value args).
+        // group-element sideband length and the reader level at the exact throw
+        // point (after the method's receiver + value args).
         let unresolved_method_wrap = unresolved_checkpoint.is_some();
 
         // Forward the group elements the inner parse collected onto `r` — EVEN when
@@ -217,7 +230,10 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // ONLY the prefix Scala reached before it threw at the method; points after
         // it are never deserialized, hence never curve-checked.
         let forward_upto = if unresolved_method_wrap {
-            unresolved_checkpoint.unwrap().0.min(inner_ges.len())
+            unresolved_checkpoint
+                .unwrap()
+                .group_elements
+                .min(inner_ges.len())
         } else {
             inner_ges.len()
         };
@@ -233,7 +249,13 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // outcome is a wrap REGARDLESS of whether the trailing bytes then parsed cleanly
         // OR hit a hard error (depth / overflow / nested HardReject) Scala never reaches.
         // Checked BEFORE the `parsed` match so such a later hard error cannot override it.
-        if unresolved_method_wrap {
+        if let Some(checkpoint) = unresolved_checkpoint {
+            leave_levels_open(
+                r,
+                entry_level,
+                checkpoint.scala_level,
+                checkpoint.leaked_levels,
+            );
             let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
             return Ok((
                 unparsed_soft_fork_tree(
@@ -242,7 +264,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                     constant_segregation,
                     full,
                     Some(method_validation_rule(
-                        unresolved_checkpoint.unwrap(),
+                        checkpoint,
                         version,
                         r.activated_script_version().unwrap_or(1),
                     )),
@@ -253,6 +275,11 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
 
         match parsed {
             Ok(tree) => {
+                // Every frame the body entered returned: only degrades nested
+                // in it (a size-delimited box script) left levels open.
+                debug_assert_eq!(level_after, entry_level, "unbalanced reader level");
+                r.set_scala_level(level_after);
+                r.set_leaked_levels(leaked_after);
                 // Scala wraps any non-SigmaProp root
                 // (`CheckDeserializedScriptIsSigmaProp`) as `UnparsedErgoTree`.
                 // `determinable_root_type` is the rule-1001 typer — it covers inline
@@ -306,6 +333,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                     validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
                     args,
                 ));
+                leave_levels_open(r, entry_level, level_after, leaked_after);
                 let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                 Ok((
                     unparsed_soft_fork_tree(
@@ -340,6 +368,23 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         r.set_ergo_tree_version(saved_v);
         parsed.map(|tree| (tree, false))
     }
+}
+
+/// A size-delimited tree degraded: Scala's `deserializeErgoTree` catches the
+/// `ValidationException` and restores only the position limit
+/// (ErgoTreeSerializer.scala:209-211), so every frame the throw unwound keeps
+/// its reader level for the rest of the reader. Count those frames, the
+/// levels between the tree's entry and the throw, as leaked, together with
+/// the levels already leaked when it threw.
+fn leave_levels_open(
+    r: &mut VlqReader,
+    entry_level: usize,
+    level_at_throw: usize,
+    leaked_at_throw: usize,
+) {
+    let open = level_at_throw.saturating_sub(entry_level);
+    r.set_leaked_levels(leaked_at_throw.saturating_add(open));
+    r.set_scala_level(entry_level);
 }
 
 /// Construct a soft-fork-accepted ErgoTree (Scala's
@@ -388,7 +433,9 @@ fn validation_rule_version(rule_id: u16, activated_version: u8) -> u16 {
 // MethodsContainer.methodsV5/V6 and CheckAndGetMethodTemplate distinguish
 // unknown containers from unknown methods after reading the receiver and args.
 fn method_validation_rule(
-    (_, type_id, method_id): (usize, u8, u8),
+    UnresolvedMethodCheckpoint {
+        type_id, method_id, ..
+    }: UnresolvedMethodCheckpoint,
     version: u8,
     activated_version: u8,
 ) -> (u16, Vec<u8>) {

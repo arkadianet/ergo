@@ -1,0 +1,30 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.degraded_tree_depth_leak",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "degrade-leak-coll99-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "Output 0's tree is size-flagged v3 (0b0ad1efefefefefefefeffd): BoolToSigmaProp, 8 LogicalNot, then unknown opcode 0xfd at depth 10. CheckValidOpCode throws a ValidationException, the tree degrades to UnparsedErgoTree, and the 10 levels are never lowered again (ErgoTreeSerializer.scala:209-211 restores only the position limit). Output 1 R4 = Coll^99[Byte] then takes 10 + 1 + 99 = 110. Round-trip identity.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d980000000002c0843d0b0ad1efefefefefefefeffd010000c08faedc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "degrade-leak-coll100-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-parse-depth",
+      "description" : "The same tx with output 1 R4 = Coll^100[Byte]: 10 leaked + 1 + 100 = 111, rejected at parse. On a fresh level it would take 101 and parse (the blesser's control), so an impl that restores the level after the degrade round-trips the tx: the over-accept.",
+      "bytes_hex" : "0155e925cba0a46aaee2ccbf49d5fa861ec5978b4810d3506e996e1d4e70ee0d980000000002c0843d0b0ad1efefefefefefefeffd010000c08faedc030008d30100010c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c1a01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

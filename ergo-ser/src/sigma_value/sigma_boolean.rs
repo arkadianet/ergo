@@ -108,12 +108,21 @@ pub(super) fn read_sigma_boolean_at_depth(
     // recursion below adds one level per node. Folding the base into `depth`
     // here would re-add it at every level, growing the effective depth twice as
     // fast as the reference and rejecting chains Scala accepts.
-    let effective_depth = r.nesting_depth_base().saturating_add(depth);
+    let effective_depth = r.depth_floor().saturating_add(depth);
     if effective_depth >= MAX_SIGMA_TREE_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: MAX_SIGMA_TREE_DEPTH,
         });
     }
+    // `SigmaBoolean.serializer.parse` holds one reader level per node
+    // (SigmaBoolean.scala:72-103).
+    r.enter_level();
+    let node = read_sigma_boolean_node(r, depth)?;
+    r.exit_level();
+    Ok(node)
+}
+
+fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
     let tag = r.get_u8()?;
     let next = depth + 1;
     match tag {

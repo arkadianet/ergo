@@ -44,7 +44,21 @@ pub struct VlqReader<'a> {
     /// exactly the group elements Scala curve-checked before it wrapped a size-delimited
     /// tree as `UnparsedErgoTree` — the points AFTER that method are never reached by
     /// Scala and must not be curve-checked here.
-    unresolved_method_checkpoint: Option<(usize, u8, u8)>,
+    unresolved_method_checkpoint: Option<UnresolvedMethodCheckpoint>,
+    /// Shadow of Scala's `CoreByteReader.lvl` as it moves, not as it is
+    /// bounded: one level per `ValueSerializer.deserialize`,
+    /// `CoreDataSerializer.deserialize` (or `DataSerializer`'s `SBox` /
+    /// `SHeader` arm) and `SigmaBoolean` parse entered, given back only when
+    /// that frame returns normally. A frame a `ValidationException` unwinds
+    /// never gives its level back, so a size-delimited tree that degrades
+    /// leaves the levels open at the throw on the reader. Only differences of
+    /// this count are meaningful; see [`enter_level`](Self::enter_level).
+    scala_level: usize,
+    /// Levels left open by degraded trees earlier on this reader. Scala's
+    /// depth bound counts them for every later read, so every depth check
+    /// adds them to its own depth. See
+    /// [`leaked_levels`](Self::leaked_levels).
+    leaked_levels: usize,
     /// The ErgoTree header version of the body currently being parsed, or `None`
     /// for a headerless context (register / context-var values, which deserialize
     /// under the activated version, not a tree-header version). Read by the type
@@ -168,6 +182,24 @@ pub enum ReadError {
     HardReject(String),
 }
 
+/// Where the parser passed the first method its tree's registry cannot
+/// resolve (after the method's receiver and value args): the point Scala's
+/// `MethodCallSerializer.parse` throws a method-resolution
+/// `ValidationException`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnresolvedMethodCheckpoint {
+    /// Group elements recorded before the throw.
+    pub group_elements: usize,
+    /// Container (type) code of the method.
+    pub type_id: u8,
+    /// Method code.
+    pub method_id: u8,
+    /// Shadow reader level at the throw ([`VlqReader::scala_level`]).
+    pub scala_level: usize,
+    /// Levels already leaked at the throw ([`VlqReader::leaked_levels`]).
+    pub leaked_levels: usize,
+}
+
 impl<'a> VlqReader<'a> {
     /// Wrap a byte slice for sequential decoding. The reader borrows `data`
     /// for its full lifetime.
@@ -180,6 +212,8 @@ impl<'a> VlqReader<'a> {
             header_spans: None,
             group_elements: Vec::new(),
             unresolved_method_checkpoint: None,
+            scala_level: 0,
+            leaked_levels: 0,
             ergo_tree_version: None,
             constant_pool_len: None,
             val_bindings: None,
@@ -299,14 +333,19 @@ impl<'a> VlqReader<'a> {
     /// [`unresolved_method_checkpoint`](Self::unresolved_method_checkpoint).
     pub fn mark_unresolved_method_checkpoint(&mut self, type_id: u8, method_id: u8) {
         if self.unresolved_method_checkpoint.is_none() {
-            self.unresolved_method_checkpoint =
-                Some((self.group_elements.len(), type_id, method_id));
+            self.unresolved_method_checkpoint = Some(UnresolvedMethodCheckpoint {
+                group_elements: self.group_elements.len(),
+                type_id,
+                method_id,
+                scala_level: self.scala_level,
+                leaked_levels: self.leaked_levels,
+            });
         }
     }
 
-    /// The group-element count, container code and method code at the first
-    /// unresolved method, or `None` if every method in the body resolved.
-    pub fn unresolved_method_checkpoint(&self) -> Option<(usize, u8, u8)> {
+    /// The reader's state at the first unresolved method, or `None` if every
+    /// method in the body resolved.
+    pub fn unresolved_method_checkpoint(&self) -> Option<UnresolvedMethodCheckpoint> {
         self.unresolved_method_checkpoint
     }
 
@@ -316,7 +355,10 @@ impl<'a> VlqReader<'a> {
     /// into the enclosing tree's soft-fork wrap), so an unresolved method inside it
     /// must NOT mark the outer tree's checkpoint. Save before parsing the nested
     /// body, restore after.
-    pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<(usize, u8, u8)>) {
+    pub fn restore_unresolved_method_checkpoint(
+        &mut self,
+        saved: Option<UnresolvedMethodCheckpoint>,
+    ) {
         self.unresolved_method_checkpoint = saved;
     }
 
@@ -407,6 +449,53 @@ impl<'a> VlqReader<'a> {
     /// top-level parse and leaves depth accounting exactly as it was.
     pub fn set_nesting_depth_base(&mut self, base: usize) {
         self.nesting_depth_base = base;
+    }
+
+    /// The level a depth check counts its own depth from: the enclosing
+    /// nested-value base plus the levels degraded trees leaked on this
+    /// reader.
+    pub fn depth_floor(&self) -> usize {
+        self.nesting_depth_base.saturating_add(self.leaked_levels)
+    }
+
+    /// Enter a frame that raises Scala's reader level. Call once the frame's
+    /// depth check has passed, and pair it with [`exit_level`](Self::exit_level)
+    /// on the frame's success path only: an error return keeps the level, as
+    /// Scala's relative `r.level = r.level - 1` never runs for a frame an
+    /// exception unwinds.
+    pub fn enter_level(&mut self) {
+        self.scala_level += 1;
+    }
+
+    /// Leave a frame entered with [`enter_level`](Self::enter_level) that
+    /// returned normally.
+    pub fn exit_level(&mut self) {
+        self.scala_level = self.scala_level.saturating_sub(1);
+    }
+
+    /// The shadow level (see [`enter_level`](Self::enter_level)). Compare two
+    /// readings to count the frames entered and not left in between.
+    pub fn scala_level(&self) -> usize {
+        self.scala_level
+    }
+
+    /// Set the shadow level, to carry it into or out of a sub-reader that
+    /// stands for the same Scala reader.
+    pub fn set_scala_level(&mut self, level: usize) {
+        self.scala_level = level;
+    }
+
+    /// Levels left open on this reader by size-delimited trees that degraded
+    /// to `UnparsedErgoTree` (Scala keeps them: `deserializeErgoTree` restores
+    /// only the position limit). Every depth check counts them.
+    pub fn leaked_levels(&self) -> usize {
+        self.leaked_levels
+    }
+
+    /// Set the leaked levels: to carry them across a sub-reader, or to start
+    /// the fresh level of a new Scala reader.
+    pub fn set_leaked_levels(&mut self, levels: usize) {
+        self.leaked_levels = levels;
     }
 
     /// Current position limit (`None` = unbounded). Save before setting a scoped
