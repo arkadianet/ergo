@@ -55,6 +55,12 @@ pub struct VlqReader<'a> {
     ergo_tree_version: Option<u8>,
     /// Constant pool bound while parsing an ErgoTree body.
     constant_pool_len: Option<usize>,
+    /// Variable ids bound so far on this logical reader, mirroring Scala's
+    /// per-reader `valDefTypeStore`, which is never reset: a binding in one
+    /// tree stays visible to every later tree on the same reader. `None`
+    /// means the reader may be partway through a Scala reader whose earlier
+    /// bindings it never saw, so absence proves nothing.
+    val_bindings: Option<std::collections::BTreeSet<u32>>,
     /// Optional override for the version that gates V6-EMBEDDABLE TYPE CODES
     /// (`SUnsignedBigInt` = code 9, …) — the ACTIVATED version, per Scala
     /// `TypeSerializer.getEmbeddableType` selecting `embeddableV5`/`embeddableV6`
@@ -176,6 +182,7 @@ impl<'a> VlqReader<'a> {
             unresolved_method_checkpoint: None,
             ergo_tree_version: None,
             constant_pool_len: None,
+            val_bindings: None,
             embeddable_activated_version: None,
             trusted: false,
             activated_script_version: None,
@@ -311,6 +318,42 @@ impl<'a> VlqReader<'a> {
     /// body, restore after.
     pub fn restore_unresolved_method_checkpoint(&mut self, saved: Option<(usize, u8, u8)>) {
         self.unresolved_method_checkpoint = saved;
+    }
+
+    /// Start tracking variable bindings: call only where Scala starts a fresh
+    /// reader, so its `valDefTypeStore` is empty. No-op if already tracking.
+    pub fn track_val_bindings(&mut self) {
+        self.val_bindings.get_or_insert_with(Default::default);
+    }
+
+    /// Whether this reader knows every binding Scala's store would hold.
+    pub fn tracks_val_bindings(&self) -> bool {
+        self.val_bindings.is_some()
+    }
+
+    /// Record a `ValDef` / `FunDef` / `FuncValue` argument binding.
+    pub fn bind_val(&mut self, id: u32) {
+        if let Some(bindings) = &mut self.val_bindings {
+            bindings.insert(id);
+        }
+    }
+
+    /// Whether `id` was bound earlier on this reader.
+    pub fn is_val_bound(&self, id: u32) -> bool {
+        self.val_bindings
+            .as_ref()
+            .is_some_and(|bindings| bindings.contains(&id))
+    }
+
+    /// The tracked bindings, for carrying into and out of a sub-reader that
+    /// Scala would read on the same reader.
+    pub fn val_bindings(&self) -> Option<&std::collections::BTreeSet<u32>> {
+        self.val_bindings.as_ref()
+    }
+
+    /// Replace the tracked bindings (see [`Self::val_bindings`]).
+    pub fn set_val_bindings(&mut self, bindings: Option<std::collections::BTreeSet<u32>>) {
+        self.val_bindings = bindings;
     }
 
     /// Constant pool bound for the current ErgoTree body, absent for raw expressions.

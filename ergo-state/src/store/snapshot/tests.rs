@@ -1187,6 +1187,7 @@ fn advance_failure_drops_base_then_recovers() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -1303,6 +1304,7 @@ fn advanced_base_non_empty_block_mutations_match_oracle() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,
@@ -1511,6 +1513,7 @@ fn advance_digest_mismatch_falls_back_to_rehydrate() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SBoolean,

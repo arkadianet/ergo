@@ -59,12 +59,27 @@ fn roundtrip_bytes(tree: &ErgoTree) -> Vec<u8> {
 
 // ----- round-trips -----
 
+/// Scala keeps the whole header byte and writes it back; only the version,
+/// size and constant-segregation bits carry meaning. sigma-state 6.0.2
+/// re-serializes each of these byte-identically.
+#[test]
+fn reserved_header_bits_round_trip_like_scala() {
+    for hex in ["2008d3", "e008d3", "280208d3"] {
+        let bytes = hex::decode(hex).unwrap();
+        let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+        let mut w = VlqWriter::new();
+        write_ergo_tree(&mut w, &tree).unwrap();
+        assert_eq!(hex::encode(w.result()), hex);
+    }
+}
+
 #[test]
 fn header_byte_version_only() {
     let tree = ErgoTree {
         version: 3,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -79,6 +94,7 @@ fn header_byte_all_flags() {
         version: 1,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -94,6 +110,7 @@ fn header_byte_size_flag_only() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -108,6 +125,7 @@ fn header_byte_cseg_flag_only() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -122,6 +140,7 @@ fn no_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -134,6 +153,7 @@ fn cseg_no_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -146,6 +166,7 @@ fn cseg_with_constants_no_size() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (SigmaType::SInt, SigmaValue::Int(42)),
             (SigmaType::SLong, SigmaValue::Long(1_000_000)),
@@ -166,6 +187,7 @@ fn cseg_with_constants_and_size() {
         version: 1,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (
                 SigmaType::SSigmaProp,
@@ -199,6 +221,7 @@ fn read_ergo_tree_constant_count_above_soft_cap_still_parses() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants,
         body: placeholder_body(),
     };
@@ -211,6 +234,7 @@ fn size_delimited_no_cseg() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: sigma_prop_body(),
     };
@@ -224,6 +248,7 @@ fn multiple_constants_roundtrip() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![
             (SigmaType::SInt, SigmaValue::Int(0)),
             (SigmaType::SLong, SigmaValue::Long(i64::MAX)),
@@ -501,17 +526,24 @@ fn getuintexact_index_overflow_hard_rejects_not_wrapped() {
 }
 
 /// A `ValUse` id past i32::MAX is read non-exact (Scala `getUInt.toInt`):
-/// accepted, kept as the raw u32 so it round-trips byte-identically.
+/// accepted when bound, kept as the raw u32 so it round-trips byte-identically.
 #[test]
 fn valuse_id_overflow_roundtrips() {
     let tree = ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: crate::opcode::Expr::Op(crate::opcode::IrNode {
-            opcode: 0x72, // ValUse
-            payload: crate::opcode::Payload::ValUse { id: 0xFFFF_FFFF },
+            opcode: 0xd9,
+            payload: crate::opcode::Payload::FuncValue {
+                args: vec![(0xffff_ffff, Some(SigmaType::SSigmaProp))],
+                body: Box::new(crate::opcode::Expr::Op(crate::opcode::IrNode {
+                    opcode: 0x72,
+                    payload: crate::opcode::Payload::ValUse { id: 0xffff_ffff },
+                })),
+            },
         }),
     };
     roundtrip(&tree);
@@ -525,6 +557,7 @@ fn funcvalue_arg_id_overflow_roundtrips() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: crate::opcode::Expr::Op(crate::opcode::IrNode {
             opcode: 0xD9, // FuncValue
@@ -606,6 +639,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
         version: 0,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SInt, SigmaValue::Int(7))],
         body: placeholder_body(), // ConstPlaceholder(0) → SInt (non-SigmaProp)
     };
@@ -627,6 +661,7 @@ fn size_flagged_const_placeholder_non_sigmaprop_root_wraps_as_unparsed() {
         version: 0,
         has_size: true,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(
             SigmaType::SSigmaProp,
             SigmaValue::SigmaProp(crate::sigma_value::SigmaBoolean::TrivialProp(true)),
@@ -801,6 +836,9 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
         "007d050004",     // Downcast (numeric)
         "00d40500",       // deserializeContext[Long]
         "00d5040500",     // deserializeRegister[Long]
+        "00da010100",     // Apply(true)(): non-function callee -> NoType
+        // Apply(Upcast(2: Int))(..): an explicit cast callee -> NoType.
+        "00da7e040404040404040404040404dada040404040404dada7fffffffffdf11ffffff0405",
     ] {
         assert!(
             check_sigma_prop_root(&parse(op)).is_err(),
@@ -815,6 +853,7 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
             "00d40801",   // deserializeContext[SigmaProp] — type tag = SigmaProp
             "00d5040800", // deserializeRegister[SigmaProp]
             "00710108",   // TaggedVar[SigmaProp] (type-tag dependent → lenient)
+            "00da1401d3010400", // Coll[SigmaProp] literal applied to 0 -> element type
             // P2PK (ProveDlog) root.
             "0008cd02000a518dc9761306f048c70ad44e1a7fc9e4ce2ceeea529646f73aada1ea6640",
             // SigmaAnd / SigmaOr / AtLeast of ProveDlogs — common multisig roots.
@@ -1031,6 +1070,7 @@ fn template_bytes_excludes_header_for_simple_tree() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -1055,6 +1095,7 @@ fn template_bytes_excludes_constants_table_for_segregated_tree() {
         version: 0,
         has_size: false,
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBoolean, SigmaValue::Boolean(true))],
         body: placeholder_body(),
     };
@@ -1074,6 +1115,7 @@ fn template_hash_is_blake2_of_template_bytes() {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: simple_body(),
     };
@@ -1255,6 +1297,7 @@ fn pre_v3_v6_method_size_flagged_wraps_and_forwards_only_pre_method_ges() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body,
     };
@@ -1390,6 +1433,7 @@ fn unknown_method_size_flagged_wraps_and_drops_trailing_ge() {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             // Plus(unknown_method, off_curve_ge): the off-curve GE is decoded
             // AFTER the method, so Scala never reaches it.
@@ -1632,6 +1676,7 @@ fn nested_box_constant_v6_in_size_delimited_outer_hard_rejects() {
         version: 0,
         has_size: true, // SIZE-DELIMITED outer — the soft-fork-wrap path
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
         body: placeholder_body(),
     };
@@ -1668,6 +1713,7 @@ fn nested_box_constant_rule1012_in_size_delimited_outer_wraps() {
         version: 0,
         has_size: true, // SIZE-DELIMITED outer — must WRAP a nested ValidationException
         constant_segregation: true,
+        reserved_header_bits: 0,
         constants: vec![(SigmaType::SBox, SigmaValue::OpaqueBoxBytes(inner_box))],
         body: placeholder_body(),
     };
@@ -1747,6 +1793,7 @@ fn size_delimited_body_nested_high_version_sbox_trusted_vs_strict() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: crate::sigma_type::SigmaType::SBox,

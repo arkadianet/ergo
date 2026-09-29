@@ -88,6 +88,14 @@ fn parse_typed_expr(
         },
     );
     parent_types.push(tpe.filter(crate::ergo_tree::root_type::type_is_precise));
+    // `ValDefSerializer` stores the binding once its rhs is parsed.
+    if let Expr::Op(IrNode {
+        payload: Payload::ValDef { id, .. } | Payload::FunDef { id, .. },
+        ..
+    }) = &expr
+    {
+        r.bind_val(*id);
+    }
     Ok(expr)
 }
 
@@ -179,6 +187,17 @@ fn parse_node(
 
         ArgPattern::One => {
             let a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            // OptionGet.tpe accesses SOption.elemType during construction.
+            // Its ClassCastException is not a soft-fork ValidationException.
+            if first == 0xe4 {
+                if let Some(Some(tpe)) = children.last() {
+                    if !matches!(tpe, SigmaType::SOption(_)) {
+                        return Err(ReadError::HardReject(format!(
+                            "OptionGet input must be an option, got {tpe:?}"
+                        )));
+                    }
+                }
+            }
             Payload::One(Box::new(a))
         }
 
@@ -206,10 +225,22 @@ fn parse_node(
         ArgPattern::ValUse => {
             // Scala `ValUseSerializer` reads the id via `getUInt.toInt`
             // (ValUseSerializer.scala:13) — NOT `getUIntExact`. A value past
-            // i32::MAX wraps to a negative `Int` and is ACCEPTED (it simply
-            // references no ValDef and fails at eval). Read non-exact and keep
-            // the raw u32 so the id round-trips byte-identically.
+            // i32::MAX wraps to a negative `Int`. Read non-exact and preserve
+            // the bit pattern, including when looking up a negative binding.
             let id = r.get_uint_to_i32()? as u32;
+            // Scala's `valDefTypeStore` belongs to the reader and is never
+            // reset, so an id bound by an earlier tree on the same reader,
+            // including a nested box's script, resolves. Absence is conclusive
+            // only while the reader has tracked every binding since Scala's
+            // reader started; nested trees share that set.
+            if r.tracks_val_bindings()
+                && !r.is_val_bound(id)
+                && !types.bindings.bindings.contains_key(&id)
+            {
+                return Err(ReadError::HardReject(format!(
+                    "ValUse {id} has no preceding definition (Scala NoSuchElementException)"
+                )));
+            }
             Payload::ValUse { id }
         }
 
@@ -235,10 +266,11 @@ fn parse_node(
             // (`0xFFFF_FF80..0xFFFF_FFFF`). Reading VLQ-u32 would
             // alias raw byte only for `id < 128`.
             let id = (r.get_u8()? as i8) as u32;
-            // Scala's SigmaByteReader always has constantStore set (even when
-            // cseg=false it uses ConstantStore.empty), so the type is NEVER
-            // read from the byte stream during deserialization.
-            Payload::TaggedVar { id, tpe: None }
+            // TaggedVariableSerializer.parse reads the type unconditionally
+            // (unlike ValDef, it has no constantStore branch). An unsupported
+            // code fails rule 1018 like any other type read.
+            let tpe = read_type(r)?;
+            Payload::TaggedVar { id, tpe: Some(tpe) }
         }
 
         ArgPattern::ValDef => {
@@ -302,7 +334,7 @@ fn parse_node(
                     "BlockValue item count too large: {count}"
                 )));
             }
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 let item = parse_typed_expr(r, next, _tree_version, types, children)?;
                 // BlockValueSerializer casts each parsed item to BlockItem
@@ -335,7 +367,7 @@ fn parse_node(
                     "FuncValue arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 // Scala `FuncValueSerializer` reads each arg id via `getUInt().toInt`
                 // (FuncValueSerializer.scala:36) — NOT `getUIntExact` (which it uses
@@ -346,6 +378,7 @@ fn parse_node(
                 // FuncValue always writes arg types (they define the function signature).
                 let tpe = Some(read_type(r)?);
                 types.bindings.bindings.insert(id, tpe.clone());
+                r.bind_val(id);
                 args.push((id, tpe));
             }
             let body = parse_typed_expr(r, next, _tree_version, types, children)?;
@@ -418,7 +451,7 @@ fn parse_node(
                     "MethodCall arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -479,9 +512,23 @@ fn parse_node(
         ArgPattern::ConcreteCollection => {
             let count = r.get_u16()? as usize;
             let elem_type = read_type(r)?;
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
-                items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let item = parse_typed_expr(r, next, _tree_version, types, children)?;
+                // `ConcreteCollectionSerializer.parse` asserts
+                // `v.tpe == tItem` per item. An `AssertionError` is not a
+                // `ValidationException`, so even a sized tree hard-rejects.
+                // Only types the IR states explicitly are checked (see
+                // `explicit_type`); an inferred type may differ from Scala's.
+                if let Some(tpe) = explicit_type(&item) {
+                    if tpe != elem_type {
+                        return Err(ReadError::HardReject(format!(
+                            "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} \
+                             (Scala AssertionError)"
+                        )));
+                    }
+                }
+                items.push(item);
             }
             Payload::ConcreteCollection { elem_type, items }
         }
@@ -514,7 +561,7 @@ fn parse_node(
                 )));
             }
             let count = count_byte as usize;
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -593,6 +640,12 @@ fn parse_node(
 
         ArgPattern::DeserializeRegister => {
             let reg_id = r.get_u8()?;
+            // findRegisterByIndex(getByte()).get throws before reading the type.
+            if reg_id > 9 {
+                return Err(ReadError::HardReject(format!(
+                    "DeserializeRegister register {reg_id} is outside R0..R9"
+                )));
+            }
             let tpe = read_type(r)?;
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
@@ -621,7 +674,7 @@ fn parse_node(
             // The reservation is soft-capped to avoid OOM on a hostile count; the
             // loop still reads `count` items and fails on truncated input.
             let count = r.get_u32_exact()? as usize;
-            let mut items = Vec::with_capacity(count.min(4096));
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -636,6 +689,15 @@ fn parse_node(
         ArgPattern::ByIndex => {
             let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let mut index = parse_typed_expr(r, next, _tree_version, types, children)?;
+            if _tree_version < 3 {
+                if let Some(Some(tpe)) = children.last() {
+                    if !matches!(tpe, SigmaType::SByte | SigmaType::SShort | SigmaType::SInt) {
+                        return Err(ReadError::HardReject(format!(
+                            "ByIndex index cannot be upcast to Int, got {tpe:?}"
+                        )));
+                    }
+                }
+            }
             // Scala ByIndexSerializer inserts a charged Upcast before v3.
             if _tree_version < 3
                 && matches!(
@@ -663,6 +725,17 @@ fn parse_node(
             } else {
                 None
             };
+            // ByIndex.tpe casts the receiver's type to SCollection after the
+            // default has been parsed. Unknown types stay lenient.
+            if let Some(Some(tpe)) = children.first() {
+                // Scala STuple extends SCollection[SAny], so dynamic tuple
+                // indexing also reaches this constructor.
+                if !matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)) {
+                    return Err(ReadError::HardReject(format!(
+                        "ByIndex input must be a collection, got {tpe:?}"
+                    )));
+                }
+            }
             Payload::ByIndex {
                 input: Box::new(input),
                 index: Box::new(index),
@@ -723,7 +796,7 @@ fn parse_node(
                     "FuncApply arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -751,10 +824,19 @@ fn parse_node(
                     tpe: SigmaType::SBoolean,
                     val: SigmaValue::Boolean(right),
                 });
+                let t = Some(SigmaType::SBoolean);
+                check_relation_constraints(first, _tree_version, (&a, &t), (&b, &t))?;
                 Payload::Two(a, b)
             } else {
                 let a = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
                 let b = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let n = children.len();
+                let (ta, tb) = if n >= 2 {
+                    (children[n - 2].clone(), children[n - 1].clone())
+                } else {
+                    (None, None)
+                };
+                check_relation_constraints(first, _tree_version, (&a, &ta), (&b, &tb))?;
                 Payload::Two(a, b)
             }
         }
@@ -764,6 +846,85 @@ fn parse_node(
         opcode: first,
         payload,
     }))
+}
+
+/// A node's Scala `tpe` when the IR states it outright: a constant's wire type,
+/// a numeric cast's target, `Coll[elementType]` for a collection literal, and a
+/// tuple of its items' explicit types. `None` for anything that needs
+/// inference, whose result may differ from Scala's in detail.
+fn explicit_type(e: &Expr) -> Option<SigmaType> {
+    match e {
+        Expr::Const { tpe, .. } => Some(tpe.clone()),
+        Expr::Op(IrNode { payload, .. }) => match payload {
+            Payload::NumericCast { tpe, .. } => Some(tpe.clone()),
+            Payload::ConcreteCollection { elem_type, .. } => {
+                Some(SigmaType::SColl(Box::new(elem_type.clone())))
+            }
+            Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
+            Payload::Tuple { items } => items
+                .iter()
+                .map(explicit_type)
+                .collect::<Option<Vec<_>>>()
+                .map(SigmaType::STuple),
+            _ => None,
+        },
+        Expr::Unparsed(_) => None,
+    }
+}
+
+/// `DeserializationSigmaBuilder` checks comparison and equality operands
+/// (`SigmaBuilder.scala` `comparisonOp` / `equalityOp`): `Lt`..`Ge` require
+/// both operands numeric, and all six require the same type once a pre-v3
+/// tree has upcast two numeric operands to the wider one. `ConstraintFailed`
+/// is not a `ValidationException`, so even a sized tree hard-rejects.
+///
+/// Only known types are judged. The numeric check is a class test, like the
+/// other parse-time checks. Type equality is stricter, so it is applied only
+/// when both types are explicit (a constant or a numeric cast) or both are
+/// flat; a nested inferred type may differ from Scala's in detail.
+fn check_relation_constraints(
+    opcode: u8,
+    tree_version: u8,
+    (a, ta): (&Expr, &Option<SigmaType>),
+    (b, tb): (&Expr, &Option<SigmaType>),
+) -> Result<(), ReadError> {
+    if !(0x8F..=0x94).contains(&opcode) {
+        return Ok(());
+    }
+    let fail = |ta: &SigmaType, tb: &SigmaType| {
+        Err(ReadError::HardReject(format!(
+            "relation {opcode:#04x} operands {ta:?} and {tb:?} fail the builder \
+             constraint (Scala ConstraintFailed)"
+        )))
+    };
+    if opcode <= 0x92 {
+        for t in [ta, tb].into_iter().flatten() {
+            if !t.is_numeric() {
+                return fail(ta.as_ref().unwrap_or(t), tb.as_ref().unwrap_or(t));
+            }
+        }
+    }
+    let (Some(ta), Some(tb)) = (ta, tb) else {
+        return Ok(());
+    };
+    let explicit = |e: &Expr| explicit_type(e).is_some();
+    let flat = |t: &SigmaType| {
+        !matches!(
+            t,
+            SigmaType::SColl(_)
+                | SigmaType::SOption(_)
+                | SigmaType::STuple(_)
+                | SigmaType::SFunc { .. }
+                | SigmaType::STypeVar(_)
+                | SigmaType::SAny
+        )
+    };
+    let comparable = (explicit(a) && explicit(b)) || (flat(ta) && flat(tb));
+    let upcast = tree_version < 3 && ta.is_numeric() && tb.is_numeric();
+    if comparable && !upcast && ta != tb {
+        return fail(ta, tb);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

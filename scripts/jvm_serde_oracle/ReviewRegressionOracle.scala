@@ -18,6 +18,7 @@ object ReviewOracle {
             case "constant" => ConstantSerializer(DeserializationSigmaBuilder).deserialize(r)
             case "expr" => r.getValue()
             case "candidate" => org.ergoplatform.ErgoBoxCandidate.serializer.parse(r)
+            case "tx" => org.ergoplatform.ErgoLikeTransactionSerializer.parse(r)
           }
           "ACCEPT " + r.position
         }

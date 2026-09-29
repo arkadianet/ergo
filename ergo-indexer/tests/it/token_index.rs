@@ -46,6 +46,7 @@ fn parseable_tree_true() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -59,6 +60,7 @@ fn parseable_tree_false() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,

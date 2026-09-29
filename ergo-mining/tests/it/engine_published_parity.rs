@@ -549,6 +549,7 @@ fn candidate_metrics_describe_retained_transactions_and_collected_fees() {
         version: 0,
         has_size: true,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,

@@ -34,6 +34,9 @@ pub struct Surface {
 /// private opcode::types::MAX_EXPR_DEPTH. Each strip round removes a level.
 const MAX_UPCAST_STRIP_ROUNDS: usize = 110;
 
+/// Mainnet's activated script version (protocol 6.0).
+const CURRENT_ACTIVATED_VERSION: u8 = 3;
+
 /// read+write fixed-point check shared by every (decode, encode) pair.
 ///
 /// `is_soft_fork_opaque` marks values whose body is a size-delimited
@@ -48,7 +51,10 @@ where
     E: Fn(&mut VlqWriter, &T) -> Result<(), WriteError>,
     F: Fn(&T) -> bool,
 {
-    let mut r1 = VlqReader::new(input);
+    // Parse under mainnet's activated script version, as the JVM fixtures
+    // are captured. The default context is pre-JIT, where a future-version
+    // nested tree is wrapped rather than parsed; that is not today's rule.
+    let mut r1 = VlqReader::new(input).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
     r1.enable_header_spans();
     let v1 = match decode(&mut r1) {
         Ok(v) => v,
@@ -71,11 +77,38 @@ where
     let b1 = w1.result();
 
     // We must be able to read back our own output.
-    let mut r2 = VlqReader::new(&b1);
+    let mut r2 = VlqReader::new(&b1).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
     r2.enable_header_spans();
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
+            // A nested box's tree can read past the box's own bytes before a
+            // validation failure rewinds the reader, so its verdict depends on
+            // what follows the box: a dropped suffix, or a later field the
+            // writer re-encodes canonically. Scala shares this: for the fuzz
+            // inputs pinned below, sigma-state 6.0.2 re-serializes to exactly
+            // our bytes and then rejects them. Exempt it only when every
+            // retained box reappears verbatim in the output and the output is
+            // not the input itself; a corrupted box, or the same bytes failing
+            // twice, still report a Bug.
+            let boxes = v1.retained_boxes();
+            if !boxes.is_empty()
+                && b1 != input
+                && boxes
+                    .iter()
+                    .all(|bx| !bx.is_empty() && b1.windows(bx.len()).any(|w| w == *bx))
+            {
+                return Outcome::WriteRejected;
+            }
+            // Pre-v3, both writers strip `Upcast(Const)` to the bare constant,
+            // so an operand keeps its pre-cast type on re-read and can fail a
+            // type check the cast satisfied (a collection item's type, a
+            // comparison's operand types). sigma-state 6.0.2 re-serializes such
+            // an input to our exact bytes and rejects them. Only a hard type
+            // rejection is exempt; truncation or misframing is still a Bug.
+            if v1.has_pending_upcast_strip() && matches!(e, ReadError::HardReject(_)) {
+                return Outcome::WriteRejected;
+            }
             // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
             // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
             // limit (only the 4096-byte proposition cap), so the node deliberately
@@ -108,6 +141,13 @@ where
         );
     }
     if v1.parity_normalized(true) != v2.parity_normalized(false) {
+        // Bug #19 can also re-decode successfully: the rewritten bytes after a
+        // size-delimited wrap become its lookahead and now parse structurally.
+        // Scala re-serializes these inputs identically, so only that
+        // wrap→structural flip is exempt.
+        if is_soft_fork_opaque(&v1) && !is_soft_fork_opaque(&v2) {
+            return Outcome::WriteRejected;
+        }
         return Outcome::bug("structure changed across re-encode".into(), input);
     }
 
@@ -123,7 +163,12 @@ where
         }
         let next_bytes = writer.result();
         if next_bytes == bytes {
-            if value.has_pending_upcast_strip() {
+            // A ByIndex byte/short index is stripped and reinserted as the
+            // same Int cast. Byte stability is valid when the expected AST
+            // round trip is also stable; other pending strips must progress.
+            if value.has_pending_upcast_strip()
+                && value.parity_normalized(true) != value.parity_normalized(false)
+            {
                 return Outcome::bug("pending Upcast strip did not change bytes".into(), &bytes);
             }
             break;
@@ -135,10 +180,15 @@ where
         if rounds > MAX_UPCAST_STRIP_ROUNDS {
             return Outcome::bug("Upcast strip did not converge".into(), input);
         }
-        let mut next_reader = VlqReader::new(&next_bytes);
+        let mut next_reader =
+            VlqReader::new(&next_bytes).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
         next_reader.enable_header_spans();
         let next = match decode(&mut next_reader) {
             Ok(next) => next,
+            // A later strip pass can expose the same type failure as the
+            // first (see the pending-strip case above): sigma-state 6.0.2
+            // writes each pass identically and rejects the same pass.
+            Err(ReadError::HardReject(_)) => return Outcome::WriteRejected,
             Err(e) => {
                 return Outcome::bug(
                     format!("re-decode of own output failed: {e:?}"),
@@ -206,6 +256,25 @@ pub fn names() -> Vec<&'static str> {
     registry(None).into_iter().map(|s| s.name).collect()
 }
 
+/// `read_ergo_tree` is deliberately lenient; the consensus box-script readers
+/// apply these gates after it (`ergo_ser::ergo_tree::gates`). A standalone tree
+/// surface must apply them too, or it fuzzes trees no consensus path accepts
+/// (a sizeless or above-activation version) against a reference that rejects
+/// them.
+fn read_ergo_tree_gated(r: &mut VlqReader) -> Result<ergo_ser::ergo_tree::ErgoTree, ReadError> {
+    use ergo_ser::ergo_tree as t;
+    let tree = t::read_ergo_tree(r)?;
+    t::check_tree_version_supported(
+        &tree,
+        r.activated_script_version()
+            .unwrap_or(t::DEFAULT_ACTIVATED_SCRIPT_VERSION),
+    )?;
+    t::check_header_size_bit(&tree)?;
+    t::check_resolvable_methods(&tree)?;
+    t::check_sigma_prop_root(&tree)?;
+    Ok(tree)
+}
+
 /// Build the surface registry. Optionally filter to a single surface by name.
 pub fn registry(only: Option<&str>) -> Vec<Surface> {
     use ergo_ser::{
@@ -220,7 +289,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         rw!("constant", sigma_value::read_constant, write_constant_pair),
         rw!(
             "ergo_tree",
-            ergo_tree::read_ergo_tree,
+            read_ergo_tree_gated,
             ergo_tree::write_ergo_tree,
             soft_fork = tree_is_unparsed
         ),
@@ -231,7 +300,7 @@ pub fn registry(only: Option<&str>) -> Vec<Surface> {
         // generator emits no-panic, byte-stable trees.
         rw!(
             "sigma_expr",
-            ergo_tree::read_ergo_tree,
+            read_ergo_tree_gated,
             ergo_tree::write_ergo_tree,
             soft_fork = tree_is_unparsed
         ),
@@ -568,6 +637,7 @@ mod tests {
             version,
             has_size: true,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: vec![],
             body: Expr::Op(IrNode {
                 opcode,
@@ -686,6 +756,137 @@ mod tests {
             rw_check(&[5], decode_ok, encode_empty, |_| false),
             Outcome::Bug(_)
         ));
+    }
+
+    /// The Bug #19 reshape can also re-decode successfully: the canonical
+    /// rewrite hands the size-delimited body new lookahead bytes, and the
+    /// soft-fork wrap becomes a structural parse. Only that wrap→structural
+    /// flip is exempt; a change that keeps or gains opacity is still a Bug.
+    #[test]
+    fn rw_check_opaque_to_structural_flip_write_rejected() {
+        fn decode(r: &mut VlqReader) -> Result<u8, ReadError> {
+            r.get_u8()
+        }
+        fn encode_next(w: &mut VlqWriter, v: &u8) -> Result<(), WriteError> {
+            w.put_u8(v + 1);
+            Ok(())
+        }
+        assert_eq!(
+            rw_check(&[5], decode, encode_next, |v| *v == 5),
+            Outcome::WriteRejected
+        );
+        for opaque in [|_: &u8| true, |_: &u8| false, |v: &u8| *v == 6] {
+            assert!(matches!(
+                rw_check(&[5], decode, encode_next, opaque),
+                Outcome::Bug(_)
+            ));
+        }
+    }
+
+    /// Nightly 2026-09-29 (main `bd9c1172`): a v3 sized tree declares a
+    /// 0-byte body, and its lookahead into an overlong creation height wraps
+    /// as rule 1002. sigma-state 6.0.2 accepts the input (43 bytes, tree
+    /// `Unparsed(eb00)`) and re-serializes it to the same bytes we write.
+    #[test]
+    fn nightly_20260929_box_candidate_reshape_write_rejected() {
+        let bytes = hex::decode(
+            "00eb00e4daff81000100000000000000002e01000006b7b72e000000000000000001fd261000000000000000f0f0",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
+    /// Local fuzz find (2026-09-29): a constant type written with compact
+    /// `Coll[Coll[T]]` codes stays under the type-depth guard, but the
+    /// canonical re-encode (one `Coll` byte per level, as Scala writes it)
+    /// did not, flipping the sized tree to an opaque wrap on re-decode. The
+    /// guard now charges both levels, so both reads wrap alike.
+    #[test]
+    fn compact_nested_coll_type_depth_is_stable_across_reencode() {
+        let bytes = hex::decode(
+            "2800d1c6ff181818181818181850505050505050505050505050505050505050505050505050505050505050505050505050505050505050501818181818181818181818181818181818181818181818181c01000004000000000fff",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("sigma_expr"))[0].run)(&bytes),
+            Outcome::Accepted
+        );
+    }
+
+    /// Local cargo-fuzz finds (2026-09-29). Each hides a nested tree whose
+    /// verdict depends on lookahead past a retained box, so a canonical
+    /// rewrite after the box flipped the re-decode. sigma-state 6.0.2 rejects
+    /// all three at activated version 3: the constant for a tree version above
+    /// activation, the two trees for rule 1012 (a sizeless version above 0).
+    #[test]
+    fn local_fuzz_20260929_rejected_under_consensus_context() {
+        for (surface, hex) in [
+            ("constant", "4d4d4d4d4f4d6300f83c4d4d4d6300f83c3c0e0e0e0e0e0e0e0e0e0e0e5454571f4d4d4d4d4d6300f84d4d4d630e0e4d00000e2500000e0e0e000045450100d40000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000000000000000000000000000000000000000000000000000000000f94d4d4d4d4d4d4d4d4d4d4d4dff"),
+            ("ergo_tree", "4463f7049b6d7e68686868686868686868030193a3686868686868686868686868686868680000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006868686868686868686868686868686868686868686868686868686868686868686868680303030303030303030303030303030303001000000303030303030303030303030303030303030000006868686868ab48484848333333333333330348484848484800ffffffffffffff4900000000000031f81798ea02d192a39a8cc7a701730073761001020402d19683030193a38cc7a5738303016868686868686868686868686868686868686868686868686868686868686803030393a358a57300000007fffffffd2e070200000000b2a57383030193a38cc7b2a573000705040004000e36104204a00b08cd0279be66ce28d959f2815b101010101010101010101010101010101003036810"),
+            ("sigma_expr", "474949494949494949494963494949494949494949494949494949494949494949494949634949494949494949634949494949494949494949490d0d720e01000000000000000000000100000500000000000000fc0000000000000000000000e1e1e1e1e1e1e1010504010303030ed60f95720d0b730000000000001000000000000000000000007208d70b10b25e8472"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                Outcome::Rejected,
+                "{surface}"
+            );
+        }
+    }
+
+    /// Local fuzz find (2026-09-29): a context-extension box whose nested
+    /// tree reads past the box into a later entry the writer re-encodes.
+    /// sigma-state 6.0.2 accepts the input (723 bytes), re-serializes it to
+    /// exactly our 432 bytes, and rejects those.
+    #[test]
+    fn retained_box_lookahead_in_transaction_is_write_rejected() {
+        let bytes = hex::decode(
+            "01b69575e11c1d1d1d1d1d1d2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2fee0d6245a1168396b2e2a4f384691f275d501c00000054000000594a5959595959595959595959d95959595963595959595959595959595959595959595959595959595959596359595959595959595959595959595959635959595959595959595959595959595959595959595959595963595959595959595959595959595959595905050505050505050505050505050505058505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505640505050505050505050505050505050505050505050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505640505050505050505050505050505050505ffff05050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030305050505050505050505050505050505050505050505640505050505050505050505050505050505ffff05050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0303030303030303030303030303030303030559595959d959595959635959599ed889ddd8899d0059590110595959595959595959595959595959592fee0d6245a1168396b2e2a4f384691f275d500000005400001c00594a5959595959595959595959d959595959635959590505050505050505050505050505055959595959595963595959595959595959595959595959",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("transaction"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
+    /// CI fuzz find (run 36561954936): a pre-v3 `Upcast(Const)` item in a
+    /// `ConcreteCollection`. Both writers strip the cast, leaving a constant of
+    /// the item's pre-cast type, which the per-item assertion then rejects.
+    /// sigma-state 6.0.2 accepts the input, re-serializes it to exactly our
+    /// 166 bytes, and rejects those.
+    #[test]
+    fn pre_v3_upcast_strip_breaking_reparse_is_write_rejected() {
+        let bytes = hex::decode(
+            "00d1999999999999999999999999990f270000d9999999990001999999060606de0604020400040004060404080404000002040204040500050005020100d808d6ffffa4d602c2a7d603c606060606060606060606060606060606060606090000000000008006060606060606060606060606d17e7e93027e05030283020606060000008006067e020606060606060606060606060606060606060606060606060606060606060606060606060b0606060606060606ad06060606060600d1937e7e0206060606060606060606060606e6060606060606060606060606060606060606060606060606069a066a00999900990099999999999906999999",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("ergo_tree"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
+    /// CI fuzz finds (run 36563327031): pre-v3 `ByIndex` index chains
+    /// `Upcast(Upcast(Long, Long), Short)`. Pass by pass, sigma-state 6.0.2
+    /// writes exactly our bytes, and after two strips both reject the bare
+    /// `Long` index.
+    #[test]
+    fn later_strip_pass_type_failure_is_write_rejected() {
+        for (surface, hex) in [
+            ("sigma_expr", "00d1ffffffb2a57e7e050405035555105555550d55160eefefedffffefffffef000404b2a57e7e050405035555105555550d55160e201a6a72160000e4b1cc"),
+            ("ergo_tree", "00d1a2a2a2a2a2a2a2a2b20d0da2a27e7e05030402feff03310203030d0d0d0d0d0d05030402fe030402feffffff01c7"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                Outcome::WriteRejected,
+                "{surface}"
+            );
+        }
     }
 
     #[test]
@@ -987,6 +1188,90 @@ mod tests {
     // ----- oracle parity -----
 
     #[test]
+    fn byindex_implicit_casts_match_jvm_serialization() {
+        // sigma-state 6.0.2, VersionContext(3, 3): the tree's own version
+        // controls stripping. These expected bytes were captured from Scala.
+        for (input, canonical) in [
+            ("00d1b2850100020000", "00d1b2850100020000"),
+            ("00d1b2850100030000", "00d1b2850100030000"),
+            ("00d1b28501007e03000400", "00d1b2850100030000"),
+            ("00d1b28501007e7e0200030400", "00d1b28501007e02000400"),
+            ("0b08d1b2850100050000", "0b08d1b2850100050000"),
+        ] {
+            let bytes = hex::decode(input).unwrap();
+            let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+            let mut writer = VlqWriter::new();
+            ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &tree).unwrap();
+            assert_eq!(hex::encode(writer.result()), canonical);
+            for surface in ["ergo_tree", "sigma_expr"] {
+                assert_eq!((registry(Some(surface))[0].run)(&bytes), Outcome::Accepted);
+            }
+        }
+    }
+
+    /// The retained box `[1]` must reappear verbatim, and the output must not
+    /// be the input itself (identical bytes cannot change a lookahead).
+    #[test]
+    fn retained_box_exception_requires_verbatim_boxes() {
+        use ergo_ser::sigma_value::SigmaValue;
+        for (input, output, expected_bug) in [
+            (&[1, 2][..], &[1][..], false),
+            (&[1, 2, 3][..], &[1, 9][..], false),
+            (&[1, 2][..], &[3][..], true),
+            (&[1, 2][..], &[][..], true),
+            (&[1][..], &[1][..], true),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let outcome = rw_check(
+                input,
+                |reader| {
+                    calls.set(calls.get() + 1);
+                    reader.get_u8()?;
+                    if calls.get() > 1 {
+                        return Err(ReadError::InvalidData("injected re-decode failure".into()));
+                    }
+                    Ok(SigmaValue::OpaqueBoxBytes(vec![1]))
+                },
+                |writer, _| {
+                    writer.put_bytes(output);
+                    Ok(())
+                },
+                |_| false,
+            );
+            assert_eq!(
+                matches!(outcome, Outcome::Bug(_)),
+                expected_bug,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nightly_20260929_crash_outcomes() {
+        for line in
+            include_str!("../../test-vectors/scala/sigma/fuzz_parity_validation.tsv").lines()
+        {
+            if !line.starts_with("nightly_20260929_") {
+                continue;
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert!(fields.len() > 4, "malformed fixture row: {line}");
+            let surface = fields[0].strip_prefix("nightly_20260929_").unwrap();
+            let bytes = hex::decode(fields[4]).unwrap();
+            let expected = if surface == "constant" {
+                Outcome::WriteRejected
+            } else {
+                Outcome::Rejected
+            };
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                expected,
+                "{surface}"
+            );
+        }
+    }
+
+    #[test]
     fn fuzz_seed_decoding_matches_captured_jvm_verdicts() {
         for line in
             include_str!("../../test-vectors/scala/sigma/fuzz_parity_validation.tsv").lines()
@@ -996,11 +1281,13 @@ mod tests {
             }
             let fields: Vec<_> = line.split_whitespace().collect();
             let bytes = hex::decode(fields[4]).unwrap();
-            let mut r = VlqReader::new(&bytes);
+            let mut r =
+                VlqReader::new(&bytes).with_activated_script_version(CURRENT_ACTIVATED_VERSION);
             let result = match fields[1] {
                 "tree" => ergo_ser::ergo_tree::read_ergo_tree(&mut r).map(|_| ()),
                 "constant" => ergo_ser::sigma_value::read_constant(&mut r).map(|_| ()),
                 "candidate" => ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map(|_| ()),
+                "tx" => ergo_ser::transaction::read_transaction(&mut r).map(|_| ()),
                 surface => panic!("unknown surface {surface}"),
             };
             assert_eq!(

@@ -484,6 +484,7 @@ fn p2pk_tree_bytes(pubkey: [u8; 33]) -> Vec<u8> {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,

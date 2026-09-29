@@ -45,6 +45,7 @@ pub use type_infer::substitution_type_of;
 const VERSION_MASK: u8 = 0x07;
 const SIZE_FLAG: u8 = 0x08;
 const CONSTANT_SEGREGATION_FLAG: u8 = 0x10;
+const RESERVED_HEADER_MASK: u8 = 0xE0;
 
 /// Soft `Vec::with_capacity` cap for an ErgoTree's segregated-constant list.
 /// `parse_body` reads the count via `get_u32_exact`, which only bounds it to
@@ -66,9 +67,10 @@ const MAX_PROPOSITION_BYTES: usize = 4096;
 /// Parsed ErgoTree: header byte + optional constants table + parsed
 /// body expression.
 ///
-/// The `version` / `has_size` / `constant_segregation` triple is the
-/// decomposition of the on-wire header byte:
-/// `header = (version & 0x07) | (has_size ? 0x08 : 0) | (cseg ? 0x10 : 0)`.
+/// The `version` / `has_size` / `constant_segregation` triple and
+/// `reserved_header_bits` decompose the on-wire header byte:
+/// `header = (version & 0x07) | (has_size ? 0x08 : 0) | (cseg ? 0x10 : 0)
+///         | reserved_header_bits`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErgoTree {
     /// ErgoTree layout version (low 3 bits of the header byte).
@@ -80,6 +82,9 @@ pub struct ErgoTree {
     /// `true` when constants are pulled out into a separate table
     /// referenced by `ConstPlaceholder` opcodes inside the body.
     pub constant_segregation: bool,
+    /// Header bits `0xE0`. They carry no meaning, but Scala keeps the whole
+    /// header byte and writes it back, so they must round-trip.
+    pub reserved_header_bits: u8,
     /// Constants table — only populated when `constant_segregation` is set.
     pub constants: Vec<(SigmaType, SigmaValue)>,
     /// Root body expression.
@@ -113,7 +118,8 @@ pub fn write_ergo_tree(w: &mut VlqWriter, tree: &ErgoTree) -> Result<(), WriteEr
             CONSTANT_SEGREGATION_FLAG
         } else {
             0
-        };
+        }
+        | (tree.reserved_header_bits & RESERVED_HEADER_MASK);
     w.put_u8(header);
 
     if tree.has_size {

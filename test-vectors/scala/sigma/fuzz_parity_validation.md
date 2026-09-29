@@ -22,3 +22,23 @@ not a claim that the entire input is a well-formed box candidate.
 
 The final two rows isolate the non-binding BlockValue item rejection under
 sizeless and sized headers. Its ClassCastException is never soft-fork-wrapped.
+
+Rows from `cc_item_type_mismatch` on were captured 2026-09-29 with the same
+tool, which gained a `tx` surface (`ErgoLikeTransactionSerializer.parse`).
+`ConcreteCollectionSerializer.parse` asserts that every item's type equals the
+declared element type. The `AssertionError` is not a `ValidationException`, so
+the sized variant is rejected rather than wrapped. `nightly_20260929_transaction`
+is the scheduled-run crash that exposed it: a context-extension collection of
+`Coll[Boolean]` holding an empty `Coll[Short]` constant. `scheduled_20260929_constant`
+is the same run's constant crash, which both implementations reject.
+
+The `tagged_var_*` rows pin `TaggedVariableSerializer` reading a type after the
+id. The `option_get_apply_xor`, `apply_*`, `box_reshape_reencoded` and
+`pr435_fuzz_*` rows pin Scala's `Apply.tpe`, where a callee that is not a
+function or collection gives `NoType`.
+
+Later rows pin the comparison builder constraints (`lt_*`, `eq_*`), a numeric
+cast used as an `Apply` callee, zero-length big integers, and the reader-wide
+binding store: `tx_valuse_bound_by_prior_output` is accepted because the first
+output's `ValDef` stays visible to the second output's tree. The `pr435_*`
+rows are fuzz inputs from this branch's CI and local runs.

@@ -394,6 +394,7 @@ pub fn build_p2pk_tree_bytes(pubkey: &[u8; 33]) -> Result<Vec<u8>, AddressDecode
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: Vec::new(),
         body: Expr::Const {
             tpe: SigmaType::SSigmaProp,
@@ -456,6 +457,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: false,
+            reserved_header_bits: 0,
             constants: Vec::new(),
             body: Expr::Const {
                 tpe: SigmaType::SSigmaProp,
@@ -512,6 +514,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(
                 SigmaType::SSigmaProp,
                 SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes(
@@ -615,6 +618,7 @@ mod tests {
             version: 0,
             has_size: false,
             constant_segregation: true,
+            reserved_header_bits: 0,
             constants: vec![(
                 SigmaType::SSigmaProp,
                 SigmaValue::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes(

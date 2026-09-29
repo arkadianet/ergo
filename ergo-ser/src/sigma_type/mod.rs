@@ -62,7 +62,10 @@ const SGLOBAL_CODE: u8 = 106;
 /// (`ValueSerializer`, `DataSerializer`, `SigmaBoolean`), never by
 /// `TypeSerializer`. The only real Scala bound on type-descriptor nesting is
 /// the reader position limit = `SigmaConstants.MaxPropositionBytes` (4096),
-/// since each `Coll`/`Option` level costs one type byte.
+/// since each `Coll`/`Option` level costs one type byte. The guard counts
+/// nesting levels, not bytes: the compact `Coll[Coll[T]]` and
+/// `Option[Coll[T]]` codes are charged two levels, matching the one-byte-per-
+/// level form both writers emit.
 ///
 /// We deliberately keep a *conservative* recursion bound rather than the true
 /// 4096 ceiling: `read_type` is recursive descent, and ~4096-deep recursion
@@ -141,6 +144,11 @@ pub enum SigmaType {
     SOption(Box<SigmaType>),
     /// Heterogeneous tuple of two or more elements.
     STuple(Vec<SigmaType>),
+    /// Scala `NoType`: the type of an `Apply` whose callee is neither a
+    /// function nor a collection. It has no type code, so it is only ever
+    /// inferred, never read or written. Every cast-checking parent and rule
+    /// 1001 reject it, as Scala does.
+    NoType,
     /// Function type: a list of domain types and a single range type.
     SFunc {
         /// Domain (parameter) types in declaration order.

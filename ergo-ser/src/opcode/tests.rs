@@ -229,18 +229,27 @@ fn roundtrip_const_placeholder() {
 #[test]
 fn roundtrip_val_use() {
     let body = Expr::Op(IrNode {
-        opcode: 0x72,
-        payload: Payload::ValUse { id: 1 },
+        opcode: 0xd9,
+        payload: Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 1 },
+            })),
+        },
     });
     roundtrip(&body, false);
 }
 
 #[test]
 fn roundtrip_tagged_var() {
-    // Type is never serialized (Scala ConstantStore.empty always non-null).
+    // TaggedVariableSerializer writes the id byte and then the type.
     let body = Expr::Op(IrNode {
         opcode: 0x71,
-        payload: Payload::TaggedVar { id: 3, tpe: None },
+        payload: Payload::TaggedVar {
+            id: 3,
+            tpe: Some(SigmaType::SInt),
+        },
     });
     roundtrip(&body, false);
 }
@@ -1076,7 +1085,7 @@ fn parser_parity_audit_against_scala_registered_set() {
 #[test]
 fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
     // TaggedVar id is one signed byte on the wire (Scala
-    // TaggedVariableSerializer.scala:16). For id = 0xFFFF_FFFF
+    // TaggedVariableSerializer.scala:16), followed by the type. For id = 0xFFFF_FFFF
     // (signed Byte = -1) the emitted form is `put_u8(0xFF)` — a single
     // byte, not a 5-byte VLQ-u32. Pin the total payload size so a
     // regression to VLQ-u32 fails loud.
@@ -1084,7 +1093,7 @@ fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0xFFFF_FFFF, // signed Byte = -1
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
@@ -1092,8 +1101,8 @@ fn taggedvar_negative_byte_id_emits_one_byte_not_5_byte_vlq() {
     let bytes = w.result();
     assert_eq!(
         bytes.len(),
-        2,
-        "TaggedVar wire form must be 2 bytes (opcode + 1-byte id); a 5-byte VLQ regression would yield 6: got {bytes:?}"
+        3,
+        "TaggedVar wire form must be 3 bytes (opcode + 1-byte id + SInt type); a 5-byte VLQ regression would yield 7: got {bytes:?}"
     );
     assert_eq!(bytes[1], 0xFF, "low byte of sign-extended id must be 0xFF");
     roundtrip(&body, false);
@@ -1106,13 +1115,13 @@ fn taggedvar_signed_byte_min_id_round_trips() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0xFFFF_FF80,
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
     write_body(&mut w, &body, false).unwrap();
     let bytes = w.result();
-    assert_eq!(bytes.len(), 2);
+    assert_eq!(bytes.len(), 3);
     assert_eq!(bytes[1], 0x80);
     roundtrip(&body, false);
 }
@@ -1128,7 +1137,7 @@ fn taggedvar_id_0x80_unsigned_panics_on_write() {
         opcode: 0x71,
         payload: Payload::TaggedVar {
             id: 0x80,
-            tpe: None,
+            tpe: Some(SigmaType::SInt),
         },
     });
     let mut w = VlqWriter::new();
