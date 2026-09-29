@@ -185,6 +185,10 @@ where
         next_reader.enable_header_spans();
         let next = match decode(&mut next_reader) {
             Ok(next) => next,
+            // A later strip pass can expose the same type failure as the
+            // first (see the pending-strip case above): sigma-state 6.0.2
+            // writes each pass identically and rejects the same pass.
+            Err(ReadError::HardReject(_)) => return Outcome::WriteRejected,
             Err(e) => {
                 return Outcome::bug(
                     format!("re-decode of own output failed: {e:?}"),
@@ -864,6 +868,25 @@ mod tests {
             (registry(Some("ergo_tree"))[0].run)(&bytes),
             Outcome::WriteRejected
         );
+    }
+
+    /// CI fuzz finds (run 36563327031): pre-v3 `ByIndex` index chains
+    /// `Upcast(Upcast(Long, Long), Short)`. Pass by pass, sigma-state 6.0.2
+    /// writes exactly our bytes, and after two strips both reject the bare
+    /// `Long` index.
+    #[test]
+    fn later_strip_pass_type_failure_is_write_rejected() {
+        for (surface, hex) in [
+            ("sigma_expr", "00d1ffffffb2a57e7e050405035555105555550d55160eefefedffffefffffef000404b2a57e7e050405035555105555550d55160e201a6a72160000e4b1cc"),
+            ("ergo_tree", "00d1a2a2a2a2a2a2a2a2b20d0da2a27e7e05030402feff03310203030d0d0d0d0d0d05030402fe030402feffffff01c7"),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                Outcome::WriteRejected,
+                "{surface}"
+            );
+        }
     }
 
     #[test]

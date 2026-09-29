@@ -518,19 +518,10 @@ fn parse_node(
                 // `ConcreteCollectionSerializer.parse` asserts
                 // `v.tpe == tItem` per item. An `AssertionError` is not a
                 // `ValidationException`, so even a sized tree hard-rejects.
-                // Only types the IR states explicitly are checked: a
-                // constant's wire type and a numeric cast's target are exactly
-                // Scala's `tpe`, while an inferred type may not be.
-                let explicit = match &item {
-                    Expr::Const { tpe, .. } => Some(tpe),
-                    Expr::Op(IrNode {
-                        payload: Payload::NumericCast { tpe, .. },
-                        ..
-                    }) => Some(tpe),
-                    _ => None,
-                };
-                if let Some(tpe) = explicit {
-                    if *tpe != elem_type {
+                // Only types the IR states explicitly are checked (see
+                // `explicit_type`); an inferred type may differ from Scala's.
+                if let Some(tpe) = explicit_type(&item) {
+                    if tpe != elem_type {
                         return Err(ReadError::HardReject(format!(
                             "ConcreteCollection item has type {tpe:?}, expected {elem_type:?} \
                              (Scala AssertionError)"
@@ -857,6 +848,30 @@ fn parse_node(
     }))
 }
 
+/// A node's Scala `tpe` when the IR states it outright: a constant's wire type,
+/// a numeric cast's target, `Coll[elementType]` for a collection literal, and a
+/// tuple of its items' explicit types. `None` for anything that needs
+/// inference, whose result may differ from Scala's in detail.
+fn explicit_type(e: &Expr) -> Option<SigmaType> {
+    match e {
+        Expr::Const { tpe, .. } => Some(tpe.clone()),
+        Expr::Op(IrNode { payload, .. }) => match payload {
+            Payload::NumericCast { tpe, .. } => Some(tpe.clone()),
+            Payload::ConcreteCollection { elem_type, .. } => {
+                Some(SigmaType::SColl(Box::new(elem_type.clone())))
+            }
+            Payload::BoolCollection { .. } => Some(SigmaType::SColl(Box::new(SigmaType::SBoolean))),
+            Payload::Tuple { items } => items
+                .iter()
+                .map(explicit_type)
+                .collect::<Option<Vec<_>>>()
+                .map(SigmaType::STuple),
+            _ => None,
+        },
+        Expr::Unparsed(_) => None,
+    }
+}
+
 /// `DeserializationSigmaBuilder` checks comparison and equality operands
 /// (`SigmaBuilder.scala` `comparisonOp` / `equalityOp`): `Lt`..`Ge` require
 /// both operands numeric, and all six require the same type once a pre-v3
@@ -892,16 +907,7 @@ fn check_relation_constraints(
     let (Some(ta), Some(tb)) = (ta, tb) else {
         return Ok(());
     };
-    let explicit = |e: &Expr| {
-        matches!(
-            e,
-            Expr::Const { .. }
-                | Expr::Op(IrNode {
-                    payload: Payload::NumericCast { .. },
-                    ..
-                })
-        )
-    };
+    let explicit = |e: &Expr| explicit_type(e).is_some();
     let flat = |t: &SigmaType| {
         !matches!(
             t,
