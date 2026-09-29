@@ -390,14 +390,23 @@ pub(crate) fn infer_node_type(
             }
             // Scala `Apply.tpe`: a function callee gives its range, a
             // collection callee its element type, and any other callee
-            // `NoType`. A constant callee's type is exact in either mode;
-            // otherwise only a precise parse-time type is trusted.
+            // `NoType`. Otherwise only a precise parse-time type is trusted.
             Payload::FuncApply { func, args } => {
                 let t = child_type(func, store, constants);
                 for a in args {
                     child_type(a, store, constants);
                 }
-                let exact = precise_types || matches!(**func, crate::opcode::Expr::Const { .. });
+                // A constant's wire type and a numeric cast's target are
+                // explicit, so either callee's type is exact in both modes.
+                let exact = precise_types
+                    || matches!(
+                        &**func,
+                        crate::opcode::Expr::Const { .. }
+                            | crate::opcode::Expr::Op(crate::opcode::IrNode {
+                                payload: Payload::NumericCast { .. },
+                                ..
+                            })
+                    );
                 match t {
                     Some(SigmaType::SFunc { t_range, .. }) if precise_types => Some(*t_range),
                     Some(SigmaType::SColl(elem)) if exact => Some(*elem),

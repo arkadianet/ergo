@@ -1108,6 +1108,7 @@ fn non_p2pk_ergo_tree() -> ErgoTree {
         version: 0,
         has_size: false,
         constant_segregation: false,
+        reserved_header_bits: 0,
         constants: vec![],
         body: ergo_ser::opcode::Expr::Op(IrNode {
             opcode: 0x91, // HEIGHT opcode (Int, not SigmaProp) — non-trivially reducible

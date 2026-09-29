@@ -42,10 +42,7 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         r,
         depth,
         _tree_version,
-        &mut ParseTypes {
-            may_have_external_bindings: r.nesting_depth_base() != 0,
-            ..Default::default()
-        },
+        &mut ParseTypes::default(),
         &mut Vec::new(),
     )
 }
@@ -54,10 +51,6 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 struct ParseTypes<'a> {
     bindings: crate::ergo_tree::root_type::ValDefTypeStore,
     constants: &'a [(SigmaType, SigmaValue)],
-    // Nested boxes share Scala's type store. Their retained bytes can contain
-    // bindings this parser cannot see, so absence is conclusive only without
-    // that shared-reader context.
-    may_have_external_bindings: bool,
 }
 
 pub(crate) fn parse_body_with_constants(
@@ -67,10 +60,6 @@ pub(crate) fn parse_body_with_constants(
 ) -> Result<Body, ReadError> {
     let mut types = ParseTypes {
         constants,
-        may_have_external_bindings: r.nesting_depth_base() != 0
-            || constants
-                .iter()
-                .any(|(_, value)| crate::ergo_tree::root_type::value_contains_box(value)),
         ..Default::default()
     };
     parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())
@@ -85,9 +74,6 @@ fn parse_typed_expr(
 ) -> Result<Expr, ReadError> {
     let mut children = Vec::new();
     let expr = parse_node(r, depth, version, types, &mut children)?;
-    if let Expr::Const { val, .. } = &expr {
-        types.may_have_external_bindings |= crate::ergo_tree::root_type::value_contains_box(val);
-    }
     let mut children = children.into_iter();
     let tpe = crate::ergo_tree::root_type::infer_node_type(
         &expr,
@@ -102,6 +88,14 @@ fn parse_typed_expr(
         },
     );
     parent_types.push(tpe.filter(crate::ergo_tree::root_type::type_is_precise));
+    // `ValDefSerializer` stores the binding once its rhs is parsed.
+    if let Expr::Op(IrNode {
+        payload: Payload::ValDef { id, .. } | Payload::FunDef { id, .. },
+        ..
+    }) = &expr
+    {
+        r.bind_val(*id);
+    }
     Ok(expr)
 }
 
@@ -234,7 +228,15 @@ fn parse_node(
             // i32::MAX wraps to a negative `Int`. Read non-exact and preserve
             // the bit pattern, including when looking up a negative binding.
             let id = r.get_uint_to_i32()? as u32;
-            if !types.may_have_external_bindings && !types.bindings.bindings.contains_key(&id) {
+            // Scala's `valDefTypeStore` belongs to the reader and is never
+            // reset, so an id bound by an earlier tree on the same reader,
+            // including a nested box's script, resolves. Absence is conclusive
+            // only while the reader has tracked every binding since Scala's
+            // reader started; nested trees share that set.
+            if r.tracks_val_bindings()
+                && !r.is_val_bound(id)
+                && !types.bindings.bindings.contains_key(&id)
+            {
                 return Err(ReadError::HardReject(format!(
                     "ValUse {id} has no preceding definition (Scala NoSuchElementException)"
                 )));
@@ -376,6 +378,7 @@ fn parse_node(
                 // FuncValue always writes arg types (they define the function signature).
                 let tpe = Some(read_type(r)?);
                 types.bindings.bindings.insert(id, tpe.clone());
+                r.bind_val(id);
                 args.push((id, tpe));
             }
             let body = parse_typed_expr(r, next, _tree_version, types, children)?;
@@ -830,10 +833,19 @@ fn parse_node(
                     tpe: SigmaType::SBoolean,
                     val: SigmaValue::Boolean(right),
                 });
+                let t = Some(SigmaType::SBoolean);
+                check_relation_constraints(first, _tree_version, (&a, &t), (&b, &t))?;
                 Payload::Two(a, b)
             } else {
                 let a = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
                 let b = Box::new(parse_typed_expr(r, next, _tree_version, types, children)?);
+                let n = children.len();
+                let (ta, tb) = if n >= 2 {
+                    (children[n - 2].clone(), children[n - 1].clone())
+                } else {
+                    (None, None)
+                };
+                check_relation_constraints(first, _tree_version, (&a, &ta), (&b, &tb))?;
                 Payload::Two(a, b)
             }
         }
@@ -843,6 +855,70 @@ fn parse_node(
         opcode: first,
         payload,
     }))
+}
+
+/// `DeserializationSigmaBuilder` checks comparison and equality operands
+/// (`SigmaBuilder.scala` `comparisonOp` / `equalityOp`): `Lt`..`Ge` require
+/// both operands numeric, and all six require the same type once a pre-v3
+/// tree has upcast two numeric operands to the wider one. `ConstraintFailed`
+/// is not a `ValidationException`, so even a sized tree hard-rejects.
+///
+/// Only known types are judged. The numeric check is a class test, like the
+/// other parse-time checks. Type equality is stricter, so it is applied only
+/// when both types are explicit (a constant or a numeric cast) or both are
+/// flat; a nested inferred type may differ from Scala's in detail.
+fn check_relation_constraints(
+    opcode: u8,
+    tree_version: u8,
+    (a, ta): (&Expr, &Option<SigmaType>),
+    (b, tb): (&Expr, &Option<SigmaType>),
+) -> Result<(), ReadError> {
+    if !(0x8F..=0x94).contains(&opcode) {
+        return Ok(());
+    }
+    let fail = |ta: &SigmaType, tb: &SigmaType| {
+        Err(ReadError::HardReject(format!(
+            "relation {opcode:#04x} operands {ta:?} and {tb:?} fail the builder \
+             constraint (Scala ConstraintFailed)"
+        )))
+    };
+    if opcode <= 0x92 {
+        for t in [ta, tb].into_iter().flatten() {
+            if !t.is_numeric() {
+                return fail(ta.as_ref().unwrap_or(t), tb.as_ref().unwrap_or(t));
+            }
+        }
+    }
+    let (Some(ta), Some(tb)) = (ta, tb) else {
+        return Ok(());
+    };
+    let explicit = |e: &Expr| {
+        matches!(
+            e,
+            Expr::Const { .. }
+                | Expr::Op(IrNode {
+                    payload: Payload::NumericCast { .. },
+                    ..
+                })
+        )
+    };
+    let flat = |t: &SigmaType| {
+        !matches!(
+            t,
+            SigmaType::SColl(_)
+                | SigmaType::SOption(_)
+                | SigmaType::STuple(_)
+                | SigmaType::SFunc { .. }
+                | SigmaType::STypeVar(_)
+                | SigmaType::SAny
+        )
+    };
+    let comparable = (explicit(a) && explicit(b)) || (flat(ta) && flat(tb));
+    let upcast = tree_version < 3 && ta.is_numeric() && tb.is_numeric();
+    if comparable && !upcast && ta != tb {
+        return fail(ta, tb);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

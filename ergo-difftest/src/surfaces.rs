@@ -82,16 +82,21 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
-            // A nested box's size-delimited tree can inspect trailing bytes,
-            // fail validation, and rewind to its declared boundary. Scala
-            // shares this behavior: removing the unconsumed suffix can change
-            // the verdict even though the writer copied EVERY consumed byte.
-            // Only exempt this retained-box case when there was a suffix and
-            // the output is exactly the consumed input prefix. Changed bytes
-            // and failures on self-contained inputs still report a Bug.
-            if v1.contains_retained_box()
-                && r1.position() < input.len()
-                && b1 == input[..r1.position()]
+            // A nested box's tree can read past the box's own bytes before a
+            // validation failure rewinds the reader, so its verdict depends on
+            // what follows the box: a dropped suffix, or a later field the
+            // writer re-encodes canonically. Scala shares this: for the fuzz
+            // inputs pinned below, sigma-state 6.0.2 re-serializes to exactly
+            // our bytes and then rejects them. Exempt it only when every
+            // retained box reappears verbatim in the output and the output is
+            // not the input itself; a corrupted box, or the same bytes failing
+            // twice, still report a Bug.
+            let boxes = v1.retained_boxes();
+            if !boxes.is_empty()
+                && b1 != input
+                && boxes
+                    .iter()
+                    .all(|bx| !bx.is_empty() && b1.windows(bx.len()).any(|w| w == *bx))
             {
                 return Outcome::WriteRejected;
             }
@@ -819,6 +824,22 @@ mod tests {
         }
     }
 
+    /// Local fuzz find (2026-09-29): a context-extension box whose nested
+    /// tree reads past the box into a later entry the writer re-encodes.
+    /// sigma-state 6.0.2 accepts the input (723 bytes), re-serializes it to
+    /// exactly our 432 bytes, and rejects those.
+    #[test]
+    fn retained_box_lookahead_in_transaction_is_write_rejected() {
+        let bytes = hex::decode(
+            "01b69575e11c1d1d1d1d1d1d2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2fee0d6245a1168396b2e2a4f384691f275d501c00000054000000594a5959595959595959595959d95959595963595959595959595959595959595959595959595959595959596359595959595959595959595959595959635959595959595959595959595959595959595959595959595963595959595959595959595959595959595905050505050505050505050505050505058505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505640505050505050505050505050505050505050505050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505640505050505050505050505050505050505ffff05050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030305050505050505050505050505050505050505050505640505050505050505050505050505050505ffff05050505050303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0303030303030303030303030303030303030559595959d959595959635959599ed889ddd8899d0059590110595959595959595959595959595959592fee0d6245a1168396b2e2a4f384691f275d500000005400001c00594a5959595959595959595959d959595959635959590505050505050505050505050505055959595959595963595959595959595959595959595959",
+        )
+        .unwrap();
+        assert_eq!(
+            (registry(Some("transaction"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+    }
+
     #[test]
     fn rw_check_both_opaque_byte_drift_bug() {
         assert!(matches!(
@@ -1139,11 +1160,14 @@ mod tests {
         }
     }
 
+    /// The retained box `[1]` must reappear verbatim, and the output must not
+    /// be the input itself (identical bytes cannot change a lookahead).
     #[test]
-    fn retained_box_exception_requires_exact_prefix_and_trailing_context() {
+    fn retained_box_exception_requires_verbatim_boxes() {
         use ergo_ser::sigma_value::SigmaValue;
         for (input, output, expected_bug) in [
             (&[1, 2][..], &[1][..], false),
+            (&[1, 2, 3][..], &[1, 9][..], false),
             (&[1, 2][..], &[3][..], true),
             (&[1, 2][..], &[][..], true),
             (&[1][..], &[1][..], true),

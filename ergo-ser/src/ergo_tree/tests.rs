@@ -837,6 +837,8 @@ fn check_sigma_prop_root_matches_jvm_on_sizeless_trees() {
         "00d40500",       // deserializeContext[Long]
         "00d5040500",     // deserializeRegister[Long]
         "00da010100",     // Apply(true)(): non-function callee -> NoType
+        // Apply(Upcast(2: Int))(..): an explicit cast callee -> NoType.
+        "00da7e040404040404040404040404dada040404040404dada7fffffffffdf11ffffff0405",
     ] {
         assert!(
             check_sigma_prop_root(&parse(op)).is_err(),

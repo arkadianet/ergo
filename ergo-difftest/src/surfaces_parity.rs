@@ -21,8 +21,9 @@ use ergo_ser::{
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq;
 
-    fn contains_retained_box(&self) -> bool {
-        false
+    /// Bytes of every retained (opaque) box this value holds, in wire order.
+    fn retained_boxes(&self) -> Vec<&[u8]> {
+        Vec::new()
     }
 
     fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
@@ -57,8 +58,10 @@ unchanged!(
 );
 
 impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
-    fn contains_retained_box(&self) -> bool {
-        self.0.contains_retained_box() || self.1.contains_retained_box()
+    fn retained_boxes(&self) -> Vec<&[u8]> {
+        let mut boxes = self.0.retained_boxes();
+        boxes.extend(self.1.retained_boxes());
+        boxes
     }
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         (
@@ -83,6 +86,11 @@ impl<T: ParityNormalize> ParityNormalize for Vec<T> {
             .flat_map(ParityNormalize::header_values)
             .collect()
     }
+    fn retained_boxes(&self) -> Vec<&[u8]> {
+        self.iter()
+            .flat_map(ParityNormalize::retained_boxes)
+            .collect()
+    }
 }
 
 fn normalize_value(value: &mut SigmaValue) {
@@ -98,16 +106,14 @@ fn normalize_value(value: &mut SigmaValue) {
     }
 }
 impl ParityNormalize for SigmaValue {
-    fn contains_retained_box(&self) -> bool {
+    fn retained_boxes(&self) -> Vec<&[u8]> {
         match self {
-            SigmaValue::OpaqueBoxBytes(_) => true,
+            SigmaValue::OpaqueBoxBytes(bytes) => vec![bytes.as_slice()],
             SigmaValue::Coll(CollValue::Values(items))
             | SigmaValue::Tuple(items)
-            | SigmaValue::ConcreteCollection { items, .. } => {
-                items.iter().any(ParityNormalize::contains_retained_box)
-            }
-            SigmaValue::Opt(Some(inner)) => inner.contains_retained_box(),
-            _ => false,
+            | SigmaValue::ConcreteCollection { items, .. } => items.retained_boxes(),
+            SigmaValue::Opt(Some(inner)) => inner.retained_boxes(),
+            _ => Vec::new(),
         }
     }
     fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
@@ -307,12 +313,24 @@ impl ParityNormalize for ErgoTree {
         }
         headers
     }
+    fn retained_boxes(&self) -> Vec<&[u8]> {
+        let mut boxes = self.constants.retained_boxes();
+        for (_, expr) in ergo_ser::opcode::preorder(&self.body) {
+            if let Expr::Const { val, .. } = expr {
+                boxes.extend(val.retained_boxes());
+            }
+        }
+        boxes
+    }
 }
 
 // Explicit views preserve every other field, including private wire caches.
 // No rebuilding via serializers: doing so would hide codec bugs.
 macro_rules! view {
     ($ty:ty, $v:ident, $body:expr, $headers:expr) => {
+        view!($ty, $v, $body, $headers, Vec::new());
+    };
+    ($ty:ty, $v:ident, $body:expr, $headers:expr, $boxes:expr) => {
         impl ParityNormalize for $ty {
             fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
                 let $v = self;
@@ -322,6 +340,10 @@ macro_rules! view {
                 let $v = self;
                 $headers
             }
+            fn retained_boxes(&self) -> Vec<&[u8]> {
+                let $v = self;
+                $boxes
+            }
         }
     };
 }
@@ -329,13 +351,15 @@ view!(
     RegisterValue,
     v,
     (v.tpe.clone(), v.value.parity_normalized(false)),
-    v.value.header_values()
+    v.value.header_values(),
+    v.value.retained_boxes()
 );
 view!(
     AdditionalRegisters,
     v,
     v.registers.parity_normalized(false),
-    v.registers.header_values()
+    v.registers.header_values(),
+    v.registers.retained_boxes()
 );
 view!(
     ContextExtension,
@@ -353,6 +377,10 @@ view!(
     v.values
         .values()
         .flat_map(ParityNormalize::header_values)
+        .collect(),
+    v.values
+        .values()
+        .flat_map(ParityNormalize::retained_boxes)
         .collect()
 );
 view!(
@@ -363,19 +391,22 @@ view!(
         v.extension().parity_normalized(false),
         v.extension_bytes().to_vec()
     ),
-    v.extension().header_values()
+    v.extension().header_values(),
+    v.extension().retained_boxes()
 );
 view!(
     Input,
     v,
     (v.box_id, v.spending_proof.parity_normalized(false)),
-    v.spending_proof.header_values()
+    v.spending_proof.header_values(),
+    v.spending_proof.retained_boxes()
 );
 view!(
     UnsignedInput,
     v,
     (v.box_id, v.extension.parity_normalized(false)),
-    v.extension.header_values()
+    v.extension.header_values(),
+    v.extension.retained_boxes()
 );
 view!(
     ErgoBoxCandidate,
@@ -393,6 +424,11 @@ view!(
         let mut headers = v.ergo_tree().header_values();
         headers.extend(v.additional_registers.header_values());
         headers
+    },
+    {
+        let mut boxes = v.ergo_tree().retained_boxes();
+        boxes.extend(v.additional_registers.retained_boxes());
+        boxes
     }
 );
 view!(
@@ -403,7 +439,8 @@ view!(
         v.transaction_id,
         v.index
     ),
-    v.candidate.header_values()
+    v.candidate.header_values(),
+    v.candidate.retained_boxes()
 );
 view!(
     Transaction,
@@ -417,6 +454,11 @@ view!(
         let mut headers = v.inputs.header_values();
         headers.extend(v.output_candidates.header_values());
         headers
+    },
+    {
+        let mut boxes = v.inputs.retained_boxes();
+        boxes.extend(v.output_candidates.retained_boxes());
+        boxes
     }
 );
 view!(
@@ -431,13 +473,19 @@ view!(
         let mut headers = v.inputs.header_values();
         headers.extend(v.output_candidates.header_values());
         headers
+    },
+    {
+        let mut boxes = v.inputs.retained_boxes();
+        boxes.extend(v.output_candidates.retained_boxes());
+        boxes
     }
 );
 view!(
     BlockTransactions,
     v,
     (v.header_id, v.transactions.parity_normalized(false)),
-    v.transactions.header_values()
+    v.transactions.header_values(),
+    v.transactions.retained_boxes()
 );
 
 pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
@@ -450,9 +498,14 @@ pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
 }
 
 /// Verify IDs from independent header-parser boundaries, not re-serialized
-/// bytes or the SHeader decoder's own hash calculation. If equal header fields
-/// occurred with different wire hashes, provenance is ambiguous: refuse the
-/// exclusion rather than letting an arbitrary choice of ID pass unnoticed.
+/// bytes or the SHeader decoder's own hash calculation. Equal header fields can
+/// legitimately occur with different wire hashes: Scala hashes each header's
+/// own input slice, so a non-canonical encoding gives the same fields a new
+/// ID. Values and spans both arrive in wire order, so within each group of
+/// equal headers the value IDs must follow the observed wire hashes in order
+/// (a span may back several values). A swapped or invented ID still fails;
+/// spans without a value (a header read inside retained box bytes) are
+/// skipped.
 pub(super) fn header_ids_match_wire(
     value: &impl ParityNormalize,
     reader: &ergo_primitives::reader::VlqReader,
@@ -477,8 +530,23 @@ pub(super) fn header_ids_match_wire(
             ))
         })
         .collect();
+    // One span may back several values (a value cloned into a collection
+    // and an option), so the cursor stays on the matched span.
+    let mut group_cursor: Vec<(&Header, usize)> = Vec::new();
     values.into_iter().all(|(header, id)| {
-        let mut matching = observations.iter().filter(|(h, _)| h == header).peekable();
-        matching.peek().is_some() && matching.all(|(_, wire_id)| *wire_id == id)
+        let start = group_cursor
+            .iter()
+            .rev()
+            .find(|(h, _)| *h == header)
+            .map_or(0, |&(_, at)| at);
+        let found = (start..observations.len())
+            .find(|&k| observations[k].0 == *header && observations[k].1 == id);
+        match found {
+            Some(k) => {
+                group_cursor.push((header, k));
+                true
+            }
+            None => false,
+        }
     })
 }

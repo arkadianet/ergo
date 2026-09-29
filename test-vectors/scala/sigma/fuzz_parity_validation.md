@@ -36,3 +36,9 @@ The `tagged_var_*` rows pin `TaggedVariableSerializer` reading a type after the
 id. The `option_get_apply_xor`, `apply_*`, `box_reshape_reencoded` and
 `pr435_fuzz_*` rows pin Scala's `Apply.tpe`, where a callee that is not a
 function or collection gives `NoType`.
+
+Later rows pin the comparison builder constraints (`lt_*`, `eq_*`), a numeric
+cast used as an `Apply` callee, zero-length big integers, and the reader-wide
+binding store: `tx_valuse_bound_by_prior_output` is accepted because the first
+output's `ValDef` stays visible to the second output's tree. The `pr435_*`
+rows are fuzz inputs from this branch's CI and local runs.

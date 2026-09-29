@@ -188,6 +188,12 @@ pub fn read_transaction(r: &mut VlqReader) -> Result<Transaction, ReadError> {
         0,
         "nesting depth base leaked into a top-level transaction parse"
     );
+    // Scala parses the whole transaction on one reader, so a binding in an
+    // earlier tree or context extension resolves a later `ValUse`. A
+    // transaction at the start of a fresh reader starts that store empty.
+    if r.position() == 0 {
+        r.track_val_bindings();
+    }
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {

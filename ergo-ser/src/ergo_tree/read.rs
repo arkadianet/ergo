@@ -95,6 +95,11 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
     let tree_start = r.position();
+    // A tree that starts a fresh top-level reader starts Scala's reader too, so
+    // its `valDefTypeStore` is empty and unbound uses are decidable.
+    if tree_start == 0 && r.nesting_depth_base() == 0 {
+        r.track_val_bindings();
+    }
     let header = r.get_u8()?;
     let version = header & VERSION_MASK;
     let has_size = header & SIZE_FLAG != 0;
@@ -181,7 +186,11 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             // box -> tree -> constant -> box cycle recurses until the native
             // stack overflows. Inert for a top-level tree, where the base is 0.
             inner.set_nesting_depth_base(r.nesting_depth_base());
+            // The body shares Scala's reader, and with it the binding store,
+            // including bindings made before a failure that is then wrapped.
+            inner.set_val_bindings(r.val_bindings().cloned());
             let parsed = parse_body(&mut inner, header, has_size, constant_segregation);
+            r.set_val_bindings(inner.val_bindings().cloned());
             (
                 parsed,
                 inner.unresolved_method_checkpoint(),
