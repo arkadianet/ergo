@@ -6,6 +6,7 @@
 use ergo_primitives::reader::{ReadError, VlqReader};
 
 use super::{read_constant, SigmaValue};
+use crate::ergo_box::MAX_BOX_SIZE;
 
 /// Skip past an ErgoTree in the reader without fully parsing the body.
 ///
@@ -187,11 +188,6 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
     }
     Ok(())
 }
-
-/// Maximum serialized box size (`SigmaConstants.MaxBoxSize = 4 * 1024`). Scala's
-/// `ErgoBoxCandidate.parseBodyWithIndexedDigests` bounds the candidate body to
-/// `position + MaxBoxSize` via the reader's position limit.
-const MAX_BOX_SIZE: usize = 4 * 1024;
 
 /// Read an inline SBox constant by structurally advancing through the box
 /// fields, then capturing the raw bytes as opaque data for roundtrip fidelity.

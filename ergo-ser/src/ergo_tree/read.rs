@@ -325,9 +325,18 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         // unaffected. A v6-only embeddable type in a sizeless v<3 tree errors
         // (`InvalidData`); the box-script readers propagate it as a reject, matching
         // Scala re-raising the uncaught `ValidationException` as a hard reject.
+        //
+        // `deserializeErgoTree` bounds the whole tree, sized or not, to a
+        // window of `MaxPropositionSize` from its start
+        // (ErgoTreeSerializer.scala:143-144), replacing any enclosing window
+        // (a box's) and restoring it afterwards. A sizeless tree cannot
+        // degrade, so a read that begins past it rejects the tree.
         let saved_v = r.ergo_tree_version();
+        let saved_limit = r.position_limit();
         r.set_ergo_tree_version(Some(version));
+        r.set_position_limit(Some(tree_start + MAX_PROPOSITION_BYTES));
         let parsed = parse_body(r, header, has_size, constant_segregation);
+        r.set_position_limit(saved_limit);
         r.set_ergo_tree_version(saved_v);
         parsed.map(|tree| (tree, false))
     }

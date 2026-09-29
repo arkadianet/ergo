@@ -266,6 +266,12 @@ impl ErgoBox {
     }
 }
 
+/// `SigmaConstants.MaxBoxSize`: `ErgoBoxCandidate.parseBodyWithIndexedDigests`
+/// bounds a candidate's body (value .. registers) to a window of this many
+/// bytes from its start (ErgoBoxCandidate.scala:190-191). A read that begins
+/// past it is rule 1014, which no box read catches: the box is rejected.
+pub(crate) const MAX_BOX_SIZE: usize = 4096;
+
 /// Scala writes the per-box token count as a single unsigned byte;
 /// >255 tokens would silently wrap on `as u8` and corrupt the wire form.
 fn check_token_count(len: usize) -> Result<(), WriteError> {

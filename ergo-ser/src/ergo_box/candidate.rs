@@ -46,6 +46,10 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
         0,
         "nesting depth base leaked into a top-level box-candidate parse"
     );
+    // The box window; a tree sets its own window from its start and
+    // restores this one after it.
+    let box_limit = r.position_limit();
+    r.set_position_limit(Some(r.position() + super::MAX_BOX_SIZE));
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
@@ -108,6 +112,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
         .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
     let register_bytes = rw.result();
 
+    r.set_position_limit(box_limit);
     Ok(ErgoBoxCandidate {
         value,
         ergo_tree,
