@@ -5,12 +5,8 @@ name: Fuzz (nightly scheduled)
 # campaign to build coverage, grows the committed seed corpus over time, and
 # surfaces new invariant violations as loud failures.
 #
-# Note on cargo-fuzz / libFuzzer: the cargo-fuzz targets in
-# ergo-difftest/fuzz/ require a nightly toolchain and are intentionally NOT
-# part of this stable job. The hermetic structured campaign below is the stable
-# equivalent — same fuzz_one logic, coverage-guided by the structure-aware
-# generators rather than by libFuzzer instrumentation. See D1 in
-# ergo-difftest/docs/interface-contracts.md §6 for the design rationale.
+# The structured and mutation campaigns use stable Rust; cargo-fuzz runs in
+# a separate nightly-toolchain matrix with libFuzzer and ASan instrumentation.
 #
 # The JVM oracle differential requires scala-cli + a published local ergo-core
 # and stays manual/local. The streamed replay driver IS wired below (the `replay`
@@ -100,17 +96,31 @@ jobs:
       # bytes — catching decoding bugs near the valid manifold.
       - name: corpus mutation — 2 000 000 iters
         run: |
+          set -o pipefail
           cargo run --release -p ergo-difftest -- \
             --iters 2000000 \
-            --corpus ergo-difftest/fuzz/corpus/ergo_tree
+            --corpus ergo-difftest/fuzz/corpus/ergo_tree \
+            2>&1 | tee "$RUNNER_TEMP/corpus-mutation.log"
 
       # Run ergo_tree and sigma_expr surfaces with the full corpus.
       # Other surfaces use the default unstructured random (no --corpus flag).
       - name: corpus mutation (sigma_expr) — 500 000 iters
         run: |
+          set -o pipefail
           cargo run --release -p ergo-difftest -- \
             --surface sigma_expr --iters 500000 \
-            --corpus ergo-difftest/fuzz/corpus/sigma_expr
+            --corpus ergo-difftest/fuzz/corpus/sigma_expr \
+            2>&1 | tee "$RUNNER_TEMP/sigma-expr-mutation.log"
+
+      - name: upload mutation findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-transcripts
+          path: |
+            ${{ runner.temp }}/corpus-mutation.log
+            ${{ runner.temp }}/sigma-expr-mutation.log
+          if-no-files-found: ignore
 
   replay:
     name: streamed archival replay (deep contiguous state-root)
@@ -143,6 +153,8 @@ jobs:
         run: |
           if [ -z "$REPLAY_NODE_URL" ]; then
             echo "REPLAY_NODE_URL unset — skipping streamed replay (needs a live archival node)."
+            echo '### Archival replay was not tested' >> "$GITHUB_STEP_SUMMARY"
+            echo 'REPLAY_NODE_URL is unset. Fuzzing results do not include state-root replay coverage.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           cargo run --release -p ergo-difftest --bin replay -- \
@@ -199,7 +211,7 @@ jobs:
         working-directory: ergo-difftest
         run: |
           cargo +nightly fuzz run "${{ matrix.target }}" -- \
-            -max_total_time=600 -error_exitcode=1
+            -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1
 
       - name: upload crash artifacts
         if: failure()
@@ -260,6 +272,11 @@ jobs:
           java-version: '11'
 
       - uses: VirtusLab/scala-cli-setup@v1
+
+      # scala-cli does not install sbt, which the cold publishLocal path needs.
+      - uses: sbt/setup-sbt@v1
+        with:
+          sbt-runner-version: 1.12.11
 
       # The oracle's dependency closure: sigma-state 6.0.2 from Maven (coursier)
       # and ergo-core 6.0.2 from a local publish (ivy). Keyed on the oracle

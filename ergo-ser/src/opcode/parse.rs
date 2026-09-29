@@ -42,7 +42,10 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
         r,
         depth,
         _tree_version,
-        &mut ParseTypes::default(),
+        &mut ParseTypes {
+            may_have_external_bindings: r.nesting_depth_base() != 0,
+            ..Default::default()
+        },
         &mut Vec::new(),
     )
 }
@@ -51,6 +54,10 @@ pub fn parse_expr(r: &mut VlqReader, depth: usize, _tree_version: u8) -> Result<
 struct ParseTypes<'a> {
     bindings: crate::ergo_tree::root_type::ValDefTypeStore,
     constants: &'a [(SigmaType, SigmaValue)],
+    // Nested boxes share Scala's type store. Their retained bytes can contain
+    // bindings this parser cannot see, so absence is conclusive only without
+    // that shared-reader context.
+    may_have_external_bindings: bool,
 }
 
 pub(crate) fn parse_body_with_constants(
@@ -60,6 +67,10 @@ pub(crate) fn parse_body_with_constants(
 ) -> Result<Body, ReadError> {
     let mut types = ParseTypes {
         constants,
+        may_have_external_bindings: r.nesting_depth_base() != 0
+            || constants
+                .iter()
+                .any(|(_, value)| crate::ergo_tree::root_type::value_contains_box(value)),
         ..Default::default()
     };
     parse_typed_expr(r, 0, version, &mut types, &mut Vec::new())
@@ -74,6 +85,9 @@ fn parse_typed_expr(
 ) -> Result<Expr, ReadError> {
     let mut children = Vec::new();
     let expr = parse_node(r, depth, version, types, &mut children)?;
+    if let Expr::Const { val, .. } = &expr {
+        types.may_have_external_bindings |= crate::ergo_tree::root_type::value_contains_box(val);
+    }
     let mut children = children.into_iter();
     let tpe = crate::ergo_tree::root_type::infer_node_type(
         &expr,
@@ -179,6 +193,17 @@ fn parse_node(
 
         ArgPattern::One => {
             let a = parse_typed_expr(r, next, _tree_version, types, children)?;
+            // OptionGet.tpe accesses SOption.elemType during construction.
+            // Its ClassCastException is not a soft-fork ValidationException.
+            if first == 0xe4 {
+                if let Some(Some(tpe)) = children.last() {
+                    if !matches!(tpe, SigmaType::SOption(_)) {
+                        return Err(ReadError::HardReject(format!(
+                            "OptionGet input must be an option, got {tpe:?}"
+                        )));
+                    }
+                }
+            }
             Payload::One(Box::new(a))
         }
 
@@ -206,10 +231,14 @@ fn parse_node(
         ArgPattern::ValUse => {
             // Scala `ValUseSerializer` reads the id via `getUInt.toInt`
             // (ValUseSerializer.scala:13) — NOT `getUIntExact`. A value past
-            // i32::MAX wraps to a negative `Int` and is ACCEPTED (it simply
-            // references no ValDef and fails at eval). Read non-exact and keep
-            // the raw u32 so the id round-trips byte-identically.
+            // i32::MAX wraps to a negative `Int`. Read non-exact and preserve
+            // the bit pattern, including when looking up a negative binding.
             let id = r.get_uint_to_i32()? as u32;
+            if !types.may_have_external_bindings && !types.bindings.bindings.contains_key(&id) {
+                return Err(ReadError::HardReject(format!(
+                    "ValUse {id} has no preceding definition (Scala NoSuchElementException)"
+                )));
+            }
             Payload::ValUse { id }
         }
 
@@ -302,7 +331,7 @@ fn parse_node(
                     "BlockValue item count too large: {count}"
                 )));
             }
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 let item = parse_typed_expr(r, next, _tree_version, types, children)?;
                 // BlockValueSerializer casts each parsed item to BlockItem
@@ -335,7 +364,7 @@ fn parse_node(
                     "FuncValue arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 // Scala `FuncValueSerializer` reads each arg id via `getUInt().toInt`
                 // (FuncValueSerializer.scala:36) — NOT `getUIntExact` (which it uses
@@ -418,7 +447,7 @@ fn parse_node(
                     "MethodCall arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -479,7 +508,7 @@ fn parse_node(
         ArgPattern::ConcreteCollection => {
             let count = r.get_u16()? as usize;
             let elem_type = read_type(r)?;
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -514,7 +543,7 @@ fn parse_node(
                 )));
             }
             let count = count_byte as usize;
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -593,6 +622,12 @@ fn parse_node(
 
         ArgPattern::DeserializeRegister => {
             let reg_id = r.get_u8()?;
+            // findRegisterByIndex(getByte()).get throws before reading the type.
+            if reg_id > 9 {
+                return Err(ReadError::HardReject(format!(
+                    "DeserializeRegister register {reg_id} is outside R0..R9"
+                )));
+            }
             let tpe = read_type(r)?;
             let has_default = r.get_u8()?;
             let default = if has_default != 0 {
@@ -621,7 +656,7 @@ fn parse_node(
             // The reservation is soft-capped to avoid OOM on a hostile count; the
             // loop still reads `count` items and fails on truncated input.
             let count = r.get_u32_exact()? as usize;
-            let mut items = Vec::with_capacity(count.min(4096));
+            let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }
@@ -636,6 +671,15 @@ fn parse_node(
         ArgPattern::ByIndex => {
             let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let mut index = parse_typed_expr(r, next, _tree_version, types, children)?;
+            if _tree_version < 3 {
+                if let Some(Some(tpe)) = children.last() {
+                    if !matches!(tpe, SigmaType::SByte | SigmaType::SShort | SigmaType::SInt) {
+                        return Err(ReadError::HardReject(format!(
+                            "ByIndex index cannot be upcast to Int, got {tpe:?}"
+                        )));
+                    }
+                }
+            }
             // Scala ByIndexSerializer inserts a charged Upcast before v3.
             if _tree_version < 3
                 && matches!(
@@ -663,6 +707,15 @@ fn parse_node(
             } else {
                 None
             };
+            // ByIndex.tpe casts the receiver's type to SCollection after the
+            // default has been parsed. Unknown types stay lenient.
+            if let Some(Some(tpe)) = children.first() {
+                if !matches!(tpe, SigmaType::SColl(_)) {
+                    return Err(ReadError::HardReject(format!(
+                        "ByIndex input must be a collection, got {tpe:?}"
+                    )));
+                }
+            }
             Payload::ByIndex {
                 input: Box::new(input),
                 index: Box::new(index),
@@ -723,7 +776,7 @@ fn parse_node(
                     "FuncApply arg count too large: {n_args}"
                 )));
             }
-            let mut args = Vec::with_capacity(n_args);
+            let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
             }

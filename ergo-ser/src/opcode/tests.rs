@@ -229,8 +229,14 @@ fn roundtrip_const_placeholder() {
 #[test]
 fn roundtrip_val_use() {
     let body = Expr::Op(IrNode {
-        opcode: 0x72,
-        payload: Payload::ValUse { id: 1 },
+        opcode: 0xd9,
+        payload: Payload::FuncValue {
+            args: vec![(1, Some(SigmaType::SInt))],
+            body: Box::new(Expr::Op(IrNode {
+                opcode: 0x72,
+                payload: Payload::ValUse { id: 1 },
+            })),
+        },
     });
     roundtrip(&body, false);
 }

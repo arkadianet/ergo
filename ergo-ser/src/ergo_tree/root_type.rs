@@ -81,7 +81,7 @@ pub(crate) struct ValDefTypeStore {
 /// box can pollute `valDefTypeStore`. We key on the VALUE, not the type: an empty
 /// `Coll[SBox]` has a box-bearing type but materializes no box and changes nothing,
 /// so it must NOT trigger `ValUse` leniency (which would be an accept-invalid).
-pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
+pub(crate) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
     use crate::sigma_value::{CollValue, SigmaValue};
     match val {
         SigmaValue::OpaqueBoxBytes(_) => true,
@@ -114,8 +114,8 @@ pub(super) fn value_contains_box(val: &crate::sigma_value::SigmaValue) -> bool {
 ///    `deserializeErgoTree` does not wrap it: a hard reject even under
 ///    `has_size`. That is a PARSE-layer verdict this rule-1001 typer cannot
 ///    express (`Some(non-sigma)` would wrap-accept a has_size tree Scala hard
-///    rejects); the node's parser accepts an unbound `ValUse` (pre-existing),
-///    so the typer stays lenient rather than mis-classify. (When a box
+///    rejects); the parser rejects an unbound use when its store is complete,
+///    while this typer stays lenient rather than mis-classify. (When a box
 ///    constant precedes the `ValUse`, lenient is also the CORRECT direction:
 ///    the box's nested script may have bound the id to any type.)
 ///  - A constant that MATERIALIZES a box value ([`value_contains_box`]).
@@ -1122,11 +1122,19 @@ mod tests {
             read_ergo_tree(&mut reader).unwrap();
             assert_eq!(reader.position(), sized.len() - 1, "{body}");
         }
-        for body in ["d9007201", "860272010500"] {
-            let bytes = hex::decode(format!("00{body}")).unwrap();
-            let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
-            assert_eq!(root(&tree.body), Some(SigmaType::SAny));
-            assert_eq!(substitution_type_of(&tree.body), None);
+        // The wire parser now rejects these unbound references. The typer
+        // still needs a conservative answer for directly constructed ASTs.
+        for body in [
+            func_value(vec![], val_use(1)),
+            op(
+                0x86,
+                Payload::Tuple {
+                    items: vec![val_use(1), long0()],
+                },
+            ),
+        ] {
+            assert_eq!(root(&body), Some(SigmaType::SAny));
+            assert_eq!(substitution_type_of(&body), None);
         }
     }
 
@@ -1147,9 +1155,9 @@ mod tests {
         for (case, expected) in cases.iter().zip(responses.lines()) {
             let bytes = hex::decode(case["hex"].as_str().unwrap()).unwrap();
             let mut reader = VlqReader::new(&bytes);
-            let tree = read_ergo_tree(&mut reader).unwrap();
+            let result = read_ergo_tree(&mut reader).and_then(|tree| check_sigma_prop_root(&tree));
             assert_eq!(
-                check_sigma_prop_root(&tree).is_ok(),
+                result.is_ok(),
                 expected.starts_with("ACCEPT"),
                 "{}: {expected}",
                 case["name"]

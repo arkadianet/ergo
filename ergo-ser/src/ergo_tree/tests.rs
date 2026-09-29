@@ -501,7 +501,7 @@ fn getuintexact_index_overflow_hard_rejects_not_wrapped() {
 }
 
 /// A `ValUse` id past i32::MAX is read non-exact (Scala `getUInt.toInt`):
-/// accepted, kept as the raw u32 so it round-trips byte-identically.
+/// accepted when bound, kept as the raw u32 so it round-trips byte-identically.
 #[test]
 fn valuse_id_overflow_roundtrips() {
     let tree = ErgoTree {
@@ -510,8 +510,14 @@ fn valuse_id_overflow_roundtrips() {
         constant_segregation: false,
         constants: vec![],
         body: crate::opcode::Expr::Op(crate::opcode::IrNode {
-            opcode: 0x72, // ValUse
-            payload: crate::opcode::Payload::ValUse { id: 0xFFFF_FFFF },
+            opcode: 0xd9,
+            payload: crate::opcode::Payload::FuncValue {
+                args: vec![(0xffff_ffff, Some(SigmaType::SSigmaProp))],
+                body: Box::new(crate::opcode::Expr::Op(crate::opcode::IrNode {
+                    opcode: 0x72,
+                    payload: crate::opcode::Payload::ValUse { id: 0xffff_ffff },
+                })),
+            },
         }),
     };
     roundtrip(&tree);

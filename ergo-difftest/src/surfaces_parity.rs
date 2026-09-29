@@ -21,6 +21,10 @@ use ergo_ser::{
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq;
 
+    fn contains_retained_box(&self) -> bool {
+        false
+    }
+
     fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
         Vec::new()
     }
@@ -53,6 +57,9 @@ unchanged!(
 );
 
 impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
+    fn contains_retained_box(&self) -> bool {
+        self.0.contains_retained_box() || self.1.contains_retained_box()
+    }
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         (
             self.0.parity_normalized(after_write),
@@ -91,6 +98,18 @@ fn normalize_value(value: &mut SigmaValue) {
     }
 }
 impl ParityNormalize for SigmaValue {
+    fn contains_retained_box(&self) -> bool {
+        match self {
+            SigmaValue::OpaqueBoxBytes(_) => true,
+            SigmaValue::Coll(CollValue::Values(items))
+            | SigmaValue::Tuple(items)
+            | SigmaValue::ConcreteCollection { items, .. } => {
+                items.iter().any(ParityNormalize::contains_retained_box)
+            }
+            SigmaValue::Opt(Some(inner)) => inner.contains_retained_box(),
+            _ => false,
+        }
+    }
     fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
         let mut value = self.clone();
         normalize_value(&mut value);
@@ -185,6 +204,27 @@ fn normalize_expr(expr: &mut Expr, version: u8, after_write: bool) {
     };
     for child in children {
         normalize_expr(child, version, after_write);
+    }
+    // ByIndexSerializer.parse reinserts an Int Upcast for a byte/short index
+    // before v3. Model that context after the writer's one-level stripping.
+    if after_write && version < 3 {
+        if let Payload::ByIndex { index, .. } = &mut node.payload {
+            if matches!(
+                index.as_ref(),
+                Expr::Const {
+                    tpe: SigmaType::SByte | SigmaType::SShort,
+                    ..
+                }
+            ) {
+                **index = Expr::Op(IrNode {
+                    opcode: 0x7e,
+                    payload: Payload::NumericCast {
+                        input: index.clone(),
+                        tpe: SigmaType::SInt,
+                    },
+                });
+            }
+        }
     }
 }
 fn has_pending_strip(expr: &Expr) -> bool {

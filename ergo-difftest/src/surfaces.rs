@@ -76,6 +76,19 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
+            // A nested box's size-delimited tree can inspect trailing bytes,
+            // fail validation, and rewind to its declared boundary. Scala
+            // shares this behavior: removing the unconsumed suffix can change
+            // the verdict even though the writer copied EVERY consumed byte.
+            // Only exempt this retained-box case when there was a suffix and
+            // the output is exactly the consumed input prefix. Changed bytes
+            // and failures on self-contained inputs still report a Bug.
+            if v1.contains_retained_box()
+                && r1.position() < input.len()
+                && b1 == input[..r1.position()]
+            {
+                return Outcome::WriteRejected;
+            }
             // The `MAX_TYPE_DEPTH` (=100) guard is a stack-overflow safeguard, NOT
             // a consensus boundary: Scala's `TypeSerializer` imposes no type-depth
             // limit (only the 4096-byte proposition cap), so the node deliberately
@@ -123,7 +136,12 @@ where
         }
         let next_bytes = writer.result();
         if next_bytes == bytes {
-            if value.has_pending_upcast_strip() {
+            // A ByIndex byte/short index is stripped and reinserted as the
+            // same Int cast. Byte stability is valid when the expected AST
+            // round trip is also stable; other pending strips must progress.
+            if value.has_pending_upcast_strip()
+                && value.parity_normalized(true) != value.parity_normalized(false)
+            {
                 return Outcome::bug("pending Upcast strip did not change bytes".into(), &bytes);
             }
             break;
@@ -985,6 +1003,86 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    #[test]
+    fn byindex_implicit_casts_match_jvm_serialization() {
+        // sigma-state 6.0.2, VersionContext(3, 3): the tree's own version
+        // controls stripping. These expected bytes were captured from Scala.
+        for (input, canonical) in [
+            ("00d1b2850100020000", "00d1b2850100020000"),
+            ("00d1b2850100030000", "00d1b2850100030000"),
+            ("00d1b28501007e03000400", "00d1b2850100030000"),
+            ("00d1b28501007e7e0200030400", "00d1b28501007e02000400"),
+            ("0b08d1b2850100050000", "0b08d1b2850100050000"),
+        ] {
+            let bytes = hex::decode(input).unwrap();
+            let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+            let mut writer = VlqWriter::new();
+            ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &tree).unwrap();
+            assert_eq!(hex::encode(writer.result()), canonical);
+            for surface in ["ergo_tree", "sigma_expr"] {
+                assert_eq!((registry(Some(surface))[0].run)(&bytes), Outcome::Accepted);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_box_exception_requires_exact_prefix_and_trailing_context() {
+        use ergo_ser::sigma_value::SigmaValue;
+        for (input, output, expected_bug) in [
+            (&[1, 2][..], &[1][..], false),
+            (&[1, 2][..], &[3][..], true),
+            (&[1, 2][..], &[][..], true),
+            (&[1][..], &[1][..], true),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let outcome = rw_check(
+                input,
+                |reader| {
+                    calls.set(calls.get() + 1);
+                    reader.get_u8()?;
+                    if calls.get() > 1 {
+                        return Err(ReadError::InvalidData("injected re-decode failure".into()));
+                    }
+                    Ok(SigmaValue::OpaqueBoxBytes(vec![1]))
+                },
+                |writer, _| {
+                    writer.put_bytes(output);
+                    Ok(())
+                },
+                |_| false,
+            );
+            assert_eq!(
+                matches!(outcome, Outcome::Bug(_)),
+                expected_bug,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nightly_20260929_crash_outcomes() {
+        for line in
+            include_str!("../../test-vectors/scala/sigma/fuzz_parity_validation.tsv").lines()
+        {
+            if !line.starts_with("nightly_20260929_") {
+                continue;
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let surface = fields[0].strip_prefix("nightly_20260929_").unwrap();
+            let bytes = hex::decode(fields[4]).unwrap();
+            let expected = if surface == "constant" {
+                Outcome::WriteRejected
+            } else {
+                Outcome::Rejected
+            };
+            assert_eq!(
+                (registry(Some(surface))[0].run)(&bytes),
+                expected,
+                "{surface}"
+            );
+        }
+    }
 
     #[test]
     fn fuzz_seed_decoding_matches_captured_jvm_verdicts() {

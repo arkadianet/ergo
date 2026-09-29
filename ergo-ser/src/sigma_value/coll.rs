@@ -69,7 +69,9 @@ pub(super) fn read_coll(
             Ok(CollValue::Bytes(bytes.to_vec()))
         }
         _ => {
-            let mut vals = Vec::with_capacity(count);
+            // Reserve modestly until the untrusted count is backed by values.
+            // This changes allocation only; valid large collections still grow.
+            let mut vals = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 vals.push(read_value_at_depth(r, elem_type, depth + 1)?);
             }
