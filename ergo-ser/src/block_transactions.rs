@@ -258,6 +258,33 @@ pub fn read_block_transactions_with_group_elements(
 
 #[cfg(test)]
 mod tests {
+
+    /// SANTA `BlockTransactions.reader_scope` (blessed by ergo-core 6.0.6):
+    /// `ErgoTransactionSerializer.parse` wraps each transaction in a new
+    /// `SigmaByteReader`, so every transaction starts with an empty binding
+    /// store. #2's second transaction uses a variable only the first one
+    /// binds and must be rejected; the others round-trip byte-identically.
+    #[test]
+    fn block_transactions_start_each_transaction_with_an_empty_binding_store() {
+        for (name, hex, accept) in [
+            ("block-depth-left-then-plain-accept#0", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade20402012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd01000001e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000", true),
+            ("block-plain-then-depth-left-accept#1", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201e21828951e367099a66b8cac0f867c2297848003ab45f38d8c3b864598d728590000000001c0843d0008d3010000012273c73313bd759c7a0e122d48a6b452a378a24fc783280e8d3789f08f5567b20000000001c0843d0b6dd1efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefeffd010000", true),
+            ("block-valdef-then-valuse-reject#2", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d3720101000001b2c4c3246f9b3015b4fea907cb8b0748e5c6c434c665d8cf2b2668427caf97620000000001c0843d007201010000", false),
+            ("block-valdef-then-own-valdef-accept#3", "bfbc8c5cb61b59dd3cd2918450c7272600312b3b8c929808b09e76253d1bfecf84ade2040201456971d1f52b5bafce6e5c94848a0892d936cfe52a65d6a75d48d1fcc586f9f60000000001c0843d00d801d60108d37201010000015dea0e5b89dbbc08eb741989221dda7428575bb695d2a75bb15e434e379af43b0000000001c0843d00d801d60108d37201010000", true),
+        ] {
+            let bytes = hex::decode(hex).unwrap();
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let result = read_block_transactions(&mut r);
+            assert_eq!(result.is_ok(), accept, "{name}: {result:?}");
+            if let Ok(bt) = result {
+                let mut marker = VlqReader::new(&bytes[32..]);
+                let version = (marker.get_u32_exact().unwrap() - MAX_TRANSACTIONS_IN_BLOCK) as u8;
+                let mut w = VlqWriter::new();
+                write_block_transactions_with_version(&mut w, &bt, version).unwrap();
+                assert_eq!(w.result(), bytes, "{name}: round trip");
+            }
+        }
+    }
     use super::*;
     use crate::ergo_box::ErgoBoxCandidate;
     use crate::ergo_tree::{read_ergo_tree, ErgoTree};

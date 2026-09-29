@@ -188,12 +188,26 @@ pub fn read_transaction(r: &mut VlqReader) -> Result<Transaction, ReadError> {
         0,
         "nesting depth base leaked into a top-level transaction parse"
     );
-    // Scala parses the whole transaction on one reader, so a binding in an
-    // earlier tree or context extension resolves a later `ValUse`. A
-    // transaction at the start of a fresh reader starts that store empty.
-    if r.position() == 0 {
-        r.track_val_bindings();
-    }
+    with_fresh_binding_store(r, read_transaction_parts)
+}
+
+/// `ErgoTransactionSerializer.parse` wraps every transaction in a new
+/// `SigmaByteReader`, standalone or inside a block section, so each one starts
+/// with an empty `valDefTypeStore`: a binding in an earlier tree or context
+/// extension of the same transaction resolves a later `ValUse`, one from
+/// another transaction does not. The caller's store is restored afterwards.
+fn with_fresh_binding_store<T>(
+    r: &mut VlqReader,
+    read: impl FnOnce(&mut VlqReader) -> Result<T, ReadError>,
+) -> Result<T, ReadError> {
+    let saved = r.val_bindings().cloned();
+    r.set_val_bindings(Some(Default::default()));
+    let result = read(r);
+    r.set_val_bindings(saved);
+    result
+}
+
+fn read_transaction_parts(r: &mut VlqReader) -> Result<Transaction, ReadError> {
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
@@ -230,6 +244,10 @@ pub fn write_unsigned_transaction(
 
 /// Decode the wire form produced by [`write_unsigned_transaction`].
 pub fn read_unsigned_transaction(r: &mut VlqReader) -> Result<UnsignedTransaction, ReadError> {
+    with_fresh_binding_store(r, read_unsigned_transaction_parts)
+}
+
+fn read_unsigned_transaction_parts(r: &mut VlqReader) -> Result<UnsignedTransaction, ReadError> {
     let input_count = r.get_u16()? as usize;
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
