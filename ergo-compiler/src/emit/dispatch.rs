@@ -148,7 +148,34 @@ impl Scope {
                 true_branch,
                 false_branch,
                 ..
-            } => node(0x95, self.three(condition, true_branch, false_branch)?),
+            } => {
+                let children = self.three(condition, true_branch, false_branch)?;
+                // TreeBuilding.scala:295-300 (v6.0.6) rebuilds serialize's value,
+                // forcing IfThenElse.scala:40-44's branch-element assertion.
+                // Binder-prebuilt serialize arguments can bypass the typer;
+                // a still-untyped Select carries the full method signature.
+                let branch_type = |branch: &TypedExpr| match branch {
+                    T::Select {
+                        res_type: None,
+                        tpe: SType::SFunc { range, .. },
+                        ..
+                    } => range.as_ref().clone(),
+                    other => node_tpe(other).clone(),
+                };
+                let then_type = branch_type(true_branch);
+                let else_type = branch_type(false_branch);
+                if then_type != SType::NoType
+                    && else_type != SType::NoType
+                    && then_type != else_type
+                {
+                    return Err(EmitError::GraphBuildingReject {
+                        class: "AssertionError",
+                        what: "Both branches of IfThenElseLazy should have the same type".into(),
+                        pos: None,
+                    });
+                }
+                node(0x95, children)
+            }
             T::Tuple { items, .. } => {
                 // Scala STuple is 2..=255 items; the ergo-ser writer asserts
                 // (panics) past 255 (write.rs Tuple arm), so guard recoverably.
@@ -431,15 +458,33 @@ impl Scope {
                 field,
                 res_type,
                 tpe,
-                ..
-            } => self.emit_select(obj, field, res_type.as_ref(), tpe),
+                pos,
+            } => self.emit_select(obj, field, res_type.as_ref(), tpe, *pos),
             T::MethodCall {
                 obj,
                 method,
                 args,
                 type_subst,
+                pos,
                 ..
-            } => self.emit_method_call(obj, method, args, type_subst),
+            } => self
+                .emit_method_call(obj, method, args, type_subst)
+                .map_err(|err| {
+                    // GraphBuilding.scala:457-458 (v6.0.6): unsupported numeric
+                    // methods cite the MethodCall, which inherits the selector.
+                    match err {
+                        EmitError::GraphBuildingReject {
+                            class,
+                            what,
+                            pos: None,
+                        } if method.owner == "SNumericType" => EmitError::GraphBuildingReject {
+                            class,
+                            what,
+                            pos: Some(*pos),
+                        },
+                        other => other,
+                    }
+                }),
 
             // ── pre-typed nodes: must never reach emit ────────────────────────
             T::ApplyTypes { .. } => Err(EmitError::InvalidShape(

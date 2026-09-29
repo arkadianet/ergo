@@ -1,7 +1,7 @@
 //! ErgoScript → ErgoTree compiler.
 //!
 //! M1 scope: source text → untyped AST, faithful to the Scala reference parser
-//! (`sigmastate.lang.SigmaParser`, sigma-state 6.0.2): same accept/reject
+//! (`sigmastate.lang.SigmaParser`, sigma-state 6.0.6): same accept/reject
 //! decisions, same AST shapes, same error positions. Every grammar decision in
 //! this crate cites the mirrored Scala source as `file:line` under
 //! `sigmastate-interpreter`.
@@ -186,7 +186,7 @@
 //!
 //! ## Oracle stack
 //!
-//! The typer is graded by a live JVM oracle pinned to sigma-state 6.0.2:
+//! The typer is graded by a live JVM oracle pinned to sigma-state 6.0.6:
 //! - **Parser oracle** (`scripts/jvm_parser_oracle/`) — M1 accept/reject parity
 //! - **Typer oracle** (`scripts/jvm_typer_oracle/TyperOracle.scala`) — typed s-expression
 //!   from `SigmaCompiler.typecheck` with `lowerMethodCalls=true`,
@@ -201,10 +201,10 @@
 //!
 //! ## Binding decisions (E-digest)
 //!
-//! - **E1 (lenient Block rule):** The `Val`'s explicit type annotation is DISCARDED in
-//!   v6.0.2 (`SigmaTyper.scala:53-66` at the v6.0.2 tag). `{ val x: Long = 1; x }`
-//!   accepts with `x: SInt`. The `isAssignableTo`/`getResultType` strict-check is a
-//!   post-6.0.2 commit and is NOT implemented here; oracle-confirmed (golden seed §11).
+//! - **Val ascriptions:** Primitive explicit types must equal the RHS result type;
+//!   function RHS values use their range (SigmaTyper.scala:89-94,
+//!   SType.scala:215-229, v6.0.6). Option ascriptions provide context for bare
+//!   None at tree version >= 3 (SigmaTyper.scala:109-127).
 //! - **E5 (oracle grading):** `ACCEPT` records grade s-expression byte equality; `REJECT`
 //!   records grade verdict + exception CLASS (advisory). Reject `line:col` is graded only
 //!   in fresh-JVM mode (`tc1.sh`) — batch mode contaminates singleton positions (R1).
