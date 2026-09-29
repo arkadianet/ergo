@@ -1,0 +1,67 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Transaction.ushort_wrap",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "transaction-inputs-count-wraps-accept#0",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction with one input (no proof, no extension), no data inputs and one output, whose inputs count is written as 2^32 + 1 (8180808010). The count is a getUShort (ErgoLikeTransaction.scala:148), which scorex-util reads as getULong().toInt and only then checks 0..65535: it reads as 1. The transaction parses and is written back with the count 01, and its id is computed over those re-encoded bytes (bytesToSign). NON-IDENTITY. An impl that range-checks the full value rejects it: the over-reject.",
+      "bytes_hex" : "818080801000a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-inputs-count-wraps-to-65537-reject#1",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction with one input (no proof, no extension), no data inputs and one output, whose inputs count is written as 2^32 + 2^16 + 1 (81 80 84 80 10): truncated to 32 bits it is 65537, outside the unsigned short range: the JVM rejects. An impl that keeps the low 16 bits reads 1 and accepts: the over-accept.",
+      "bytes_hex" : "818084801000a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010000",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-data-inputs-count-wraps-accept#2",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction with one input (no proof, no extension), no data inputs and one output, whose data-inputs count is written as 2^32 (80 80 80 80 10, :155): it reads as 0 and is written back as 00. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000080808080100001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-outputs-count-wraps-accept#3",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction with one input (no proof, no extension), no data inputs and one output, whose outputs count is written as 2^32 + 1 (:172): it reads as 1 and is written back as 01. NON-IDENTITY.",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d71000000008180808010c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d710000000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "transaction-proof-length-wraps-accept#4",
+      "kind" : "Transaction",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A transaction with one input (no proof, no extension), no data inputs and one output, whose input carries the 1-byte proof ab with its length written as 2^32 + 1. A proof's length is a getUShort (ProverResult.scala:40): it reads as 1, and the input is written back as 01 ab. NON-IDENTITY. (The wire kind parses the proof; it does not verify it.)",
+      "bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d718180808010ab00000001c0843d0008d3010000",
+      "expected_bytes_hex" : "0100a19de1b5fa998df5a48630a611180690abad5270c33f23a79baba2f8840d7101ab00000001c0843d0008d3010000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

@@ -29,19 +29,24 @@ pub fn encode_vlq_into(mut value: u64, buf: &mut Vec<u8>) {
 
 /// Decode a VLQ-encoded unsigned 64-bit integer from a byte slice.
 /// Returns (decoded_value, bytes_consumed).
+///
+/// Mirrors Scala's `VLQReader.getULong` (scorex-util 0.2.1), which every
+/// VLQ read in the reference goes through: it reads at most ten bytes, ORs
+/// each byte's low 7 bits in at the next multiple of 7, and drops whatever
+/// is shifted past bit 63, so a tenth byte contributes only its lowest
+/// payload bit. A tenth byte that still carries the continuation bit is an
+/// error. Over-long encodings (`[0x81, 0x00]` for 1) decode like the
+/// minimal form.
 pub fn decode_vlq(bytes: &[u8]) -> Result<(u64, usize), VlqError> {
     let mut result: u64 = 0;
-    let mut shift: u32 = 0;
     for (i, &byte) in bytes.iter().enumerate() {
-        if shift >= 63 && (byte & 0x7F) > 1 {
-            return Err(VlqError::Overflow);
-        }
-        result |= ((byte & 0x7F) as u64) << shift;
+        // i <= 9 here, so the shift stays below 64; `<<` drops the bits
+        // shifted past bit 63, as the JVM's `Long` shift does.
+        result |= ((byte & 0x7F) as u64) << (7 * i);
         if byte & 0x80 == 0 {
             return Ok((result, i + 1));
         }
-        shift += 7;
-        if shift > 63 {
+        if i == 9 {
             return Err(VlqError::Overflow);
         }
     }
@@ -55,13 +60,8 @@ pub enum VlqError {
     /// value was truncated.
     #[error("unexpected end of input")]
     UnexpectedEnd,
-    /// The decoded value would not fit in a `u64`. Fires when an 11th
-    /// byte is encountered (>70 payload bits) or when the 10th byte
-    /// carries a payload greater than `1` (the only payload values
-    /// that fit in the remaining high bit). Valid 10-byte encodings
-    /// — `u64::MAX` itself encodes to 10 bytes with a final-byte
-    /// payload of exactly `1` — are accepted; this error fires only
-    /// past that boundary.
+    /// The tenth byte still carries the continuation bit. Scala's
+    /// `getULong` reads at most ten bytes and fails past them.
     #[error("VLQ value exceeds u64")]
     Overflow,
 }
@@ -272,5 +272,28 @@ mod tests {
         let (decoded, consumed) = decode_vlq(&[0x80, 0x00]).unwrap();
         assert_eq!(decoded, 0);
         assert_eq!(consumed, 2);
+    }
+
+    // ----- oracle parity -----
+
+    /// Scala `getULong` drops the bits shifted past bit 63, so a tenth byte
+    /// keeps only its lowest payload bit. JVM (`ErgoSerdeOracle.scala`,
+    /// sigma-state 6.0.6, `constant` surface, SLong `05` + the VLQ):
+    /// nine `80` then `02` -> `ACCEPT 0500`; nine `80` then `7f` -> `ACCEPT
+    /// 0580808080808080808001` (only bit 63 set); ten `80` then `01` ->
+    /// `REJECT RuntimeException`.
+    #[test]
+    fn decode_vlq_tenth_byte_keeps_only_its_low_bit() {
+        let tenth = |last: u8| {
+            let mut bytes = vec![0x80u8; 9];
+            bytes.push(last);
+            bytes
+        };
+        assert_eq!(decode_vlq(&tenth(0x02)).unwrap(), (0, 10));
+        assert_eq!(decode_vlq(&tenth(0x7f)).unwrap(), (1 << 63, 10));
+        assert_eq!(decode_vlq(&tenth(0x01)).unwrap(), (1 << 63, 10));
+        let mut eleven = vec![0x80u8; 10];
+        eleven.push(0x01);
+        assert!(matches!(decode_vlq(&eleven), Err(VlqError::Overflow)));
     }
 }
