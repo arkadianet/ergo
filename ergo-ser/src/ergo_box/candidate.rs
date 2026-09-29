@@ -208,8 +208,12 @@ mod tests {
     /// consensus id / bytes_to_sign paths.
     #[test]
     fn write_preserves_size_zero_unparsed_tree_bytes() {
+        // The body parse reads past the declared size: `eb00` then an unknown
+        // opcode `fd` (rule 1002) wraps to a size-0 tree; `eb00` alone runs out
+        // of input, which the JVM rejects (ArrayIndexOutOfBoundsException).
         let tree_bytes = hex::decode("eb00").unwrap();
-        let mut tr = VlqReader::new(&tree_bytes);
+        let wire = hex::decode("eb00fd").unwrap();
+        let mut tr = VlqReader::new(&wire);
         let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
         let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
             235,
@@ -234,8 +238,12 @@ mod tests {
     /// Indexed writer likewise preserves size-0 Unparsed tree bytes.
     #[test]
     fn indexed_write_preserves_size_zero_unparsed_tree_bytes() {
+        // The body parse reads past the declared size: `cb00` then an unknown
+        // opcode `fd` (rule 1002) wraps to a size-0 tree; `cb00` alone runs out
+        // of input, which the JVM rejects (ArrayIndexOutOfBoundsException).
         let tree_bytes = hex::decode("cb00").unwrap();
-        let mut tr = VlqReader::new(&tree_bytes);
+        let wire = hex::decode("cb00fd").unwrap();
+        let mut tr = VlqReader::new(&wire);
         let tree = read_ergo_tree(&mut tr).expect("size-0 tree wraps");
         let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
             1,

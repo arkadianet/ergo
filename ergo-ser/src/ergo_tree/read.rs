@@ -281,46 +281,31 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                 let _ = r.get_bytes(body_consumed)?;
                 Ok((tree, false))
             }
-            // Reached only when NO unresolved method preceded the error (that case
-            // wrapped above) — so this hard error is the FIRST thing Scala hits too.
-            // A tree-depth overflow is Scala's `DeserializeCallDepthExceeded`,
-            // a `SerializerException` that `deserializeErgoTree` does NOT catch
-            // (it only wraps ReaderPositionLimitExceeded / IllegalArgumentException
-            // / ValidationException). So it must HARD-REJECT even under has_size,
-            // not become an UnparsedErgoTree — otherwise a size-delimited tree
-            // nested past MaxTreeDepth would be accept-invalid vs Scala.
-            //
-            // `HardReject` carries the same semantics for a NESTED box script
-            // (an `SBox` constant whose sizeless pre-v3 inner tree carries a v6
-            // method, or violates rule 1012): Scala re-raises those as
-            // `SerializerException` too, so they must escape this size-delimited
-            // wrap rather than be swallowed into an `UnparsedErgoTree`.
-            //
-            // `ValueTooLarge` is a VLQ value that overflowed its declared integer
-            // width during the body parse. After routing the NON-exact
-            // `getUInt().toInt` sites (segregated constants count, `ValUse` id,
-            // `FuncValue` arg ids) through `get_uint_to_i32`, every `ValueTooLarge`
-            // reachable HERE is from a width Scala hard-rejects: a `getUIntExact`
-            // site (ConstantPlaceholder index, ValDef/FunDef id, BlockValue /
-            // FuncValue / SigmaAnd-SigmaOr counts, SString length →
-            // `ArithmeticException`) or a `getUShort` range overflow — neither a
-            // `ValidationException`, so it must escape the wrap.
-            Err(
-                e @ (ReadError::DepthLimitExceeded { .. }
-                | ReadError::HardReject(_)
-                | ReadError::ValueTooLarge { .. }),
-            ) => Err(e),
+            // Reached only when NO unresolved method preceded the error (that
+            // case wrapped above), so this error is the FIRST thing Scala hits
+            // too. Only a `ValidationException` degrades a size-delimited tree:
+            // `ErgoTreeSerializer.deserializeErgoTree` (`ErgoTreeSerializer.scala:
+            // 141-215`) wraps on `case ve: ValidationException` alone, turns a
+            // `ReaderPositionLimitExceeded` into one (rule 1014) and rethrows an
+            // `IllegalArgumentException` as a `SerializerException`. Every other
+            // throw inside the body is a hard reject: running out of input
+            // (`BufferUnderflowException`, or the reader's `require`), a failed
+            // `require`, a `ClassCastException` / `MatchError` /
+            // `NegativeArraySizeException` / `ArrayIndexOutOfBoundsException`
+            // from building a node, `safeNewArray` past 100,000 items, a
+            // `DeserializeCallDepthExceeded` or any other `SerializerException`,
+            // including one a nested box script re-raises. The body parser
+            // reports exactly the `ValidationException` sites as
+            // `SigmaValidation` (a validation rule id), so that is the only
+            // error the wrap takes.
             Err(error) => {
-                let validation_error = match error {
-                    ReadError::SigmaValidation { rule_id, args, .. } => Some((
-                        validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
-                        args,
-                    )),
-                    _ => None,
+                let ReadError::SigmaValidation { rule_id, args, .. } = error else {
+                    return Err(error);
                 };
-                // Other parse failures (unknown opcode, invalid type tag, body
-                // truncated at the MaxPropositionSize view) map to Scala's
-                // ValidationException, wrapped as UnparsedErgoTree under has_size.
+                let validation_error = Some((
+                    validation_rule_version(rule_id, r.activated_script_version().unwrap_or(1)),
+                    args,
+                ));
                 let full = take_unparsed_size_region(r, tree_start, body_start, declared_size)?;
                 Ok((
                     unparsed_soft_fork_tree(
@@ -423,6 +408,8 @@ fn parse_body(
         // non-exact and treat a negative count as 0 (an overflowed count is a
         // valid empty-constants tree in Scala, not a hard rejection).
         let count = r.get_uint_to_i32()?.max(0) as usize;
+        // `safeNewArray[Constant](nConsts)` (ErgoTreeSerializer.scala:254).
+        crate::opcode::check_array_length(count, "segregated constants")?;
         let mut consts = Vec::with_capacity(count.min(CONSTANTS_VEC_SOFT_CAP));
         for _ in 0..count {
             let (tpe, val) = read_constant(r)?;

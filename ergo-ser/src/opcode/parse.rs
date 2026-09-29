@@ -6,8 +6,8 @@ use crate::sigma_type::{decode_type, read_type, SigmaType};
 use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
-    is_known_method, method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr,
-    IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
+    check_array_length, is_known_method, method_explicit_type_args_count, opcode_pattern,
+    ArgPattern, Body, Expr, IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
 };
 
 /// Parse an ErgoTree body (single root expression) from bytes.
@@ -329,11 +329,7 @@ fn parse_node(
 
         ArgPattern::BlockValue => {
             let count = r.get_u32_exact()? as usize;
-            if count > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "BlockValue item count too large: {count}"
-                )));
-            }
+            check_array_length(count, "BlockValue items")?;
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 let item = parse_typed_expr(r, next, _tree_version, types, children)?;
@@ -362,11 +358,7 @@ fn parse_node(
 
         ArgPattern::FuncValue => {
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "FuncValue arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "FuncValue args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 // Scala `FuncValueSerializer` reads each arg id via `getUInt().toInt`
@@ -446,11 +438,7 @@ fn parse_node(
             let method_id = r.get_u8()?;
             let obj = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "MethodCall arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "MethodCall args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
@@ -674,6 +662,7 @@ fn parse_node(
             // The reservation is soft-capped to avoid OOM on a hostile count; the
             // loop still reads `count` items and fails on truncated input.
             let count = r.get_u32_exact()? as usize;
+            check_array_length(count, "SigmaAnd/SigmaOr items")?;
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
@@ -791,11 +780,7 @@ fn parse_node(
         ArgPattern::FuncApply => {
             let func = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "FuncApply arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "Apply args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);

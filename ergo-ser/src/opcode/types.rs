@@ -1,5 +1,6 @@
 use crate::sigma_type::SigmaType;
 use crate::sigma_value::SigmaValue;
+use ergo_primitives::reader::ReadError;
 
 /// Maximum byte value that encodes an inline Constant (type code), not an opcode.
 pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
@@ -12,6 +13,22 @@ pub(super) const LAST_CONSTANT_CODE: u8 = 0x70;
 /// `UnparsedErgoTree`), as well as to bound stack use. No real ErgoTree comes
 /// close to this depth.
 pub(crate) const MAX_EXPR_DEPTH: usize = 110;
+
+/// Scala `sigma.util.MaxArrayLength`: `safeNewArray` refuses to allocate more
+/// items than this (`sigma/util/package.scala:7-13`).
+pub(crate) const MAX_ARRAY_LENGTH: usize = 100_000;
+
+/// Scala `safeNewArray(len)`: a count above [`MAX_ARRAY_LENGTH`] throws a
+/// `RuntimeException` before any item is read. It is not a
+/// `ValidationException`, so a size-delimited tree does not degrade on it.
+pub(crate) fn check_array_length(len: usize, what: &str) -> Result<(), ReadError> {
+    if len > MAX_ARRAY_LENGTH {
+        return Err(ReadError::HardReject(format!(
+            "cannot allocate {what} with {len} items: max limit is {MAX_ARRAY_LENGTH} (Scala safeNewArray)"
+        )));
+    }
+    Ok(())
+}
 
 /// Convenience alias used at the [`crate::ergo_tree`] boundary, where
 /// the body of a tree is just a single root [`Expr`].

@@ -467,12 +467,11 @@ pub(crate) fn read_value_at_depth(
         }
         SigmaType::SUnit => Ok(SigmaValue::Unit),
         SigmaType::SString => {
+            // `getUIntExact`, then `getBytes(size)` (CoreDataSerializer.scala:
+            // 104-110): no length cap of its own. A read that begins inside the
+            // position limit reads the whole string; a string longer than the
+            // input fails the reader's `require` (hard).
             let len = r.get_u32_exact()? as usize;
-            if len > 4096 {
-                return Err(ReadError::InvalidData(format!(
-                    "SString value too long: {len}"
-                )));
-            }
             let bytes = r.get_bytes(len)?;
             // Scala CoreDataSerializer.scala:104-110 decodes SString values
             // with `new String(bytes, UTF_8)` (lossy). The decoded value is
@@ -533,22 +532,19 @@ pub(crate) fn read_value_at_depth(
         SigmaType::SReserved10 | SigmaType::SReserved11 => Err(ReadError::InvalidData(format!(
             "reserved type value deserialization not supported: {tpe:?}"
         ))),
+        // `CoreDataSerializer.deserialize`'s fallback (`CoreDataSerializer.scala:
+        // 144-146`) runs `CheckSerializableTypeCode`, which passes every code up
+        // to `LastDataType` (111), and then throws a `SerializerException`
+        // ("Not defined DataSerializer"). These codes (97..=106) pass the rule,
+        // so the refusal is hard: a size-delimited tree does not degrade on it.
+        // `SFunc` (112) fails the rule itself, a `ValidationException`, above.
         SigmaType::SAny
         | SigmaType::SContext
         | SigmaType::SPreHeader
         | SigmaType::SGlobal
-        | SigmaType::STypeVar(_) => Err(ReadError::SigmaValidation {
-            rule_id: 1009,
-            args: vec![match tpe {
-                SigmaType::SAny => 97,
-                SigmaType::SContext => 101,
-                SigmaType::STypeVar(_) => 103,
-                SigmaType::SPreHeader => 105,
-                SigmaType::SGlobal => 106,
-                _ => unreachable!(),
-            }],
-            message: format!("value deserialization not supported for {tpe:?}"),
-        }),
+        | SigmaType::STypeVar(_) => Err(ReadError::HardReject(format!(
+            "Not defined DataSerializer for type {tpe:?} (Scala SerializerException)"
+        ))),
     }
 }
 
