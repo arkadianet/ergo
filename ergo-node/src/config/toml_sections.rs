@@ -306,7 +306,7 @@ pub(super) struct TomlHeaderCheckpoint {
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default)]
 pub(super) struct TomlStore {
-    /// redb + AVL arena page cache, in bytes. Override
+    /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. Override
     /// `StateStore::DEFAULT_CACHE_BYTES`.
     pub(super) cache_bytes: Option<usize>,
 }
