@@ -27,6 +27,15 @@ pub(super) trait ParityNormalize {
         None
     }
 
+    fn is_position_limit_wrap(&self, _bytes: &[u8]) -> bool {
+        false
+    }
+
+    /// A Boolean leaf becomes a constant whose data read adds one level.
+    fn has_depth_expanding_boolean(&self) -> bool {
+        false
+    }
+
     /// Bytes of every retained (opaque) box this value holds, in wire order.
     fn retained_boxes(&self) -> Vec<&[u8]> {
         Vec::new()
@@ -36,8 +45,8 @@ pub(super) trait ParityNormalize {
         Vec::new()
     }
 
-    // Only ErgoTree re-serializes its AST. Containing boxes/transactions/blocks
-    // re-emit retained tree bytes verbatim, so every other type keeps false.
+    // Box readers cache a canonical tree serialization, so containing
+    // boxes/transactions/blocks must also follow its one-level cast stripping.
     fn has_pending_upcast_strip(&self) -> bool {
         false
     }
@@ -64,6 +73,9 @@ unchanged!(
 );
 
 impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
+    fn has_pending_upcast_strip(&self) -> bool {
+        self.0.has_pending_upcast_strip() || self.1.has_pending_upcast_strip()
+    }
     fn retained_boxes(&self) -> Vec<&[u8]> {
         let mut boxes = self.0.retained_boxes();
         boxes.extend(self.1.retained_boxes());
@@ -82,6 +94,9 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
     }
 }
 impl<T: ParityNormalize> ParityNormalize for Vec<T> {
+    fn has_pending_upcast_strip(&self) -> bool {
+        self.iter().any(ParityNormalize::has_pending_upcast_strip)
+    }
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         self.iter()
             .map(|v| v.parity_normalized(after_write))
@@ -307,6 +322,34 @@ impl ParityNormalize for ErgoTree {
         Some(4096)
     }
 
+    fn is_position_limit_wrap(&self, bytes: &[u8]) -> bool {
+        matches!(&self.body, Expr::Unparsed(raw)
+            if matches!(raw.validation_error, Some((1014, _))) && raw.bytes == bytes)
+    }
+
+    fn has_depth_expanding_boolean(&self) -> bool {
+        let mut stack = vec![(&self.body, 0)];
+        while let Some((expr, depth)) = stack.pop() {
+            if depth == 109
+                && matches!(
+                    expr,
+                    Expr::Const {
+                        tpe: SigmaType::SBoolean,
+                        ..
+                    }
+                )
+            {
+                return true;
+            }
+            stack.extend(
+                ergo_ser::opcode::children(expr)
+                    .into_iter()
+                    .map(|c| (c, depth + 1)),
+            );
+        }
+        false
+    }
+
     fn has_pending_upcast_strip(&self) -> bool {
         self.version < 3 && has_pending_strip(&self.body)
     }
@@ -341,10 +384,18 @@ macro_rules! view {
         view!($ty, $v, $body, $headers, Vec::new());
     };
     ($ty:ty, $v:ident, $body:expr, $headers:expr, $boxes:expr) => {
+        view!($ty, $v, _after_write, $body, $headers, $boxes, false);
+    };
+    ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr) => {
         impl ParityNormalize for $ty {
-            fn parity_normalized(&self, _after_write: bool) -> impl PartialEq {
+            fn parity_normalized(&self, $after_write: bool) -> impl PartialEq {
                 let $v = self;
                 $body
+            }
+            fn has_pending_upcast_strip(&self) -> bool {
+                let $v = self;
+                let _ = $v;
+                $pending
             }
             fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
                 let $v = self;
@@ -421,13 +472,18 @@ view!(
 view!(
     ErgoBoxCandidate,
     v,
+    after_write,
     (
         v.value,
-        v.ergo_tree().parity_normalized(false),
-        // The bytes the box is written with, which its id commits to. The
-        // bytes as read (`ergo_tree_bytes`) legitimately change when a
-        // non-canonical tree is re-encoded.
-        v.serialized_ergo_tree_bytes().to_vec(),
+        v.ergo_tree().parity_normalized(after_write),
+        // Compare the first writer's cache with the second reader's retained
+        // bytes. Its new canonical cache may strip the NEXT cast level.
+        if after_write {
+            v.serialized_ergo_tree_bytes()
+        } else {
+            v.ergo_tree_bytes()
+        }
+        .to_vec(),
         v.creation_height,
         v.tokens.clone(),
         v.additional_registers.parity_normalized(false),
@@ -442,26 +498,30 @@ view!(
         let mut boxes = v.ergo_tree().retained_boxes();
         boxes.extend(v.additional_registers.retained_boxes());
         boxes
-    }
+    },
+    v.ergo_tree().has_pending_upcast_strip()
 );
 view!(
     ErgoBox,
     v,
+    after_write,
     (
-        v.candidate.parity_normalized(false),
+        v.candidate.parity_normalized(after_write),
         v.transaction_id,
         v.index
     ),
     v.candidate.header_values(),
-    v.candidate.retained_boxes()
+    v.candidate.retained_boxes(),
+    v.candidate.has_pending_upcast_strip()
 );
 view!(
     Transaction,
     v,
+    after_write,
     (
         v.inputs.parity_normalized(false),
         v.data_inputs.clone(),
-        v.output_candidates.parity_normalized(false)
+        v.output_candidates.parity_normalized(after_write)
     ),
     {
         let mut headers = v.inputs.header_values();
@@ -472,15 +532,17 @@ view!(
         let mut boxes = v.inputs.retained_boxes();
         boxes.extend(v.output_candidates.retained_boxes());
         boxes
-    }
+    },
+    v.output_candidates.has_pending_upcast_strip()
 );
 view!(
     UnsignedTransaction,
     v,
+    after_write,
     (
         v.inputs.parity_normalized(false),
         v.data_inputs.clone(),
-        v.output_candidates.parity_normalized(false)
+        v.output_candidates.parity_normalized(after_write)
     ),
     {
         let mut headers = v.inputs.header_values();
@@ -491,14 +553,17 @@ view!(
         let mut boxes = v.inputs.retained_boxes();
         boxes.extend(v.output_candidates.retained_boxes());
         boxes
-    }
+    },
+    v.output_candidates.has_pending_upcast_strip()
 );
 view!(
     BlockTransactions,
     v,
-    (v.header_id, v.transactions.parity_normalized(false)),
+    after_write,
+    (v.header_id, v.transactions.parity_normalized(after_write)),
     v.transactions.header_values(),
-    v.transactions.retained_boxes()
+    v.transactions.retained_boxes(),
+    v.transactions.has_pending_upcast_strip()
 );
 
 pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {

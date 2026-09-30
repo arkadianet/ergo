@@ -82,6 +82,14 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
+            // Scala writes TrueLeaf/FalseLeaf as Boolean constants. At the
+            // last expression level their added data-value read exceeds 110.
+            // Exempt only this AST shape and the matching depth failure.
+            if matches!(e, ReadError::DepthLimitExceeded { max: 110 })
+                && v1.has_depth_expanding_boolean()
+            {
+                return Outcome::WriteRejected;
+            }
             // Scala also expands compact type descriptors (e.g. 0x18 into
             // two 0x0c bytes). An accepted standalone tree can consequently
             // serialize past MaxPropositionSize and fail rule 1014 on re-read.
@@ -140,6 +148,15 @@ where
         );
     }
     if v1.parity_normalized(true) != v2.parity_normalized(false) {
+        // A sized tree catches the same size expansion as a rule-1014 wrap
+        // instead of returning an error. Require exact retained output bytes.
+        if v1
+            .tree_position_limit()
+            .is_some_and(|limit| r1.position() <= limit && b1.len() > limit)
+            && v2.is_position_limit_wrap(&b1)
+        {
+            return Outcome::WriteRejected;
+        }
         // Bug #19 can also re-decode successfully: the rewritten bytes after a
         // size-delimited wrap become its lookahead and now parse structurally.
         // Scala re-serializes these inputs identically, so only that
@@ -1467,6 +1484,138 @@ mod tests {
                     Ok(())
                 },
                 |_| false,
+            );
+            assert_eq!(matches!(outcome, Outcome::Bug(_)), expected_bug);
+        }
+    }
+
+    /// Run 36775308168: all three first serializations match sigma-state 6.0.6.
+    #[test]
+    fn nightly_20261001_crashes_match_scala_serialization_and_outcomes() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                for line in
+                    include_str!("../../test-vectors/scala/sigma/nightly_roundtrip_2026_10_01.tsv")
+                        .lines()
+                        .filter(|line| !line.starts_with('#'))
+                {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("fuzz/corpus")
+                        .join(fields[0])
+                        .join(fields[1]);
+                    let bytes = std::fs::read(path).unwrap();
+                    let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+                    let mut writer = VlqWriter::new();
+                    if fields[0] == "ergo_box_candidate" {
+                        let value =
+                            ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+                        ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &value).unwrap();
+                    } else {
+                        let value = read_ergo_tree_gated(&mut reader).unwrap();
+                        ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &value).unwrap();
+                    }
+                    assert_eq!(hex::encode(writer.result()), fields[3], "{}", fields[1]);
+                    let expected = match fields[2] {
+                        "Accepted" => Outcome::Accepted,
+                        "WriteRejected" => Outcome::WriteRejected,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!((registry(Some(fields[0]))[0].run)(&bytes), expected);
+                    crate::fuzz::fuzz_one(fields[0], &bytes);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Boolean leaves add a data-value level only when written as constants.
+    #[test]
+    fn boolean_leaf_depth_expansion_has_exact_boundary() {
+        for leaf in [0x7f, 0x80] {
+            for (nots, expected) in [
+                (107, Outcome::Accepted),
+                (108, Outcome::WriteRejected),
+                (109, Outcome::Rejected),
+            ] {
+                let mut bytes = vec![0, 0xd1]; // BoolToSigmaProp
+                bytes.extend(std::iter::repeat_n(0xef, nots));
+                bytes.push(leaf);
+                for surface in ["ergo_tree", "sigma_expr"] {
+                    assert_eq!((registry(Some(surface))[0].run)(&bytes), expected);
+                }
+            }
+        }
+    }
+
+    /// A box's cached canonical script strips one cast per read, also when
+    /// carried by indexed transaction outputs or block transaction sections.
+    #[test]
+    fn cached_script_cast_chains_converge_through_containers() {
+        for version in 0..=3 {
+            for casts in 1..=3 {
+                let mut candidate = vec![57, 0xc8 | version, 4, 0xcd, 0xff];
+                candidate.extend(std::iter::repeat_n(0x7e, casts));
+                candidate.extend([4, 4]); // Int constant 2
+                candidate.extend(std::iter::repeat_n(4, casts)); // Int cast targets
+                candidate.extend([4, 0, 0]); // height, tokens, registers
+                let mut bx = candidate.clone();
+                bx.extend([0; 33]); // transaction id + index
+                let mut tx = vec![0, 0, 0, 1]; // inputs, data inputs, token table, outputs
+                tx.extend_from_slice(&candidate);
+                let mut block = vec![0; 32];
+                block.push(1);
+                block.extend_from_slice(&tx);
+                for (surface, bytes) in [
+                    ("ergo_box_candidate", &candidate),
+                    ("ergo_box", &bx),
+                    ("transaction", &tx),
+                    ("unsigned_transaction", &tx),
+                    ("block_transactions", &block),
+                ] {
+                    assert_eq!(
+                        (registry(Some(surface))[0].run)(bytes),
+                        Outcome::Accepted,
+                        "{surface}, version={version}, casts={casts}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_size_wrap_exception_requires_growth_rule_and_exact_bytes() {
+        use ergo_ser::opcode::Expr;
+        for (input_size, output_size, rule, retained_byte, expected_bug) in [
+            (4096, 4097, 1014, 1, false),
+            (4097, 4098, 1014, 1, true),
+            (4095, 4096, 1014, 1, true),
+            (4096, 4097, 1001, 1, true),
+            (4096, 4097, 1014, 2, true),
+        ] {
+            let outcome = rw_check(
+                &vec![0; input_size],
+                |reader| {
+                    let mut tree = cast_tree(3, 0x7e);
+                    if reader.get_u8()? == 0 {
+                        reader.set_position(input_size);
+                    } else {
+                        let mut raw = ergo_ser::opcode::UnparsedErgoTree::from(vec![
+                            retained_byte;
+                            output_size
+                        ]);
+                        raw.validation_error = Some((rule, vec![]));
+                        tree.body = Expr::Unparsed(raw);
+                    }
+                    Ok(tree)
+                },
+                |writer, _| {
+                    writer.put_bytes(&vec![1; output_size]);
+                    Ok(())
+                },
+                tree_is_unparsed,
             );
             assert_eq!(matches!(outcome, Outcome::Bug(_)), expected_bug);
         }
