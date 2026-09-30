@@ -11,7 +11,7 @@ use crate::error::WriteError;
 use crate::register::read_registers;
 use crate::token::{Token, TokenId};
 
-use super::candidate::{read_ergo_box_candidate, write_ergo_box_candidate};
+use super::candidate::{read_ergo_box_candidate_parts, write_ergo_box_candidate};
 use super::{ErgoBox, ErgoBoxCandidate};
 
 /// Serialize a full ErgoBox (standalone mode).
@@ -28,7 +28,30 @@ pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> 
 /// trees, use `parse_ergo_box_bytes` (which requires the caller to supply the
 /// exact ErgoTree bytes so the parser can locate the tree/body boundary).
 pub fn read_ergo_box(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
-    let candidate = read_ergo_box_candidate(r)?;
+    // `ErgoBox.sigmaSerializer.parse` on a fresh reader starts with an empty
+    // `valDefTypeStore`, so a `ValUse` its tree does not bind is a
+    // `NoSuchElementException` (hard). A box read that starts a top-level
+    // reader starts that store here too.
+    if r.position() == 0 && r.nesting_depth_base() == 0 {
+        return crate::transaction::with_fresh_binding_store(r, read_ergo_box_parts);
+    }
+    read_ergo_box_parts(r)
+}
+
+/// Read the bytes of a box already accepted inside an enclosing parse, such
+/// as an `SBox` constant's `OpaqueBoxBytes`.
+///
+/// Scala keeps that box as the `ErgoBox` it parsed on the enclosing reader,
+/// whose tree may use a `ValUse` the enclosing tree bound, and never parses
+/// its bytes again. [`read_ergo_box`] is a standalone parse with an empty
+/// binding store and would reject such a use, so this read tracks no
+/// bindings.
+pub fn read_accepted_ergo_box(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
+    read_ergo_box_parts(r)
+}
+
+fn read_ergo_box_parts(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
+    let candidate = read_ergo_box_candidate_parts(r)?;
     let transaction_id = ModifierId::from_bytes(r.get_array::<32>()?);
     let index = r.get_u16()?;
     Ok(ErgoBox {

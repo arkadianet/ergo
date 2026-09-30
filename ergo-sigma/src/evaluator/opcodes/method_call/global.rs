@@ -537,12 +537,13 @@ fn visit_serialization_puts(
         }
         (T::SBox, Sv::OpaqueBoxBytes(bytes)) => {
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-            let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut r).map_err(|e| {
-                EvalError::TypeError {
-                    expected: "parseable SBox bytes for SGlobal.serialize cost",
-                    got: format!("box parse error: {e}"),
-                }
-            })?;
+            let candidate =
+                ergo_ser::ergo_box::read_accepted_ergo_box_candidate(&mut r).map_err(|e| {
+                    EvalError::TypeError {
+                        expected: "parseable SBox bytes for SGlobal.serialize cost",
+                        got: format!("box parse error: {e}"),
+                    }
+                })?;
             charge(3)?;
             charge(3 + candidate.ergo_tree_bytes().len() as u64)?;
             charge(1)?;

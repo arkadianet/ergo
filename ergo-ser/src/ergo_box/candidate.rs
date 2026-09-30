@@ -38,6 +38,23 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
 /// For parsing real mainnet box bytes (which may have non-size-delimited trees),
 /// use `parse_ergo_box_bytes` which handles tree boundary detection.
 pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    // A candidate read that starts a top-level reader starts Scala's
+    // `valDefTypeStore` empty, as `read_ergo_box` does.
+    if r.position() == 0 && r.nesting_depth_base() == 0 && !r.tracks_val_bindings() {
+        return crate::transaction::with_fresh_binding_store(r, read_ergo_box_candidate_parts);
+    }
+    read_ergo_box_candidate_parts(r)
+}
+
+/// Read the candidate of a box already accepted inside an enclosing parse,
+/// such as an `SBox` constant's bytes; see [`super::read_accepted_ergo_box`].
+pub fn read_accepted_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
+    read_ergo_box_candidate_parts(r)
+}
+
+pub(super) fn read_ergo_box_candidate_parts(
+    r: &mut VlqReader,
+) -> Result<ErgoBoxCandidate, ReadError> {
     // Top-level entry: the nesting budget must start unconsumed. See the same
     // backstop in `read_transaction` — a leaked base shows up as a node
     // rejecting valid input with a depth error nothing explains.

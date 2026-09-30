@@ -589,11 +589,12 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
         (SigmaType::SBox, SigmaValue::OpaqueBoxBytes(bytes)) => {
             use ergo_ser::register::RegisterId;
             let mut r = ergo_primitives::reader::VlqReader::new(bytes);
-            let ergo_box =
-                ergo_ser::ergo_box::read_ergo_box(&mut r).map_err(|e| EvalError::TypeError {
+            let ergo_box = ergo_ser::ergo_box::read_accepted_ergo_box(&mut r).map_err(|e| {
+                EvalError::TypeError {
                     expected: "valid SBox constant",
                     got: format!("box deser error: {e}"),
-                })?;
+                }
+            })?;
             if !r.is_empty() {
                 return Err(EvalError::TypeError {
                     expected: "valid SBox constant",
