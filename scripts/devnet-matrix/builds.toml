@@ -167,3 +167,9 @@ work_dir = ".work-syncfix2-plus-2566"
 ergo_ref = "322e2cbfced22a46fb308926cfbd6dfbcf1ee645"
 branch = "tmp/sync-refresh-plus-2566"
 description = "syncfix2 composed with #2566 (squash-integrated), including composition tests"
+
+[builds."syncfix2+2563f"]
+work_dir = ".work-syncfix2-plus-2563f"
+ergo_ref = "7666618222a2c62707dae1390805cf7d1582a8b4"
+branch = "tmp/syncfix2-plus-2563f"
+description = "#2597 final (syncfix2, 93c756df4) merged into #2563 (13fc25df2): the patched follower of the D arm, whose stock follower runs syncfix2"
