@@ -125,12 +125,7 @@ fn open_markers_file(path: &Path) -> io::Result<File> {
     // (~14 rows per boot), so the extra surface isn't justified. The
     // empty-file case is the only realistic corruption mode for a sink
     // that's only ever opened by `record_init_marker` inside `run_inner`.
-    match OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .append(true)
-        .open(path)
-    {
+    match OpenOptions::new().create_new(true).append(true).open(path) {
         Ok(mut f) => {
             f.write_all(HEADER.as_bytes())?;
             f.write_all(b"\n")?;
@@ -278,7 +273,8 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 
         let mut f = open_markers_file(&path).unwrap();
-        f.write_all(b"row1,a,1,2,3,4,5,6,7,8,9,10,11,12,13,\n").unwrap();
+        f.write_all(b"row1,a,1,2,3,4,5,6,7,8,9,10,11,12,13,\n")
+            .unwrap();
         drop(f);
 
         let body = std::fs::read_to_string(&path).unwrap();
@@ -296,13 +292,15 @@ mod tests {
         // First open: fresh creator → writes header.
         {
             let mut f = open_markers_file(&path).unwrap();
-            f.write_all(b"row1,a,1,2,3,4,5,6,7,8,9,10,11,12,13,\n").unwrap();
+            f.write_all(b"row1,a,1,2,3,4,5,6,7,8,9,10,11,12,13,\n")
+                .unwrap();
         }
 
         // Second open: file exists → no header re-emission.
         {
             let mut f = open_markers_file(&path).unwrap();
-            f.write_all(b"row2,b,1,2,3,4,5,6,7,8,9,10,11,12,13,\n").unwrap();
+            f.write_all(b"row2,b,1,2,3,4,5,6,7,8,9,10,11,12,13,\n")
+                .unwrap();
         }
 
         let body = std::fs::read_to_string(&path).unwrap();

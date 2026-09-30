@@ -639,6 +639,8 @@ pub const ROLLBACK_WINDOW: u32 = 200;
 /// all-zero reading used for backends without a UTXO arena (e.g. digest mode).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StateMetrics {
+    /// Jobs waiting in the persist channel; excludes the worker batch.
+    pub persist_queue_len: usize,
     /// Cumulative AVL arena node reads since the last `arena_reset_read_count`.
     pub arena_read_count: u64,
     /// Bytes currently held in the AVL arena's clean LRU cache (0 if unbudgeted).
@@ -1020,6 +1022,10 @@ impl StateStore {
     /// consumer. Pure observability — none of these fields is consensus state.
     pub fn metrics(&self) -> StateMetrics {
         StateMetrics {
+            persist_queue_len: self
+                .persist_pipeline
+                .as_ref()
+                .map_or(0, crate::persist::PersistPipeline::queued_jobs),
             arena_read_count: self.tree.arena_read_count(),
             arena_cache_clean_bytes: self.tree.arena_cache_clean_bytes(),
             arena_cache_capacity_bytes: self.tree.arena_cache_capacity_bytes(),

@@ -1,4 +1,5 @@
 use super::sync_helpers::try_send_anchor_sync_info;
+mod section_wire_policy;
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;

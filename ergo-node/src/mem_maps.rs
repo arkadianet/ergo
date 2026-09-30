@@ -153,8 +153,7 @@ fn is_shared_object(path: &str) -> bool {
     // Match `.so.<digits>(.<digits>)*` suffix
     if let Some(idx) = base.find(".so.") {
         let tail = &base[idx + 4..];
-        return !tail.is_empty()
-            && tail.chars().all(|c| c.is_ascii_digit() || c == '.');
+        return !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '.');
     }
     false
 }

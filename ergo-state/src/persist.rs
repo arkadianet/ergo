@@ -486,6 +486,11 @@ where
 }
 
 impl PersistPipeline {
+    /// Point-in-time jobs waiting in the bounded channel, excluding the
+    /// worker's current batch. Observability only; not a flush barrier.
+    pub fn queued_jobs(&self) -> usize {
+        self.tx.as_ref().map_or(0, Sender::len)
+    }
     /// Deterministic pending-result fixture, without a background worker.
     #[cfg(feature = "test-utils")]
     pub(crate) fn with_pending_failure_for_test(height: u32) -> Self {
