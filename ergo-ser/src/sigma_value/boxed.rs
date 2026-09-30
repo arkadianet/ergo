@@ -205,7 +205,7 @@ pub(super) fn read_opaque_box(r: &mut VlqReader, depth: usize) -> Result<SigmaVa
     // would let that cycle start a fresh budget on every box.
     let previous_base = r.nesting_depth_base();
     let base = previous_base.saturating_add(depth).saturating_add(1);
-    if base > crate::opcode::MAX_EXPR_DEPTH {
+    if base.saturating_add(r.leaked_levels()) > crate::opcode::MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: crate::opcode::MAX_EXPR_DEPTH,
         });

@@ -176,7 +176,7 @@ pub(crate) fn type_has_v6_only_type(tpe: &SigmaType) -> bool {
 /// Read a single register value. Handles both plain Constants (type <= 0x70)
 /// and expression opcodes (> 0x70) like CreateTuple.
 fn read_register_value(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadError> {
-    if r.nesting_depth_base() >= crate::opcode::MAX_EXPR_DEPTH {
+    if r.depth_floor() >= crate::opcode::MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: crate::opcode::MAX_EXPR_DEPTH,
         });

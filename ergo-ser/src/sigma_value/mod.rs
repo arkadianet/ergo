@@ -287,13 +287,16 @@ pub fn read_constant(r: &mut VlqReader) -> Result<(SigmaType, SigmaValue), ReadE
 pub(crate) fn read_constant_as_expr(
     r: &mut VlqReader,
 ) -> Result<(SigmaType, SigmaValue), ReadError> {
-    if r.nesting_depth_base() >= crate::opcode::MAX_EXPR_DEPTH {
+    if r.depth_floor() >= crate::opcode::MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: crate::opcode::MAX_EXPR_DEPTH,
         });
     }
+    // The `ValueSerializer.deserialize` frame `getValue` enters.
+    r.enter_level();
     let tpe = read_type(r)?;
     let val = read_value_at_depth(r, &tpe, 1)?;
+    r.exit_level();
     Ok((tpe, val))
 }
 
@@ -410,11 +413,25 @@ pub(crate) fn read_value_at_depth(
 ) -> Result<SigmaValue, ReadError> {
     // DataSerializer increments the same reader level as ValueSerializer.
     // This includes primitive values and every composite-value child.
-    if r.nesting_depth_base().saturating_add(depth) >= crate::opcode::MAX_EXPR_DEPTH {
+    if r.depth_floor().saturating_add(depth) >= crate::opcode::MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: crate::opcode::MAX_EXPR_DEPTH,
         });
     }
+    // `CoreDataSerializer.deserialize` (and `DataSerializer`'s `SBox` /
+    // `SHeader` arm, which replaces it) holds one reader level for the value
+    // and gives it back only when the value reads.
+    r.enter_level();
+    let value = read_value_in_frame(r, tpe, depth)?;
+    r.exit_level();
+    Ok(value)
+}
+
+fn read_value_in_frame(
+    r: &mut VlqReader,
+    tpe: &SigmaType,
+    depth: usize,
+) -> Result<SigmaValue, ReadError> {
     match tpe {
         SigmaType::SBoolean => {
             let b = r.get_u8()?;

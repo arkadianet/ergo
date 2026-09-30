@@ -116,13 +116,29 @@ fn parse_node(
     // climbing when an `SBox` constant's box script re-enters this parser on
     // the SAME reader, rather than restarting at 0 (see
     // `VlqReader::nesting_depth_base`). The base is 0 for every top-level
-    // parse, so this is inert outside a nested box script.
-    let effective_depth = r.nesting_depth_base().saturating_add(depth);
+    // parse, so this is inert outside a nested box script. The floor also
+    // counts the levels degraded trees left open earlier on the reader.
+    let effective_depth = r.depth_floor().saturating_add(depth);
     if effective_depth >= MAX_EXPR_DEPTH {
         return Err(ReadError::DepthLimitExceeded {
             max: MAX_EXPR_DEPTH,
         });
     }
+    // `ValueSerializer.deserialize` holds one reader level for the node and
+    // gives it back only when the node parses (ValueSerializer.scala:397-409).
+    r.enter_level();
+    let node = parse_node_value(r, depth, _tree_version, types, children)?;
+    r.exit_level();
+    Ok(node)
+}
+
+fn parse_node_value(
+    r: &mut VlqReader,
+    depth: usize,
+    _tree_version: u8,
+    types: &mut ParseTypes<'_>,
+    children: &mut Vec<Option<SigmaType>>,
+) -> Result<Expr, ReadError> {
     // `ValueSerializer.deserialize` peeks the first byte (`r.peekByte()`,
     // ValueSerializer.scala:399), which checks only the buffer bounds, not the
     // position limit: at the end of the input it throws a raw
