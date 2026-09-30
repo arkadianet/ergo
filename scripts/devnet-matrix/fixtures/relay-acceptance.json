@@ -1,0 +1,296 @@
+{
+  "provenance": "Verbatim A1/campaign/steady.json relay_refresh.source_lines subset for first three ordering blocks and SyncInfo arrivals before third miner apply. source_line is the 1-based captured entry index. Not a complete log window; omissions are deliberate for fixture size.",
+  "window": {
+    "start": 1790534847.5208952,
+    "end": 1790534921.194,
+    "receipt_cutoff": 1790534923.194,
+    "boundaries": [
+      1790534847.5208952,
+      1790534901.883,
+      1790534906.413,
+      1790534921.194
+    ],
+    "initial_interval_partial": true,
+    "terminal_interval_excluded": true
+  },
+  "source_lines": {
+    "scala": [
+      {
+        "source_line": 1956,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:07.550Z"
+      },
+      {
+        "source_line": 1985,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:07.994Z"
+      },
+      {
+        "source_line": 2014,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:54628, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:08.586Z"
+      },
+      {
+        "source_line": 2700,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New block mined, header: Header({\"extensionId\":\"d22953d4ed199b24565251a55a0955bddaa0968e0c3b5456005f3fe0250cc9b7\",\"difficulty\":\"20000\",\"votes\":\"000000\",\"timestamp\":1790534901629,\"size\":218,\"unparsedBytes\":\"\",\"stateRoot\":\"9f9e35f7d43e32d26aeb56d565e60a608f00eaf60a2d0a13167accd67bb49fd407\",\"height\":26,\"nBits\":38674432,\"version\":4,\"id\":\"e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90\",\"adProofsRoot\":\"715c946b194c33bd98348f530923c2939447cf1eb02ac2cf8dd3952e3b694553\",\"transactionsRoot\":\"bb6a0090c004d413a216454e2419ee35492f8ee31f6fa79d47a096a3d77290c7\",\"extensionHash\":\"520349211f0fe259b9cf591afa295d3e068dfe7372fd6764080766095e7ee4d1\",\"powSolutions\":{\"pk\":\"03bea1cdb898502c32acd7a716fc8c05f0f96010f904c405189da676c28cbe2d87\",\"w\":\"03c9a41cbf5339978e1b0dca92935e89ea905cfbe127aeefc03ecf3a88c6842d08\",\"n\":\"0000000000000192\",\"d\":5637815538570078045943839654554889891424602473557830724130263325259768312},\"adProofsId\":\"9c5486e4630988e3f498580318666075f18a91397ff8b8f92498e1d861f396aa\",\"transactionsId\":\"4e43256ade963344ae8758cc3e9711416c19c6b66c8775e5f25d00c4d95f078a\",\"parentId\":\"266528a067d9e9f5873891275779edded7e161adf8704227dd336c00d5653d76\"}) | relay_ts=2026-09-27T18:48:21.878Z"
+      },
+      {
+        "source_line": 2731,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with score 520000. New height 26, old height 25 | relay_ts=2026-09-27T18:48:21.880Z"
+      },
+      {
+        "source_line": 2754,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 and emission box Some(c55dda2512e7764750840cbbe21399d8feb94936cc069db3b20aa7d47389b9e1) applied to UtxoState at height 26 | relay_ts=2026-09-27T18:48:21.883Z"
+      },
+      {
+        "source_line": 2896,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:22.904Z"
+      },
+      {
+        "source_line": 3068,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New block mined, header: Header({\"extensionId\":\"f8e61af6fdb7e789993e2ed2b2b1f4fcfc0efb8e496306b802b1c9c8daecc21f\",\"difficulty\":\"20000\",\"votes\":\"000000\",\"timestamp\":1790534906310,\"size\":218,\"unparsedBytes\":\"\",\"stateRoot\":\"36054328111098b5fb860e6c8c19c21e12553342651ed8cdb336db02a6b99b8e07\",\"height\":27,\"nBits\":38674432,\"version\":4,\"id\":\"05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2\",\"adProofsRoot\":\"bb785c41c36202986bb1509fa321fa2ad37858edbe3f6b35fb8c4eadbba5f9dd\",\"transactionsRoot\":\"8dabad7579cb957e4cede0b3a5eb73d9e01343c4cbd76736eecca078a173c291\",\"extensionHash\":\"59cc39520d64acdb481226894f58592d366fea05b06335bfd1224853ccfea152\",\"powSolutions\":{\"pk\":\"03bea1cdb898502c32acd7a716fc8c05f0f96010f904c405189da676c28cbe2d87\",\"w\":\"0278d954a7f7a539c4e9d6987814aa1c8ebce95db1a5a66e859f528fc13eeefba3\",\"n\":\"000000000000007b\",\"d\":1017706195511201046300487373225035130252235272305137139772209568858714329},\"adProofsId\":\"c816e56d67cab692661878318d9ab8638cd8aa01202df33ed87fbef5437d35dd\",\"transactionsId\":\"4d398b8bf216de844f418666b5a1a8e7713703778c7956a2a4282ecfa2576e4c\",\"parentId\":\"e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90\"}) | relay_ts=2026-09-27T18:48:26.403Z"
+      },
+      {
+        "source_line": 3089,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 with score 540000. New height 27, old height 26 | relay_ts=2026-09-27T18:48:26.404Z"
+      },
+      {
+        "source_line": 3121,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:26.408Z"
+      },
+      {
+        "source_line": 3128,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:26.410Z"
+      },
+      {
+        "source_line": 3133,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 and emission box Some(267600005f4bec77efb548521140e26c096a3cbd5c229a8dc69b1301ef2c256a) applied to UtxoState at height 27 | relay_ts=2026-09-27T18:48:26.413Z"
+      },
+      {
+        "source_line": 3174,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:54628, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:26.473Z"
+      },
+      {
+        "source_line": 3177,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:26.674Z"
+      },
+      {
+        "source_line": 3969,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New block mined, header: Header({\"extensionId\":\"baa18adab7d2862fefb1464e92ceac1137daabdfa856b7ed80f3db7298f7e7ef\",\"difficulty\":\"20000\",\"votes\":\"000000\",\"timestamp\":1790534920860,\"size\":218,\"unparsedBytes\":\"\",\"stateRoot\":\"69b7be3e2ce534dd363c067bf4fe3a80dcbf4bfcebe690bbe42f363eb108d3f607\",\"height\":28,\"nBits\":38674432,\"version\":4,\"id\":\"d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f\",\"adProofsRoot\":\"47edc5aa2276dc798ecc32536574eeecdfdac3d769f08bdc89252a902e23dccc\",\"transactionsRoot\":\"07aaea1a48036f60e67bf0345db49e10840d25cd380765cdac6391ac3d872a2a\",\"extensionHash\":\"735bb4c41cc7f660d7f116b23ee6c982f7183b4651ca367c439679ac3697e4eb\",\"powSolutions\":{\"pk\":\"03bea1cdb898502c32acd7a716fc8c05f0f96010f904c405189da676c28cbe2d87\",\"w\":\"03d4afcda73980e75c1851799ff27dafae5e6f519f7b224b2c7808bad5cd39a1e9\",\"n\":\"000000000000018d\",\"d\":4555826130975637585691784863836268261666953388592712680778294664371205681},\"adProofsId\":\"6e738c157216192e3d9d569dbe8399cdfb5cd5060d2dfacd8c7058e8966b8871\",\"transactionsId\":\"5af401246950ce18bd3e4da2d4975b080b3b9ce4c619b2f6b5a2fee434819042\",\"parentId\":\"05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2\"}) | relay_ts=2026-09-27T18:48:41.171Z"
+      },
+      {
+        "source_line": 3988,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f with score 560000. New height 28, old height 27 | relay_ts=2026-09-27T18:48:41.174Z"
+      },
+      {
+        "source_line": 4015,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46680, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:41.182Z"
+      },
+      {
+        "source_line": 4021,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:46670, local=/127.0.0.1:19570, direction=Incoming) | relay_ts=2026-09-27T18:48:41.189Z"
+      },
+      {
+        "source_line": 4025,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f and emission box Some(eb763d61aaa276f2ac7bf3de7ceaa99f58ea3228cbbdf978e8abdfe022aa8ce1) applied to UtxoState at height 28 | relay_ts=2026-09-27T18:48:41.194Z"
+      },
+      {
+        "source_line": 5272,
+        "text": "INFO org.ergoplatform.mining.CandidateGenerator - New block mined, header: Header({\"extensionId\":\"e8a7817aca5992f332ec0790284d98112089fa4499a4ff49db9b3e76d42e2e99\",\"difficulty\":\"20000\",\"votes\":\"000000\",\"timestamp\":1790534942690,\"size\":218,\"unparsedBytes\":\"\",\"stateRoot\":\"35af62f813585d8e3032c6c2341121a3a1130862ced113291a22fe54bad3b9d507\",\"height\":29,\"nBits\":38674432,\"version\":4,\"id\":\"a312c0544779396b2d14dd735e34ff4fbf338f0a8c9141ecb031e4cac0109469\",\"adProofsRoot\":\"83758e24a24f3c466f79c2b3bfce604b1a6a02b60c603d1122a2b9ae9596f5a5\",\"transactionsRoot\":\"c15fc34d1a507a5811b3a5d820905884418085aeba4c85c60acee47701d7fa40\",\"extensionHash\":\"508b22f1092c43e846b73d06592853956647b4f83f3480d7f17e3ada8d721bd6\",\"powSolutions\":{\"pk\":\"03bea1cdb898502c32acd7a716fc8c05f0f96010f904c405189da676c28cbe2d87\",\"w\":\"03768a0007b451c062ca6b064fc32cb2a331f8563723ffec5cdb75750e10b91686\",\"n\":\"0000000000000110\",\"d\":5284602511819158299196775473191080187196156858627561643178525174879801927},\"adProofsId\":\"c35864210fe7cf681c965b19c6ddae796569d030d06147ef7e90a960b4c3e8df\",\"transactionsId\":\"032e0473b78f1ed98905800d506e233bf5e5e36a919db0071cfb4cf420dfbbc7\",\"parentId\":\"d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f\"}) | relay_ts=2026-09-27T18:49:02.921Z"
+      }
+    ],
+    "scala2": [
+      {
+        "source_line": 292,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T18:47:39.798Z"
+      },
+      {
+        "source_line": 931,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19572, local=/127.0.0.1:37618, direction=Outgoing) | relay_ts=2026-09-27T18:48:06.586Z"
+      },
+      {
+        "source_line": 958,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T18:48:07.550Z"
+      },
+      {
+        "source_line": 960,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T18:48:07.550Z"
+      },
+      {
+        "source_line": 1000,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:58260, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T18:48:09.015Z"
+      },
+      {
+        "source_line": 1336,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 | relay_ts=2026-09-27T18:48:21.880Z"
+      },
+      {
+        "source_line": 1353,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 | relay_ts=2026-09-27T18:48:21.882Z"
+      },
+      {
+        "source_line": 1354,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with score 520000. New height 26, old height 25 | relay_ts=2026-09-27T18:48:21.883Z"
+      },
+      {
+        "source_line": 1365,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Applying block transactions from input-blocks for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with transactions: 1 | relay_ts=2026-09-27T18:48:21.884Z"
+      },
+      {
+        "source_line": 1366,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:58260, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T18:48:21.884Z"
+      },
+      {
+        "source_line": 1380,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 and emission box Some(c55dda2512e7764750840cbbe21399d8feb94936cc069db3b20aa7d47389b9e1) applied to UtxoState at height 26 | relay_ts=2026-09-27T18:48:21.888Z"
+      },
+      {
+        "source_line": 1403,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Applying block transactions from input-blocks for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with transactions: 1 | relay_ts=2026-09-27T18:48:21.889Z"
+      },
+      {
+        "source_line": 1582,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 | relay_ts=2026-09-27T18:48:26.408Z"
+      },
+      {
+        "source_line": 1604,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46670, direction=Outgoing) | relay_ts=2026-09-27T18:48:26.411Z"
+      },
+      {
+        "source_line": 1605,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 with score 540000. New height 27, old height 26 | relay_ts=2026-09-27T18:48:26.411Z"
+      },
+      {
+        "source_line": 1608,
+        "text": "WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block transactions fully for 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 as Merkle root does not match | relay_ts=2026-09-27T18:48:26.412Z"
+      },
+      {
+        "source_line": 1718,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 | relay_ts=2026-09-27T18:48:26.414Z"
+      },
+      {
+        "source_line": 1719,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Ignoring ordering block announcement as it is already known: 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 | relay_ts=2026-09-27T18:48:26.414Z"
+      },
+      {
+        "source_line": 1738,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 and emission box Some(267600005f4bec77efb548521140e26c096a3cbd5c229a8dc69b1301ef2c256a) applied to UtxoState at height 27 | relay_ts=2026-09-27T18:48:26.429Z"
+      },
+      {
+        "source_line": 1824,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:58260, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T18:48:27.444Z"
+      },
+      {
+        "source_line": 2159,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:58244, local=/127.0.0.2:19571, direction=Incoming) | relay_ts=2026-09-27T18:48:39.968Z"
+      },
+      {
+        "source_line": 2190,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f | relay_ts=2026-09-27T18:48:41.176Z"
+      },
+      {
+        "source_line": 2206,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f with score 560000. New height 28, old height 27 | relay_ts=2026-09-27T18:48:41.185Z"
+      },
+      {
+        "source_line": 2209,
+        "text": "WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block transactions fully for d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f as Merkle root does not match | relay_ts=2026-09-27T18:48:41.185Z"
+      },
+      {
+        "source_line": 2269,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f | relay_ts=2026-09-27T18:48:41.190Z"
+      },
+      {
+        "source_line": 2270,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Ignoring ordering block announcement as it is already known: d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f | relay_ts=2026-09-27T18:48:41.190Z"
+      },
+      {
+        "source_line": 2335,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f and emission box Some(eb763d61aaa276f2ac7bf3de7ceaa99f58ea3228cbbdf978e8abdfe022aa8ce1) applied to UtxoState at height 28 | relay_ts=2026-09-27T18:48:51.199Z"
+      }
+    ],
+    "scala3": [
+      {
+        "source_line": 360,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.2:19571, local=/127.0.0.1:58260, direction=Outgoing) | relay_ts=2026-09-27T18:47:42.858Z"
+      },
+      {
+        "source_line": 625,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:36616, local=/127.0.0.3:19573, direction=Incoming) | relay_ts=2026-09-27T18:47:54.586Z"
+      },
+      {
+        "source_line": 916,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19572, local=/127.0.0.1:35522, direction=Outgoing) | relay_ts=2026-09-27T18:48:05.586Z"
+      },
+      {
+        "source_line": 970,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46680, direction=Outgoing) | relay_ts=2026-09-27T18:48:07.994Z"
+      },
+      {
+        "source_line": 1335,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 | relay_ts=2026-09-27T18:48:21.880Z"
+      },
+      {
+        "source_line": 1354,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 | relay_ts=2026-09-27T18:48:21.882Z"
+      },
+      {
+        "source_line": 1355,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with score 520000. New height 26, old height 25 | relay_ts=2026-09-27T18:48:21.882Z"
+      },
+      {
+        "source_line": 1361,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Applying block transactions from input-blocks for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with transactions: 1 | relay_ts=2026-09-27T18:48:21.883Z"
+      },
+      {
+        "source_line": 1373,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 and emission box Some(c55dda2512e7764750840cbbe21399d8feb94936cc069db3b20aa7d47389b9e1) applied to UtxoState at height 26 | relay_ts=2026-09-27T18:48:21.887Z"
+      },
+      {
+        "source_line": 1395,
+        "text": "INFO org.ergoplatform.nodeView.UtxoNodeViewHolder - Applying block transactions from input-blocks for e41d4d42157e03136b9fb06a9f2dabd7d70606e5ee7c0f6ad39d242bb6c90a90 with transactions: 1 | relay_ts=2026-09-27T18:48:21.888Z"
+      },
+      {
+        "source_line": 1553,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19572, local=/127.0.0.1:35522, direction=Outgoing) | relay_ts=2026-09-27T18:48:25.586Z"
+      },
+      {
+        "source_line": 1579,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 | relay_ts=2026-09-27T18:48:26.405Z"
+      },
+      {
+        "source_line": 1599,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 with score 540000. New height 27, old height 26 | relay_ts=2026-09-27T18:48:26.408Z"
+      },
+      {
+        "source_line": 1603,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46680, direction=Outgoing) | relay_ts=2026-09-27T18:48:26.409Z"
+      },
+      {
+        "source_line": 1608,
+        "text": "WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block transactions fully for 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 as Merkle root does not match | relay_ts=2026-09-27T18:48:26.410Z"
+      },
+      {
+        "source_line": 1666,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header 05408193420fa462407a6a13d505c85efab29ae8726a63f7216d3b9c800539c2 and emission box Some(267600005f4bec77efb548521140e26c096a3cbd5c229a8dc69b1301ef2c256a) applied to UtxoState at height 27 | relay_ts=2026-09-27T18:48:26.425Z"
+      },
+      {
+        "source_line": 1759,
+        "text": "DEBUG scorex.core.network.PeerConnectionHandler - Received message MessageSpec(65: Sync) from ConnectionId(remote=/127.0.0.1:19570, local=/127.0.0.1:46680, direction=Outgoing) | relay_ts=2026-09-27T18:48:26.675Z"
+      },
+      {
+        "source_line": 2178,
+        "text": "INFO org.ergoplatform.network.ErgoNodeViewSynchronizer - Processing ordering block announcement for d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f | relay_ts=2026-09-27T18:48:41.176Z"
+      },
+      {
+        "source_line": 2188,
+        "text": "INFO org.ergoplatform.nodeView.history.ErgoHistory$$anon$1 - New best header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f with score 560000. New height 28, old height 27 | relay_ts=2026-09-27T18:48:41.181Z"
+      },
+      {
+        "source_line": 2192,
+        "text": "WARN org.ergoplatform.nodeView.UtxoNodeViewHolder - Downloading block transactions fully for d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f as Merkle root does not match | relay_ts=2026-09-27T18:48:41.184Z"
+      },
+      {
+        "source_line": 2279,
+        "text": "INFO org.ergoplatform.nodeView.state.UtxoState - Valid modifier with header d01327975f01d1be687791cb596657dfb5e3f5180408c0f686be35faa7ab410f and emission box Some(eb763d61aaa276f2ac7bf3de7ceaa99f58ea3228cbbdf978e8abdfe022aa8ce1) applied to UtxoState at height 28 | relay_ts=2026-09-27T18:48:51.207Z"
+      }
+    ]
+  }
+}

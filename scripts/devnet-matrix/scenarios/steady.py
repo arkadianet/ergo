@@ -138,6 +138,11 @@ def _observe_window(ctx, blocks, address):
             f'{node}: mean={m.get("mean_per_block")} max={m.get("max_per_block")} '
             f'min-gap={m.get("min_gap_seconds")}s available={m.get("available", False)}'
             for node, m in measurement['M3'].items()) + ' | ' + summary(measurement['classification']))
+    try:
+        from relay_acceptance import summary as acceptance_summary
+        ctx.note('acceptance_result_line', acceptance_summary(measurement))
+    except Exception as error:  # noqa: BLE001 -- additive metrics must not fail the run
+        ctx.note('acceptance_result_line', f'unavailable: {error!r}')
     scanned = walker.scanned
     return start, scanned, observations, sent
 

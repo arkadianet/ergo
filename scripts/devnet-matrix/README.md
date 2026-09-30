@@ -476,6 +476,35 @@ retained in JSON so totals can be recomputed.
   Rust's peer API has byte totals rather than per-code timestamps, and its
   operator event feed has no input-block receipt event.
 
+Additive #2597 observations live in `M4`, `M5`, and `reconstruction`, with
+their own `acceptance_result_line`; the existing metrics and verdicts stay unchanged.
+M4 uses `New block mined, header: Header({...})` IDs in `[start, end)` and
+the network synchronizer's ID-bearing `Processing ordering block announcement`
+lines through `receipt_cutoff`. It records unique receipt per follower, per
+mining interval, and signed receipt time minus miner application time. Header
+and full-block application are separate observations, not proof of announcement
+receipt or of a specific download transport. The synchronizer's height-gap
+return precedes its INFO receipt log, so `never_received` is unknown;
+`never_observed` is only bounded log absence. Enabling its DEBUG logger exposes
+height-gap drops but still no ID. Complete receipt coverage needs an ID-bearing
+log before that return (including `remote` to identify the supplier).
+
+M5 uses M3's timestamped receiver events and the same reverse socket matching
+for all directed Scala links. It reports messages per ordering interval and
+per mined input block, plus minimum and nearest-rank p1/p5 adjacent arrival
+gaps and the number strictly below 250 ms. Gaps span interval and connection
+boundaries on each link; zero-input intervals have a null per-input ratio.
+Millisecond rounding keeps exactly 250 ms out of the violation count. These
+totals include replies and periodic traffic; arrival gaps do not prove send
+gaps or isolate the additional supplier refresh messages.
+
+`reconstruction` deduplicates the follower's `Applying block transactions from
+input-blocks`, `Downloading block transactions fully`, and the synchronizer's
+`Requesting all the block transactions ... as prev input block not found` lines for M4 IDs.
+The latter proves a full-download request, not completion. Re-scoring also
+surfaces existing `steady.json.reconstruction_accounting` follower counts as
+`archived_steady`, labelled with their wider scenario scope.
+
 The `classification` object reports every follower separately and partitions
 exactly M1's never-admitted IDs into `a-stale-not-sent`, `a-not-sent-other`,
 `b-plus2-dropped`, `b-gap-dropped`, and `other`. The console uses **admitted**
@@ -541,7 +570,7 @@ already includes them). Each sidecar record is a JSON-encoded string,
 preserving one original tailed entry, including its newline or a partial
 line. The files can be replayed without loading the logs into memory.
 Both formats preserve the exact live poll boundaries, excluding the full
-logs' warm-up and post-measurement tail. It recomputes Scala M1, M2, M3 and causes;
+logs' warm-up and post-measurement tail. It recomputes Scala M1–M5, reconstruction and causes;
 Rust M1 uses archived successful API IDs because offline re-probing is
 impossible. It writes JSON to stdout and leaves the archive unchanged.
 Cause `source_line` references are 1-based indices into the corresponding

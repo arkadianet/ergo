@@ -265,4 +265,11 @@ class Measurement:
 
         from relay_classification import classify
         result['classification'] = classify(result, evidence_dir=self.evidence_dir)
+        # Additive and recomputable offline by relay_rescore.py: never lose a run's
+        # relay evidence to a parsing surprise in these observations.
+        try:
+            from relay_acceptance import acceptance_metrics
+            result.update(acceptance_metrics(self.lines, intervals, result))
+        except Exception as error:  # noqa: BLE001
+            result['acceptance_error'] = repr(error)
         return result

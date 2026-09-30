@@ -100,7 +100,8 @@ class RelayTests(unittest.TestCase):
             (evidence / 'steady.json').write_text(json.dumps({'relay_refresh': result}))
             shutil.copytree(evidence, moved)  # paths must survive run.sh-style export
             old_score, new_score = rescore(old_dir), rescore(moved)
-            for key in ('window', 'M1', 'M3', 'classification', 'rust_api_errors', 'rust_last_probes'):
+            for key in ('window', 'M1', 'M3', 'classification', 'rust_api_errors', 'rust_last_probes',
+                        'M4', 'M5', 'reconstruction'):
                 self.assertEqual(old_score[key], new_score[key])
                 self.assertEqual(result[key], new_score[key])
             for node in old_score['M2']:

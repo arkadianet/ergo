@@ -42,3 +42,13 @@ not node log fields. Negative tests explicitly perturb these captures to
 exercise classes absent from A1 (`a-not-sent-other`, `other`) and ambiguous
 or missing evidence. Tests do not need an A1 archive unless
 `RELAY_A1_EVIDENCE` is set for the full-run Q3 parity check.
+
+`relay-acceptance.json` is a small verbatim subset of A1's captured
+`relay_refresh.source_lines`: the first three ordering blocks, follower
+receipt/header/reconstruction/application lines mentioning them, and early
+SyncInfo arrivals. `source_line` records the 1-based captured entry index,
+not the full-log line number. Its window is shortened at the third miner
+application, with a two-second receipt tail. It deliberately omits input-block
+traffic; tests supply explicit input denominators and control omissions to
+verify that header acquisition is not counted as announcement receipt.
+Threshold and percentile tests perturb the real receiver events' timestamps.

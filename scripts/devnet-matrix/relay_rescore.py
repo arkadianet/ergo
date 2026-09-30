@@ -7,6 +7,7 @@ from pathlib import Path
 
 from relay_classification import DELAY_SECONDS, classify
 from relay_evidence import source_lines
+from relay_acceptance import acceptance_metrics
 from relay_measurement import coverage, miner_window, peer_traffic, scala_received, staleness
 
 
@@ -14,7 +15,8 @@ def rescore(directory, delay_seconds=DELAY_SECONDS):
     path = directory / 'steady.json'
     if not path.is_file():
         path = directory / 'campaign' / 'steady.json'
-    saved = json.loads(path.read_text())['relay_refresh']
+    steady = json.loads(path.read_text())
+    saved = steady['relay_refresh']
     # Captured lines preserve exactly the live poll window, including receipt
     # cutoff; full node logs contain warm-up and post-measurement activity.
     lines = source_lines(saved, path.parent)
@@ -34,6 +36,7 @@ def rescore(directory, delay_seconds=DELAY_SECONDS):
                                 if receiver in lines else {'unavailable': 'no stock Scala receiver'})
     result['classification'] = classify(result, delay_seconds, path.parent)
     result['rescore'] = {'source': str(path), 'rust_coverage_source': 'archived successful API IDs; no offline re-probe'}
+    result.update(acceptance_metrics(lines, intervals, result, steady))
     # Source-line references index inline arrays or sidecar records, 1-based.
     return result
 

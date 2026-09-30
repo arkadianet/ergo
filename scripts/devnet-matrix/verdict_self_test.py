@@ -15,6 +15,7 @@ import smoke
 from scenarios import common, fork, miner_self_reject, reconstruct_rate
 from relay_self_test import RelayTests
 from relay_classification_self_test import ClassificationTests
+from relay_acceptance_self_test import AcceptanceTests
 
 
 # ----- helpers -----
