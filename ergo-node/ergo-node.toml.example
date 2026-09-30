@@ -168,6 +168,10 @@ peer_details.reverse_dns = false
 # api_key_hash = "<64 lowercase hex characters>"
 
 [mempool]
+# Reject empty-proof inputs carrying extension variable 127, including mixed transactions.
+# Defaults to true on mainnet, false on testnet/devnet. Set false to relay rent claims.
+# This affects admission only; valid claims in blocks and miner self-claims remain allowed.
+# reject_storage_rent_txs = true
 # disabled = false           # set true to skip tx relay (e.g. archival or sync-test runs)
 # sort_policy = "cost"       # cost (default) | size | min
 # max_pool_size = 1000       # matches Scala mempoolCapacity

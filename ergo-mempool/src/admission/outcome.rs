@@ -61,6 +61,8 @@ pub enum RejectReason {
     Duplicate,
     Structural,
     BelowMinFee,
+    /// Local relay policy; the transaction may still be valid in a block.
+    StorageRentPolicy,
     UnresolvedInput,
     UnresolvedDataInput,
     ValidationFailed {

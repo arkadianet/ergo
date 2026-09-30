@@ -124,6 +124,7 @@ impl Validator for MockValidator {
         Ok(PeekedTx {
             tx_id: plan.peek_tx_id.unwrap_or(default_tx_id),
             fee: plan.peek_fee.unwrap_or(default_fee),
+            contains_storage_rent_claim: false,
         })
     }
 

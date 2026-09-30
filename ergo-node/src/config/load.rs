@@ -740,6 +740,9 @@ impl NodeConfig {
         );
         let mempool_config = MempoolConfig {
             enabled: !mempool_force_off,
+            reject_storage_rent_txs: tm
+                .reject_storage_rent_txs
+                .unwrap_or(network == Network::Mainnet),
             max_pool_size: tm.max_pool_size.unwrap_or(def.max_pool_size),
             max_pool_bytes: tm.max_pool_bytes.unwrap_or(def.max_pool_bytes),
             min_relay_fee_nano_erg: tm

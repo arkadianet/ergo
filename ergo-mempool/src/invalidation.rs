@@ -16,6 +16,8 @@ use crate::types::TxId;
 pub enum InvalidationReason {
     /// Validation failed (script, structural, monetary, …).
     ValidationFailed,
+    /// Locally declined by relay policy; suppress repeated inventory fetches.
+    RelayPolicy,
     /// Tx was evicted as a double-spend loser and subsequently
     /// re-presented. Separate tag so metrics can distinguish.
     DoubleSpendLoser,

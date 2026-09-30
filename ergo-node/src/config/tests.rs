@@ -2336,3 +2336,23 @@ fn header_checkpoint_without_nipopow_bootstrap_accepted() {
     assert!(!cfg.nipopow_bootstrap);
     assert!(cfg.header_checkpoint.is_some());
 }
+
+#[test]
+fn storage_rent_relay_policy_network_defaults_and_overrides() {
+    for network in ["mainnet", "testnet", "devnet"] {
+        for override_value in [None, Some(false), Some(true)] {
+            let section = override_value.map_or(String::new(), |v| {
+                format!("[mempool]\nreject_storage_rent_txs = {v}\n")
+            });
+            let path = write_toml(&section);
+            let mut cli = minimal_cli(Some(&path));
+            cli.network = Some(network.into());
+            let cfg = NodeConfig::load(cli).expect("load storage-rent policy");
+            assert_eq!(
+                cfg.mempool_config.reject_storage_rent_txs,
+                override_value.unwrap_or(network == "mainnet"),
+                "network={network}, override={override_value:?}",
+            );
+        }
+    }
+}
