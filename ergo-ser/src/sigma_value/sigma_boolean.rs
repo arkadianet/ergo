@@ -144,21 +144,27 @@ pub(super) fn read_sigma_boolean_at_depth(
             Ok(SigmaBoolean::Cor(children))
         }
         SIGMA_THRESHOLD => {
-            // Scala: k = r.getUShort(), n = r.getUShort()
+            // Scala: k = r.getUShort(), n = r.getUShort(), then the n children,
+            // and only then `CTHRESHOLD`'s constructor `require(0 <= k && k <= n
+            // && n <= 255)` (SigmaBoolean.scala:94-101, :223). So a
+            // `ValidationException` among the children wins over the bound, and
+            // the bound itself is an `IllegalArgumentException`: a hard reject.
             let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
-            if !r.is_trusted() && !is_valid_cthreshold_shape(k, count) {
-                return Err(ReadError::InvalidData(format!(
-                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={count}"
-                )));
-            }
             let mut children = Vec::with_capacity(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
+            if !r.is_trusted() && !is_valid_cthreshold_shape(k, count) {
+                return Err(ReadError::HardReject(format!(
+                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={count}"
+                )));
+            }
             Ok(SigmaBoolean::Cthreshold { k, children })
         }
-        _ => Err(ReadError::InvalidData(format!(
+        // Scala's `SigmaBoolean.serializer.parse` matches the tag with no
+        // default case: a `MatchError`, a hard reject.
+        _ => Err(ReadError::HardReject(format!(
             "unknown SigmaBoolean tag: 0x{tag:02X}"
         ))),
     }
@@ -388,14 +394,18 @@ mod tests {
 
     #[test]
     fn untrusted_cthreshold_reader_rejects_invalid_shapes() {
+        // CTHRESHOLD's `require` is an IllegalArgumentException: hard. JVM
+        // (SANTA SigmaBoolean.conjecture_bounds #0, #2, blessed on 6.0.6):
+        // `REJECT IllegalArgumentException`.
         for (k, n) in [(3u16, 2u16), (0, 256)] {
             let bytes = cthreshold_bytes(k, n);
             let mut r = VlqReader::new(&bytes);
             let err = read_value(&mut r, &SigmaType::SSigmaProp).unwrap_err();
             assert!(
-                matches!(&err, ReadError::InvalidData(_)),
+                matches!(&err, ReadError::HardReject(_)),
                 "k={k}, n={n} returned {err:?}"
             );
+            assert!(r.is_empty(), "k={k}, n={n}: the children are read first");
         }
     }
 

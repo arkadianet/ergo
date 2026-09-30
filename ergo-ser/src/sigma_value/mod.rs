@@ -455,6 +455,17 @@ pub(crate) fn read_value_at_depth(
             Ok(SigmaValue::Coll(coll))
         }
         SigmaType::SOption(elem_type) => {
+            // Inside a pre-v3 tree `CoreDataSerializer` has no `SOption` case
+            // (`CoreDataSerializer.scala:140`): its fallback runs
+            // `CheckSerializableTypeCode` on code 36, a `ValidationException`
+            // (rule 1009) thrown before the option's tag or content is read.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: "SOption value requires ErgoTree version >= 3".into(),
+                });
+            }
             let opt = read_option(r, elem_type, depth)?;
             Ok(SigmaValue::Opt(opt))
         }
@@ -467,12 +478,11 @@ pub(crate) fn read_value_at_depth(
         }
         SigmaType::SUnit => Ok(SigmaValue::Unit),
         SigmaType::SString => {
+            // `getUIntExact`, then `getBytes(size)` (CoreDataSerializer.scala:
+            // 104-110): no length cap of its own. A read that begins inside the
+            // position limit reads the whole string; a string longer than the
+            // input fails the reader's `require` (hard).
             let len = r.get_u32_exact()? as usize;
-            if len > 4096 {
-                return Err(ReadError::InvalidData(format!(
-                    "SString value too long: {len}"
-                )));
-            }
             let bytes = r.get_bytes(len)?;
             // Scala CoreDataSerializer.scala:104-110 decodes SString values
             // with `new String(bytes, UTF_8)` (lossy). The decoded value is
@@ -508,6 +518,16 @@ pub(crate) fn read_value_at_depth(
         // a v3 SHeader constant whose pk carries an invalid SEC1 prefix; we
         // accepted while this surfaced as a wrap-able InvalidData.
         SigmaType::SHeader => {
+            // Inside a pre-v3 tree `DataSerializer`'s `SHeader` case is gated
+            // off (`DataSerializer.scala:39`) and the fallback's
+            // `CheckSerializableTypeCode` passes code 104, so it throws a
+            // `SerializerException` before the header is read: a hard reject.
+            if r.ergo_tree_version().is_some_and(|v| v < 3) {
+                return Err(ReadError::HardReject(
+                    "SHeader value requires ErgoTree version >= 3 (Scala SerializerException)"
+                        .into(),
+                ));
+            }
             let start = r.position();
             let h = crate::header::read_header(r)
                 .map_err(|e| ReadError::HardReject(format!("SHeader value: {e}")))?;
@@ -533,22 +553,19 @@ pub(crate) fn read_value_at_depth(
         SigmaType::SReserved10 | SigmaType::SReserved11 => Err(ReadError::InvalidData(format!(
             "reserved type value deserialization not supported: {tpe:?}"
         ))),
+        // `CoreDataSerializer.deserialize`'s fallback (`CoreDataSerializer.scala:
+        // 144-146`) runs `CheckSerializableTypeCode`, which passes every code up
+        // to `LastDataType` (111), and then throws a `SerializerException`
+        // ("Not defined DataSerializer"). These codes (97..=106) pass the rule,
+        // so the refusal is hard: a size-delimited tree does not degrade on it.
+        // `SFunc` (112) fails the rule itself, a `ValidationException`, above.
         SigmaType::SAny
         | SigmaType::SContext
         | SigmaType::SPreHeader
         | SigmaType::SGlobal
-        | SigmaType::STypeVar(_) => Err(ReadError::SigmaValidation {
-            rule_id: 1009,
-            args: vec![match tpe {
-                SigmaType::SAny => 97,
-                SigmaType::SContext => 101,
-                SigmaType::STypeVar(_) => 103,
-                SigmaType::SPreHeader => 105,
-                SigmaType::SGlobal => 106,
-                _ => unreachable!(),
-            }],
-            message: format!("value deserialization not supported for {tpe:?}"),
-        }),
+        | SigmaType::STypeVar(_) => Err(ReadError::HardReject(format!(
+            "Not defined DataSerializer for type {tpe:?} (Scala SerializerException)"
+        ))),
     }
 }
 

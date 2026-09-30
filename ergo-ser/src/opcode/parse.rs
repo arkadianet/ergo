@@ -6,8 +6,8 @@ use crate::sigma_type::{decode_type, read_type, SigmaType};
 use crate::sigma_value::{read_value_at_depth, SigmaValue};
 
 use super::types::{
-    is_known_method, method_explicit_type_args_count, opcode_pattern, ArgPattern, Body, Expr,
-    IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
+    check_array_length, is_known_method, method_explicit_type_args_count, opcode_pattern,
+    ArgPattern, Body, Expr, IrNode, Payload, LAST_CONSTANT_CODE, MAX_EXPR_DEPTH,
 };
 
 /// Parse an ErgoTree body (single root expression) from bytes.
@@ -132,45 +132,28 @@ fn parse_node(
         // nested SigmaProp continues the shared MaxTreeDepth budget (Scala's
         // single CoreByteReader.level across expr + value + SigmaBoolean).
         let val = read_value_at_depth(r, &tpe, depth + 1)?;
-        // SHeader value deserialization is gated on isV3OrLaterErgoTreeVersion
-        // (Scala DataSerializer.deserialize(SHeader)). The gate fires PER
-        // materialized header, so a constant that actually CARRIES a header
-        // (incl. nested) in a pre-v3 (version < 3) tree is rejected by the
-        // reference at parse time — but an empty Coll[Header] (no header
-        // materialized) is accepted. Match that value-based behavior.
-        //
-        // HARD reject: the reference's pre-v3 SHeader arm falls through to
-        // `CoreDataSerializer` and throws a `SerializerException`, which
-        // `deserializeErgoTree` does NOT catch — so it escapes the
-        // size-delimited soft-fork wrap and rejects the whole tree. This is the
-        // same verdict the SEGREGATED-constant path already applies
-        // (`ergo_tree::read::parse_body`); emitting a soft `InvalidData` here
-        // funneled an INLINE pre-v3 header constant into the generic body-error
-        // wrap and accepted a tree the reference rejects (cargo-fuzz #304).
-        if _tree_version < 3 && val.contains_header() {
-            return Err(ReadError::HardReject(format!(
-                "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
-            )));
-        }
-        // SOption data is likewise gated on isV3OrLaterErgoTreeVersion
-        // (CoreDataSerializer matches `SOption` only when v3+, otherwise falls
-        // through to CheckSerializableTypeCode and throws — for Some AND None).
-        // This is the PARSE-TIME companion to the value-materialization gate in
-        // `ergo-sigma` (`sigma_to_value_versioned`): here it rejects a
-        // materialized Option constant that appears INLINE in the parsed tree
-        // body, which carries the real tree version, so a pre-v3 (version < 3)
-        // tree is rejected exactly as the reference rejects it. Plain register /
-        // context-var constants do NOT reach this path (they are read via
-        // `read_constant`); those are gated at materialization instead. An empty
-        // Coll[Option] materializes no Option and is accepted here.
-        if _tree_version < 3 && val.contains_option() {
-            return Err(ReadError::SigmaValidation {
-                rule_id: 1009,
-                args: vec![36],
-                message: format!(
-                    "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
-                ),
-            });
+        // Inside a tree the value reader applies the pre-v3 `SHeader` /
+        // `SOption` data gates at the point Scala throws, against the tree
+        // version the reader carries (`read_value_at_depth`). A headerless
+        // payload (a register or context-extension expression, `Deserialize*`
+        // bytes) has no tree version on the reader and is judged against the
+        // version passed in, once the value is read: a Header is Scala's hard
+        // `SerializerException`, an Option its rule-1009 `ValidationException`.
+        if r.ergo_tree_version().is_none() && _tree_version < 3 {
+            if val.contains_header() {
+                return Err(ReadError::HardReject(format!(
+                    "SHeader value requires ErgoTree version >= 3 (got {_tree_version})"
+                )));
+            }
+            if val.contains_option() {
+                return Err(ReadError::SigmaValidation {
+                    rule_id: 1009,
+                    args: vec![36],
+                    message: format!(
+                        "SOption value requires ErgoTree version >= 3 (got {_tree_version})"
+                    ),
+                });
+            }
         }
         return Ok(Expr::Const { tpe, val });
     }
@@ -344,11 +327,7 @@ fn parse_node(
 
         ArgPattern::BlockValue => {
             let count = r.get_u32_exact()? as usize;
-            if count > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "BlockValue item count too large: {count}"
-                )));
-            }
+            check_array_length(count, "BlockValue items")?;
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 let item = parse_typed_expr(r, next, _tree_version, types, children)?;
@@ -377,11 +356,7 @@ fn parse_node(
 
         ArgPattern::FuncValue => {
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "FuncValue arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "FuncValue args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 // Scala `FuncValueSerializer` reads each arg id via `getUInt().toInt`
@@ -461,11 +436,7 @@ fn parse_node(
             let method_id = r.get_u8()?;
             let obj = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "MethodCall arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "MethodCall args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);
@@ -699,6 +670,7 @@ fn parse_node(
             // The reservation is soft-capped to avoid OOM on a hostile count; the
             // loop still reads `count` items and fails on truncated input.
             let count = r.get_u32_exact()? as usize;
+            check_array_length(count, "SigmaAnd/SigmaOr items")?;
             let mut items = Vec::with_capacity(count.min(64));
             for _ in 0..count {
                 items.push(parse_typed_expr(r, next, _tree_version, types, children)?);
@@ -816,11 +788,7 @@ fn parse_node(
         ArgPattern::FuncApply => {
             let func = parse_typed_expr(r, next, _tree_version, types, children)?;
             let n_args = r.get_u32_exact()? as usize;
-            if n_args > 10_000 {
-                return Err(ReadError::InvalidData(format!(
-                    "FuncApply arg count too large: {n_args}"
-                )));
-            }
+            check_array_length(n_args, "Apply args")?;
             let mut args = Vec::with_capacity(n_args.min(64));
             for _ in 0..n_args {
                 args.push(parse_typed_expr(r, next, _tree_version, types, children)?);

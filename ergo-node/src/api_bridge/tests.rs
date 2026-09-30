@@ -729,14 +729,17 @@ fn b4_q5_extension_canonicalization_rewrites_non_canonical_bytes() {
 /// and a well-behaved wallet never submits one.
 #[test]
 fn b4_q5_soft_fork_ergo_tree_placeholder_fallback_rejected() {
-    // Header byte: 0x18 = 0001 1000
+    // Header byte: 0x08 = 0000 1000
     //   bits 0-2: version = 0 (supported)
-    //   bit 3: constant_segregation = 0
-    //   bit 4: has_size = 1 (required for the bounded-data parse path)
+    //   bit 3: has_size = 1 (required for the bounded-data parse path)
+    //   bit 4: constant_segregation = 0
     // Size varint: 0x02 (body is 2 bytes)
     // Body: 0x04 (SInt type code) + 0x05 (zigzag-encoded value)
-    //   → root constant is SInt, not SSigmaProp → placeholder fallback
-    let placeholder_tree = "18020405";
+    //   → root constant is SInt, not SSigmaProp → rule 1001 wraps it. JVM
+    //   (`ErgoSerdeOracle.scala`, 6.0.6): `mc_root 08020405` → WRAP; the
+    //   segregated `18020405` reads a constants count of 4 and runs out of
+    //   input, a hard `BufferUnderflowException`.
+    let placeholder_tree = "08020405";
     let so = ergo_api::compat::types::ScalaOutputInput {
         value: 1_000_000,
         ergo_tree: placeholder_tree.to_string(),

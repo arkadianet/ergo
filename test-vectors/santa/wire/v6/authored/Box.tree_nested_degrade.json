@@ -1,0 +1,133 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Box.tree_nested_degrade",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "box-nested-unsized-softfork-reject#0",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The nested box's tree is unsized, 00 d1 fd, whose unknown opcode fd fails rule 1002. Unsized, the nested tree turns that ValidationException into a SerializerException ('ErgoTree serialized without size bit.'), which does not degrade the outer tree either: the JVM rejects. An impl that degrades the outer tree on any nested failure accepts it: the over-accept.",
+      "bytes_hex" : "c0843d18300263c0843d00d1fd01000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-sized-softfork-accept#1",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose nested tree is the same, size-flagged (08 02 d1 fd). It degrades on its own, so the outer tree parses. Round-trip identity.",
+      "bytes_hex" : "c0843d18310263c0843d0802d1fd01000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-rule-1012-degrade-accept#2",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The nested box's tree header is 01, a v1 tree without the size bit. CheckHeaderSizeBit (rule 1012, ErgoTreeSerializer.scala:219) runs before the nested tree's own handler (:145), so its ValidationException reaches the outer tree, which degrades. Round-trip identity. An impl that treats it as a hard error rejects: the over-reject.",
+      "bytes_hex" : "c0843d18300263c0843d0108d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-rule-1012-unsized-outer-reject#3",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose outer tree is the same but unsized (10): the ValidationException cannot degrade it, so the JVM rejects.",
+      "bytes_hex" : "c0843d100263c0843d0108d301000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-rule-1019-degrade-accept#4",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The outer tree is v3 (1b), and the nested box's R4 is Option[Int] Some(1) (28 01 02): well-formed data that CheckV6Type (rule 1019, ErgoBoxCandidate.scala:232) refuses in a register. The ValidationException degrades the outer tree. Round-trip identity.",
+      "bytes_hex" : "c0843d1b330263c0843d0008d301000128010200000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-option-register-unsized-outer-reject#5",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose outer tree is unsized v0 (10). There the Option data fails rule 1009 (no Option data below tree v3), and unsized, the outer tree cannot degrade: the JVM rejects.",
+      "bytes_hex" : "c0843d100263c0843d0008d301000128010200000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-sheader-register-v1-reject#6",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The outer tree is v1 (19), and the nested box's R4 is an SHeader (68, then a 215-byte header). Below tree v3 there is no data serializer for SHeader, a SerializerException, not a ValidationException: the size flag does not help and the JVM rejects.",
+      "bytes_hex" : "c0843d1988020263c0843d0008d30100016802000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0000000000000000000000000000000000000000000000000000000000000000070239b80100000000000000000000000000000000000000000000000000000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-sheader-register-v3-degrade-accept#7",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose outer tree is v3 (1b): the SHeader parses, then rule 1019 refuses it in a register, and the outer tree degrades. Round-trip identity.",
+      "bytes_hex" : "c0843d1b88020263c0843d0008d30100016802000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c0843d0000000000000000000000000000000000000000000000000000000000000000070239b80100000000000000000000000000000000000000000000000000000000000000000000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-seven-registers-r4-degrade-accept#8",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The outer tree is v3, and the nested box declares 7 registers, R4 = Option[Int] Some(1), then 6 × Int 1. The registers are read in order and R4 fails rule 1019 before the seventh register's missing id is ever looked up (which would reject, see tree_degrade_gate #17), so the outer tree degrades. Round-trip identity. An impl that checks the register count first rejects.",
+      "bytes_hex" : "c0843d1b3f0263c0843d0008d301000728010204020402040204020402040200000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-unsized-int-root-reject#9",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose size-flagged, segregated tree has constant 0 = a Box, constant 1 = SigmaProp(true) and the body ConstantPlaceholder(1). The nested box's tree is unsized, 00 04 02, whose root is Int 1: rule 1001 (the root must be a SigmaProp, ErgoTreeSerializer.scala:174) fails in the nested tree. Unsized, the nested tree turns that ValidationException into a SerializerException ('ErgoTree serialized without size bit.'), as #0 does for rule 1002, so the outer tree does not degrade: the JVM rejects. An impl that degrades the outer tree accepts it: the over-accept.",
+      "bytes_hex" : "c0843d18300263c0843d00040201000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-nested-sized-int-root-accept#10",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose nested tree is the same, size-flagged (08 02 04 02). Rule 1001 degrades it on its own, so the outer tree parses. Round-trip identity.",
+      "bytes_hex" : "c0843d18310263c0843d0802040201000000000000000000000000000000000000000000000000000000000000000000000008d373010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

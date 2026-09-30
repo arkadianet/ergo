@@ -171,9 +171,17 @@ fn skip_ergo_tree(r: &mut VlqReader) -> Result<(), ReadError> {
         // inner failure as `UnparsedErgoTree`, rejected only on spend, which the
         // evaluator's spend-path gate handles.
         if version != 0 && !r.is_trusted() {
-            return Err(ReadError::InvalidData(format!(
-                "nested box script: ErgoTree version {version} requires the size bit (CheckHeaderSizeBit, rule 1012)"
-            )));
+            // `CheckHeaderSizeBit` (rule 1012) throws a `ValidationException`
+            // before the nested tree's own handler (`ErgoTreeSerializer.scala:
+            // 219`), so it reaches an enclosing size-delimited tree, which
+            // degrades on it.
+            return Err(ReadError::SigmaValidation {
+                rule_id: 1012,
+                args: vec![header],
+                message: format!(
+                    "nested box script: ErgoTree version {version} requires the size bit (CheckHeaderSizeBit, rule 1012)"
+                ),
+            });
         }
         parse_sizeless_inner_box_script(r, version, cseg).map_err(harden_sizeless_inner_error)?;
     }
@@ -410,7 +418,7 @@ mod tests {
     /// A sizeless `version != 0` nested box script violates rule 1012
     /// (`CheckHeaderSizeBit`). Read standalone (no enclosing tree), the
     /// rejection propagates and the box is rejected. The error is a SOFT
-    /// `InvalidData` (Scala throws this as a `ValidationException`), so an
+    /// `SigmaValidation` (Scala throws this as a `ValidationException`), so an
     /// enclosing size-delimited tree would instead WRAP it — see
     /// `ergo_tree::tests::nested_box_constant_rule1012_in_size_delimited_outer_wraps`.
     #[test]
@@ -422,7 +430,7 @@ mod tests {
         let err = read_value(&mut r, &SigmaType::SBox)
             .expect_err("sizeless version!=0 nested box script must reject (rule 1012)");
         assert!(
-            matches!(&err, ReadError::InvalidData(m) if m.contains("rule 1012")),
+            matches!(&err, ReadError::SigmaValidation { rule_id: 1012, .. }),
             "got {err:?}",
         );
     }

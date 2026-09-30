@@ -575,6 +575,65 @@ fn funcvalue_arg_id_overflow_roundtrips() {
 
 // ----- oracle parity -----
 
+/// Issue #436: a constant whose nested box carries a sized version-6 tree that
+/// fails on a `SerializerException` must be rejected at activated version 1
+/// too, where the version gate is inert and the body is parsed: only a
+/// `ValidationException` degrades a sized tree. JVM (`ErgoSerdeOracle.scala`,
+/// sigma-state 6.0.6): `constant@1` -> `REJECT InvalidTypePrefix`,
+/// `constant@3` -> `REJECT SerializerException`.
+#[test]
+fn issue_436_nested_v6_sized_tree_rejects_at_every_activated_version() {
+    let bytes = hex::decode(
+        "4d4d4d4d4f4d6300f83c4d4d4d6300f83c3c0e0e0e0e0e0e0e0e0e0e0e5454571f4d4d4d4d4d6300f84d4d4d630e0e4d00000e2500000e0e0e000045450100d40000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000000",
+    )
+    .unwrap();
+    for activated in [None, Some(1u8), Some(3)] {
+        let mut r = VlqReader::new(&bytes);
+        if let Some(a) = activated {
+            r = r.with_activated_script_version(a);
+        }
+        assert!(
+            crate::sigma_value::read_constant(&mut r).is_err(),
+            "activated {activated:?}: the JVM rejects"
+        );
+    }
+}
+
+/// Below tree v3 an Option's data is refused by `CheckSerializableTypeCode`
+/// (rule 1009, a `ValidationException`) before its content is read, so a
+/// size-flagged tree degrades even when that content is malformed. At v3 the
+/// content is read and a malformed point is a hard reject. JVM
+/// (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `ergo_tree`, activated 3):
+///
+/// ```text
+/// 1926012b01c4(11 x32)7300   (v1, segregated Some(bad point))  ACCEPT, wrapped
+/// 09232b01c4(11 x32)         (v1, inline Some(bad point))      ACCEPT, wrapped
+/// 1b26012b01c4(11 x32)7300   (v3, the same)                    REJECT SerializerException
+/// ```
+#[test]
+fn pre_v3_option_constant_degrades_before_its_content_is_read() {
+    let point = format!("c4{}", "11".repeat(32));
+    for (tree, wraps) in [
+        (format!("1926012b01{point}7300"), true),
+        (format!("09232b01{point}"), true),
+        (format!("1b26012b01{point}7300"), false),
+    ] {
+        let bytes = hex::decode(&tree).unwrap();
+        let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+        let result = read_ergo_tree(&mut r);
+        if wraps {
+            let parsed = result.unwrap_or_else(|e| panic!("{tree}: {e:?}"));
+            assert!(matches!(parsed.body, Expr::Unparsed(_)), "{tree}: wraps");
+            assert!(r.is_empty(), "{tree}");
+        } else {
+            assert!(
+                result.is_err(),
+                "{tree}: a v3 tree reads the point and rejects"
+            );
+        }
+    }
+}
+
 // -- Size-flagged malformed tree (Scala UnparsedErgoTree parity) --
 
 /// Block 1,702,686 tx #3 output[0] on mainnet carries an ErgoTree with
