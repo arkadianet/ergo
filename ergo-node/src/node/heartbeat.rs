@@ -338,6 +338,7 @@ pub(super) fn emit_heartbeat(state: &mut NodeState, now: Instant) {
             avg_ms = format!("{avg:.2}"),
             header_load_ms = format!("{:.1}", ns_to_ms(bperf.header_load_ns)),
             sections_load_ms = format!("{:.1}", ns_to_ms(bperf.sections_load_ns)),
+            proof_ms = format!("{:.1}", ns_to_ms(bperf.proof_ns)),
             parent_ctx_ms = format!("{:.1}", ns_to_ms(bperf.parent_ctx_ns)),
             validate_ms = format!("{:.1}", ns_to_ms(bperf.validate_ns)),
             apply_ms = format!("{:.1}", ns_to_ms(bperf.apply_ns)),
