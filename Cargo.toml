@@ -94,6 +94,7 @@ lru               = "0.18"
 crossbeam-channel = "0.5"
 arc-swap          = "1"
 parking_lot       = "0.12"
+scoped-tls-hkt    = "0.1.5"
 
 # Parallelism
 rayon = "1.11"

@@ -8,6 +8,14 @@ use ergo_validation::context::ProtocolParams;
 use std::{error::Error, path::PathBuf, time::Instant};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Opt in only for diagnosis; timed comparisons normally leave this off.
+    if std::env::var_os("ERGO_REPLAY_TRACE").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter("warn,ergo_state::persist=debug")
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    }
     let mut args = std::env::args().skip(1);
     let path = PathBuf::from(args.next().ok_or("provide disposable state.redb path")?);
     let count: u32 = args.next().unwrap_or_else(|| "150".into()).parse()?;

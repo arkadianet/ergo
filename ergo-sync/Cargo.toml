@@ -32,7 +32,7 @@ serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile   = { workspace = true }
 redb       = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[test]]
 name = "it"

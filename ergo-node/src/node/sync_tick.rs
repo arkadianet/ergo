@@ -68,8 +68,9 @@ pub(super) fn handle_sync_tick(state: &mut NodeState) {
     handle_sync_tick_at(state, Instant::now());
 }
 
-/// Drive one sync cycle using a single supplied monotonic timestamp.
+/// Drive one sync cycle using a supplied monotonic scheduling timestamp.
 pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
+    let tick_started = Instant::now();
     maybe_emit_gauges(state, now);
 
     // 0-pre. NiPoPoW bootstrap. Runs BEFORE Mode 2 discovery so the
@@ -363,11 +364,16 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         }
     }
 
-    // 5. Heartbeat: always fires so a stalled sync is visible.
-    heartbeat::emit_heartbeat(state, now);
+    // 5. Sample diagnostics after the work they describe. Block draining can
+    // take seconds; using the tick-entry time with the post-drain height
+    // overstates throughput and dates the API snapshot before its state.
+    // Add elapsed work to the supplied clock so simulated scheduling times
+    // used by tests remain consistent too.
+    let observed_now = now + tick_started.elapsed();
+    heartbeat::emit_heartbeat(state, observed_now);
 
     // 6. Publish operator-API snapshot.
-    publish_snapshot(state, now);
+    publish_snapshot(state, observed_now);
 }
 
 /// Mode 2 consume-side discovery fan-out.

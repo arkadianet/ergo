@@ -1,5 +1,7 @@
 # Bounded node prefetch for UTXO proof generation
 
+Historical intermediate implementation at `1a7a5d89`. The final same-thread resolver supersedes the prefetch worker; see [the final report](sync-same-thread-proofs-2026-09-30.md). These measurements remain evidence for this earlier revision.
+
 Base revision: `5d62fd5851e74fcb965b4aba50e1b423127f46f1`.
 Worktree branch: `codex/sync-performance`.
 

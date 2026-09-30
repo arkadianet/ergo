@@ -570,9 +570,15 @@ impl PersistPipeline {
         let tx = self.tx.as_ref().ok_or(StateError::InvalidPrecondition {
             what: "persist pipeline already shut down",
         })?;
+        let height = job.height;
+        let send_start = std::time::Instant::now();
         tx.send(job).map_err(|_| StateError::InternalInvariant {
             what: "persist worker thread died (channel closed)",
         })?;
+        let send_ms = send_start.elapsed().as_secs_f64() * 1000.0;
+        if send_ms >= 1.0 {
+            debug!(height, send_ms, "persist queue wait");
+        }
         Ok(seq)
     }
 
@@ -802,8 +808,10 @@ impl PersistPipeline {
             return Ok(0.0);
         }
 
+        let batch_start = std::time::Instant::now();
         let mut write_txn = crate::begin_write_qr(db)
             .observe_persist_error(failure_context, "background_persist_begin_write")?;
+        let writer_wait_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
 
         // Durability mode per batch:
         //   - `None`: makes writes visible without a durability guarantee.
@@ -1170,10 +1178,27 @@ impl PersistPipeline {
         }
 
         let commit_start = std::time::Instant::now();
+        let write_ms =
+            commit_start.duration_since(batch_start).as_secs_f64() * 1000.0 - writer_wait_ms;
         write_txn
             .commit()
             .observe_persist_error(failure_context, "background_persist_commit")?;
-        Ok(commit_start.elapsed().as_secs_f64() * 1000.0)
+        let commit_ms = commit_start.elapsed().as_secs_f64() * 1000.0;
+        // Log single-job batches too: they dominate when proof generation is
+        // slower than persistence, and can still contain the periodic fsync.
+        // Separate writer acquisition from mutation and commit so contention
+        // with section/header writes is not mistaken for storage flush time.
+        debug!(
+            n = jobs.len(),
+            h_lo = jobs.first().map(|j| j.height).unwrap_or(0),
+            h_hi = jobs.last().map(|j| j.height).unwrap_or(0),
+            durable = any_durable,
+            writer_wait_ms,
+            write_ms,
+            commit_ms,
+            "persist transaction timing",
+        );
+        Ok(commit_ms)
     }
 }
 
