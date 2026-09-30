@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 
 
+REPLAY_TIMEOUT_SECONDS = 600
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--snapshot', type=Path, required=True)
@@ -46,8 +49,18 @@ def main():
                 with database.open('rb') as stream:
                     os.fsync(stream.fileno())
                 (scratch / '.benchmark-copy').write_text('disposable ergo sync benchmark\n')
-                result = subprocess.run([str(binaries[mode]), str(database), str(args.blocks)],
-                                        capture_output=True, text=True, check=True)
+                try:
+                    result = subprocess.run(
+                        [str(binaries[mode]), str(database), str(args.blocks)],
+                        capture_output=True, text=True, check=True,
+                        timeout=REPLAY_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired:
+                    parser.exit(
+                        status=1,
+                        message=(f'replay timed out after {REPLAY_TIMEOUT_SECONDS}s: '
+                                 f'mode={mode}, iteration={iteration + 1}\n'),
+                    )
                 lines = [line for line in result.stdout.splitlines() if line.startswith('replay ')]
                 if len(lines) != 1:
                     raise RuntimeError(f'unexpected replay output: {result.stdout}\n{result.stderr}')
