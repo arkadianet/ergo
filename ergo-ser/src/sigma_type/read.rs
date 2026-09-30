@@ -177,10 +177,14 @@ fn open_tuple(child_depth: usize, count: usize) -> Step {
     if count == 0 {
         return Step::Done(SigmaType::STuple(Vec::new()));
     }
+    // The items grow as they are read, so an untrusted count reserves
+    // nothing up front: a chain of frames each declaring 255 items and
+    // opening the next as its first costs the bytes it reads, not
+    // 255 slots per level.
     Step::Open(Frame {
         child_depth,
         kind: FrameKind::Tuple {
-            items: Vec::with_capacity(count),
+            items: Vec::new(),
             remaining: count,
             then_prim: None,
         },
@@ -291,7 +295,8 @@ fn decode_one(r: &mut VlqReader, byte: u8, depth: usize, gate_v: u8) -> Result<S
             Ok(Step::Open(Frame {
                 child_depth: next,
                 kind: FrameKind::Func {
-                    t_dom: Vec::with_capacity(dom_count),
+                    // Grows as read, like a tuple's items (`open_tuple`).
+                    t_dom: Vec::new(),
                     remaining_dom: dom_count,
                     t_range: None,
                     tpe_params: Vec::new(),
@@ -717,6 +722,23 @@ mod tests {
         // `StackOverflowError`, not a `ValidationException`, so the refusal is
         // hard: a size-delimited tree must not degrade on it.
         let bytes = nested_coll_bytes(MAX_TYPE_DEPTH + 2);
+        let mut r = VlqReader::new(&bytes);
+        match read_type(&mut r) {
+            Err(ReadError::HardReject(msg)) => {
+                assert!(msg.contains("type recursion depth"), "got: {msg}")
+            }
+            other => panic!("expected a hard depth reject, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_type_wide_tuple_chain_past_max_depth_hard_rejects() {
+        // Each `STuple` of 255 items (`60 ff`) opens the next as its first
+        // item: two bytes per level, so this runs past the guard in 32 KiB.
+        // The reader must not reserve 255 item slots per open frame before
+        // the items arrive, or the chain costs hundreds of MiB before the
+        // reject.
+        let bytes = [0x60u8, 0xFF].repeat(MAX_TYPE_DEPTH + 2);
         let mut r = VlqReader::new(&bytes);
         match read_type(&mut r) {
             Err(ReadError::HardReject(msg)) => {
