@@ -145,7 +145,7 @@ pub struct NodeConfig {
     /// Global SyncInfo broadcast cadence once stable (headers caught up).
     /// Default [`ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE`] (15 s).
     pub sync_interval_stable: std::time::Duration,
-    /// redb + AVL arena page cache, in bytes. None → use store default.
+    /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. None → use store default.
     pub cache_bytes: Option<usize>,
     /// Script-validation checkpoint: blocks at or below this height skip
     /// per-input ErgoScript evaluation. `None` → fully validate every block.

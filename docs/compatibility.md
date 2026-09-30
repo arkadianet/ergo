@@ -41,6 +41,40 @@ here.
 
 ## What is implemented and parity-tested
 
+### Received block-section bytes
+
+Block sections are stored through typed persistence with their received
+payload intact, and P2P `RequestModifier` serves that payload intact, in both
+UTXO and digest modes. This is an intentional byte-fidelity difference from
+Scala 6.0.7: its history insertion serializes parsed `BlockTransactions`, and
+its P2P responder serves those stored canonical bytes. We retain received bytes
+to avoid introducing a blanket transform over embedded values with retained
+wire identity. No storage migration or canonicalization is introduced. Section identity commits
+to its type, header ID and content root, rather than a hash of the entire wire
+payload; receive-time verification recomputes that identity from parsed content.
+
+The fresh Scala-backed fixture
+`test-vectors/scala/block_section_storage_6_0_7.json` and
+`ergo-node/src/node/tests/section_wire_policy.rs` pin 22 accepted sections,
+including noncanonical Boolean/context-extension and zero-prefixed identity
+GroupElement encodings, across block versions 1 and 4. Eight wire payloads
+differ from canonical storage, while transaction IDs, transaction/witness
+roots, section IDs and canonical re-serialization agree. This evidence is
+scoped to these encodings and section admission; the synthetic input boxes
+and unmined headers do not establish full-block validity. Retained box/header
+identity (#357) must not be generalized into canonical identity.
+
+`GET /blocks/{id}/transactions` is a parsed JSON surface. Its transaction
+values and canonical transaction sizes match Scala in these cases. Rust's
+section `size` consistently describes received bytes. Scala initially reports
+received section length from its parsed-object cache, then canonical stored
+length after reopening; the shorter Boolean leaf encodings differ by one byte
+at that point. The oracle records both states separately. Reproduction and
+the exact production storage/serving seams are documented in
+[the pinned oracle archive](https://github.com/arkadianet/ergo/tree/ba2ac17932c8ca818594f110b5b25e9c07ac6dba/scripts/jvm_section_oracle/README.md).
+
+### Sync and API behavior
+
 Header admission enforces Scala's fatal rule 209 (`hdrTooOld`): a child's
 parent must be less than `[node] keep_versions` blocks below the applied
 full-block tip, and genesis requires the full tip to be below that window.
