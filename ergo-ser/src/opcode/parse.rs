@@ -209,12 +209,14 @@ fn parse_node(
                     }
                 }
             }
+            check_numeric_operands(first, &children[children.len() - 1..])?;
             Payload::One(Box::new(a))
         }
 
         ArgPattern::Two => {
             let a = parse_typed_expr(r, next, _tree_version, types, children)?;
             let b = parse_typed_expr(r, next, _tree_version, types, children)?;
+            check_numeric_operands(first, &children[children.len() - 2..])?;
             Payload::Two(Box::new(a), Box::new(b))
         }
 
@@ -883,6 +885,31 @@ fn explicit_type(e: &Expr) -> Option<SigmaType> {
     }
 }
 
+/// The bitwise and negation nodes check their operands when they are built:
+/// `Negation` and `BitInversion` `require(input.tpe.isNumTypeOrNoType)`, and
+/// `BitOp` (BitOr, BitAnd, BitXor and the three shifts) the same of both
+/// operands (`trees.scala:882`, `:900`, `:913`). The arithmetic operations
+/// (Plus .. Max) have no such check (`SigmaBuilder.scala:707-712`). A failed
+/// `require` is an `IllegalArgumentException`, which `deserializeErgoTree`
+/// rethrows as a `SerializerException`: a hard reject, also in a sized tree.
+///
+/// Only an operand whose type is known precisely is judged; an unknown type
+/// could be Scala's `NoType`, which passes.
+fn check_numeric_operands(opcode: u8, operands: &[Option<SigmaType>]) -> Result<(), ReadError> {
+    if !matches!(opcode, 0xF0..=0xF3 | 0xF5..=0xF8) {
+        return Ok(());
+    }
+    for tpe in operands.iter().flatten() {
+        if !tpe.is_numeric() {
+            return Err(ReadError::HardReject(format!(
+                "operand of opcode {opcode:#04x} must be numeric, got {tpe:?} \
+                 (Scala require -> SerializerException)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `DeserializationSigmaBuilder` checks comparison and equality operands
 /// (`SigmaBuilder.scala` `comparisonOp` / `equalityOp`): `Lt`..`Ge` require
 /// both operands numeric, and all six require the same type once a pre-v3
@@ -1031,6 +1058,42 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    /// `Negation`, `BitInversion` and `BitOp` require numeric operands when
+    /// built; arithmetic does not. JVM (`ErgoSerdeOracle.scala`, sigma-state
+    /// 6.0.6, `ergo_tree`, activated 3), all `BoolToSigmaProp(EQ(op, x))`:
+    ///
+    /// ```text
+    /// 00d193f001010101              Negation(true)          REJECT SerializerException
+    /// 00d193f101010101              BitInversion(true)      REJECT SerializerException
+    /// 00d193f685010185010185010101  ShiftRight(C, C), C = Coll[Boolean]  REJECT
+    /// 00d193f604020402f60402040204  ShiftRight(Int, Int)    ACCEPT
+    /// 00d193f004020402              Negation(Int)           ACCEPT
+    /// 00d193f2040204020402          BitOr(Int, Int)         ACCEPT
+    /// ```
+    #[test]
+    fn bit_and_negation_operands_must_be_numeric() {
+        for (body, accept) in [
+            ("d193f001010101", false),
+            ("d193f101010101", false),
+            ("d193f685010185010185010101", false),
+            ("d193f604020402f60402040204", true),
+            ("d193f004020402", true),
+            ("d193f2040204020402", true),
+        ] {
+            let bytes = hex::decode(body).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let result = parse_expr(&mut r, 0, 0);
+            if accept {
+                assert!(result.is_ok(), "{body}: {result:?}");
+            } else {
+                assert!(
+                    matches!(&result, Err(ReadError::HardReject(m)) if m.contains("must be numeric")),
+                    "{body}: {result:?}"
+                );
+            }
+        }
+    }
 
     /// An INLINE pre-v3 `SHeader` constant must be a [`ReadError::HardReject`],
     /// not a soft `InvalidData`. The reference's `DataSerializer` matches
