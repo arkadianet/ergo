@@ -173,3 +173,15 @@ work_dir = ".work-syncfix2-plus-2563f"
 ergo_ref = "7666618222a2c62707dae1390805cf7d1582a8b4"
 branch = "tmp/syncfix2-plus-2563f"
 description = "#2597 final (syncfix2, 93c756df4) merged into #2563 (13fc25df2): the patched follower of the D arm, whose stock follower runs syncfix2"
+
+[builds.opt3]
+work_dir = ".work-opt3"
+ergo_ref = "fdbf0db7667db6eca10cad0ace87f1e66ed79b3a"
+branch = "tmp/opt3-on-a1bd938ef"
+description = "#2597 option 3 (cafebedouin/ergo matrix/2597-opt3j-header-inv, 0120f3688 + 34a74d0dc, cherry-picked onto a1bd938ef): a peer's header Inv on our best chain raises its recorded height; the O-arm miner and stock follower"
+
+[builds."opt3+2563f"]
+work_dir = ".work-opt3-plus-2563f"
+ergo_ref = "796cd091752189d164f8555971309aad838d0739"
+branch = "tmp/opt3-plus-2563f"
+description = "#2597 option 3 cherry-picked onto #2563 (13fc25df2): the O-arm patched follower, so the O-arm followers differ only by the store"

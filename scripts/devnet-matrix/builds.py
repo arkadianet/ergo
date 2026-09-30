@@ -41,7 +41,7 @@ BUILDS_TOML = HERE / 'builds.toml'
 # patch we filed.
 BUILD_NAMES = ('stock', 'F16', 'F12F05', 'F14', 'F13', 'F04', 'F11', 'all',
                'base', 'base+2506', '2563f', '2563f+2506', '2562f', 'soak', 'syncfix', '2566', 'syncfix+2566',
-               'syncfix2', 'syncfix2+2566', 'syncfix2+2563f')
+               'syncfix2', 'syncfix2+2566', 'syncfix2+2563f', 'opt3', 'opt3+2563f')
 
 # A registry entry's `ergo_ref`: a full commit id, never a branch name,
 # so a later branch move cannot change what a rerun provisions.
