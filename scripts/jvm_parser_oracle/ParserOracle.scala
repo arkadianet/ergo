@@ -1,7 +1,7 @@
 // JVM reference PARSER oracle for the ergo-compiler M1 corpus-parity test.
 //
 // Reads `parse <hex-of-utf8-source>` lines on stdin and, for each, runs the REAL
-// Scala reference parser (`sigmastate.lang.SigmaParser`, sigma-state 6.0.2 — the
+// Scala reference parser (`sigmastate.lang.SigmaParser`, sigma-state 6.0.6 — the
 // version the consensus node runs) and prints one line:
 //   ACCEPT               the source parsed to a Value AST
 //   REJECT <line>:<col>  the source was refused; 1-based position of the failure
@@ -15,8 +15,8 @@
 // ── artifact resolution (resolved empirically 2026-07) ────────────────────────
 // `sigmastate.lang.SigmaParser` lives in sigma-state's `parsers` sub-module. In
 // the reference checkout that module carries `publish / skip := true`, but the
-// PUBLISHED `org.scorexfoundation::sigma-state:6.0.2` artifact on Maven Central
-// DOES ship the parsers classes — a bare dep on sigma-state:6.0.2 exposes
+// PUBLISHED `org.scorexfoundation::sigma-state:6.0.6` artifact on Maven Central
+// DOES ship the parsers classes — a bare dep on sigma-state:6.0.6 exposes
 // `SigmaParser`, `sigma.ast.SourceContext`, and `sigma.exceptions.CompilerException`
 // with NO local publishLocal and NO extra source roots. So (unlike ErgoSerdeOracle,
 // which needs ergo-core published locally) this oracle needs only sigma-state and
@@ -32,7 +32,7 @@
 //
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 
 import scala.io.StdIn
 import scorex.util.encode.Base16

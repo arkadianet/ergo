@@ -1,7 +1,7 @@
 // JVM reference TYPER oracle for the ergo-compiler M2 typed-tree parity test.
 //
 // Reads verb lines on stdin and, for each, runs the REAL Scala reference
-// binder+typer (sigma-state 6.0.2 — the version the consensus node runs) and
+// binder+typer (sigma-state 6.0.6 — the version the consensus node runs) and
 // prints ONE line:
 //   OK <sexpr>                        typed tree (canonical s-expression, see §4 below)
 //   REJECT <line>:<col> <ExClass>     binder/typer refused (1-based pos, else 0:0)
@@ -96,7 +96,7 @@
 // "<@1 @2>". Full payload parity is M3 scope; M2 grades structure + types + scalars.
 //
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 
 import scala.io.StdIn
 import scorex.util.encode.Base16

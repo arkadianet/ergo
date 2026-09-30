@@ -18,7 +18,7 @@ pub fn write_ergo_box_candidate_indexed(
     token_id_table: &[TokenId],
 ) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(&c.ergo_tree_bytes);
+    w.put_bytes(c.serialized_ergo_tree_bytes());
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
@@ -121,14 +121,25 @@ fn read_box_tail(
             amount,
         });
     }
-    let reg_start = r.position();
     let additional_registers = read_registers(r)?;
-    let reg_end = r.position();
-    let register_bytes = r.data_slice(reg_start, reg_end).to_vec();
+    // The canonical re-serialization of the parsed registers, never the
+    // verbatim wire slice: Scala writes an output box's registers back from
+    // its parsed values (`ValueSerializer.serialize` on each stored
+    // `EvaluatedValue`), so a transaction id and its output box ids commit to
+    // those bytes. A register the reference accepts in a non-canonical form
+    // (the `TrueLeaf` opcode `7f`, a collection length above 2^32) would
+    // otherwise give the transaction a different id than the reference's.
+    // Same rule as the standalone reader, `read_ergo_box_candidate`.
+    let mut rw = VlqWriter::new();
+    crate::register::write_registers(&mut rw, &additional_registers)
+        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    let register_bytes = rw.result();
+    let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     Ok(ErgoBoxCandidate {
         value,
         ergo_tree,
         ergo_tree_bytes,
+        canonical_tree_bytes,
         creation_height,
         tokens,
         additional_registers,

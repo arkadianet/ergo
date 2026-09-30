@@ -59,13 +59,19 @@ function txidNode(t) {
 }
 
 function srcText(t) {
-  const s = t.source || {};
-  return s.kind === 'peer' ? `peer ${s.addr || ''}` : s.kind || 'local';
+  // The v1 API sends a flat source string, not the internal { kind, addr }.
+  switch (t.source) {
+    case 'peer': return 'peer';
+    case 'api': return 'local · api';
+    case 'public_api': return 'public api';
+    case 'wallet': return 'local · wallet';
+    case 'demoted_from_block': return 'from block';
+    default: return 'unknown';
+  }
 }
 function srcNode(t) {
-  const s = t.source || {};
-  if (s.kind === 'peer') return span(`peer ${truncMiddle(s.addr || '', 6, 4)}`, 'var(--tx2)');
-  return span(`local · ${s.kind || 'local'}`, 'var(--green)');
+  const isLocal = t.source === 'api' || t.source === 'wallet';
+  return span(srcText(t), isLocal ? 'var(--green)' : 'var(--tx2)');
 }
 
 const COLS = [

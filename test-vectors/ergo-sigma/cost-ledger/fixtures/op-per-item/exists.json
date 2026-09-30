@@ -31,6 +31,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 2,
         "crypto_block_cost": 0,
@@ -70,6 +72,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 2,
         "crypto_block_cost": 0,
@@ -109,6 +113,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 3,
         "crypto_block_cost": 0,
@@ -148,6 +154,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 3,
         "crypto_block_cost": 0,
@@ -187,6 +195,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 3,
         "crypto_block_cost": 0,
@@ -226,6 +236,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -265,6 +277,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -304,6 +318,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -343,6 +359,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -382,6 +400,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -421,6 +441,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 3,
         "crypto_block_cost": 0,
@@ -460,6 +482,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 3,
         "crypto_block_cost": 0,
@@ -499,6 +523,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -538,6 +564,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -577,6 +605,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 4,
         "crypto_block_cost": 0,
@@ -616,6 +646,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 5,
         "crypto_block_cost": 0,
@@ -655,6 +687,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 5,
         "crypto_block_cost": 0,
@@ -694,6 +728,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 5,
         "crypto_block_cost": 0,
@@ -733,6 +769,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 5,
         "crypto_block_cost": 0,
@@ -772,6 +810,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 5,
         "crypto_block_cost": 0,
@@ -811,6 +851,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 11,
         "crypto_block_cost": 0,
@@ -850,6 +892,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 11,
         "crypto_block_cost": 0,
@@ -889,6 +933,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 12,
         "crypto_block_cost": 0,
@@ -928,6 +974,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 12,
         "crypto_block_cost": 0,
@@ -967,6 +1015,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 12,
         "crypto_block_cost": 0,
@@ -1006,6 +1056,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1045,6 +1097,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1084,6 +1138,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1123,6 +1179,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1162,6 +1220,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1201,6 +1261,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 12,
         "crypto_block_cost": 0,
@@ -1240,6 +1302,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 12,
         "crypto_block_cost": 0,
@@ -1279,6 +1343,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1318,6 +1384,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1357,6 +1425,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1396,6 +1466,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1435,6 +1507,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1474,6 +1548,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1513,6 +1589,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1552,6 +1630,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1591,6 +1671,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1630,6 +1712,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 13,
         "crypto_block_cost": 0,
@@ -1669,6 +1753,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1708,6 +1794,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1747,6 +1835,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 14,
         "crypto_block_cost": 0,
@@ -1786,6 +1876,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 15,
         "crypto_block_cost": 0,
@@ -1825,6 +1917,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 15,
         "crypto_block_cost": 0,
@@ -1864,6 +1958,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 15,
         "crypto_block_cost": 0,
@@ -1903,6 +1999,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 15,
         "crypto_block_cost": 0,
@@ -1942,6 +2040,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 16,
         "crypto_block_cost": 0,
@@ -1981,6 +2081,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 23,
         "crypto_block_cost": 0,
@@ -2020,6 +2122,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 24,
         "crypto_block_cost": 0,
@@ -2059,6 +2163,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 24,
         "crypto_block_cost": 0,
@@ -2098,6 +2204,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 24,
         "crypto_block_cost": 0,
@@ -2137,6 +2245,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 24,
         "crypto_block_cost": 0,
@@ -2176,6 +2286,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 25,
         "crypto_block_cost": 0,
@@ -2215,6 +2327,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 25,
         "crypto_block_cost": 0,
@@ -2254,6 +2368,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 25,
         "crypto_block_cost": 0,
@@ -2293,6 +2409,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 25,
         "crypto_block_cost": 0,
@@ -2332,6 +2450,8 @@
         "pre_header_hex": "04000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798000000"
       },
       "expected": {
+        "wrapped_rule_id": null,
+        "wrapped_rule_args": null,
         "verdict": "Accept",
         "eval_block_cost": 26,
         "crypto_block_cost": 0,
@@ -2347,18 +2467,18 @@
   ],
   "manifest": {
     "scala": {
-      "ergo_version": "6.0.2",
-      "sigmastate_version": "6.0.2",
-      "ergo_wallet_version": "6.0.2",
+      "ergo_version": "6.0.6",
+      "sigmastate_version": "6.0.6",
+      "ergo_wallet_version": "6.0.6",
       "node_app_version": null,
       "source_shas": {
-        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
-        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+        "sigmastate_v6.0.6": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+        "ergo_v6.0.6": "23aabead88774d27f2c9190ace3c9abbc8f1d5cb"
       },
-      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+      "note": "Standalone JVM oracle using sigma-state 6.0.6 from Maven Central and ergo-core/ergo-wallet 6.0.6 published locally (sbt publishLocal of tag v6.0.6) as pinned in the script; no node or mainnet request was used."
     },
     "rust": {
-      "git_sha": "24e89c9e3eb1e520a90c46fd85fd8b678915af83",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
       "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
       "features": [
         "ergo-sigma/cost-trace",
@@ -2367,10 +2487,10 @@
     },
     "tool": {
       "script": "scripts/gen-cost-fixture.sh",
-      "git_sha": "24e89c9e3eb1e520a90c46fd85fd8b678915af83",
-      "script_sha256": "e94b8f73a122f141e68b2cf6758fe4d6b31339b44dfc87e5b52e03a529cc58ac",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
+      "script_sha256": "c1da4d6d3ea2710c644a83b674d7452f674a31f28fabafc2b72bf060a8f93b3e",
       "oracle_script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
-      "oracle_sha256": "a8f007806a69d84f73cf0b7bbcaeeef8fcd212608358bca1e5fcfb668467514c",
+      "oracle_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
       "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
       "scala_directive": "2.12",
       "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
@@ -2390,9 +2510,9 @@
       }
     },
     "run": {
-      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
+      "command": "scala-cli --skip-cli-updates run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- verify",
       "fixture": "test-vectors/ergo-sigma/cost-ledger/fixtures/op-per-item/exists.json",
-      "timestamp_utc": "2026-09-15T15:44:25.581514+00:00",
+      "timestamp_utc": "2026-09-29T17:40:34.193044+00:00",
       "seeds": null,
       "selected": 60,
       "executed": 60,
@@ -2401,10 +2521,29 @@
     },
     "evidence": {
       "request_jsonl_sha256": "109b55218d50806eb844adf3d6194dcd60f412b0c1cf2221173657b9bfbb38a0",
-      "response_jsonl_sha256": "a5f6a8e2133f7bc7d72e7ac7d8cc81e8deb87ba37db201138a15a2815573af83"
+      "response_jsonl_sha256": "bfbc8cac1160935a2a7d7b52096e7044dae6f1d0fd0a898129651d51ba136474"
     },
-    "scala_sigmastate": "6.0.2",
-    "generator": "scripts/gen-cost-fixture.sh@24e89c9e3eb1e520a90c46fd85fd8b678915af83",
-    "date": "2026-09-15T15:44:25.581514+00:00"
+    "rent_run": {
+      "files": [
+        "test-vectors/ergo-sigma/verify/rent-requests.jsonl",
+        "test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+        "test-vectors/ergo-sigma/verify/rent-cases.json"
+      ],
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+      "artifacts": "sigma-state 6.0.6 from Maven Central; ergo-core, ergo-wallet and avldb 6.0.6 published locally with sbt publishLocal (tag v6.0.6, ergo 23aabead88774d27f2c9190ace3c9abbc8f1d5cb)",
+      "script_git_sha": "d3c7de4",
+      "script_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+      "scala_cli": "1.12.1",
+      "jvm": "OpenJDK Corretto 17.0.17.10.1 (17.0.17+10-LTS)",
+      "timestamp_utc": "2026-09-29T17:33:56.250162+00:00",
+      "selected": 10,
+      "executed": 10,
+      "skipped": 0,
+      "failed": 0,
+      "reproduction_check": "Re-captured at 6.0.6 from the checked-in requests; a same-setup 6.0.2 run reproduces every checked-in field of all 32 responses. 6.0.2 vs 6.0.6 differ only in fix-cases[5] (rent-enabled-storage-factor-string) failure_class/rejection_detail: circe 0.13.0 -> 0.14.15 renamed the request-decoding DecodingFailure class; verdict RejectOther unchanged. responses.jsonl/fix-responses.jsonl and cases.json/fix-cases.json keep their recorded 9-field schema; the script's additional wrapped_rule_id, wrapped_rule_args and evaluator_failure_block_cost fields are not recorded there."
+    },
+    "scala_sigmastate": "6.0.6",
+    "generator": "scripts/gen-cost-fixture.sh@d3c7de477ddd56044aa5044774156c17be1760c4",
+    "date": "2026-09-29T17:40:34.193044+00:00"
   }
 }

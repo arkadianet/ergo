@@ -1,0 +1,167 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "Box.tree_bool_pair_form",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "box-plus-on-bool-collections-accept#0",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Plus(C, C), C)), C = Coll[Boolean](true) (85 01 01). Only the nine relations read an 85 after their opcode as a packed Boolean pair; for Plus it is the start of a Boolean collection constant. The builder does not check an arithmetic operation's operand types at parse, so the tree parses. Round-trip identity. An impl that reads the pair form here consumes different bytes.",
+      "bytes_hex" : "c0843d00d1939a8501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-minus-on-bool-collections-accept#1",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is the same with Minus (99). Round-trip identity.",
+      "bytes_hex" : "c0843d00d193998501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-eq-bool-pair-accept#2",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(true, true)) in the relation's packed pair form, 93 85 03. Round-trip identity.",
+      "bytes_hex" : "c0843d00d19385030100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-multiply-on-bool-collections-accept#3",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Multiply(C, C), C)), C = Coll[Boolean](true) (85 01 01). Multiply (9c) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "c0843d00d1939c8501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-division-on-bool-collections-accept#4",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Division(C, C), C)), C = Coll[Boolean](true) (85 01 01). Division (9d) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "c0843d00d1939d8501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-modulo-on-bool-collections-accept#5",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Modulo(C, C), C)), C = Coll[Boolean](true) (85 01 01). Modulo (9e) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "c0843d00d1939e8501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-min-on-bool-collections-accept#6",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Min(C, C), C)), C = Coll[Boolean](true) (85 01 01). Min (a1) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "c0843d00d193a18501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-max-on-bool-collections-accept#7",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(Max(C, C), C)), C = Coll[Boolean](true) (85 01 01). Max (a2) goes through TwoArgumentsSerializer, which reads two values (TwoArgumentsSerializer.scala:21-25), so its 85 starts a Boolean collection, and the builder builds the ArithOp without checking the operands (SigmaBuilder.scala:707-712): the tree parses. Round-trip identity. An impl that reads the pair form after the opcode consumes different bytes.",
+      "bytes_hex" : "c0843d00d193a28501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitor-on-bool-collections-reject#8",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(BitOr(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitOr (f2) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "c0843d00d193f28501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitand-on-bool-collections-reject#9",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(BitAnd(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitAnd (f3) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "c0843d00d193f38501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitxor-on-bool-collections-reject#10",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "A bare box whose tree is BoolToSigmaProp(EQ(BitXor(C, C), C)), C = Coll[Boolean](true) (85 01 01). BitXor (f5) reads two values as well, but BitOp requires numeric operands (trees.scala:913): an IllegalArgumentException, which deserializeErgoTree rethrows as a SerializerException (ErgoTreeSerializer.scala:191-193): the JVM rejects.",
+      "bytes_hex" : "c0843d00d193f58501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitor-on-bool-collections-sized-reject#11",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose tree is the same BitOr, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "c0843d080cd193f28501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitand-on-bool-collections-sized-reject#12",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose tree is the same BitAnd, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "c0843d080cd193f38501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "box-bitxor-on-bool-collections-sized-reject#13",
+      "kind" : "Box",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: A bare box whose tree is the same BitXor, size-flagged (08 0c). The SerializerException is not a ValidationException, so the tree does not degrade: the JVM rejects. An impl that degrades it accepts: the over-accept.",
+      "bytes_hex" : "c0843d080cd193f58501018501018501010100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

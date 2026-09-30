@@ -1,5 +1,5 @@
 {
-  "oracle": "sigma-state:6.0.2 / accumulator_probe",
+  "oracle": "sigma-state:6.0.6 / accumulator_probe",
   "cases": [
     {
       "initial": 9,
@@ -52,27 +52,27 @@
   ],
   "manifest": {
     "scala": {
-      "ergo_version": "6.0.2",
-      "sigmastate_version": "6.0.2",
-      "ergo_wallet_version": "6.0.2",
+      "ergo_version": "6.0.6",
+      "sigmastate_version": "6.0.6",
+      "ergo_wallet_version": "6.0.6",
       "node_app_version": null,
       "source_shas": {
-        "sigmastate_v6.0.2": "23dd29f612249c169d09fae9bca76d7cc02e144c",
-        "ergo_v6.0.2": "2cdbb8cf09d7ccbc060e1022e3c15bcf6a9991b1"
+        "sigmastate_v6.0.6": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+        "ergo_v6.0.6": "23aabead88774d27f2c9190ace3c9abbc8f1d5cb"
       },
-      "note": "Standalone JVM oracle using the published/local 6.0.2 fallback artifacts pinned in the script; no node or mainnet request was used."
+      "note": "Standalone JVM oracle using sigma-state 6.0.6 from Maven Central and ergo-core/ergo-wallet 6.0.6 published locally (sbt publishLocal of tag v6.0.6) as pinned in the script; no node or mainnet request was used."
     },
     "rust": {
-      "git_sha": "100297b9ddcb4631a653e4aeb057815d8449bb49",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
       "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
       "features": []
     },
     "tool": {
       "script": "scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala",
-      "git_sha": "100297b9ddcb4631a653e4aeb057815d8449bb49",
-      "oracle_sha256": "85e42853fd827a7032995124cc850b7a216a8e6f57f998a84acb950d456af4df",
+      "git_sha": "d3c7de477ddd56044aa5044774156c17be1760c4",
+      "oracle_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
       "generator": "scripts/gen-evaluated-probe.py",
-      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1\nYour Scala CLI version is outdated. The newest version is 1.17.1\nIt is recommended that you update Scala CLI through the same tool or method you used for its initial installation for avoiding the creation of outdated duplicates.",
+      "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
       "scala_directive": "2.12",
       "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
     },
@@ -87,7 +87,7 @@
     },
     "run": {
       "command": "scala-cli --skip-cli-updates run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false --suppress-outdated-dependency-warning -- accumulator_probe",
-      "timestamp_utc": "2026-09-20T02:45:42.184784+00:00",
+      "timestamp_utc": "2026-09-29T17:40:24.573231+00:00",
       "selected": 6,
       "executed": 6,
       "skipped": 0,
@@ -96,9 +96,28 @@
     },
     "evidence": {
       "request_jsonl_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "response_json_sha256": "79cc9fa0cfa1effb6d79b3e902f8c572265f0ce17f74f2534b5da655e3cc25c6"
+      "response_json_sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf"
     },
-    "scala_sigmastate": "6.0.2",
-    "date": "2026-09-20T02:45:42.184784+00:00"
+    "rent_run": {
+      "files": [
+        "test-vectors/ergo-sigma/verify/rent-requests.jsonl",
+        "test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+        "test-vectors/ergo-sigma/verify/rent-cases.json"
+      ],
+      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+      "artifacts": "sigma-state 6.0.6 from Maven Central; ergo-core, ergo-wallet and avldb 6.0.6 published locally with sbt publishLocal (tag v6.0.6, ergo 23aabead88774d27f2c9190ace3c9abbc8f1d5cb)",
+      "script_git_sha": "d3c7de4",
+      "script_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+      "scala_cli": "1.12.1",
+      "jvm": "OpenJDK Corretto 17.0.17.10.1 (17.0.17+10-LTS)",
+      "timestamp_utc": "2026-09-29T17:33:56.250162+00:00",
+      "selected": 10,
+      "executed": 10,
+      "skipped": 0,
+      "failed": 0,
+      "reproduction_check": "Re-captured at 6.0.6 from the checked-in requests; a same-setup 6.0.2 run reproduces every checked-in 6.0.2 field of all 32 responses. 6.0.2 vs 6.0.6 differ only in fix-cases[5] (rent-enabled-storage-factor-string) failure_class/rejection_detail: circe 0.13.0 -> 0.14.15 renamed the request-decoding DecodingFailure class; verdict RejectOther unchanged."
+    },
+    "scala_sigmastate": "6.0.6",
+    "date": "2026-09-29T17:40:24.573231+00:00"
   }
 }

@@ -102,11 +102,11 @@ those codecs are exercised in-context via `ergo_tree`/`ergo_box_candidate`.
 ### Oracle setup (one-time)
 
 `scripts/jvm_serde_oracle/ErgoSerdeOracle.scala` runs the real `sigma-state` +
-`ergo-core` the node mirrors (version 6.0.2). `sigma-state` is on Maven;
+`ergo-core` the node mirrors (version 6.0.6). `sigma-state` is on Maven;
 `ergo-core` (transaction/header) is not, so publish it locally first:
 
 ```bash
-cd <ergo reference checkout>
+cd <ergo reference checkout, tag v6.0.6>
 sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 ```
 
@@ -270,7 +270,7 @@ The nightly `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same
 set, uploads `regressions/` plus the per-surface oracle transcripts as an artifact,
 fails on any unbaselined `PENDING`, and fails louder (exit 3) if the run did not
 check what it planned to. It is `workflow_dispatch`-only rather than scheduled, because
-`ergo-core 6.0.2` is not on Maven Central: a cold GitHub-hosted runner has to
+`ergo-core 6.0.6` is not on Maven Central: a cold GitHub-hosted runner has to
 clone the Scala node and `sbt avldb/publishLocal ergoWallet/publishLocal
 ergoCore/publishLocal`, which does not fit the ~20 min budget. The job caches
 `~/.ivy2/local` + `~/.cache/coursier` keyed on the oracle script hash, so a warm

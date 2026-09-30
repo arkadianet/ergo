@@ -1,0 +1,4 @@
+box-index-2-32-accept#0	ACCEPT c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400
+box-index-2-32-plus-1-accept#1	ACCEPT c0843d0008d30100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66401
+box-index-wraps-to-65536-reject#2	REJECT IllegalArgumentException
+box-r4-coll-length-wraps-accept#3	ACCEPT c0843d0008d30100010e01ab1d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400

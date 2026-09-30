@@ -41,7 +41,7 @@ def sha(data):
 
 revision = output('git', 'rev-parse', 'HEAD')
 manifest = json.loads((root / 'test-vectors/ergo-sigma/verify/manifest.json').read_text())
-manifest.update(scala_sigmastate='6.0.2', date=datetime.datetime.now(datetime.timezone.utc).isoformat())
+manifest.update(scala_sigmastate='6.0.6', date=datetime.datetime.now(datetime.timezone.utc).isoformat())
 manifest['rust'] = {'git_sha': revision, 'toolchain': output('rustc', '--version'), 'features': []}
 manifest['tool'] = {'script': script, 'git_sha': revision,
                     'oracle_sha256': sha((root / script).read_bytes()),

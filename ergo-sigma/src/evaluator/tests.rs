@@ -9882,6 +9882,54 @@ fn subst_constants_scala_parity_error_cases() {
     );
 }
 
+// Scala's `deserializeHeaderWithTreeBytes` reads the declared size and the
+// constants count as `getUInt().toInt`: both accept anything up to u32::MAX,
+// the size is otherwise ignored, and a count that wraps negative means no
+// constants. Templates from SANTA `substConstants:declared_size_u32` #0-#2 and
+// `substConstants:template_forms` #0-#2 (https://github.com/mwaddip/santa,
+// MIT, blessed jvm:sigma-state-6.0.6), plus two extra rows. Every expectation
+// is our own JVM run of `ErgoTreeSerializer.substituteConstants(template, [0],
+// [sigmaProp(false)])` under `VersionContext.withVersions(3, 3)`, identical on
+// sigma-state 6.0.2 and 6.0.6.
+#[test]
+fn subst_constants_reads_size_and_count_like_scala_get_uint_to_int() {
+    use super::helpers::subst_constants;
+    let false_prop = || Value::SigmaProp(SigmaBoolean::TrivialProp(false));
+    let accepted = [
+        // declared size 2^32 - 1: fits u32, ignored, recomputed as 5.
+        ("18ffffffff0f0108d37300", "18050108d27300", 1),
+        // the true size: the control.
+        ("18050108d37300", "18050108d27300", 1),
+        // header bit 5 is written back as read.
+        ("38050108d37300", "38050108d27300", 1),
+        // count 2^32 - 1 wraps negative: no constants, position 0 skipped.
+        ("1807ffffffff0f08d3", "18030008d3", 0),
+        ("10ffffffff0f08d3", "100008d3", 0),
+        // count 2^31: Int.MinValue once narrowed, again no constants.
+        ("1807808080800808d3", "18030008d3", 0),
+        // a negative count leaves the constant's bytes to the tree body.
+        ("1808ffffffff0f0108d37300", "1806000108d37300", 0),
+    ];
+    for (template, expected, n_constants) in accepted {
+        let result = subst_constants(&hex::decode(template).unwrap(), &[0], &[false_prop()], true)
+            .unwrap_or_else(|e| panic!("{template}: {e:?}"));
+        assert_eq!(
+            (hex::encode(result.0), result.1),
+            (expected.to_string(), n_constants),
+            "{template}"
+        );
+    }
+    // declared size 2^32: out of getUInt's range, IllegalArgumentException.
+    let err = subst_constants(
+        &hex::decode("1880808080100108d37300").unwrap(),
+        &[0],
+        &[false_prop()],
+        true,
+    )
+    .unwrap_err();
+    assert!(matches!(err, EvalError::RuntimeException(_)), "{err:?}");
+}
+
 // A template whose constants section carries an SHeader value (reachable via
 // crafted scriptBytes) must be rejected by a pre-v3 executing ErgoTree even
 // when that constant is NOT the one being substituted: Scala deserializes the

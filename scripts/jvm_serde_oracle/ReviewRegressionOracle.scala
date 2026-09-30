@@ -1,5 +1,5 @@
 //> using scala 2.12.20
-//> using dep org.scorexfoundation::sigma-state:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 
 import sigma.VersionContext
 import sigma.ast.DeserializationSigmaBuilder

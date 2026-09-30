@@ -1,6 +1,6 @@
 //> using repository "https://gitlab.com/api/v4/projects/61211221/packages/maven"
 //> using scala 2.12
-//> using dep org.scorexfoundation::sigma-state:6.0.2
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 
 // Scala AVL+ verifier ORACLE for the Rust node's `ergo_sigma::avl::AvlVerifier`.
 //

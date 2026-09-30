@@ -245,7 +245,7 @@ jobs:
     name: consensus guard (JVM oracle differential — reduce / reduce_ctx / tx / box / validate)
     # `workflow_dispatch` ONLY, deliberately — not on the nightly schedule.
     #
-    # Why: the oracle runs the REAL reference jars, and `ergo-core 6.0.2` is not
+    # Why: the oracle runs the REAL reference jars, and `ergo-core 6.0.6` is not
     # published to Maven Central. Standing it up on a cold GitHub-hosted runner
     # means cloning the Scala node and running
     # `sbt avldb/publishLocal ergoWallet/publishLocal ergoCore/publishLocal`,
@@ -287,8 +287,8 @@ jobs:
         with:
           sbt-runner-version: 1.12.11
 
-      # The oracle's dependency closure: sigma-state 6.0.2 from Maven (coursier)
-      # and ergo-core 6.0.2 from a local publish (ivy). Keyed on the oracle
+      # The oracle's dependency closure: sigma-state 6.0.6 from Maven (coursier)
+      # and ergo-core 6.0.6 from a local publish (ivy). Keyed on the oracle
       # script itself plus the pinned reference tag, so an oracle change or a
       # version bump invalidates the cache instead of silently reusing stale jars.
       - name: cache JVM oracle dependencies
@@ -298,16 +298,16 @@ jobs:
           path: |
             ~/.ivy2/local
             ~/.cache/coursier
-          key: jvm-oracle-${{ hashFiles('scripts/jvm_serde_oracle/ErgoSerdeOracle.scala') }}-ergo-core-6.0.2
+          key: jvm-oracle-${{ hashFiles('scripts/jvm_serde_oracle/ErgoSerdeOracle.scala') }}-ergo-core-6.0.6
 
-      # Cold path only: publish ergo-core 6.0.2 locally. `avldb` pulls
+      # Cold path only: publish ergo-core 6.0.6 locally. `avldb` pulls
       # leveldbjni-all from the GitLab repo the .scala `using repository`
       # directive already declares, so no extra resolver config is needed here.
-      - name: bootstrap ergo-core 6.0.2 (publishLocal)
+      - name: bootstrap ergo-core 6.0.6 (publishLocal)
         if: steps.oracle-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v6.0.2 https://github.com/ergoplatform/ergo.git "$RUNNER_TEMP/ergo-reference"
+          git clone --depth 1 --branch v6.0.6 https://github.com/ergoplatform/ergo.git "$RUNNER_TEMP/ergo-reference"
           cd "$RUNNER_TEMP/ergo-reference"
           sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 

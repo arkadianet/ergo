@@ -7,7 +7,7 @@ use crate::typer::{coll_elem, TypeEnv, TyperCtx};
 use super::*;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// §1.1 Block (E1-lenient)
+// §1.1 Block
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub(crate) fn assign_block(
@@ -16,14 +16,19 @@ pub(crate) fn assign_block(
     result: TypedExpr,
     block_pos: Pos,
     ctx: &TyperCtx,
+    expected: Option<&SType>,
 ) -> Result<TypedExpr, TyperError> {
     let mut cur_env = env.clone();
     let mut new_binds = Vec::with_capacity(bindings.len());
     for b in bindings {
-        let (name, body, v_pos) = match b {
+        let (name, explicit_type, body, v_pos) = match b {
             TypedExpr::ValNode {
-                name, body, pos, ..
-            } => (name, *body, pos),
+                name,
+                given_type,
+                body,
+                pos,
+                ..
+            } => (name, given_type, *body, pos),
             other => {
                 return Err(TyperError::typer(
                     node_pos(&other),
@@ -38,11 +43,31 @@ pub(crate) fn assign_block(
                 format!("Variable {name} already defined ({name} = {prev:?}"),
             ));
         }
-        let b1 = assign_type(&cur_env, body, ctx)?;
+        // SigmaTyper.scala:89-94; SType.scala:215-229 (v6.0.6):
+        // primitive ascriptions check the value's (possibly function) result type.
+        let expected_body = (explicit_type != SType::NoType).then_some(&explicit_type);
+        let b1 = assign_type_expected(&cur_env, body, ctx, expected_body)?;
         let b1_tpe = node_tpe(&b1).clone();
-        // E1: the Val's explicit annotation is DISCARDED — bind n -> b1.tpe,
-        // mkVal(n, b1.tpe, b1) (SigmaTyper.scala:60,62; NOT the HEAD-only
-        // isAssignableTo check).
+        let result_type = match &b1_tpe {
+            SType::SFunc { range, .. } => range.as_ref(),
+            other => other,
+        };
+        if matches!(
+            explicit_type,
+            SType::SBoolean
+                | SType::SByte
+                | SType::SShort
+                | SType::SInt
+                | SType::SLong
+                | SType::SBigInt
+                | SType::SString
+        ) && &explicit_type != result_type
+        {
+            return Err(TyperError::typer(
+                v_pos,
+                format!("Expected type {explicit_type:?}, but got {b1_tpe:?}"),
+            ));
+        }
         cur_env.insert(name.clone(), b1_tpe.clone());
         new_binds.push(TypedExpr::ValNode {
             name,
@@ -52,7 +77,7 @@ pub(crate) fn assign_block(
             pos: v_pos,
         });
     }
-    let result1 = assign_type(&cur_env, result, ctx)?;
+    let result1 = assign_type_expected(&cur_env, result, ctx, expected)?;
     let tpe = node_tpe(&result1).clone();
     Ok(TypedExpr::Block {
         bindings: new_binds,
@@ -164,22 +189,18 @@ pub(crate) fn assign_select(
     // newObj.tpe must be SProduct (SigmaTyper.scala:90-91); container_exists is
     // true for every SProduct (incl. the empty SBoolean/SString/SAny/SUnit
     // containers), false for non-product types (SFunc/NoType/STypeVar/...).
-    // Citations: SigmaTyper.scala:121 `sel.sourceContext` for the non-product
-    // error (the bound Select's OWN position — `sel_pos`); SigmaTyper.scala:93
-    // `obj.sourceContext` for MethodNotFound below (the receiver's position).
-    // These are two different citations in the reference, not the same one.
-    let obj_pos = node_pos(&new_obj);
+    // SigmaTyper.scala:145-147,173 (v6.0.6): both errors cite the selector.
     if !container_exists(&t_obj) {
         return Err(TyperError::typer(
             sel_pos,
-            format!("Cannot get field '{field}' in the object of non-product type {t_obj:?}"),
+            format!("Cannot select field '{field}': receiver has non-product type {t_obj:?}"),
         ));
     }
     // getMethod(tNewObj, n) — None -> MethodNotFound (incl. empty containers, E4).
     let method = get_method(&t_obj, &field, ctx.tree_version).ok_or_else(|| {
         TyperError::method_not_found(
-            obj_pos,
-            format!("Cannot find method '{field}' in the object of Product type {t_obj:?}"),
+            sel_pos,
+            format!("Cannot find method '{field}' on receiver of type {t_obj:?}"),
         )
     })?;
 
@@ -217,14 +238,10 @@ pub(crate) fn assign_select(
         // seed shows box/context/avltree/header properties as `%Owner.name [] {}`).
         // Cast methods (toByte..) and SCollection.size have has_ir_builder=false
         // and take the Select branch below (they stay Select until GraphBuilding).
-        Ok(lower_method(
-            &t_obj,
-            &field,
-            new_obj,
-            vec![],
-            t_res,
-            ctx.tree_version,
-        ))
+        Ok(
+            lower_method(&t_obj, &field, new_obj, vec![], t_res, ctx.tree_version)
+                .with_pos(sel_pos),
+        )
     } else {
         // Select survives: numeric cast methods (no irBuilder) and method-with-args
         // carriers (tRes.isFunc), consumed by an enclosing Apply (Task 6).
@@ -316,10 +333,28 @@ pub(crate) fn assign_if(
     e: TypedExpr,
     if_pos: Pos,
     ctx: &TyperCtx,
+    expected: Option<&SType>,
 ) -> Result<TypedExpr, TyperError> {
     let c1 = assign_type(env, c, ctx)?;
-    let t1 = assign_type(env, t, ctx)?;
-    let e1 = assign_type(env, e, ctx)?;
+    // SigmaTyper.scala:491-508 (v6.0.6): infer a bare None from its sibling.
+    let bare_none = |v: &TypedExpr| {
+        ctx.tree_version >= 3 && matches!(v, TypedExpr::Ident { name, .. } if name == "None")
+    };
+    let (t1, e1) = match (bare_none(&t), bare_none(&e)) {
+        (true, false) => {
+            let e1 = assign_type_expected(env, e, ctx, expected)?;
+            (assign_type_expected(env, t, ctx, Some(node_tpe(&e1)))?, e1)
+        }
+        (false, true) => {
+            let t1 = assign_type_expected(env, t, ctx, expected)?;
+            let e1 = assign_type_expected(env, e, ctx, Some(node_tpe(&t1)))?;
+            (t1, e1)
+        }
+        _ => (
+            assign_type_expected(env, t, ctx, expected)?,
+            assign_type_expected(env, e, ctx, expected)?,
+        ),
+    };
     let tpe = node_tpe(&t1).clone(); // If.tpe = trueBranch.tpe
                                      // Condition check first, then branch-equality (SigmaTyper.scala:445-448).
     if !matches!(node_tpe(&c1), SType::SBoolean) {
@@ -462,5 +497,30 @@ pub(crate) fn assign_byindex(
         default,
         tpe: elem,
         pos: bi_pos,
+    })
+}
+
+/// SigmaTyper.scala:109-127 (v6.0.6): contextual None is Global.none[T]().
+pub(crate) fn assign_bare_none(
+    pos: Pos,
+    expected: Option<&SType>,
+) -> Result<TypedExpr, TyperError> {
+    let Some(SType::SOption(elem)) = expected else {
+        return Err(TyperError::typer(pos,
+            "Cannot infer the type of `None`. Add a type ascription (e.g. `val x: Option[Int] = None`) or use `Global.none[T]()`.".into()));
+    };
+    Ok(TypedExpr::MethodCall {
+        obj: Box::new(TypedExpr::Global {
+            tpe: SType::SGlobal,
+            pos: 0,
+        }),
+        method: crate::typed::MethodRef {
+            owner: "SigmaDslBuilder".into(),
+            name: "none".into(),
+        },
+        args: vec![],
+        type_subst: vec![("T".into(), elem.as_ref().clone())],
+        tpe: SType::SOption(elem.clone()),
+        pos,
     })
 }

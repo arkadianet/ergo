@@ -270,6 +270,7 @@ pub(crate) fn expr_suffix(c: &mut Cursor, ctx: Ctx) -> Result<Vec<Suffix>, Parse
             let seg = c.bump();
             out.push(Suffix::Select {
                 name: seg.text(c.src).to_string(),
+                pos: seg.start,
             });
             continue;
         }
@@ -314,18 +315,17 @@ pub(crate) fn paren_arg_list(c: &mut Cursor) -> Result<Suffix, ParseError> {
     })
 }
 
-/// `applySuffix` (Exprs.scala:191-211): `foldLeft` the markers onto `f`. Every node
-/// built here takes `pos = f.pos()` (Scala pins `builder.currentSrcCtx =
-/// f.sourceContext` for the whole fold, :192).
+/// Exprs.scala:191-215 (v6.0.6): selectors use their own context; other
+/// suffix nodes inherit the initial receiver's context.
 pub(crate) fn apply_suffix(f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, ParseError> {
     let f_pos = f.pos();
     let mut acc = f;
     for suf in suffixes {
         acc = match suf {
-            Suffix::Select { name } => Expr::Select {
+            Suffix::Select { name, pos } => Expr::Select {
                 obj: Box::new(acc),
                 field: name,
-                pos: f_pos,
+                pos,
             },
             Suffix::Args { tuple: None } => Expr::Apply {
                 func: Box::new(acc),

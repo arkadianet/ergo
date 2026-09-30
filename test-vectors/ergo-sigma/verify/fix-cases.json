@@ -198,8 +198,8 @@
       "rent_block_cost": 0,
       "rent_path": true,
       "total_block_cost": "unavailable",
-      "failure_class": "io.circe.DecodingFailure$$anon$2",
-      "rejection_detail": "DecodingFailure(Long, List(DownField(storage_fee_factor)))",
+      "failure_class": "io.circe.DecodingFailure$DecodingFailureImpl",
+      "rejection_detail": "DecodingFailure at .storage_fee_factor: Long",
       "legacy": "unavailable"
     }
   },

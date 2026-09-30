@@ -1,0 +1,156 @@
+{
+  "schema" : "santa-wire/v1",
+  "op" : "SigmaBoolean.conjecture_bounds",
+  "blessed_by" : "jvm:sigma-state-6.0.6",
+  "entries" : [
+    {
+      "name" : "cthreshold-256-children-reject#0",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD(1, 256 × TrueProp) (98 01 80 02 d3…). The children are read first, then CTHRESHOLD's require (0 <= k <= n <= 255, SigmaBoolean.scala:223) fails: an IllegalArgumentException, and the JVM rejects.",
+      "bytes_hex" : "98018002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-255-children-accept#1",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "The twin: CTHRESHOLD(1, 255 × TrueProp). Round-trip identity.",
+      "bytes_hex" : "9801ff01d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-k-above-n-reject#2",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD(2, [TrueProp]) (98 02 01 d3): k above the number of children fails the same require: the JVM rejects.",
+      "bytes_hex" : "980201d3",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cand-no-children-accept#3",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CAND() (96 00): the parser builds CAND(children) directly, and that constructor carries no check (only CAND.normalized requires a non-empty list, SigmaBoolean.scala:165), so the JVM parses it. Round-trip identity.",
+      "bytes_hex" : "9600",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cor-no-children-accept#4",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "COR() (97 00): parses, as CAND(). Round-trip identity.",
+      "bytes_hex" : "9700",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-k-zero-accept#5",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD(0, [TrueProp]) (98 00 01 d3): k = 0 passes the require. Round-trip identity.",
+      "bytes_hex" : "980001d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-k-zero-no-children-accept#6",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD(0, []) (98 00 00). Round-trip identity.",
+      "bytes_hex" : "980000",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cand-256-children-accept#7",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CAND(256 × TrueProp) (96 80 02 d3…). CAND's child count is a getUShort and the constructor checks nothing (SigmaBoolean.scala:80-86, :149), so up to 65535 children parse. Round-trip identity. An impl that bounds CAND at 255 children, as CTHRESHOLD is bounded, rejects it: the over-reject.",
+      "bytes_hex" : "968002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cor-256-children-accept#8",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "COR(256 × TrueProp) (97 80 02 d3…): it parses, as CAND does (:87-93, :185). Round-trip identity.",
+      "bytes_hex" : "978002d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-k-256-reject#9",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD(256, [TrueProp]) (98 80 02 01 d3). k is a getUShort, 256, and the require (k <= n, SigmaBoolean.scala:223) fails: the JVM rejects. An impl that reads k as a byte gets 0 and accepts CTHRESHOLD(0, [TrueProp]): the over-accept.",
+      "bytes_hex" : "98800201d3",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cthreshold-k-wraps-accept#10",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CTHRESHOLD whose k is written as 2^32 + 1 (8180808010), over [TrueProp]. scorex-util's getUShort is getULong().toInt and only then the 0..65535 check, so k reads as 1: CTHRESHOLD(1, [TrueProp]), written back as 98 01 01 d3. NON-IDENTITY. An impl that range-checks the full value rejects it: the over-reject.",
+      "bytes_hex" : "98818080801001d3",
+      "expected_bytes_hex" : "980101d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cand-count-wraps-accept#11",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CAND whose child count is written as 2^32 + 1 (8180808010): it reads as 1, CAND([TrueProp]), written back as 96 01 d3. NON-IDENTITY.",
+      "bytes_hex" : "968180808010d3",
+      "expected_bytes_hex" : "9601d3",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    },
+    {
+      "name" : "cand-count-wraps-to-65536-reject#12",
+      "kind" : "SigmaBoolean",
+      "source" : "santa:authored-sized-tree-requests",
+      "description" : "CAND whose child count is written as 2^32 + 2^16 (8080848010): truncated to 32 bits it is 65536, which getUShort's check refuses: the JVM rejects before reading a child. An impl that keeps the low 16 bits reads 0 and accepts CAND(): the over-accept.",
+      "bytes_hex" : "968080848010",
+      "error" : "errored",
+      "version" : {
+        "activated" : 3,
+        "ergoTree" : 3
+      }
+    }
+  ]
+}

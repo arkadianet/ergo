@@ -7,7 +7,7 @@ mutates byte inputs, feeds them through the `ergo-ser` / `ergo-sigma` / `ergo-va
 decoders, and asserts two hermetic invariants (no decode ever panics; a
 `decode → encode → decode` round-trip reaches a byte-stable fixed point). Phase 2
 layers the JVM oracle on top: a long-lived `scala-cli` process runs `ErgoSerdeOracle.scala`
-(the real sigmastate 6.0.2 runtime) while the harness streams inputs over a pipe and
+(the real sigmastate 6.0.6 runtime) while the harness streams inputs over a pipe and
 diffs accept/reject verdicts and canonical re-serializations. A structure-aware
 generator (`src/gen/`) covers a 28-variant `Feature` vocabulary (27 adversarial + an on-manifold
 baseline), each mapped where applicable to a named catalog bug, with a measurable coverage ratio. A greedy delta-debugging minimizer

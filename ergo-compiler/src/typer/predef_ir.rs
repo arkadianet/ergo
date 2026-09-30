@@ -754,7 +754,7 @@ fn execute_from_self_reg(
     const NUM_REGISTERS: i64 = 10;
     if !(0..NUM_REGISTERS).contains(&idx) {
         return match default {
-            // WithDefault: out-of-range returns the default value verbatim.
+            // SigmaPredef.scala:429 (v6.0.6): return the default node verbatim.
             Some(d) => Some(Ok(d)),
             // bare: out-of-range throws InvalidArguments (mapped to TyperException).
             None => Some(Err(typer_err(

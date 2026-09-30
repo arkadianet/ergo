@@ -1,7 +1,7 @@
 # Fuzz seed reference verdicts
 
-`fuzz_parity_validation.tsv` contains actual JVM sigma-state 6.0.2 results,
-captured 2026-09-28 using Scala 2.12.20 and activated version 3. Tree versions
+`fuzz_parity_validation.tsv` contains actual JVM sigma-state 6.0.6 results,
+captured 2026-09-30 using Scala 2.12.20 and activated version 3. Tree versions
 come from their headers. The capture tool is
 `scripts/jvm_serde_oracle/ReviewRegressionOracle.scala`.
 
@@ -29,7 +29,8 @@ tool, which gained a `tx` surface (`ErgoLikeTransactionSerializer.parse`).
 declared element type. The `AssertionError` is not a `ValidationException`, so
 the sized variant is rejected rather than wrapped. `nightly_20260929_transaction`
 is the scheduled-run crash that exposed it: a context-extension collection of
-`Coll[Boolean]` holding an empty `Coll[Short]` constant. `scheduled_20260929_constant`
+`Coll[Boolean]` holding an empty `Coll[Short]` constant; since sigma-state 6.0.5 it is
+rejected before that collection is read (see below). `scheduled_20260929_constant`
 is the same run's constant crash, which both implementations reject.
 
 The `tagged_var_*` rows pin `TaggedVariableSerializer` reading a type after the
@@ -42,3 +43,18 @@ cast used as an `Apply` callee, zero-length big integers, and the reader-wide
 binding store: `tx_valuse_bound_by_prior_output` is accepted because the first
 output's `ValDef` stays visible to the second output's tree. The `pr435_*`
 rows are fuzz inputs from this branch's CI and local runs.
+
+Since sigma-state 6.0.5, `ContextExtension.serializer.parse` rejects a negative
+variable id with `SerializerException` ("Negative id of context extension
+variable") before reading its value. Three `tx` rows have such an id in their
+first input's extension and reject there: `nightly_20260929_transaction` and
+`pr435_ci_tx_cc_tuple_item` (id byte 0x97, -105), and
+`pr435_local_tx_box_lookahead` (id byte 0xd9, -39). So these three rows no longer
+reach the collection-item assertion or the retained-box lookahead. The
+`cc_item_*`, `cc_tuple_item_*` and `box_lookahead_prefix` rows still cover those.
+
+`pr435_ci_bigint_zero_len` is a zero-length `SBigInt` inside a nested box's tree.
+The `NumberFormatException` from `new BigInteger` is an `IllegalArgumentException`.
+`ErgoTreeSerializer.deserializeErgoTree` catches that and rethrows it as a
+`SerializerException`, so the row records `SerializerException`, not the bare
+`NumberFormatException` that the standalone `bigint_zero_len` constant throws.

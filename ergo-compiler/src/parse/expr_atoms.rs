@@ -35,12 +35,10 @@ impl Ctx {
 
 /// One postfix `ExprSuffix` marker (Exprs.scala:79-83), folded by `apply_suffix`.
 ///
-/// The markers carry no positions: every node `apply_suffix` builds takes
-/// `pos = f.pos()` (Scala pins `builder.currentSrcCtx = f.sourceContext` for the
-/// whole fold, Exprs.scala:192), so a marker's own captured index is discarded.
+/// Selectors retain their own source position (Exprs.scala:194-198, v6.0.6).
 pub(crate) enum Suffix {
     /// `.id` → `mkSelect(acc, name)` (Exprs.scala:80).
-    Select { name: String },
+    Select { name: String, pos: crate::span::Pos },
     /// `[T,…]` → `mkApplyTypes(acc, args)` (Exprs.scala:81).
     TypeApply { args: Vec<SType> },
     /// `(…)` → `mkApply` (Exprs.scala:315-319). `None` = `()` (unit carrier);
