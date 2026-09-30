@@ -899,6 +899,9 @@ async fn run_inner_with_backend(
     };
 
     let mut state = NodeState {
+        sync_refresh: super::sync_refresh::SyncRefresh::new(
+            ergo_state::ChainStateRead::chain_state_meta(&store).best_header_score,
+        ),
         store,
         coordinator,
         executor,

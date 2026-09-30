@@ -101,6 +101,7 @@ pub(in crate::node) fn execute_effects(
 /// uncounted.
 fn effect_name(effect: &Effect) -> &'static str {
     match effect {
+        Effect::SupplierHeight { .. } => "SupplierHeight",
         Effect::RequestInputBlock { .. } => "RequestInputBlock",
         Effect::RequestTransactionIds { .. } => "RequestTransactionIds",
         Effect::RequestTransactions { .. } => "RequestTransactions",
@@ -248,6 +249,13 @@ fn execute_one(
     queue: &mut VecDeque<Effect>,
 ) {
     match effect {
+        Effect::SupplierHeight { from, height } => {
+            if let Some(peer) = resolve(rt, from, "supplier height") {
+                if state.registry.peers.contains_key(&peer) {
+                    state.sync_refresh.suppliers.insert(peer, height);
+                }
+            }
+        }
         Effect::RequestInputBlock { id, from } => {
             request_modifier(
                 state,
@@ -912,7 +920,22 @@ pub(in crate::node) fn apply_chain_change(
 pub(in crate::node) fn relay_peers(state: &NodeState) -> Vec<PeerId> {
     let our_height = state.store.chain_state_meta().best_full_block_height;
     let snapshots = state.coordinator.peer_sync_snapshots();
-    let mut peers: Vec<PeerId> = state
+    let mut peers: Vec<PeerId> = capable_peers(state)
+        .into_iter()
+        .filter(|p| {
+            snapshots
+                .get(p)
+                .and_then(|s| s.peer_height)
+                .is_some_and(|h| h.abs_diff(our_height) <= RELAY_HEIGHT_WINDOW)
+        })
+        .collect();
+    peers.sort();
+    peers
+}
+
+/// Connected, registered peers that advertise sub-blocks and UTXO state.
+pub(in crate::node) fn capable_peers(state: &NodeState) -> Vec<PeerId> {
+    state
         .peer_manager
         .connected_peers()
         .filter(|p| state.registry.peers.contains_key(&p.addr))
@@ -926,14 +949,6 @@ pub(in crate::node) fn relay_peers(state: &NodeState) -> Vec<PeerId> {
             }
             None => false,
         })
-        .filter(|p| {
-            snapshots
-                .get(&p.addr)
-                .and_then(|s| s.peer_height)
-                .is_some_and(|h| h.abs_diff(our_height) <= RELAY_HEIGHT_WINDOW)
-        })
         .map(|p| p.addr)
-        .collect();
-    peers.sort();
-    peers
+        .collect()
 }

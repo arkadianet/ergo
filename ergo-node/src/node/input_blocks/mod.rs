@@ -15,7 +15,7 @@
 
 mod ctx;
 mod dispatch;
-mod effects;
+pub(in crate::node) mod effects;
 mod hooks;
 mod profile;
 mod reconstruct;

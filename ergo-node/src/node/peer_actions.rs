@@ -244,6 +244,7 @@ pub(super) fn connect_to_address(state: &mut NodeState, addr: std::net::SocketAd
 
 pub(super) fn flush_actions(state: &mut NodeState, actions: Vec<Action>) {
     let now = Instant::now();
+    super::sync_refresh::collect_progress(state, now);
     // Fold any first-deliverer observations the coordinator accumulated
     // during the just-completed execute batch into the bounded ring. The
     // coordinator records `(header_id, peer)` in `on_header_validated`
@@ -403,6 +404,7 @@ pub(super) fn cleanup_banned_ip(state: &mut NodeState, ip: std::net::IpAddr, now
 }
 
 pub(super) fn cleanup_disconnected_peer(state: &mut NodeState, peer: &PeerId) {
+    state.sync_refresh.forget(peer);
     state.registry.remove(peer);
     state.mempool.on_peer_disconnected(peer);
     state.throttle.forget_peer(peer);

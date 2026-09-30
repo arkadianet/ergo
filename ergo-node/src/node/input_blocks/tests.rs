@@ -5519,3 +5519,769 @@ fn input_block_ordering_header_applied_by_announcement_sends_one_sync_info() {
         announced_then_requested_header_scenario(HeaderAsk::InputBlockAhead, coalesced);
     }
 }
+
+mod sync_refresh {
+    use super::*;
+    use ergo_p2p::{handshake::Version, message};
+    use std::time::Duration;
+
+    // ----- helpers -----
+
+    fn pump(state: &mut NodeState, now: Instant) {
+        state.last_sync_broadcast = now;
+        crate::node::sync_tick::handle_sync_tick_at(state, now);
+    }
+
+    fn announce(state: &mut NodeState, peer: std::net::SocketAddr, block: &MainnetBlock) {
+        let mut ann = ts::ordering_announcement([0; 32], block.height, 1, Vec::new());
+        ann.header = block.header.clone();
+        ann.non_broadcasted_transactions = block.transactions.clone();
+        ann.extension_fields = mainnet_extension_fields(block);
+        let actions = send_to(
+            state,
+            peer,
+            message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+            &message::serialize_ordering_block_announcement_msg(&ann).unwrap(),
+        );
+        crate::node::flush_actions(state, actions);
+    }
+
+    fn assert_tip(rx: &mut crate::peer_loop::outbound::Receiver, tip: [u8; 32]) {
+        let syncs = drain_sync_infos(rx);
+        assert_eq!(syncs.len(), 1, "one coalesced refresh");
+        let message::SyncInfo::V2 { headers } = message::deserialize_sync_info(&syncs[0]).unwrap()
+        else {
+            panic!("V2 required")
+        };
+        assert!(!headers.is_empty());
+        assert_eq!(
+            *ergo_primitives::digest::blake2b256(&headers[0]).as_bytes(),
+            tip
+        );
+    }
+
+    fn supplier_refresh(supplied_height: u32, ordering: bool, disconnect: bool) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer_with_mode(
+            &mut state,
+            19740,
+            Version::SUBBLOCKS,
+            Some(utxo_mode()),
+            now,
+        );
+        set_peer_height(&mut state, peer, 2);
+        let (other, _other_rx) = handshake_peer(&mut state, 19741, Version::SUBBLOCKS, now);
+        let (code, payload) = if ordering {
+            let ann = ts::ordering_announcement([0; 32], supplied_height, 1, Vec::new());
+            (
+                message::CODE_ORDERING_BLOCK_ANNOUNCEMENT,
+                message::serialize_ordering_block_announcement_msg(&ann).unwrap(),
+            )
+        } else {
+            let ann = ts::announcement([0; 32], supplied_height, 1, None);
+            (
+                message::CODE_INPUT_BLOCK,
+                message::serialize_input_block(&ann).unwrap(),
+            )
+        };
+        let actions = send_to(&mut state, peer, code, &payload);
+        crate::node::flush_actions(&mut state, actions);
+        assert_eq!(
+            state.sync_refresh.suppliers.get(&peer).copied(),
+            (supplied_height.abs_diff(4) <= 2).then_some(supplied_height)
+        );
+        if disconnect {
+            crate::node::cleanup_disconnected_peer(&mut state, &peer);
+            assert!(!state.sync_refresh.suppliers.contains_key(&peer));
+            let (tx, new_rx) = crate::peer_loop::outbound::channel(64);
+            state.registry.peers.insert(
+                peer,
+                crate::node::state::PeerRuntime {
+                    sync_version: ergo_p2p::peer::SyncVersion::V2,
+                    outbound_tx: tx,
+                },
+            );
+            rx = new_rx;
+        }
+        let block = &blocks[4];
+        announce(&mut state, other, block);
+        persist_sections(&mut state, block);
+        let actions = state.executor.execute(
+            Action::AssembleBlock {
+                header_id: block.header_id,
+            },
+            &mut state.store,
+            &mut state.coordinator,
+            Instant::now(),
+            None,
+        );
+        crate::node::flush_actions(&mut state, actions);
+        assert_eq!(state.store.chain_state_meta().best_full_block_height, 5);
+        assert!(!crate::node::input_blocks::effects::relay_peers(&state).contains(&peer));
+        pump(&mut state, Instant::now() + Duration::from_secs(2));
+        let syncs = drain_sync_infos(&mut rx);
+        assert!(syncs.len() <= 1);
+        !syncs.is_empty()
+    }
+
+    // ----- happy path -----
+
+    #[test]
+    fn sync_refresh_stale_tracked_supplier_receives_refresh() {
+        for ordering in [false, true] {
+            assert!(supplier_refresh(3, ordering, false));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_announcer_spaced_live_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
+        announce(&mut state, peer, &blocks[4]);
+        assert_eq!(
+            state.sync_refresh.deadline(),
+            Some(now + Duration::from_millis(250))
+        );
+        pump(&mut state, now + Duration::from_millis(249));
+        assert!(drain_sync_infos(&mut rx).is_empty());
+        pump(&mut state, now + Duration::from_millis(250));
+        assert_tip(&mut rx, blocks[4].header_id);
+    }
+    #[test]
+    fn sync_refresh_requested_burst_preserves_reply_and_final_tip() {
+        for coalesced in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut state, _) = mainnet_state_before(dir.path(), 2);
+            crate::node::flush_actions(&mut state, Vec::new());
+            let blocks = mainnet_blocks(5);
+            let now = Instant::now();
+            let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+            state
+                .coordinator
+                .sync_state_mut()
+                .mark_headers_chain_synced();
+            for block in &blocks[1..] {
+                crate::node::register_expectation(&mut state, peer, 101, &[block.header_id], now);
+                let payload = message::serialize_modifiers(&ergo_p2p::types::ModifiersData {
+                    type_id: 101,
+                    modifiers: vec![(block.header_id, block.header_bytes.clone())],
+                })
+                .unwrap();
+                deliver_header_frame(&mut state, peer, &payload, coalesced);
+                let expected = message::serialize_sync_info(&message::SyncInfo::V2 {
+                    headers: state.executor.cached_header_bytes(50),
+                })
+                .unwrap();
+                assert_eq!(
+                    drain_sync_infos(&mut rx),
+                    vec![expected],
+                    "unchanged #399 reply"
+                );
+            }
+            let after = Instant::now();
+            pump(&mut state, after + Duration::from_millis(240));
+            assert!(drain_sync_infos(&mut rx).is_empty());
+            pump(&mut state, after + Duration::from_millis(251));
+            assert_tip(&mut rx, blocks[4].header_id);
+            pump(&mut state, after + Duration::from_secs(2));
+            assert!(drain_sync_infos(&mut rx).is_empty());
+        }
+    }
+
+    #[test]
+    fn sync_refresh_full_block_refreshes_only_nearby_mesh() {
+        for route in [0, 1, 2] {
+            let full = route != 0;
+            let dir = tempfile::tempdir().unwrap();
+            let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+            crate::node::flush_actions(&mut state, Vec::new());
+            let now = Instant::now();
+            let (supplier, mut supplier_rx) =
+                handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+            state
+                .coordinator
+                .sync_state_mut()
+                .mark_headers_chain_synced();
+            let mut receivers = Vec::new();
+            for (i, height, version, mode) in [
+                (1, 4, Version::SUBBLOCKS, utxo_mode()),
+                (2, 50, Version::SUBBLOCKS, utxo_mode()),
+                (3, 4, Version::CURRENT, utxo_mode()),
+                (4, 4, Version::SUBBLOCKS, digest_mode()),
+            ] {
+                let (peer, rx) =
+                    handshake_peer_with_mode(&mut state, 19740 + i, version, Some(mode), now);
+                set_peer_height(&mut state, peer, height);
+                receivers.push(rx);
+            }
+            let block = &blocks[4];
+            if full {
+                if route == 1 {
+                    announce(&mut state, supplier, block);
+                    // Complete the full-download fallback selected by this announcement.
+                    persist_sections(&mut state, block);
+                    let actions = state.executor.execute(
+                        Action::AssembleBlock {
+                            header_id: block.header_id,
+                        },
+                        &mut state.store,
+                        &mut state.coordinator,
+                        Instant::now(),
+                        None,
+                    );
+                    crate::node::flush_actions(&mut state, actions);
+                } else {
+                    let (reply, result) = tokio::sync::oneshot::channel();
+                    crate::node::events::handle_event_batch(
+                        &mut state,
+                        vec![crate::peer_loop::PeerEvent::LocalFullBlock {
+                            header_bytes: block.header_bytes.clone(),
+                            bt_bytes: block.section_bytes.clone(),
+                            ext_bytes: block.extension_bytes.clone(),
+                            ad_proofs_bytes: None,
+                            reply,
+                        }],
+                    );
+                    assert!(result.blocking_recv().unwrap().is_ok());
+                }
+                assert_eq!(
+                    state.store.chain_state_meta().best_full_block_height,
+                    5,
+                    "route {route}, apply error {:?}",
+                    state.executor.last_block_apply_error()
+                );
+            } else {
+                let actions = state.executor.execute_all(
+                    vec![Action::ValidateHeader {
+                        peer: supplier,
+                        modifier_id: block.header_id,
+                        header_bytes: block.header_bytes.clone(),
+                    }],
+                    &mut state.store,
+                    &mut state.coordinator,
+                    now,
+                    None,
+                );
+                crate::node::flush_actions(&mut state, actions);
+                assert_eq!(state.store.chain_state_meta().best_full_block_height, 4);
+            }
+            let after = Instant::now();
+            pump(&mut state, after + Duration::from_millis(990));
+            for rx in &mut receivers {
+                assert!(drain_sync_infos(rx).is_empty());
+            }
+            pump(&mut state, after + Duration::from_millis(1010));
+            if full {
+                assert_tip(&mut receivers[0], block.header_id);
+            }
+            for rx in &mut receivers {
+                assert!(drain_sync_infos(rx).is_empty());
+            }
+            let _ = drain_sync_infos(&mut supplier_rx);
+        }
+    }
+    #[test]
+    fn sync_refresh_handoff_and_fallback_refresh_supplier() {
+        for fallback in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+            crate::node::flush_actions(&mut state, Vec::new());
+            let now = Instant::now();
+            let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+            state
+                .coordinator
+                .sync_state_mut()
+                .mark_headers_chain_synced();
+            let tag = state.input_blocks.as_mut().unwrap().tag(peer);
+            let block = &blocks[4];
+            let mut ann = ts::ordering_announcement([0; 32], 5, 1, Vec::new());
+            ann.header = block.header.clone();
+            ann.extension_fields = mainnet_extension_fields(block);
+            store_ordering_announcement(&mut state, ann, tag);
+            let effect = if fallback {
+                Effect::OrderingReconstruct {
+                    from: tag,
+                    plan: ergo_inputblocks::ordering::ReconstructionPlan {
+                        header_id: block.header_id,
+                        non_broadcasted: Vec::new(),
+                        broadcasted_ids: Vec::new(),
+                        input_chain_txs: Vec::new(),
+                        reconstruction_key: Default::default(),
+                        prev_input_block_id: None,
+                    },
+                }
+            } else {
+                Effect::RequestBlockTransactions {
+                    header_id: block.header_id,
+                    from: tag,
+                }
+            };
+            let actions = execute_effects(&mut state, vec![effect], now);
+            crate::node::flush_actions(&mut state, actions);
+            assert_eq!(state.store.chain_state_meta().best_header_height, 5);
+            assert_eq!(state.store.chain_state_meta().best_full_block_height, 4);
+            pump(&mut state, now + Duration::from_secs(1));
+            assert_tip(&mut rx, block.header_id);
+        }
+    }
+
+    #[test]
+    fn sync_refresh_announcement_burst_builds_final_live_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = mainnet_state_before(dir.path(), 2);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let blocks = mainnet_blocks(5);
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
+        for block in &blocks[1..] {
+            announce(&mut state, peer, block);
+            persist_sections(&mut state, block);
+            let actions = state.executor.execute(
+                Action::AssembleBlock {
+                    header_id: block.header_id,
+                },
+                &mut state.store,
+                &mut state.coordinator,
+                Instant::now(),
+                None,
+            );
+            crate::node::flush_actions(&mut state, actions);
+            assert_eq!(
+                state.store.chain_state_meta().best_full_block_height,
+                block.height
+            );
+        }
+        assert!(
+            drain_sync_infos(&mut rx).is_empty(),
+            "announcement bursts have no #399 reply"
+        );
+        pump(&mut state, Instant::now() + Duration::from_millis(300));
+        assert_tip(&mut rx, blocks[4].header_id);
+    }
+
+    // ----- round-trips -----
+
+    #[test]
+    fn sync_refresh_intervening_send_rearms_and_deduplicates() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        state.coordinator.sync_state_mut().mark_sync_sent(peer, now);
+        announce(&mut state, peer, &blocks[4]);
+        let other_send = now + Duration::from_millis(200);
+        // Use the unchanged handshake helper as an intervening ordinary send.
+        crate::node::sync_helpers::send_initial_sync_info(
+            &mut state,
+            &peer,
+            ergo_p2p::peer::SyncVersion::V2,
+            other_send,
+        );
+        assert_tip(&mut rx, blocks[4].header_id);
+        fire_due(&mut state, now + Duration::from_millis(250));
+        assert!(drain_sync_infos(&mut rx).is_empty());
+        assert_eq!(
+            state.sync_refresh.deadline(),
+            Some(now + Duration::from_millis(450))
+        );
+        fire_due(&mut state, now + Duration::from_millis(450));
+        assert_tip(&mut rx, blocks[4].header_id);
+        schedule(
+            &mut state,
+            peer,
+            Duration::from_secs(1),
+            now + Duration::from_secs(1),
+        );
+        fire_due(&mut state, now + Duration::from_secs(2));
+        assert!(
+            drain_sync_infos(&mut rx).is_empty(),
+            "same tip is not refreshed twice"
+        );
+    }
+
+    #[test]
+    fn sync_refresh_disconnect_clears_timer_tip_and_generation() {
+        use crate::node::sync_refresh::{fire, fire_due, schedule};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        schedule(&mut state, peer, Duration::ZERO, now);
+        fire_due(&mut state, now);
+        assert_tip(&mut rx, blocks[3].header_id);
+        schedule(&mut state, peer, Duration::from_secs(1), now);
+        let rt = state.registry.peers.remove(&peer).unwrap();
+        crate::node::cleanup_disconnected_peer(&mut state, &peer);
+        assert!(
+            state.sync_refresh.deadline().is_none(),
+            "pending timer is removed"
+        );
+        state.registry.peers.insert(peer, rt);
+        schedule(
+            &mut state,
+            peer,
+            Duration::ZERO,
+            now + Duration::from_secs(2),
+        );
+        fire(&mut state, peer, 2, now + Duration::from_secs(2));
+        assert!(
+            drain_sync_infos(&mut rx).is_empty(),
+            "stale generation cannot consume new timer"
+        );
+        fire_due(&mut state, now + Duration::from_secs(2));
+        assert_tip(&mut rx, blocks[3].header_id);
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn sync_refresh_unregistered_supplier_leaves_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = mainnet_state_before(dir.path(), 5);
+        let peer = "10.200.0.1:9030".parse().unwrap();
+        let ann = ts::announcement([0; 32], 4, 1, None);
+        let actions = send_to(
+            &mut state,
+            peer,
+            message::CODE_INPUT_BLOCK,
+            &message::serialize_input_block(&ann).unwrap(),
+        );
+        crate::node::flush_actions(&mut state, actions);
+        assert!(!state.sync_refresh.suppliers.contains_key(&peer));
+    }
+
+    #[test]
+    fn sync_refresh_aged_out_supplier_receives_nothing() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(2, ordering, false));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_outside_window_supplier_receives_nothing() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(7, ordering, false));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_disconnected_supplier_record_cleared() {
+        for ordering in [false, true] {
+            assert!(!supplier_refresh(3, ordering, true));
+        }
+    }
+
+    #[test]
+    fn sync_refresh_ibd_and_lighter_fork_do_not_schedule() {
+        for ibd in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+            // A high-scoring existing tip makes block 5 a valid, lighter continuation.
+            if !ibd {
+                state
+                    .store
+                    .as_utxo_mut()
+                    .unwrap()
+                    .test_force_set_best_header_unsafe(blocks[3].header_id, 4, vec![255; 32])
+                    .unwrap();
+                state
+                    .coordinator
+                    .sync_state_mut()
+                    .mark_headers_chain_synced();
+            }
+            crate::node::flush_actions(&mut state, Vec::new());
+            let now = Instant::now();
+            let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+            let block = &blocks[4];
+            let actions = state.executor.execute_all(
+                vec![Action::ValidateHeader {
+                    peer,
+                    modifier_id: block.header_id,
+                    header_bytes: block.header_bytes.clone(),
+                }],
+                &mut state.store,
+                &mut state.coordinator,
+                now,
+                None,
+            );
+            crate::node::flush_actions(&mut state, actions);
+            assert!(state.store.get_header(&block.header_id).unwrap().is_some());
+            assert_eq!(state.coordinator.sync_state().headers_chain_synced(), !ibd);
+            pump(&mut state, now + Duration::from_secs(2));
+            assert!(drain_sync_infos(&mut rx).is_empty());
+            if ibd {
+                // A subsequent lower-score notification must not look like progress
+                // merely because it is the first one after header sync completes.
+                state
+                    .coordinator
+                    .sync_state_mut()
+                    .mark_headers_chain_synced();
+                let older = &blocks[3];
+                let actions = state.coordinator.on_header_validated(
+                    peer,
+                    older.header_id,
+                    older.height,
+                    older.header.timestamp,
+                    ergo_ser::modifier_id::ExpectedSections::from_header(
+                        &older.header_id,
+                        older.header.transactions_root.as_bytes(),
+                        older.header.extension_root.as_bytes(),
+                        older.header.ad_proofs_root.as_bytes(),
+                    ),
+                    now,
+                );
+                crate::node::flush_actions(&mut state, actions);
+                pump(&mut state, now + Duration::from_secs(3));
+                assert!(
+                    drain_sync_infos(&mut rx).is_empty(),
+                    "IBD records the score watermark"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sync_refresh_rejected_header_produces_no_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 4);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        announce(&mut state, peer, &mainnet_blocks(5)[4]);
+        assert_eq!(
+            state.store.chain_state_meta().best_header_height,
+            blocks[2].height
+        );
+        pump(&mut state, now + Duration::from_secs(2));
+        assert!(drain_sync_infos(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn sync_refresh_empty_history_and_v1_peer_send_nothing() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        for empty in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = if empty {
+                live_state(dir.path())
+            } else {
+                mainnet_state_before(dir.path(), 5).0
+            };
+            crate::node::flush_actions(&mut state, Vec::new());
+            let now = Instant::now();
+            let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+            if !empty {
+                state.registry.peers.get_mut(&peer).unwrap().sync_version =
+                    ergo_p2p::peer::SyncVersion::V1;
+            }
+            schedule(&mut state, peer, Duration::ZERO, now);
+            if !empty {
+                assert!(state.sync_refresh.deadline().is_none());
+            }
+            fire_due(&mut state, now);
+            assert!(drain_sync_infos(&mut rx).is_empty());
+            assert!(state.sync_refresh.deadline().is_none());
+        }
+    }
+
+    #[test]
+    fn sync_refresh_pending_timer_keeps_first_deadline() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        schedule(&mut state, peer, Duration::from_secs(1), now);
+        schedule(
+            &mut state,
+            peer,
+            Duration::from_secs(1),
+            now + Duration::from_millis(200),
+        );
+        assert_eq!(
+            state.sync_refresh.deadline(),
+            Some(now + Duration::from_secs(1))
+        );
+        fire_due(&mut state, now + Duration::from_millis(999));
+        assert!(drain_sync_infos(&mut rx).is_empty());
+        fire_due(&mut state, now + Duration::from_secs(1));
+        assert_tip(&mut rx, blocks[3].header_id);
+    }
+
+    #[test]
+    fn sync_refresh_peer_loses_v2_before_fire_sends_nothing() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        schedule(&mut state, peer, Duration::ZERO, now);
+        state.registry.peers.get_mut(&peer).unwrap().sync_version = ergo_p2p::peer::SyncVersion::V1;
+        fire_due(&mut state, now);
+        assert!(drain_sync_infos(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn sync_refresh_failed_dispatch_does_not_record_tip() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        for _ in 0..64 {
+            assert!(crate::node::send_to_peer(
+                &state,
+                &peer,
+                message::CODE_INV,
+                Vec::new()
+            ));
+        }
+        schedule(&mut state, peer, Duration::ZERO, now);
+        fire_due(&mut state, now);
+        assert!(drain_sync_infos(&mut rx).is_empty());
+        assert!(state
+            .coordinator
+            .sync_state()
+            .last_sync_sent(peer)
+            .is_none());
+        // A full outbound queue closes that transport; provide a fresh test
+        // transport without clearing refresh state to check the failed-send dedupe.
+        let (tx, fresh_rx) = crate::peer_loop::outbound::channel(64);
+        state.registry.peers.get_mut(&peer).unwrap().outbound_tx = tx;
+        rx = fresh_rx;
+        schedule(&mut state, peer, Duration::ZERO, now);
+        fire_due(&mut state, now);
+        assert_tip(&mut rx, blocks[3].header_id);
+    }
+
+    #[test]
+    fn sync_refresh_invalid_header_produces_no_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, blocks) = mainnet_state_before(dir.path(), 5);
+        crate::node::flush_actions(&mut state, Vec::new());
+        let now = Instant::now();
+        let (peer, mut rx) = handshake_peer(&mut state, 19740, Version::SUBBLOCKS, now);
+        state
+            .coordinator
+            .sync_state_mut()
+            .mark_headers_chain_synced();
+        let block = &blocks[4];
+        let actions = state.executor.execute_all(
+            vec![Action::ValidateHeader {
+                peer,
+                modifier_id: block.header_id,
+                header_bytes: vec![0],
+            }],
+            &mut state.store,
+            &mut state.coordinator,
+            now,
+            None,
+        );
+        crate::node::flush_actions(&mut state, actions);
+        assert!(state.store.get_header(&block.header_id).unwrap().is_none());
+        pump(&mut state, now + Duration::from_secs(2));
+        assert!(drain_sync_infos(&mut rx).is_empty());
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn sync_refresh_equal_height_fork_exchange_terminates() {
+        use crate::node::sync_refresh::{fire_due, schedule};
+        let left_dir = tempfile::tempdir().unwrap();
+        let right_dir = tempfile::tempdir().unwrap();
+        let (mut left, blocks) = mainnet_state_before(left_dir.path(), 5);
+        let (mut right, _) = mainnet_state_before(right_dir.path(), 5);
+        // Classification consumes stored header facts, independent of PoW validation.
+        // Give the right node a distinct, equal-height stored tip on the same parent.
+        let mut fork = blocks[3].header.clone();
+        fork.timestamp += 1;
+        let (bytes, _) = serialize_header(&fork).unwrap();
+        let id = *ergo_primitives::digest::blake2b256(&bytes).as_bytes();
+        seed_mainnet_headers(&mut right, &[(4, id, bytes, fork)], true);
+        crate::node::flush_actions(&mut left, Vec::new());
+        crate::node::flush_actions(&mut right, Vec::new());
+        let now = Instant::now();
+        let (rp, mut to_right) = handshake_peer(&mut left, 19740, Version::SUBBLOCKS, now);
+        let (lp, mut to_left) = handshake_peer(&mut right, 19741, Version::SUBBLOCKS, now);
+        schedule(&mut left, rp, Duration::ZERO, now);
+        schedule(&mut right, lp, Duration::ZERO, now);
+        fire_due(&mut left, now);
+        fire_due(&mut right, now);
+        let mut frames = 0;
+        for _ in 0..8 {
+            let a = drain_sync_infos(&mut to_right);
+            let b = drain_sync_infos(&mut to_left);
+            if a.is_empty() && b.is_empty() {
+                break;
+            }
+            frames += a.len() + b.len();
+            for payload in a {
+                let actions = crate::node::handle_message(
+                    &mut right,
+                    lp,
+                    message::CODE_SYNC_INFO,
+                    &payload,
+                    now,
+                );
+                crate::node::flush_actions(&mut right, actions);
+            }
+            for payload in b {
+                let actions = crate::node::handle_message(
+                    &mut left,
+                    rp,
+                    message::CODE_SYNC_INFO,
+                    &payload,
+                    now,
+                );
+                crate::node::flush_actions(&mut left, actions);
+            }
+        }
+        assert_eq!(
+            left.coordinator.peer_sync_snapshots()[&rp].status,
+            ergo_p2p::sync::PeerChainStatus::Fork
+        );
+        assert_eq!(
+            right.coordinator.peer_sync_snapshots()[&lp].status,
+            ergo_p2p::sync::PeerChainStatus::Fork
+        );
+        assert_eq!(
+            frames, 4,
+            "two refreshes, two immediate replies, then receive lock stops exchange"
+        );
+        fire_due(&mut left, now + Duration::from_secs(3));
+        fire_due(&mut right, now + Duration::from_secs(3));
+        assert!(drain_sync_infos(&mut to_left).is_empty());
+        assert!(drain_sync_infos(&mut to_right).is_empty());
+        assert!(left.sync_refresh.deadline().is_none());
+        assert!(right.sync_refresh.deadline().is_none());
+    }
+}

@@ -243,6 +243,8 @@ pub struct SyncCoordinator {
     /// (drained every action-loop tick), same drain pattern as
     /// [`take_net_stats`].
     first_deliverers: Vec<([u8; 32], PeerId)>,
+    /// Applied headers with the headers-synced latch captured at application.
+    applied_headers: Vec<(PeerId, [u8; 32], bool)>,
     /// Digest-verifier (Mode 5) flag: when true, block-section scheduling also
     /// requests/tracks the ADProofs section (type 104) — the UTXO-set
     /// transformation proofs a digest node needs to apply a block. Scala
@@ -292,6 +294,7 @@ impl SyncCoordinator {
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
+            applied_headers: Vec::new(),
             requires_proofs: false,
             last_modifier_got_time: None,
         }
@@ -324,6 +327,7 @@ impl SyncCoordinator {
             bootstrap_in_progress: false,
             peer_sync: std::collections::HashMap::new(),
             first_deliverers: Vec::new(),
+            applied_headers: Vec::new(),
             requires_proofs: false,
             last_modifier_got_time: None,
         }
@@ -387,6 +391,11 @@ impl SyncCoordinator {
     /// as [`take_net_stats`] — pure observability, never read by sync.
     pub fn take_first_deliverers(&mut self) -> Vec<([u8; 32], PeerId)> {
         std::mem::take(&mut self.first_deliverers)
+    }
+
+    /// Drain `(peer, header_id, headers_synced)` in successful application order.
+    pub fn take_applied_headers(&mut self) -> Vec<(PeerId, [u8; 32], bool)> {
+        std::mem::take(&mut self.applied_headers)
     }
 
     /// Mark a peer as having sent us a non-tx Modifier in this tick.
