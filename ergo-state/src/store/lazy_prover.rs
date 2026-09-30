@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use bytes::Bytes;
@@ -12,10 +13,16 @@ use super::StateError;
 use crate::avl::node::{AvlNode, NodeId};
 use crate::avl::tree::AvlTree;
 
+// Count-bounded speculative cache, discarded with each proof. The upstream
+// prover graph still expands only authenticated nodes actually visited.
+const PREFETCH_CACHE_NODES: usize = 128;
+const PREFETCH_DEPTH: usize = 2;
+
 struct Resolver {
     ids: HashMap<[u8; 32], NodeId>,
     requests: Sender<NodeId>,
-    replies: Receiver<Result<AvlNode, StateError>>,
+    replies: Receiver<Result<Vec<(NodeId, AvlNode)>, StateError>>,
+    prefetched: lru::LruCache<NodeId, AvlNode>,
 }
 
 thread_local! {
@@ -28,17 +35,29 @@ fn failure(what: &'static str) -> StateError {
 
 impl Resolver {
     fn load(&mut self, label: &[u8; 32]) -> Result<Node, StateError> {
-        let id = self
+        let id = *self
             .ids
             .get(label)
             .ok_or_else(|| failure("prover: unknown label"))?;
-        self.requests
-            .send(*id)
-            .map_err(|_| failure("prover: node reader stopped"))?;
-        let node = self
-            .replies
-            .recv()
-            .map_err(|_| failure("prover: node reply missing"))??;
+        let node = if let Some(node) = self.prefetched.pop(&id) {
+            node
+        } else {
+            self.requests
+                .send(id)
+                .map_err(|_| failure("prover: node reader stopped"))?;
+            let packet = self
+                .replies
+                .recv()
+                .map_err(|_| failure("prover: node reply missing"))??;
+            // Preserve recently prefetched siblings across path changes, but
+            // bound speculative copies independently of block/UTXO-set size.
+            for (node_id, node) in packet {
+                self.prefetched.put(node_id, node);
+            }
+            self.prefetched
+                .pop(&id)
+                .ok_or_else(|| failure("prover: requested node missing from packet"))?
+        };
         let loaded = match node {
             AvlNode::Leaf {
                 key,
@@ -102,7 +121,8 @@ fn resolve(label: &[u8; 32]) -> Node {
 /// without sharing its non-Send node graph or borrowing the arena unsafely.
 /// Every expanded node is authenticated against its parent label. Untouched
 /// subtrees remain hash stubs, bounding work by the operation paths rather
-/// than the entire UTXO set. No prover state survives this call.
+/// than the entire UTXO set. Small subtree packets amortize the blocking
+/// owner/worker handoff. No prover state survives this call.
 pub(super) fn prove(
     tree: &AvlTree,
     to_lookup: &[[u8; 32]],
@@ -146,6 +166,9 @@ pub(super) fn prove_from_reader(
                         ids: HashMap::from([(root_label, root_id)]),
                         requests,
                         replies: reply,
+                        prefetched: lru::LruCache::new(
+                            NonZeroUsize::new(PREFETCH_CACHE_NODES).unwrap(),
+                        ),
                     });
                 });
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -167,8 +190,32 @@ pub(super) fn prove_from_reader(
             })
             .map_err(|_| failure("prover: failed to start worker"))?;
         while let Ok(id) = requested.recv() {
-            let node = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_node(id)))
-                .unwrap_or_else(|_| Err(failure("prover: node read panicked")));
+            let node = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let root = read_node(id)?;
+                let mut packet = vec![(id, root)];
+                // Two levels beyond the requested node, at most seven nodes.
+                // Reads stay on the arena owner; the worker receives owned
+                // copies. Child errors are deferred until the child is needed:
+                // prefetch must not reject an otherwise valid untouched path.
+                let mut level_start = 0;
+                for _ in 0..PREFETCH_DEPTH {
+                    let level_end = packet.len();
+                    for index in level_start..level_end {
+                        let AvlNode::Internal { left, right, .. } = &packet[index].1 else {
+                            continue;
+                        };
+                        let children = [*left, *right];
+                        for child in children {
+                            if let Ok(node) = read_node(child) {
+                                packet.push((child, node));
+                            }
+                        }
+                    }
+                    level_start = level_end;
+                }
+                Ok(packet)
+            }))
+            .unwrap_or_else(|_| Err(failure("prover: node read panicked")));
             if replies.send(node).is_err() {
                 break;
             }
@@ -267,6 +314,80 @@ mod tests {
     fn lazy_proof_rejects_missing_root() {
         let tree = AvlTree::new_empty_with_label(42, 0, Digest32::from_bytes([0; 32]));
         assert!(prove(&tree, &[], &DryRunRemoveMap::new(), &DryRunInsertMap::new()).is_err());
+    }
+
+    #[test]
+    fn speculative_child_read_errors_do_not_reject_an_unvisited_path() {
+        let mut tree = AvlTree::new();
+        for index in 0..128 {
+            tree.insert(key(index), vec![index as u8]);
+        }
+        let root_id = tree.root_id();
+        let root = tree.prover_node(root_id).unwrap();
+        let expected = apply_change_set_via_prover(
+            &tree,
+            &[],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+        )
+        .unwrap();
+        let mut reads = 0;
+        let actual = prove_from_reader(
+            root_id,
+            *tree.root_label().as_bytes(),
+            tree.tree_height(),
+            &[],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+            |id| {
+                reads += 1;
+                if id == root_id {
+                    Ok(root.clone())
+                } else {
+                    Err(failure("injected unused child read failure"))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(reads, 3, "one requested root and two speculative children");
+    }
+
+    #[test]
+    fn prefetched_leaf_is_authenticated_before_use() {
+        let mut tree = AvlTree::new();
+        for index in 0..128 {
+            tree.insert(key(index), vec![index as u8]);
+        }
+        let target = key(42);
+        let result = prove_from_reader(
+            tree.root_id(),
+            *tree.root_label().as_bytes(),
+            tree.tree_height(),
+            &[target],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new(),
+            |id| {
+                let mut node = tree.prover_node(id)?;
+                if let AvlNode::Leaf { key, value, .. } = &mut node {
+                    if *key == target {
+                        value.push(0xff);
+                    }
+                }
+                Ok(node)
+            },
+        );
+        assert!(
+            result.is_err(),
+            "prefetched data must not bypass label verification"
+        );
+        assert!(prove(
+            &tree,
+            &[target],
+            &DryRunRemoveMap::new(),
+            &DryRunInsertMap::new()
+        )
+        .is_ok());
     }
 
     #[test]

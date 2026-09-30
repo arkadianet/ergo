@@ -29,7 +29,8 @@ pub struct Cli {
 
     /// IBD durability flush interval (blocks). During initial sync,
     /// block commits use `Durability::None` except every N blocks which
-    /// use `Durability::Eventual` (queued to OS pagecache, fsync deferred).
+    /// use `Durability::Eventual` (still a synchronous flush on Linux
+    /// with the pinned redb 2.6.3 backend).
     /// Default 500 — empirically reduces durable-flush spikes >500ms by
     /// ~75% vs the old 100, with no measurable loss in apply throughput.
     /// On hard crash, up to N blocks of work replays from peers.
@@ -37,7 +38,8 @@ pub struct Cli {
     #[arg(long, default_value = "500")]
     pub ibd_flush_interval: u32,
 
-    /// redb + AVL arena page cache, in bytes. Larger cache → fewer disk
+    /// AVL arena cache, in bytes (redb's internal cache is separate).
+    /// Larger cache → fewer disk
     /// reads for AVL nodes during IBD on a multi-GB database. Default
     /// matches `StateStore::DEFAULT_CACHE_BYTES`. Set lower on
     /// memory-constrained hosts; higher won't hurt until the working

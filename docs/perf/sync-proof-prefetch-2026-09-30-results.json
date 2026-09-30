@@ -1,0 +1,179 @@
+{
+  "base_revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1",
+  "hardware": "Ryzen 7 7800X3D; 64 GiB RAM; Intel Optane P1600X",
+  "toolchain": "Rust 1.95.0",
+  "interval": [
+    563843,
+    563992
+  ],
+  "os_drive": {
+    "median_durable_seconds": {
+      "baseline": 10.332747,
+      "candidate": 7.877044
+    },
+    "throughput_speedup": 1.3117543840049644,
+    "time_reduction_percent": 23.766216283046514,
+    "records": [
+      {
+        "iteration": 1,
+        "mode": "baseline",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "9.727573",
+        "committed_secs": "9.764482",
+        "durable_secs": "10.332747",
+        "bps": "14.517",
+        "proof_ms": "7181.905",
+        "validate_ms": "996.051",
+        "apply_ms": "793.672",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 1,
+        "mode": "candidate",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "6.753175",
+        "committed_secs": "6.803711",
+        "durable_secs": "7.355638",
+        "bps": "20.393",
+        "proof_ms": "4609.991",
+        "validate_ms": "995.809",
+        "apply_ms": "790.257",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 2,
+        "mode": "candidate",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "7.271030",
+        "committed_secs": "7.311232",
+        "durable_secs": "7.877044",
+        "bps": "19.043",
+        "proof_ms": "4560.042",
+        "validate_ms": "999.198",
+        "apply_ms": "805.157",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 2,
+        "mode": "baseline",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "9.603820",
+        "committed_secs": "9.644534",
+        "durable_secs": "10.206860",
+        "bps": "14.696",
+        "proof_ms": "7176.231",
+        "validate_ms": "983.582",
+        "apply_ms": "762.561",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 3,
+        "mode": "baseline",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "9.870970",
+        "committed_secs": "9.911661",
+        "durable_secs": "10.538503",
+        "bps": "14.234",
+        "proof_ms": "7537.170",
+        "validate_ms": "1029.103",
+        "apply_ms": "826.694",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 3,
+        "mode": "candidate",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "9.630907",
+        "committed_secs": "9.682369",
+        "durable_secs": "10.330658",
+        "bps": "14.520",
+        "proof_ms": "6103.930",
+        "validate_ms": "1007.655",
+        "apply_ms": "807.298",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      }
+    ]
+  },
+  "optane": {
+    "median_durable_seconds": {
+      "baseline": 9.102192500000001,
+      "candidate": 6.6622164999999995
+    },
+    "throughput_speedup": 1.3662408749400445,
+    "time_reduction_percent": 26.80646448644105,
+    "records": [
+      {
+        "iteration": 1,
+        "mode": "baseline",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "8.678184",
+        "committed_secs": "8.717951",
+        "durable_secs": "9.278749",
+        "bps": "16.166",
+        "proof_ms": "6911.120",
+        "validate_ms": "918.200",
+        "apply_ms": "750.148",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 1,
+        "mode": "candidate",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "6.179487",
+        "committed_secs": "6.217866",
+        "durable_secs": "6.767282",
+        "bps": "22.165",
+        "proof_ms": "4398.988",
+        "validate_ms": "911.170",
+        "apply_ms": "764.478",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 2,
+        "mode": "candidate",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "5.964259",
+        "committed_secs": "5.999025",
+        "durable_secs": "6.557151",
+        "bps": "22.876",
+        "proof_ms": "4220.199",
+        "validate_ms": "904.019",
+        "apply_ms": "735.107",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      },
+      {
+        "iteration": 2,
+        "mode": "baseline",
+        "start": "563842",
+        "end": "563992",
+        "blocks": "150",
+        "enqueue_secs": "8.329071",
+        "committed_secs": "8.365028",
+        "durable_secs": "8.925636",
+        "bps": "16.806",
+        "proof_ms": "6671.722",
+        "validate_ms": "856.191",
+        "apply_ms": "707.320",
+        "root": "ee64f369c27d696f26cb665e5e05b8eb88ee1064e4e30d94dd52e34857003cca17"
+      }
+    ]
+  }
+}

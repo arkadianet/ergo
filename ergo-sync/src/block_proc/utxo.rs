@@ -194,6 +194,7 @@ pub(super) fn process_block_utxo(
     // 2c. Full proofHash parity — UTXO-mode counterpart of Scala's
     // "Regenerated proofHash is not equal to the declared one" check.
     //
+    let proof_start = Instant::now();
     let retained_proof = match store.ad_proofs_apply_policy() {
         ergo_state::store::AdProofsApplyPolicy::VerifyShipped => {
             let section_bytes = store.get_block_section(&expected.ad_proofs_id)?.ok_or(
@@ -256,6 +257,8 @@ pub(super) fn process_block_utxo(
             .then_some(regenerated.1)
         }
     };
+
+    let t_proof = proof_start.elapsed();
 
     // Voted parameters: at epoch starts, run the full
     // epoch-extension validation before constructing CheckedHeader.
@@ -535,6 +538,10 @@ pub(super) fn process_block_utxo(
     let t_total_elapsed = t_total.elapsed();
 
     if let Some(p) = perf {
+        p.proof_ns.fetch_add(
+            t_proof.as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         p.add_block(
             tx_count as u64,
             t_header.as_nanos() as u64,
@@ -553,6 +560,7 @@ pub(super) fn process_block_utxo(
             total_ms = t_total_elapsed.as_secs_f64() * 1000.0,
             hdr_ms = t_header.as_secs_f64() * 1000.0,
             sec_ms = t_sections.as_secs_f64() * 1000.0,
+            proof_ms = t_proof.as_secs_f64() * 1000.0,
             pctx_ms = t_parent_ctx.as_secs_f64() * 1000.0,
             validate_ms = t_validate.as_secs_f64() * 1000.0,
             apply_ms = t_apply.as_secs_f64() * 1000.0,
