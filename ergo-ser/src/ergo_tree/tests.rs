@@ -204,28 +204,41 @@ fn cseg_with_constants_and_size() {
     roundtrip(&tree);
 }
 
+/// A sizeless, constant-segregated v0 tree of `count` SInt constants
+/// (`0, 1, ..`) under the root `BoolToSigmaProp(TrueLeaf)` (`d1 7f`).
+fn sizeless_int_constants_tree(count: u32) -> Vec<u8> {
+    let mut w = VlqWriter::new();
+    w.put_u8(CONSTANT_SEGREGATION_FLAG);
+    w.put_u32(count);
+    for i in 0..count {
+        w.put_u8(0x04);
+        w.put_i32(i as i32);
+    }
+    w.put_u8(0xD1);
+    w.put_u8(0x7F);
+    w.result()
+}
+
+/// `deserializeErgoTree` bounds a sizeless tree to `MaxPropositionSize`
+/// bytes from its start, as it does a sized one
+/// (ErgoTreeSerializer.scala:143-144). A 1,300-constant tree (3,841 bytes)
+/// parses; a 1,400-constant one (4,141 bytes) reads its constants past the
+/// window, and a sizeless tree cannot degrade, so it is rejected. JVM
+/// verdicts (ErgoSerdeOracle `ergo_tree`, sigma-state 6.0.6): ACCEPT and
+/// REJECT SerializerException.
 #[test]
-fn read_ergo_tree_constant_count_above_soft_cap_still_parses() {
-    // CONSTANTS_VEC_SOFT_CAP bounds only the initial Vec reservation; it must
-    // NOT reject a tree the Scala node would accept. A cseg tree with more
-    // constants than the cap round-trips — the Vec grows past the cap on
-    // push and parsing succeeds. Pins the consensus-acceptance claim of the
-    // soft cap (contrast `read_ergo_tree_huge_constant_count_does_not_oom`,
-    // which checks the hostile short-payload path returns an error).
-    let n = CONSTANTS_VEC_SOFT_CAP + 904; // 5000, comfortably above the cap
-    assert!(n > CONSTANTS_VEC_SOFT_CAP);
-    let constants: Vec<(SigmaType, SigmaValue)> = (0..n)
-        .map(|i| (SigmaType::SInt, SigmaValue::Int(i as i32)))
-        .collect();
-    let tree = ErgoTree {
-        version: 0,
-        has_size: false,
-        constant_segregation: true,
-        reserved_header_bits: 0,
-        constants,
-        body: placeholder_body(),
-    };
-    roundtrip(&tree);
+fn read_ergo_tree_sizeless_constants_past_proposition_window_rejected() {
+    let inside = sizeless_int_constants_tree(1300);
+    assert_eq!(inside.len(), 3841);
+    let mut r = VlqReader::new(&inside);
+    let tree = read_ergo_tree(&mut r).expect("within the window");
+    assert_eq!(tree.constants.len(), 1300);
+    assert!(r.is_empty());
+
+    let past = sizeless_int_constants_tree(1400);
+    assert_eq!(past.len(), 4141);
+    let mut r = VlqReader::new(&past);
+    assert!(read_ergo_tree(&mut r).is_err());
 }
 
 #[test]

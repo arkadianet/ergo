@@ -58,6 +58,10 @@ pub fn read_ergo_box_candidate_indexed(
     r: &mut VlqReader,
     token_id_table: &[TokenId],
 ) -> Result<ErgoBoxCandidate, ReadError> {
+    // The box window; a tree sets its own window from its start and
+    // restores this one after it.
+    let box_limit = r.position_limit();
+    r.set_position_limit(Some(r.position() + super::MAX_BOX_SIZE));
     let value = r.get_u64()?;
     let tree_start = r.position();
     let ergo_tree = read_ergo_tree(r)?;
@@ -87,7 +91,9 @@ pub fn read_ergo_box_candidate_indexed(
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
 
-    read_box_tail(r, value, ergo_tree, ergo_tree_bytes, token_id_table)
+    let candidate = read_box_tail(r, value, ergo_tree, ergo_tree_bytes, token_id_table)?;
+    r.set_position_limit(box_limit);
+    Ok(candidate)
 }
 
 /// Read the box tail (creation_height, tokens, registers) and assemble the full candidate.

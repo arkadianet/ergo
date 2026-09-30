@@ -123,6 +123,12 @@ fn parse_node(
             max: MAX_EXPR_DEPTH,
         });
     }
+    // `ValueSerializer.deserialize` peeks the first byte (`r.peekByte()`,
+    // ValueSerializer.scala:399), which checks only the buffer bounds, not the
+    // position limit: at the end of the input it throws a raw
+    // `ArrayIndexOutOfBoundsException` (hard) even past the window. Only the
+    // read that follows checks the limit (rule 1014).
+    r.peek_u8()?;
     let first = r.get_u8()?;
 
     if first <= LAST_CONSTANT_CODE {
