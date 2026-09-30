@@ -16,6 +16,55 @@ infrastructure.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-30
+
+Scala consensus and compiler parity fixes, more reliable full-chain selection,
+and faster authenticated UTXO proof generation.
+
+### Added
+
+- Add authenticated POST aliases for wallet lock and next-key derivation while
+  retaining the existing authenticated GET routes (#453).
+- Pin block-section storage and serving behavior against Scala-produced
+  fixtures, and document the archived IBD/RSS baseline and cache guidance
+  (#455).
+
+### Changed
+
+- Generate authenticated UTXO proofs on the arena owner's thread and prefetch
+  missing nodes in bounded batches to reduce proof-generation overhead (#454).
+- Use operating-system randomness for peer selection and gossip while keeping
+  the documented peer quality and recency policies (#453).
+- Refresh JVM oracle fixtures and compiler expectations against sigma-state
+  6.0.6 (#438, #441).
+
+### Fixed
+
+- Select full chains by cumulative work over contiguous available blocks.
+  Preserve the applied tip during header-only forks, adopt shorter heavier
+  chains when their bodies are available, and allow complete competing branches
+  to advance while another branch withholds bodies. Use the applied branch's
+  ancestors for epoch votes and preserve independent header and full tips across
+  digest-store restarts (#453).
+- Enforce Scala's header-age retention rule, retry silent NiPoPoW peers, and
+  remove losing sibling assembly records after their height is applied (#453).
+- Match Scala's unsigned-short and VLQ reads, context-extension ID validation,
+  transaction and standalone-box binding stores, canonical box serialization,
+  and `substConstants` size/count handling (#435, #437, #439, #440, #442, #447).
+- Match Scala's constructor-cast and numeric-operand checks, Boolean leaf
+  decoding, box and ErgoTree read windows, and validation-only soft-fork
+  degradation. Preserve the reader levels left open by a degraded tree
+  (#435, #443, #444, #445, #446, #448).
+- Read deeply nested type descriptors iteratively and grow compound-type
+  buffers only as their children arrive, avoiding excessive allocation from
+  untrusted declared counts (#439, #448).
+- Match sigma-state 6.0.6 ErgoScript typing and source-position behavior (#441).
+- Reject AVL-tree expressions used as sizeless box-script roots. Recognize the
+  reference serializer's compact-type expansion beyond the ErgoTree size window
+  in the nightly fuzz invariant, with both crash inputs retained as regressions
+  (#456).
+- Display transaction sources correctly in the mempool dashboard (#434).
+
 ## [0.10.0] - 2026-09-28
 
 Decoder depth and type-validation fixes for Scala parity, protection against
