@@ -116,10 +116,14 @@ pub fn parse_ergo_box_bytes(
         let amount = r.get_u64()?;
         tokens.push(Token { token_id, amount });
     }
-    let reg_start = r.position();
     let additional_registers = read_registers(&mut r)?;
-    let reg_end = r.position();
-    let register_bytes = r.data_slice(reg_start, reg_end).to_vec();
+    // Canonical registers and tree, as every box reader keeps them; see
+    // `read_ergo_box_candidate`.
+    let mut rw = VlqWriter::new();
+    crate::register::write_registers(&mut rw, &additional_registers)
+        .map_err(|e| ReadError::InvalidData(format!("register re-serialize: {e}")))?;
+    let register_bytes = rw.result();
+    let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, ergo_tree_bytes);
     let transaction_id = ModifierId::from_bytes(r.get_array::<32>()?);
     let index = r.get_u16()?;
 
@@ -135,6 +139,7 @@ pub fn parse_ergo_box_bytes(
             value,
             ergo_tree,
             ergo_tree_bytes: ergo_tree_bytes.to_vec(),
+            canonical_tree_bytes,
             creation_height,
             tokens,
             additional_registers,
@@ -284,6 +289,39 @@ mod tests {
     }
 
     // ----- oracle parity -----
+
+    /// A box keeps the tree bytes it was read from as `propositionBytes`, and is
+    /// written (and identified) with the canonical tree. Box vectors from SANTA
+    /// `Box.tree_count_wrap` #0-#2 and `Box.tree_parse_acceptance` #2/#3
+    /// (https://github.com/mwaddip/santa, MIT); expected bytes and
+    /// `propositionBytes` are our own sigma-state 6.0.6 JVM runs of
+    /// `ErgoBox.sigmaSerializer` / `ErgoBoxCandidate.serializer`.
+    #[test]
+    fn box_with_non_canonical_tree_keeps_proposition_bytes_and_writes_canonically() {
+        let tail = "0100001d823ee9ea823cc80232a19181efad41d66849c33ed5d0d6c5750b8d60f1d66400";
+        for (tree, canonical) in [
+            ("1807ffffffff0f08d3", "18030008d3"),
+            ("1807808080800808d3", "18030008d3"),
+            ("10ffffffff0f08d3", "100008d3"),
+            ("00d17f", "00d10101"),
+            ("00d180", "00d10100"),
+            ("00d1937f80", "00d1938501"),
+        ] {
+            let bytes = hex::decode(format!("c0843d{tree}{tail}")).unwrap();
+            let mut r = VlqReader::new(&bytes).with_activated_script_version(3);
+            let b = read_ergo_box(&mut r).unwrap_or_else(|e| panic!("{tree}: {e:?}"));
+            assert!(r.is_empty(), "{tree}");
+            assert_eq!(hex::encode(b.candidate.ergo_tree_bytes()), tree);
+            assert_eq!(
+                hex::encode(b.candidate.serialized_ergo_tree_bytes()),
+                canonical
+            );
+            assert_eq!(
+                hex::encode(serialize_ergo_box(&b).unwrap()),
+                format!("c0843d{canonical}{tail}")
+            );
+        }
+    }
 
     /// Test box_id computation by constructing boxes from explorer JSON data
     /// (value, ergoTree, creationHeight, tokens, registers, txId, index)

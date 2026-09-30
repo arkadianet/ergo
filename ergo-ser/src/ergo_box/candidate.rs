@@ -12,11 +12,11 @@ use super::{check_token_count, ErgoBoxCandidate};
 
 /// Serialize ErgoBoxCandidate in standalone mode (full token IDs).
 ///
-/// Writes the raw ErgoTree bytes directly (no length prefix), matching
+/// Writes the tree's canonical bytes directly (no length prefix), matching
 /// the Scala/sigma-rust wire format.
 pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(&c.ergo_tree_bytes);
+    w.put_bytes(c.serialized_ergo_tree_bytes());
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
@@ -71,6 +71,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
     }
     let tree_end = r.position();
     let ergo_tree_bytes = r.data_slice(tree_start, tree_end).to_vec();
+    let canonical_tree_bytes = super::canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
     let creation_height = r.get_u32_exact()?;
     let token_count = r.get_u8()? as usize;
     let mut tokens = Vec::with_capacity(token_count);
@@ -112,6 +113,7 @@ pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, Re
         value,
         ergo_tree,
         ergo_tree_bytes,
+        canonical_tree_bytes,
         creation_height,
         tokens,
         additional_registers,
