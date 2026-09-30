@@ -21,6 +21,12 @@ use ergo_ser::{
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq;
 
+    /// Only standalone ErgoTrees use a proposition-size window. Compact type
+    /// descriptors can expand beyond it when serialized, including in Scala.
+    fn tree_position_limit(&self) -> Option<usize> {
+        None
+    }
+
     /// Bytes of every retained (opaque) box this value holds, in wire order.
     fn retained_boxes(&self) -> Vec<&[u8]> {
         Vec::new()
@@ -297,6 +303,10 @@ fn has_pending_strip(expr: &Expr) -> bool {
     children.into_iter().any(has_pending_strip)
 }
 impl ParityNormalize for ErgoTree {
+    fn tree_position_limit(&self) -> Option<usize> {
+        Some(4096)
+    }
+
     fn has_pending_upcast_strip(&self) -> bool {
         self.version < 3 && has_pending_strip(&self.body)
     }

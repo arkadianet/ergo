@@ -763,6 +763,8 @@ fn op_root_non_sigma_type(opcode: u8) -> Option<crate::sigma_type::SigmaType> {
         0x9F | 0xA0 | 0xEE => Some(SGroupElement),
         0x74 | 0x7A | 0x9B | 0xC2..=0xC5 | 0xCB | 0xCC | 0xD0 => Some(SColl(Box::new(SByte))),
         0xC7 => Some(STuple(vec![SInt, SColl(Box::new(SByte))])),
+        // CreateAvlTree has a fixed SAvlTree result, regardless of its operands.
+        0xB6 => Some(SAvlTree),
         0xB7 => Some(SOption(Box::new(SColl(Box::new(SByte))))),
         _ => None,
     };

@@ -82,6 +82,18 @@ where
     let v2 = match decode(&mut r2) {
         Ok(v) => v,
         Err(e) => {
+            // Scala also expands compact type descriptors (e.g. 0x18 into
+            // two 0x0c bytes). An accepted standalone tree can consequently
+            // serialize past MaxPropositionSize and fail rule 1014 on re-read.
+            // Restrict this to a tree that grew from within its size window;
+            // other errors and containing boxes/transactions remain Bugs.
+            if matches!(e, ReadError::SigmaValidation { rule_id: 1014, .. })
+                && v1
+                    .tree_position_limit()
+                    .is_some_and(|limit| r1.position() <= limit && b1.len() > limit)
+            {
+                return Outcome::WriteRejected;
+            }
             // A nested box's tree can read past the box's own bytes before a
             // validation failure rewinds the reader, so its verdict depends on
             // what follows the box: a dropped suffix, or a later field the
@@ -1361,6 +1373,103 @@ mod tests {
             (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
             Outcome::WriteRejected
         );
+    }
+
+    /// sigma-state 6.0.6 rejects this nightly input: CreateAvlTree's SAvlTree
+    /// result fails rule 1001 in the sizeless box script.
+    #[test]
+    fn nightly_box_candidate_avl_root_rejected() {
+        let bytes = include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-09-30-avl-root");
+        assert_eq!(
+            (registry(Some("ergo_box_candidate"))[0].run)(bytes),
+            Outcome::Rejected
+        );
+
+        // The same fixed result must reject a standalone sizeless tree and
+        // degrade a size-delimited tree, matching Scala's rule-1001 catch.
+        let body = hex::decode("b60202020204000400").unwrap();
+        let mut sizeless = vec![0];
+        sizeless.extend_from_slice(&body);
+        assert_eq!(
+            (registry(Some("ergo_tree"))[0].run)(&sizeless),
+            Outcome::Rejected
+        );
+        let mut sized = vec![8, body.len() as u8];
+        sized.extend_from_slice(&body);
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&sized)).unwrap();
+        assert!(tree_is_unparsed(&tree));
+    }
+
+    /// Both writers expand the original 3205-byte compact descriptor input to
+    /// the captured 4940-byte Scala output, which both readers then refuse.
+    #[test]
+    fn nightly_compact_type_expansion_matches_scala_write_rejection() {
+        std::thread::Builder::new()
+            // Deep type clone/equality/drop are recursive in debug builds.
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let bytes = include_bytes!(
+                    "../fuzz/corpus/ergo_tree/nightly-2026-09-30-compact-type-expansion"
+                );
+                let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
+                let tree = read_ergo_tree_gated(&mut reader).unwrap();
+                let mut writer = VlqWriter::new();
+                ergo_ser::ergo_tree::write_ergo_tree(&mut writer, &tree).unwrap();
+                let output = writer.result();
+                let expected =
+                    include_str!("../../test-vectors/scala/sigma/nightly_type_expansion.hex")
+                        .lines()
+                        .find(|line| !line.starts_with('#'))
+                        .unwrap();
+                assert_eq!(hex::encode(&output), expected);
+                assert_eq!(output.len(), 4940);
+                assert!(matches!(
+                    read_ergo_tree_gated(&mut VlqReader::new(&output)),
+                    Err(ReadError::SigmaValidation { rule_id: 1014, .. })
+                ));
+                for surface in ["ergo_tree", "sigma_expr"] {
+                    assert_eq!(
+                        (registry(Some(surface))[0].run)(bytes),
+                        Outcome::WriteRejected
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn tree_size_expansion_exception_requires_growth_and_position_rule() {
+        for (input_size, output_size, rule_id, expected_bug) in [
+            (4096, 4097, 1014, false),
+            (4097, 4098, 1014, true),
+            (4095, 4096, 1014, true),
+            (4096, 4097, 1001, true),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let outcome = rw_check(
+                &vec![0; input_size],
+                |reader| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() > 1 {
+                        return Err(ReadError::SigmaValidation {
+                            rule_id,
+                            args: vec![],
+                            message: "injected validation failure".into(),
+                        });
+                    }
+                    reader.set_position(input_size);
+                    Ok(cast_tree(3, 0x7e))
+                },
+                |writer, _| {
+                    writer.put_bytes(&vec![0; output_size]);
+                    Ok(())
+                },
+                |_| false,
+            );
+            assert_eq!(matches!(outcome, Outcome::Bug(_)), expected_bug);
+        }
     }
 
     /// Scala ValueSerializer.scala:154-166,359-370: only pre-v3 Upcast(Const) is stripped.
