@@ -217,6 +217,7 @@ fn parse_node(
             let a = parse_typed_expr(r, next, _tree_version, types, children)?;
             let b = parse_typed_expr(r, next, _tree_version, types, children)?;
             check_numeric_operands(first, &children[children.len() - 2..])?;
+            check_constructor_casts(first, &children[children.len() - 2..])?;
             Payload::Two(Box::new(a), Box::new(b))
         }
 
@@ -224,6 +225,7 @@ fn parse_node(
             let a = parse_typed_expr(r, next, _tree_version, types, children)?;
             let b = parse_typed_expr(r, next, _tree_version, types, children)?;
             let c = parse_typed_expr(r, next, _tree_version, types, children)?;
+            check_constructor_casts(first, &children[children.len() - 3..])?;
             Payload::Three(Box::new(a), Box::new(b), Box::new(c))
         }
 
@@ -630,6 +632,16 @@ fn parse_node(
         ArgPattern::ExtractRegisterAs => {
             let input = parse_typed_expr(r, next, _tree_version, types, children)?;
             let reg_id = r.get_u8()?;
+            // `ErgoBox.findRegisterByIndex(regId).get`
+            // (ExtractRegisterAsSerializer.scala:28): an id outside R0..R9,
+            // including a negative Byte, is a `NoSuchElementException` thrown
+            // before the type is read: a hard reject.
+            if reg_id > 9 {
+                return Err(ReadError::HardReject(format!(
+                    "ExtractRegisterAs register id {} is not R0..R9 (Scala NoSuchElementException)",
+                    reg_id as i8
+                )));
+            }
             let tpe = read_type(r)?;
             Payload::ExtractRegisterAs {
                 input: Box::new(input),
@@ -910,6 +922,33 @@ fn check_numeric_operands(opcode: u8, operands: &[Option<SigmaType>]) -> Result<
     Ok(())
 }
 
+/// Nodes whose type is a strict `val` computed from an operand cast it when
+/// they are built, so an operand of the wrong kind is a `ClassCastException`,
+/// a hard reject also in a sized tree: `Append` and `Slice` take
+/// `input.tpe` as an `SCollection` (`transformers.scala:62`, `:89`; an
+/// `STuple` is one), `MapCollection` takes `mapper.tpe` as an `SFunc`
+/// (`:38`). Only an operand whose type is known precisely is judged.
+fn check_constructor_casts(opcode: u8, operands: &[Option<SigmaType>]) -> Result<(), ReadError> {
+    let (operand, want) = match opcode {
+        0xB3 | 0xB4 => (&operands[0], "a collection"),
+        0xAD => (&operands[1], "a function"),
+        _ => return Ok(()),
+    };
+    let Some(tpe) = operand else {
+        return Ok(());
+    };
+    let fits = match opcode {
+        0xAD => matches!(tpe, SigmaType::SFunc { .. }),
+        _ => matches!(tpe, SigmaType::SColl(_) | SigmaType::STuple(_)),
+    };
+    if !fits {
+        return Err(ReadError::HardReject(format!(
+            "operand of opcode {opcode:#04x} must be {want}, got {tpe:?} (Scala ClassCastException)"
+        )));
+    }
+    Ok(())
+}
+
 /// `DeserializationSigmaBuilder` checks comparison and equality operands
 /// (`SigmaBuilder.scala` `comparisonOp` / `equalityOp`): `Lt`..`Ge` require
 /// both operands numeric, and all six require the same type once a pre-v3
@@ -1089,6 +1128,50 @@ mod tests {
             } else {
                 assert!(
                     matches!(&result, Err(ReadError::HardReject(m)) if m.contains("must be numeric")),
+                    "{body}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// Constructor casts: `Append` / `Slice` cast `input.tpe` to a collection,
+    /// `MapCollection` casts the mapper's type to a function, and
+    /// `ExtractRegisterAs` looks its register id up with `.get`. JVM
+    /// (`ErgoSerdeOracle.scala`, sigma-state 6.0.6, `ergo_tree`, activated 3);
+    /// the first and the Slice rows are SANTA `tree_parse_acceptance` e1 / e2
+    /// (https://github.com/mwaddip/santa, MIT):
+    ///
+    /// ```text
+    /// EQ(SizeOf(Append(Int 1, Int 2)), 0)           REJECT ClassCastException
+    /// EQ(SizeOf(Append(Coll[Int], Coll[Int])), 0)   ACCEPT
+    /// EQ(SizeOf(Append((1,1), (1,1))), 0)           ACCEPT  (STuple is an SCollection)
+    /// EQ(SizeOf(Slice(Int 1, 0, 1)), 0)             REJECT ClassCastException
+    /// EQ(SizeOf(Map(Coll[Int], Int 1)), 0)          REJECT ClassCastException
+    /// EQ(SizeOf(Map(Coll[Int], (x: Int) => x)), 0)  ACCEPT
+    /// isDefined(SELF.R9[Int])                       ACCEPT
+    /// isDefined(SELF.R10[Int]) / (SELF.R-128[Int])  REJECT NoSuchElementException
+    /// ```
+    #[test]
+    fn constructor_casts_reject_operands_of_the_wrong_kind() {
+        for (body, accept) in [
+            ("d193b1b3040204040400", false),
+            ("d193b1b31001021001020400", true),
+            ("d193b1b35802025802020400", true),
+            ("d193b1b40402040004020400", false),
+            ("d193b1ad1001020402040000", false),
+            ("d193b1ad100102d901010472010400", true),
+            ("d1e6c6a70904", true),
+            ("d1e6c6a70a04", false),
+            ("d1e6c6a78004", false),
+        ] {
+            let bytes = hex::decode(body).unwrap();
+            let mut r = VlqReader::new(&bytes);
+            let result = parse_expr(&mut r, 0, 0);
+            if accept {
+                assert!(result.is_ok(), "{body}: {result:?}");
+            } else {
+                assert!(
+                    matches!(&result, Err(ReadError::HardReject(_))),
                     "{body}: {result:?}"
                 );
             }

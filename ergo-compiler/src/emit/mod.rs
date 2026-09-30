@@ -1257,7 +1257,11 @@ mod tests {
         // Fixed-arity opcode mapping pinned with constant stand-ins in the
         // function position (the wire pattern is child-shape-agnostic); the
         // real-lambda frontend route is `higher_order_ops_with_frontend_
-        // lambdas_emit_func_values` below.
+        // lambdas_emit_func_values` below. MapCollection is the exception:
+        // its type is `SCollection(mapper.tpe.asFunc.tRange)`
+        // (transformers.scala:38), so Scala casts the mapper's type when the
+        // node is built and a non-function mapper is a ClassCastException
+        // (JVM: `0810d193ad0e020102050ead0e020102050e` REJECT).
         let input = byte_coll_c(vec![1, 2]);
         let f = long_c(7);
         let mk = |node: TypedExpr, byte: u8| {
@@ -1266,7 +1270,7 @@ mod tests {
         mk(
             TypedExpr::MapCollection {
                 input: Box::new(input.clone()),
-                mapper: Box::new(f.clone()),
+                mapper: Box::new(tc("{(x: Byte) => 7L}")),
                 tpe: scoll(SType::SLong),
                 pos: 0,
             },
