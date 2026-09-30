@@ -1,0 +1,5 @@
+[persist] shutdown: closing channel, 0 job(s) queued + any in flight
+[persist] drained h=999 writes=36 commit=0.1ms
+[persist] drained h=1000 writes=38 commit=0.1ms
+[persist] still draining… 0.5s elapsed
+[persist] thread joined cleanly after 0.5s

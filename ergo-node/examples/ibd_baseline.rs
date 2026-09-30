@@ -13,6 +13,7 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[path = "../src/mem_maps.rs"]
 mod mem_maps;
 #[path = "../src/mem_marker.rs"]

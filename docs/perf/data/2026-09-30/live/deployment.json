@@ -1,0 +1,17 @@
+{
+  "source_commit": "5d62fd5851e74fcb965b4aba50e1b423127f46f1",
+  "binary_sha256": "be94a3309b3896f7370a52be8129bfbe25f506fab3c650402846d910765f0b99",
+  "profile": {
+    "mode": "UTXO archive, no bootstrap",
+    "verify_transactions": true,
+    "script_validation_checkpoint_height": 0,
+    "cache_bytes": 2147483648,
+    "keep_versions": 200,
+    "download_window": 384,
+    "indexer_enabled": true,
+    "mining_enabled": true,
+    "offline_mining_generation": false
+  },
+  "host": "AMD Ryzen 7 7800X3D, 16 logical CPUs, 61 GiB RAM; Linux Pop!_OS; Intel Optane /dev/nvme0n1p1 ext4",
+  "conditions": "existing warm process/database/OS caches; public P2P peers; no restart, pause, cache changes or global cache drop; no local compilation or tests during recorded live window"
+}

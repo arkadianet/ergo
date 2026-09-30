@@ -1,0 +1,4 @@
+ts_ms,label,vm_rss_kb,vm_size_kb,rss_anon_kb,rss_file_kb,smaps_rss_kb,smaps_pss_kb,smaps_shared_clean_kb,smaps_shared_dirty_kb,smaps_private_clean_kb,smaps_private_dirty_kb,smaps_anonymous_kb,smaps_anon_huge_pages_kb,smaps_file_pmd_mapped_kb,maps_summary
+1790770624539,benchmark_before_apply,15408,87824,9448,5960,15408,13181,2248,0,3712,9448,9448,0,0,heap=9024kb anon=67980kb redb=0kb so=3432kb bin=7260kb stack=132kb other=0kb
+1790770624603,benchmark_after_commit,41172,1169424,33740,7432,41172,38749,2448,0,4984,33740,33740,0,0,heap=9024kb anon=1149580kb redb=0kb so=3432kb bin=7260kb stack=132kb other=0kb
+1790770626689,benchmark_plateau,42324,1170436,34764,7560,42324,39774,2576,0,4984,34764,34764,0,0,heap=10048kb anon=1149568kb redb=0kb so=3432kb bin=7260kb stack=132kb other=0kb

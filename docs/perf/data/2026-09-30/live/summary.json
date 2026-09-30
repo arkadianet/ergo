@@ -1,0 +1,73 @@
+{
+  "executable_sha256": "be94a3309b3896f7370a52be8129bfbe25f506fab3c650402846d910765f0b99",
+  "pid": 771498,
+  "sample_count": 116,
+  "started_utc": "2026-09-30T12:10:04.792587+00:00",
+  "ended_utc": "2026-09-30T12:12:05.624099+00:00",
+  "start_height": 697175,
+  "end_height": 701050,
+  "duration_seconds": 120.83151396500034,
+  "blocks_per_second": 32.0694483818387,
+  "rss_sampled_peak_kib": 4102056,
+  "rss_first_kib": 3652624,
+  "rss_last_kib": 4102052,
+  "anon_first_kib": 3626600,
+  "anon_last_kib": 4076028,
+  "file_first_kib": 26024,
+  "file_last_kib": 26024,
+  "pending_blocks_sampled_peak": 387,
+  "metric_sampled_peaks": {
+    "ergo_node_block_apply_errors_total": 0.0,
+    "ergo_node_apply_in_progress": 1.0,
+    "ergo_node_apply_age_ms": 151.0,
+    "ergo_node_apply_wedged": 0.0,
+    "ergo_node_last_apply_duration_ms": 189.0,
+    "ergo_node_last_apply_age_ms": 149.0,
+    "ergo_dl_inflight": 768.0,
+    "ergo_dl_peers_inflight": 21.0,
+    "ergo_dl_received": 10000.0,
+    "ergo_dl_late_acceptable": 768.0,
+    "ergo_dl_recently_released": 0.0,
+    "ergo_orphan_groups": 0.0,
+    "ergo_orphan_headers": 0.0,
+    "ergo_rss_kb": 4101580.0
+  },
+  "last_apply_duration_ms_median": 11.0,
+  "mapping_buckets_start": {
+    "other_file_or_special": {
+      "virtual_kib": 38112,
+      "rss_kib": 26796
+    },
+    "anonymous": {
+      "virtual_kib": 6246688,
+      "rss_kib": 3618560
+    },
+    "heap": {
+      "virtual_kib": 8484,
+      "rss_kib": 7256
+    },
+    "stack": {
+      "virtual_kib": 132,
+      "rss_kib": 12
+    }
+  },
+  "mapping_buckets_end": {
+    "other_file_or_special": {
+      "virtual_kib": 38112,
+      "rss_kib": 26796
+    },
+    "anonymous": {
+      "virtual_kib": 6674732,
+      "rss_kib": 4067988
+    },
+    "heap": {
+      "virtual_kib": 8484,
+      "rss_kib": 7256
+    },
+    "stack": {
+      "virtual_kib": 132,
+      "rss_kib": 12
+    }
+  },
+  "scope": "live observation, no cache change, restart, global cache drop or phase-counter reset; sampled peaks are lower bounds"
+}

@@ -37,11 +37,10 @@ pub struct Cli {
     #[arg(long, default_value = "500")]
     pub ibd_flush_interval: u32,
 
-    /// redb + AVL arena page cache, in bytes. Larger cache → fewer disk
-    /// reads for AVL nodes during IBD on a multi-GB database. Default
-    /// matches `StateStore::DEFAULT_CACHE_BYTES`. Set lower on
-    /// memory-constrained hosts; higher won't hurt until the working
-    /// set fits.
+    /// AVL arena clean-node LRU budget, in bytes. Separate from redb caches
+    /// and dirty/pinned nodes; this is not a process RSS limit. Default
+    /// matches `StateStore::DEFAULT_CACHE_BYTES`. Increase only when cache
+    /// pressure and available memory justify it.
     #[arg(long)]
     pub cache_bytes: Option<usize>,
 

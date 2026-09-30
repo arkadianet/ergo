@@ -1,0 +1,35 @@
+{
+  "blocks": 150,
+  "blocks_per_second": 263.49734357173224,
+  "cache_bytes": 16777216,
+  "committed_seconds": 0.065767065,
+  "durable_seconds": 0.569265701,
+  "end_height": 1000,
+  "enqueue_seconds": 0.065348368,
+  "persist_queue_sampled_peak": 4,
+  "phases_ms": {
+    "apply_enqueue": 19.328949,
+    "header_load": 2.769729,
+    "parent_context": 3.361822,
+    "sections_load": 7.681683,
+    "total": 57.002577,
+    "validation": 16.041056
+  },
+  "restart_verified": true,
+  "root": "736dead46883b961dacc8d3386dee59a579cf5abb42f881a37b08ebc2fb947240c",
+  "start_height": 850,
+  "unpersisted_pinned_bytes_sampled_peak": 15592,
+  "iteration": 1,
+  "sample_count": 20,
+  "rss_sampled_peak_kib": 41484,
+  "plateau_rss_kib": 41484,
+  "plateau_anon_kib": 33980,
+  "plateau_file_kib": 7504,
+  "avl_clean_sampled_peak_bytes": 167952,
+  "raw_csv": "run-1-16mib.csv",
+  "host_load_average": [
+    3.673828125,
+    3.8486328125,
+    4.6884765625
+  ]
+}

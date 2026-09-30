@@ -110,7 +110,22 @@ the fast clean-database boot path.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `cache_bytes` | usize | 1 GiB (`1073741824`) | redb + AVL arena page-cache budget, in bytes. When omitted, the store uses its built-in default. CLI flag `--cache-bytes` overrides this. Note that redb's own per-database page cache is separate from this AVL-arena budget; account for several gibibytes of resident memory across the state, indexer, peers, and wallet databases. |
+| `cache_bytes` | usize | 1 GiB (`1073741824`) | AVL arena clean-node LRU budget, in bytes. CLI flag `--cache-bytes` overrides this. Dirty/pinned nodes and redb's per-database caches are separate; this is not a process RSS limit. |
+
+Start with the 1 GiB default for full-mainnet replay, then compare the same
+height interval and validation settings before changing it. The
+[measured cache comparison](perf/ibd-baseline-2026-09-30.md) found no material
+benefit from 16, 128 or 1024 MiB budgets on blocks 851..1000: that small AVL
+working set fit all three. This supports a smaller budget for that workload,
+but does not establish a full-mainnet minimum or optimal budget.
+
+Reserve memory for redb caches, dirty/pinned AVL nodes, download/persist queues
+and enabled indexer, wallet and mining work. A live full-validation archive
+node with a 2 GiB AVL budget reached approximately 3.9 GiB RSS during the
+recorded window. Increasing the budget does not bound these other allocations.
+Use RSS/anonymous/file samples, AVL occupancy and queue observations together;
+raise the budget only if a matched replay improves performance and the host
+has headroom. The linked baseline includes commands for repeating that check.
 
 ## `[chain]`
 
