@@ -366,6 +366,7 @@ times it.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `disabled` | bool | `false` | When `true`, skip transaction relay (useful for archival or sync-test runs). CLI flag: `--mempool-disabled`. |
+| `reject_storage_rent_txs` | bool | `true` on mainnet; `false` on testnet/devnet | Decline transactions with any empty-proof input carrying extension variable 127, including mixed transactions. Set `false` to relay rent claims. Admission policy only: valid claims in blocks and miner self-claims remain allowed. |
 | `sort_policy` | string | `"cost"` | Pool priority ordering: `"cost"`, `"size"`, or `"min"`. An unknown value is rejected at load. CLI flag: `--mempool-sort`. |
 | `max_pool_size` | usize | `1000` | Maximum transaction count. Must be at least 1. |
 | `max_pool_bytes` | usize | `67108864` (64 MiB) | Maximum total pool size in bytes. Must be at least 1. |

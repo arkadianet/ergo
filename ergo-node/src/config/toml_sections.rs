@@ -225,6 +225,8 @@ pub(super) struct TomlMempool {
     pub(super) max_pool_size: Option<usize>,
     pub(super) max_pool_bytes: Option<usize>,
     pub(super) min_relay_fee_nano_erg: Option<u64>,
+    /// Defaults to true on mainnet, false on testnet/devnet.
+    pub(super) reject_storage_rent_txs: Option<bool>,
     pub(super) max_tx_size_bytes: Option<usize>,
     pub(super) max_tx_cost: Option<u64>,
     pub(super) ibd_gate_block_lag: Option<u32>,

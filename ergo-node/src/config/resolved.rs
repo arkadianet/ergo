@@ -196,7 +196,8 @@ pub struct NodeConfig {
     /// Private devnet genesis cost cap; validated at configuration load.
     pub devnet_max_block_cost: Option<u32>,
     /// Resolved mempool configuration. All fields populated from `[mempool]`
-    /// section + CLI overrides. Defaults match `MempoolConfig::default()`.
+    /// section + CLI overrides. Defaults match `MempoolConfig::default()`
+    /// except `reject_storage_rent_txs`, which defaults to true on mainnet.
     pub mempool_config: MempoolConfig,
     /// Mempool sort policy string: "cost" | "size" | "min". Validated at
     /// load time — `from_config(sort_policy)` will always succeed.

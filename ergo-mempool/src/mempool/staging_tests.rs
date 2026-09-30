@@ -192,6 +192,7 @@ impl Validator for PoolAwareProbe {
         Ok(PeekedTx {
             tx_id: p.tx_id,
             fee: p.fee,
+            contains_storage_rent_claim: false,
         })
     }
     fn peek_structure(&self, tx_bytes: &[u8]) -> Result<PeekedStructure, ValidationErr> {

@@ -2029,6 +2029,7 @@ fn data_input_does_not_resolve_through_pool_overlay() {
             Ok(PeekedTx {
                 tx_id: self.tx_id,
                 fee: 5_000_000,
+                contains_storage_rent_claim: false,
             })
         }
         fn peek_structure(
@@ -2142,4 +2143,252 @@ fn data_input_does_not_resolve_through_pool_overlay() {
         1,
         "rejection must not touch the pool — only the parent stays",
     );
+}
+
+/// Exercise the real wire parser and admission pipeline. Missing input boxes
+/// ensure that only the policy branch can return before UTXO resolution.
+#[test]
+fn storage_rent_policy_shape_and_source_matrix() {
+    use crate::validator::{ErgoValidator, MAINNET_FEE_PROPOSITION_BYTES};
+    use ergo_primitives::{reader::VlqReader, writer::VlqWriter};
+    use ergo_ser::{
+        ergo_box::ErgoBoxCandidate,
+        ergo_tree::read_ergo_tree,
+        input::{ContextExtension, Input, SpendingProof},
+        register::AdditionalRegisters,
+        sigma_type::SigmaType,
+        sigma_value::SigmaValue,
+        transaction::{write_transaction, Transaction},
+    };
+
+    for (proof, variable, int_value, mixed, is_claim) in [
+        (vec![], Some(127), false, false, true),
+        (vec![], Some(127), true, false, true), // type does not affect relay policy
+        (vec![], Some(127), false, true, true),
+        (vec![1], Some(127), false, false, false),
+        (vec![], None, false, false, false),
+        (vec![], Some(126), false, false, false),
+    ] {
+        let mut extension = ContextExtension::empty();
+        if let Some(variable) = variable {
+            let value = if int_value {
+                (SigmaType::SInt, SigmaValue::Int(0))
+            } else {
+                (SigmaType::SShort, SigmaValue::Short(0))
+            };
+            extension.values.insert(variable, value);
+        }
+        let mut inputs = vec![Input {
+            box_id: id(1),
+            spending_proof: SpendingProof::new(proof, extension).unwrap(),
+        }];
+        if mixed {
+            inputs.insert(
+                0,
+                Input {
+                    box_id: id(2),
+                    spending_proof: SpendingProof::new(vec![1], ContextExtension::empty()).unwrap(),
+                },
+            );
+        }
+        let tree_bytes = MAINNET_FEE_PROPOSITION_BYTES.to_vec();
+        let tree = read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        let tx = Transaction {
+            inputs,
+            data_inputs: vec![],
+            output_candidates: vec![ErgoBoxCandidate::from_trusted_raw_parts(
+                5_000_000,
+                tree,
+                tree_bytes,
+                0,
+                vec![],
+                AdditionalRegisters::empty(),
+                vec![0],
+            )],
+        };
+        let mut writer = VlqWriter::new();
+        write_transaction(&mut writer, &tx).unwrap();
+        let bytes = writer.result();
+        let validator = ErgoValidator;
+        assert_eq!(
+            validator
+                .peek_fee(&bytes)
+                .unwrap()
+                .contains_storage_rent_claim,
+            is_claim
+        );
+
+        for enabled in [false, true] {
+            for source in [
+                TxSource::Peer(peer()),
+                TxSource::Api,
+                TxSource::PublicApi,
+                TxSource::Wallet,
+                TxSource::DemotedFromBlock,
+            ] {
+                let utxo = EmptyUtxo;
+                let c = ctx();
+                let tip = c.view(&utxo);
+                let cfg = MempoolConfig {
+                    reject_storage_rent_txs: enabled,
+                    ..default_config()
+                };
+                let (mut pool, mut budgets, mut invalidated, mut unresolved) = fresh();
+                let weight = ByCost;
+                let mut cx = AdmissionCtx {
+                    tip_ctx: &tip,
+                    config: &cfg,
+                    pool: &mut pool,
+                    budgets: &mut budgets,
+                    invalidated: &mut invalidated,
+                    unresolved: &mut unresolved,
+                    weight_fn: &weight,
+                };
+                let expected = if enabled && is_claim {
+                    RejectReason::StorageRentPolicy
+                } else {
+                    RejectReason::UnresolvedInput
+                };
+                let (checked, check_actions) =
+                    check(&bytes, &source, Instant::now(), &mut cx, &validator);
+                assert!(matches!(checked, CheckOutcome::Rejected { reason } if reason == expected));
+                // Use a fresh unresolved cache so the /check miss cannot mask /submit.
+                let mut submit_unresolved = UnresolvedCache::new(32, Duration::from_secs(60));
+                cx.unresolved = &mut submit_unresolved;
+                let (outcome, actions) =
+                    process(&bytes, source, Instant::now(), &mut cx, &validator);
+                assert_eq!(outcome, AdmissionOutcome::Rejected { reason: expected });
+                assert!(!actions
+                    .iter()
+                    .chain(&check_actions)
+                    .any(|action| matches!(action, MempoolAction::Penalize { .. })));
+                if enabled && is_claim {
+                    assert_eq!(cx.budgets.global_consumed(), 0);
+                    assert!(cx
+                        .invalidated
+                        .contains(&validator.peek_fee(&bytes).unwrap().tx_id));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn valid_rent_claim_policy_override_and_ordinary_spend() {
+    use crate::validator::{ErgoValidator, MAINNET_FEE_PROPOSITION_BYTES};
+    use ergo_primitives::{cost::CostAccumulator, reader::VlqReader, writer::VlqWriter};
+    use ergo_ser::{
+        ergo_box::ErgoBoxCandidate,
+        ergo_tree::read_ergo_tree,
+        input::{ContextExtension, Input, SpendingProof},
+        register::AdditionalRegisters,
+        sigma_type::SigmaType,
+        sigma_value::SigmaValue,
+        transaction::{write_transaction, Transaction},
+    };
+    use ergo_validation::{TxValidationCtx, TxValidationRules};
+
+    struct Boxes(ErgoBox);
+    impl UtxoView for Boxes {
+        fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+            (self.0.box_id().unwrap() == *id).then(|| self.0.clone())
+        }
+    }
+    let input = ErgoBox {
+        candidate: ErgoBoxCandidate::new(
+            10_000_000,
+            read_ergo_tree(&mut VlqReader::new(&[0, 8, 0xd3])).unwrap(),
+            0,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap(),
+        transaction_id: id(10).into(),
+        index: 0,
+    };
+    let mut extension = ContextExtension::empty();
+    extension
+        .values
+        .insert(127, (SigmaType::SShort, SigmaValue::Short(0)));
+    let mut tx = Transaction {
+        inputs: vec![Input {
+            box_id: input.box_id().unwrap(),
+            spending_proof: SpendingProof::new(vec![], extension).unwrap(),
+        }],
+        data_inputs: vec![],
+        output_candidates: vec![ErgoBoxCandidate::new(
+            10_000_000,
+            read_ergo_tree(&mut VlqReader::new(MAINNET_FEE_PROPOSITION_BYTES)).unwrap(),
+            1000,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap()],
+    };
+    let mut writer = VlqWriter::new();
+    write_transaction(&mut writer, &tx).unwrap();
+    let rent_bytes = writer.result();
+    let boxes = Boxes(input);
+    let mut c = ctx();
+    c.params.storage_period = 10;
+    let tip = c.view(&boxes);
+
+    // Consensus validation still accepts the rent transaction independently of relay policy.
+    ErgoValidator
+        .validate(
+            &rent_bytes,
+            &boxes,
+            &boxes,
+            &mut TxValidationCtx {
+                ctx: &c.tx_context,
+                params: &c.params,
+                cost: &mut CostAccumulator::new(JitCost::from_block_cost(4_900_000).unwrap()),
+                last_headers: &[],
+                rules: TxValidationRules { reemission: None },
+            },
+        )
+        .unwrap();
+    for enabled in [false, true] {
+        let mut pool = crate::Mempool::new(
+            MempoolConfig {
+                reject_storage_rent_txs: enabled,
+                ..default_config()
+            },
+            Box::new(ByCost),
+        );
+        let (outcome, actions) = pool.process(
+            &rent_bytes,
+            TxSource::Peer(peer()),
+            Instant::now(),
+            &tip,
+            &ErgoValidator,
+        );
+        if enabled {
+            assert_eq!(
+                outcome,
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::StorageRentPolicy
+                }
+            );
+            assert!(actions.is_empty());
+            assert_eq!(pool.size(), 0);
+            assert!(pool.is_invalidated(&ErgoValidator.peek_fee(&rent_bytes).unwrap().tx_id));
+            // Declining a claim must not blacklist an ordinary spend of the same box.
+            tx.inputs[0].spending_proof =
+                SpendingProof::new(vec![], ContextExtension::empty()).unwrap();
+            let mut writer = VlqWriter::new();
+            write_transaction(&mut writer, &tx).unwrap();
+            let (ordinary, _) = pool.process(
+                &writer.result(),
+                TxSource::Peer(peer()),
+                Instant::now(),
+                &tip,
+                &ErgoValidator,
+            );
+            assert!(matches!(ordinary, AdmissionOutcome::Admitted { .. }));
+        } else {
+            assert!(matches!(outcome, AdmissionOutcome::Admitted { .. }));
+            assert_eq!(pool.size(), 1);
+        }
+    }
 }

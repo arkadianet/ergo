@@ -305,6 +305,10 @@ pub(super) fn reject_to_submit_error(reason: RejectReason) -> SubmitError {
         RejectReason::Duplicate => ("duplicate", None),
         RejectReason::Structural => ("structural", None),
         RejectReason::BelowMinFee => ("below_min_fee", None),
+        RejectReason::StorageRentPolicy => (
+            "storage_rent_policy",
+            Some("Mempool policy declines a storage rent collection transaction".into()),
+        ),
         RejectReason::UnresolvedInput => ("unresolved_input", None),
         RejectReason::UnresolvedDataInput => ("unresolved_data_input", None),
         RejectReason::ValidationFailed { kind } => match kind {

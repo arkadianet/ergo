@@ -22,6 +22,7 @@ use ergo_validation::{TxValidationCtx, TxValidationRules};
 use tracing::warn;
 
 use crate::budget::BudgetVerdict;
+use crate::invalidation::InvalidationReason;
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
 use crate::pool::{Entry, FamilyBounds, OrderedPool, PoolError};
 use crate::types::{
@@ -294,6 +295,19 @@ pub(crate) fn check_capturing_held<V: Validator>(
         return (
             CheckOutcome::Rejected {
                 reason: RejectReason::BelowMinFee,
+            },
+            actions,
+        );
+    }
+
+    // Scala #2577: reject the entire transaction, including mixed inputs,
+    // before UTXO resolution/script evaluation. A policy decline earns no peer penalty.
+    if cx.config.reject_storage_rent_txs && peek_fee_value.contains_storage_rent_claim {
+        cx.invalidated
+            .insert(peek_fee_value.tx_id, InvalidationReason::RelayPolicy, now);
+        return (
+            CheckOutcome::Rejected {
+                reason: RejectReason::StorageRentPolicy,
             },
             actions,
         );
