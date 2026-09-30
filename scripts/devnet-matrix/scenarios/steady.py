@@ -68,7 +68,7 @@ def _observe_window(ctx, blocks, address):
     # the height was still the previous value — `WindowWalker` owns that
     # ordering, so it can be driven directly by a probe.
     from relay_measurement import Measurement, measurement_issues
-    relay = Measurement(start)
+    relay = Measurement(start, campaign.CAMPAIGN_WORK)
     walker = common.WindowWalker(start)
     while time.monotonic() < ctx.run.deadline:
         relay.poll()

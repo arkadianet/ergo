@@ -5,11 +5,14 @@ window close, not proof that a packet never arrived. Raw samples are retained.
 """
 from bisect import bisect_right
 from datetime import datetime
+import json
 import re
+import tempfile
 import time
 import urllib.error
 
 import smoke
+from relay_evidence import LineFile
 
 ID = r'[0-9a-f]{64}'
 RECEIPT = re.compile(rf'(?:Adding input block ({ID}) to existing tree|Creating new tree for input block ({ID}) and ordering block)')
@@ -157,13 +160,20 @@ def measurement_issues(result):
 
 
 class Measurement:
-    def __init__(self, start_height):
+    def __init__(self, start_height, evidence_dir=None):
         import lifecycle
         self.nodes = [n for n in lifecycle.NODES if n != 'scala']
         self.files = {n: (smoke.WORK / f'{n}.log').open() for n in lifecycle.NODES if n.startswith('scala')}
         for file in self.files.values():
             file.seek(0, 2)
-        self.lines = {n: [] for n in self.files}
+        self.evidence_dir = evidence_dir if evidence_dir is not None else smoke.WORK / 'campaign'
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        # Unique names keep earlier attempts' sidecars intact. JSONL preserves
+        # even partial lines as separate entries, with the original indices.
+        self.line_outputs = {n: tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                             dir=self.evidence_dir, prefix=f'relay-lines-{n}-', suffix='.log', delete=False)
+                             for n in self.files}
+        self.lines = {n: LineFile(file.name) for n, file in self.line_outputs.items()}
         self.started = time.time()
         self.start_height = start_height
         self.height = start_height
@@ -173,15 +183,16 @@ class Measurement:
         self.rust_errors = []
         self.rust_reads = {}
         self.samples = {n: [] for n in self.nodes}
+        self.status_polls = []
         self.last_retry_height = None
 
     def poll(self):
         import campaign
         for node, file in self.files.items():
-            lines = file.readlines()
-            self.lines[node].extend(lines)
-            if node == 'scala':
-                for line in lines:
+            while line := file.readline():
+                self.line_outputs[node].write(json.dumps(line) + '\n')
+                self.lines[node].count += 1
+                if node == 'scala':
                     match = HEIGHT.search(line)
                     if match:
                         height = int(match[1])
@@ -209,11 +220,13 @@ class Measurement:
             actual = {n: smoke.api(n, '/info', timeout=2)['fullHeight'] for n in self.nodes}
             after = smoke.api('scala', '/info', timeout=2)['fullHeight']
             tracked = {s['address'].lstrip('/'): s['height'] for s in statuses}
+            poll = len(self.status_polls)
+            self.status_polls.append({'at': at, 'raw_statuses': statuses})
             for node in self.nodes:
                 address = f'{campaign.CAMPAIGN_P2P_HOST[node]}:{campaign.CAMPAIGN_P2P[node]}'
                 self.samples[node].append({'at': at, 'end': time.time(), 'miner': before if before == after else None,
                                            'actual': actual[node], 'tracked': tracked.get(address),
-                                           'raw_statuses': statuses})
+                                           'raw_statuses_ref': poll})
         except (smoke.Unavailable, KeyError, TypeError) as error:
             for node in self.nodes:
                 self.samples[node].append({'at': at, 'error': str(error)})
@@ -223,6 +236,8 @@ class Measurement:
         self.poll()
         ended = time.time()
         for file in self.files.values():
+            file.close()
+        for file in self.line_outputs.values():
             file.close()
         intervals, boundaries = miner_window(self.lines['scala'], self.start_height, self.started)
         cutoff = boundaries[-1]
@@ -242,11 +257,12 @@ class Measurement:
                 'M2': {n: dict(staleness([r for r in rows if r['at'] < cutoff]), raw_samples=rows) for n, rows in self.samples.items()},
                 'M3': traffic_out, 'rust_api_errors': self.rust_errors,
                 'rust_last_probes': self.rust_reads,
-                'source_lines': self.lines,
+                'source_line_files': {n: lines.reference() for n, lines in self.lines.items()},
+                'status_polls': self.status_polls,
                 'limitations': ['M1 never_observed is bounded by the measurement cutoff; Rust API polling can miss evicted records.',
                                 'M3 counts at one named receiver per sender; socket pairs are matched across both logs.',
                                 'M2 stretch spans observed stale samples, not continuous-time proof; unknown samples break stretches.']}
 
         from relay_classification import classify
-        result['classification'] = classify(result)
+        result['classification'] = classify(result, evidence_dir=self.evidence_dir)
         return result

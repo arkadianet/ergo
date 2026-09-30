@@ -1,5 +1,6 @@
 """Captured relay regression: smoke 2026-09-27, three completed measurement intervals."""
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -43,6 +44,83 @@ class RelayTests(unittest.TestCase):
                 return measurement.finish()
 
     # ----- happy path -----
+    def test_a1_sidecar_measurement_round_trip(self):
+        import lifecycle
+        from relay_evidence import source_lines
+        from relay_rescore import rescore
+        fixture = json.loads((FIXTURES / 'relay-a1.json').read_text())
+        captured = {n: [r['text'] for r in rows] for n, rows in fixture['source_lines'].items()}
+        started = min(relay.timestamp(s) for s in captured['scala']) - 1
+        statuses = json.loads((FIXTURES / 'relay-samples.json').read_text())['scala2'][0]['raw_statuses']
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            evidence = root / 'campaign'
+            with patch.object(relay.smoke, 'WORK', root), patch.object(lifecycle, 'NODES', ('scala', 'scala2', 'rust')):
+                for node in captured:
+                    (root / f'{node}.log').write_text('warm-up must be excluded\n')
+                with patch.object(relay.time, 'time', return_value=started):
+                    measurement = relay.Measurement(36, evidence)
+                def api(node, path, **kwargs):
+                    return statuses if path == '/peers/syncInfo' else {'fullHeight': 36}
+                with patch.object(relay.smoke, 'api', side_effect=api), \
+                        patch.object(relay.smoke, 'request', return_value=(200, [])), \
+                        patch.object(relay.time, 'time', return_value=started + 1):
+                    # Preserve a partial read as its own indexed entry. Reusing
+                    # readlines-sized batches would hide this framing bug.
+                    for node in captured:
+                        with (root / f'{node}.log').open('a') as log:
+                            log.write('unrelated UTF8: é, partial')
+                    measurement.poll()
+                    for node, lines in captured.items():
+                        with (root / f'{node}.log').open('a') as log:
+                            log.write(' continuation\n' + ''.join(lines))
+                    result = measurement.finish()
+            self.assertNotIn('source_lines', result)
+            replayed = source_lines(result, evidence)
+            for node, lines in captured.items():
+                expected = ['unrelated UTF8: é, partial', ' continuation\n', *lines]
+                self.assertEqual(list(replayed[node]), expected)
+                self.assertEqual(list(replayed[node]), expected)  # replay is not one-shot
+                self.assertEqual(len(replayed[node]), len(expected))
+            self.assertEqual(len(result['status_polls']), 2)
+            for metric in result['M2'].values():
+                self.assertEqual([r['raw_statuses_ref'] for r in metric['raw_samples']], [0, 1])
+                self.assertTrue(all('raw_statuses' not in r for r in metric['raw_samples']))
+            # Restore the old storage format without changing observations.
+            old = json.loads(json.dumps(result))
+            old['source_lines'] = {n: list(lines) for n, lines in replayed.items()}
+            old.pop('source_line_files')
+            polls = old.pop('status_polls')
+            for metric in old['M2'].values():
+                for row in metric['raw_samples']:
+                    row['raw_statuses'] = polls[row.pop('raw_statuses_ref')]['raw_statuses']
+            old_dir, moved = root / 'old', root / 'export'
+            old_dir.mkdir()
+            (old_dir / 'steady.json').write_text(json.dumps({'relay_refresh': old}))
+            (evidence / 'steady.json').write_text(json.dumps({'relay_refresh': result}))
+            shutil.copytree(evidence, moved)  # paths must survive run.sh-style export
+            old_score, new_score = rescore(old_dir), rescore(moved)
+            for key in ('window', 'M1', 'M3', 'classification', 'rust_api_errors', 'rust_last_probes'):
+                self.assertEqual(old_score[key], new_score[key])
+                self.assertEqual(result[key], new_score[key])
+            for node in old_score['M2']:
+                old_metric, new_metric = dict(old_score['M2'][node]), dict(new_score['M2'][node])
+                old_rows, new_rows = old_metric.pop('raw_samples'), new_metric.pop('raw_samples')
+                self.assertEqual(old_metric, new_metric)
+                for a, b in zip(old_rows, new_rows):
+                    restored = dict(b)
+                    restored['raw_statuses'] = new_score['status_polls'][restored.pop('raw_statuses_ref')]['raw_statuses']
+                    self.assertEqual(a, restored)
+            # Missing and truncated evidence must fail, rather than re-score
+            # incomplete logs as successful zero observations.
+            path = moved / result['source_line_files']['scala']['path']
+            path.write_text('')
+            with self.assertRaises(ValueError):
+                rescore(moved)
+            path.unlink()
+            with self.assertRaises(FileNotFoundError):
+                rescore(moved)
+
     def test_m1_captured_interval_receipts_match(self):
         result = self.collect()
         self.assertEqual(result['window']['boundaries'], [START, 1790532392.298, 1790532409.300, END])

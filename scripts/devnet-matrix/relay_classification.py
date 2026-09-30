@@ -5,6 +5,7 @@ import math
 import re
 
 from relay_measurement import CONNECTION, HEIGHT, ID, RECEIPT, timestamp
+from relay_evidence import source_lines
 
 CLASSES = ('a-stale-not-sent', 'a-not-sent-other', 'b-plus2-dropped', 'b-gap-dropped', 'other')
 # Half a second spans roughly one A1 input-block cadence, above millisecond log skew.
@@ -44,7 +45,7 @@ def distribution(values):
                for p in (50, 90, 95, 99)}}
 
 
-def classify(result, delay_seconds=DELAY_SECONDS):
+def classify(result, delay_seconds=DELAY_SECONDS, evidence_dir=None):
     """Classify exactly M1's denominator, using captured lines and M2 samples.
 
     +2 reasons name IDs. Gap reasons require a unique miner frame within
@@ -55,7 +56,7 @@ def classify(result, delay_seconds=DELAY_SECONDS):
     """
     if not math.isfinite(delay_seconds) or delay_seconds < 0:
         raise ValueError('delay threshold must be finite and nonnegative')
-    logs = result['source_lines']
+    logs = source_lines(result, evidence_dir)
     window = result['window']
     mined = {}
     first = next(iter(result['M1'].values()))

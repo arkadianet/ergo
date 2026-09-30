@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from relay_classification import DELAY_SECONDS, classify
+from relay_evidence import source_lines
 from relay_measurement import coverage, miner_window, peer_traffic, scala_received, staleness
 
 
@@ -14,9 +15,9 @@ def rescore(directory, delay_seconds=DELAY_SECONDS):
     if not path.is_file():
         path = directory / 'campaign' / 'steady.json'
     saved = json.loads(path.read_text())['relay_refresh']
-    # Embedded lines preserve exactly the live poll window, including receipt
+    # Captured lines preserve exactly the live poll window, including receipt
     # cutoff; full node logs contain warm-up and post-measurement activity.
-    lines = saved['source_lines']
+    lines = source_lines(saved, path.parent)
     start_height = int(next(iter(next(iter(saved['M1'].values()))['per_interval'])))
     intervals, boundaries = miner_window(lines['scala'], start_height, saved['window']['start'])
     result = dict(saved)
@@ -31,9 +32,9 @@ def rescore(directory, delay_seconds=DELAY_SECONDS):
         receiver = 'scala2' if sender == 'scala' else 'scala'
         result['M3'][sender] = (dict(peer_traffic(lines[sender], lines[receiver], boundaries), receiver=receiver)
                                 if receiver in lines else {'unavailable': 'no stock Scala receiver'})
-    result['classification'] = classify(result, delay_seconds)
+    result['classification'] = classify(result, delay_seconds, path.parent)
     result['rescore'] = {'source': str(path), 'rust_coverage_source': 'archived successful API IDs; no offline re-probe'}
-    # Source-line references in classifications index the embedded arrays, 1-based.
+    # Source-line references index inline arrays or sidecar records, 1-based.
     return result
 
 
@@ -43,7 +44,7 @@ def main():
     parser.add_argument('--delay-seconds', type=float, default=DELAY_SECONDS)
     args = parser.parse_args()
     result = rescore(args.evidence_dir, args.delay_seconds)
-    result.pop('source_lines')
+    result.pop('source_lines', None)
     # Raw observations stay in the immutable archive; output keeps computed
     # metrics and per-block cause evidence without duplicating all log traffic.
     for metric in result['M3'].values():

@@ -532,13 +532,26 @@ RELAY_A1_EVIDENCE=/path/to/A1 TMPDIR="$PWD/.tmp" \
   python3 scripts/devnet-matrix/verdict_self_test.py --self-test
 ```
 
-The re-scorer uses `campaign/steady.json`'s embedded measurement source lines,
-which preserve the exact live poll boundaries, rather than the full logs'
-warm-up or post-measurement tail. It recomputes Scala M1, M2, M3 and causes;
+The re-scorer accepts both archived inline `relay_refresh.source_lines`
+and new `relay_refresh.source_line_files` references. New runs stream the
+complete measurement window to unique `relay-lines-<node>-*.log` sidecars
+beside `steady.json`; each reference contains a relative `path` and
+`line_count`. Copy these files with the JSON (`run.sh`'s `*.log` export
+already includes them). Each sidecar record is a JSON-encoded string,
+preserving one original tailed entry, including its newline or a partial
+line. The files can be replayed without loading the logs into memory.
+Both formats preserve the exact live poll boundaries, excluding the full
+logs' warm-up and post-measurement tail. It recomputes Scala M1, M2, M3 and causes;
 Rust M1 uses archived successful API IDs because offline re-probing is
 impossible. It writes JSON to stdout and leaves the archive unchanged.
 Cause `source_line` references are 1-based indices into the corresponding
-`relay_refresh.source_lines` array. The small verbatim A1 fixtures run in the
+old `relay_refresh.source_lines` array or new sidecar records; no entries
+are filtered and indices are unchanged. For direct classification of a new
+result, pass `classify(result, evidence_dir=directory_containing_steady_json)`.
+New M2 `raw_samples` store `raw_statuses_ref`, a zero-based index into
+`relay_refresh.status_polls`; each poll retains its timestamp and complete
+`raw_statuses` reply once, shared by all nodes. Old inline replies remain
+supported. The small verbatim A1 fixtures run in the
 normal self-test suite; the environment variable enables whole-A1 parity
 against Q3's published 13/68/13 and 0/86/35 table and 70 H55 recoveries.
 
