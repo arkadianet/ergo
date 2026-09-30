@@ -227,15 +227,11 @@ pub(crate) struct PersistJob {
     /// stay intact when pruning starts; only the heights between
     /// `new_min - diff` and `new_min` are evicted.
     pub old_best_full_block_height: u32,
-    /// Whether this commit must be durable (`Durability::Eventual`) or
-    /// in-memory only (`Durability::None`). `Eventual` writes data + the
-    /// durable commit marker but skips the synchronous fsync, deferring
-    /// disk durability to OS writeback (~30s on Linux). Eliminates the
-    /// 1-3s fsync stalls that `Immediate` causes on busy databases at
-    /// the cost of a small additional crash-recovery window beyond
-    /// `ibd_flush_interval`. Set per `ibd_blocks_since_flush >=
-    /// ibd_flush_interval` so the durable flush still happens
-    /// periodically — just without the stall.
+    /// Whether this batch requires `Durability::Eventual` rather than
+    /// `Durability::None`. In redb 2.6.3, Eventual still calls synchronous
+    /// `File::sync_data` on Linux; it is not an OS-writeback-only mode.
+    /// Set per `ibd_blocks_since_flush >= ibd_flush_interval` so durable
+    /// commits happen periodically during IBD.
     pub durable: bool,
     /// Prune undo entries below this height (None = no pruning).
     pub prune_below: Option<u32>,
@@ -574,9 +570,15 @@ impl PersistPipeline {
         let tx = self.tx.as_ref().ok_or(StateError::InvalidPrecondition {
             what: "persist pipeline already shut down",
         })?;
+        let height = job.height;
+        let send_start = std::time::Instant::now();
         tx.send(job).map_err(|_| StateError::InternalInvariant {
             what: "persist worker thread died (channel closed)",
         })?;
+        let send_ms = send_start.elapsed().as_secs_f64() * 1000.0;
+        if send_ms >= 1.0 {
+            debug!(height, send_ms, "persist queue wait");
+        }
         Ok(seq)
     }
 
@@ -612,9 +614,9 @@ impl PersistPipeline {
     /// false-pass on a stale watermark from a previous branch.
     ///
     /// Scope: this proves redb has committed every queued job. It does
-    /// NOT prove the OS has fsync'd those pages — `Durability::Eventual`
-    /// defers fsync to OS writeback. The `force_durable_flush` path on
-    /// `StateStore` is the OS-fsync barrier.
+    /// NOT prove all pages are durably flushed, because some batches use
+    /// `Durability::None`. The `force_durable_flush` path on `StateStore`
+    /// is the final OS-fsync barrier.
     ///
     /// Returns `None` on success; `Some(PersistResult::Err)` if any job
     /// since pipeline start failed (sticky — a single failure persists
@@ -753,7 +755,7 @@ impl PersistPipeline {
     /// is rewritten ONCE if any job bumped best_header, walking back from
     /// the LAST bumping job's tip to the FIRST bumping job's old base.
     /// Pruning uses the LAST job's `prune_below` (pruning is monotonic).
-    /// Durability: Immediate iff ANY job in the batch is durable.
+    /// Durability: Eventual iff ANY job in the batch is durable.
     #[cfg(test)]
     fn execute_batch(
         db: &Database,
@@ -806,29 +808,18 @@ impl PersistPipeline {
             return Ok(0.0);
         }
 
+        let batch_start = std::time::Instant::now();
         let mut write_txn = crate::begin_write_qr(db)
             .observe_persist_error(failure_context, "background_persist_begin_write")?;
+        let writer_wait_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
 
         // Durability mode per batch:
-        //   - `None`     : pure-memory commit, queued for next durable flush.
-        //                  Used between IBD durable points.
-        //   - `Eventual` : data is queued to OS pagecache and a durable commit
-        //                  marker is written, but NO synchronous fsync.
-        //                  redb stays consistent (CoW B-tree) and the OS
-        //                  writeback (~30s on Linux) flushes to disk in the
-        //                  background. This is the IBD periodic-flush mode —
-        //                  it gives durability across normal restarts without
-        //                  the 1-3s fsync stall that `Immediate` produces
-        //                  on a busy DB. Hard-crash window is the OS
-        //                  writeback delay (~30s) plus the IBD flush
-        //                  interval (~100 blocks); both are acceptable
-        //                  during catchup.
-        //
-        // Once IBD ends and `set_ibd_mode(false, ...)` flips, every commit
-        // is durable; the synchronous-fsync `Immediate` mode then applies
-        // (we use `Eventual` here because it's still safer than `None` —
-        // tip-sync should be configured to call this with all-immediate
-        // semantics if zero-loss durability is required).
+        //   - `None`: makes writes visible without a durability guarantee.
+        //   - `Eventual`: periodic IBD commit points and every tip-sync batch.
+        // In redb 2.6.3's Linux backend Eventual uses File::sync_data, just
+        // like Immediate. Quick-repair also enables two-phase commits. These
+        // commits can therefore stall on disk flushes; do not describe them
+        // as background OS writeback or weaken durability to hide the stall.
         let any_durable = jobs.iter().any(|j| j.durable);
         let durability = if any_durable {
             redb::Durability::Eventual
@@ -1187,10 +1178,27 @@ impl PersistPipeline {
         }
 
         let commit_start = std::time::Instant::now();
+        let write_ms =
+            commit_start.duration_since(batch_start).as_secs_f64() * 1000.0 - writer_wait_ms;
         write_txn
             .commit()
             .observe_persist_error(failure_context, "background_persist_commit")?;
-        Ok(commit_start.elapsed().as_secs_f64() * 1000.0)
+        let commit_ms = commit_start.elapsed().as_secs_f64() * 1000.0;
+        // Log single-job batches too: they dominate when proof generation is
+        // slower than persistence, and can still contain the periodic fsync.
+        // Separate writer acquisition from mutation and commit so contention
+        // with section/header writes is not mistaken for storage flush time.
+        debug!(
+            n = jobs.len(),
+            h_lo = jobs.first().map(|j| j.height).unwrap_or(0),
+            h_hi = jobs.last().map(|j| j.height).unwrap_or(0),
+            durable = any_durable,
+            writer_wait_ms,
+            write_ms,
+            commit_ms,
+            "persist transaction timing",
+        );
+        Ok(commit_ms)
     }
 }
 
