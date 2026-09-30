@@ -221,7 +221,7 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         let cs = state.store.chain_state_meta();
         let next_height = cs.best_full_block_height + 1;
         let next_header_height = cs.best_header_height;
-        if next_height <= next_header_height {
+        if next_height <= next_header_height || cs.best_header_id != cs.best_full_block_id {
             // Try to assemble and apply blocks sequentially. Successful applies
             // are relayed by flush_actions below, alongside missing-section requests.
             //
@@ -318,10 +318,7 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             .filter(|(addr, _)| state.registry.peers.contains_key(addr))
             .collect();
         let connected_addrs: Vec<PeerId> = connected.iter().map(|(a, _)| *a).collect();
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
         let selected = state
             .coordinator
             .peers_to_sync_with(&connected_addrs, now, seed);

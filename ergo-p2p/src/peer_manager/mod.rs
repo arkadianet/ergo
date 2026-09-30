@@ -498,14 +498,8 @@ impl PeerManager {
     /// `GetPeers` to a random peer every `getPeersInterval`) so a
     /// silent-but-connected peer cannot monopolize gossip rounds.
     ///
-    /// `seed` is an arbitrary `u64` (caller typically passes
-    /// `SystemTime::now()` nanos or a process-local counter); it's
-    /// used modulo the eligible-peer count to pick an index over the
-    /// address-sorted list. Tests pass explicit seeds for
-    /// determinism; production callers pass a per-tick wall-clock
-    /// value. The randomness floor is "caller chooses entropy" —
-    /// good enough for non-cryptographic gossip rotation without
-    /// pulling in a `rand` dependency.
+    /// Production callers supply OS randomness; tests inject explicit seeds.
+    /// The seed selects an index over the address-sorted eligible peers.
     ///
     /// Returns `None` if no non-degraded connected peer exists. Caller
     /// is expected to space invocations by [`GOSSIP_INTERVAL`].

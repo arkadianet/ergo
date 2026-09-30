@@ -732,6 +732,7 @@ fn inject_local_full_block(
             e @ (HeaderProcessError::ParentNotFound { .. }
             | HeaderProcessError::Invalid { .. }
             | HeaderProcessError::HeightMismatch { .. }
+            | HeaderProcessError::TooOld { .. }
             | HeaderProcessError::EpochContextIncomplete { .. }
             | HeaderProcessError::EpochHeaderMissing { .. }
             | HeaderProcessError::CheckpointMismatch { .. }

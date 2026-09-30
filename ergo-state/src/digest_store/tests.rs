@@ -1383,10 +1383,7 @@ fn lost_sentinel_with_only_chain_state_history_still_detected_as_digest_verifier
 }
 
 #[test]
-fn apply_rejects_chain_state_with_header_behind_full_block() {
-    // best_header_height must lead or equal best_full_block_height.
-    // A chain state with the header tip behind the full-block tip
-    // is a nonsense fork-choice view — reject at the seam.
+fn apply_rejects_chain_state_with_full_blocks_without_headers() {
     let tmp = tempdir().expect("tempdir");
     let mut store = open_at(tmp.path());
     let bad = ChainStateMeta {
@@ -1402,7 +1399,7 @@ fn apply_rejects_chain_state_with_header_behind_full_block() {
         .expect_err("header behind full block must reject");
     let msg = format!("{err}");
     assert!(
-        msg.contains("best_header_height < best_full_block_height"),
+        msg.contains("full blocks without a best header"),
         "msg={msg}",
     );
     assert_eq!(store.height(), 0);
@@ -2114,4 +2111,59 @@ mod rollback_selection {
         assert!(store.rollback_to(1).is_err());
         assert_eq!(store.height(), 2);
     }
+}
+
+#[test]
+fn shorter_heavier_header_chain_survives_digest_restart_and_rollback() {
+    let tmp = tempdir().unwrap();
+    let mut store = open_at(tmp.path());
+    for height in 1..=3 {
+        apply_synth(&mut store, height);
+        // The raw digest seam stores no header metadata; seed the history
+        // linkage needed by best-header index rewriting.
+        store
+            .store_validated_header(
+                &synth_header_id(height),
+                &synth_header_bytes(height, synth_digest(height)),
+                &HeaderMeta {
+                    parent_id: if height == 1 {
+                        [0; 32]
+                    } else {
+                        synth_header_id(height - 1)
+                    },
+                    height,
+                    cumulative_score: vec![height as u8],
+                    pow_validity: 1,
+                    timestamp: 1_700_000_000,
+                },
+                None,
+            )
+            .unwrap();
+    }
+    // A best header at height 2 can outscore the applied tip at height 3.
+    let branch_id = synth_header_id(42);
+    let raw = synth_header_bytes(2, synth_digest(2));
+    store
+        .store_validated_header(
+            &branch_id,
+            &raw,
+            &HeaderMeta {
+                parent_id: synth_header_id(1),
+                height: 2,
+                cumulative_score: vec![255],
+                pow_validity: 1,
+                timestamp: 1_700_000_000,
+            },
+            Some((2, vec![255])),
+        )
+        .unwrap();
+    drop(store);
+    let mut store = open_at(tmp.path());
+    assert_eq!(store.chain_state().best_header_id, branch_id);
+    assert_eq!(store.chain_state().best_header_height, 2);
+    assert_eq!(store.chain_state().best_full_block_height, 3);
+    assert_eq!(store.root_digest(), synth_digest(3));
+    store.rollback_to(1).unwrap();
+    assert_eq!(store.chain_state().best_header_id, branch_id);
+    assert_eq!(store.chain_state().best_full_block_height, 1);
 }

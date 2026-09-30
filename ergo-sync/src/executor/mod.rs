@@ -38,6 +38,7 @@ mod startup;
 pub(crate) use header_pipeline::{ORPHAN_HEADER_IBD_LOOKAHEAD, ORPHAN_HEADER_LIMIT};
 #[cfg(test)]
 pub(crate) use reorg::ForkPoint;
+#[cfg(test)]
 pub(crate) use reorg::ReorgOutcome;
 pub use reorg::{DeepForkWedge, LastBlockApplyError};
 pub use startup::{HydrationError, StartupError};
@@ -150,6 +151,11 @@ pub struct SyncExecutor {
     /// CONTEXT.headers sees [H, H-1, ..., H-9]. Max 10 entries.
     /// Updated after each successful block apply. Rebuilt on rollback.
     block_context_headers: Vec<CheckedHeader>,
+    /// Available replacement suffix selected by cumulative full-chain work.
+    reorg_blocks: VecDeque<[u8; 32]>,
+    /// An assembled block outside the best-header branch may complete a
+    /// better full chain even while the best-header branch withholds bodies.
+    full_candidate_height: Option<u32>,
     /// Header IDs installed since the last `drain_orphans` call. Used by
     /// the orphan drain to filter the buffer down to "orphans whose parent
     /// MIGHT have just appeared" without doing a full per-orphan
@@ -256,6 +262,8 @@ impl SyncExecutor {
             chain_config,
             last_headers: VecDeque::with_capacity(LAST_HEADERS_WINDOW),
             block_context_headers: Vec::with_capacity(10),
+            reorg_blocks: VecDeque::new(),
+            full_candidate_height: None,
             recently_installed: HashSet::new(),
             orphan_headers: HashMap::new(),
             orphan_headers_len: 0,

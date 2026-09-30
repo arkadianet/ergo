@@ -332,13 +332,10 @@ pub(in crate::node) fn handle_message(
             // hold its slot. Serving it still costs us nothing beyond the
             // reply, and an honest peer that asks for peers is also
             // syncing with us.
-            // Seed for rotation: wall-clock nanos give a different
+            // Seed rotation from OS randomness to vary the
             // starting offset on each `Peers` reply so the same prefix
             // of our peer list isn't sent to every requester.
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0);
+            let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
             // Scala parses inbound Peers with `require(length <= 64)`
             // (BasicMessagesRepo.scala:56-58); a longer list is a parse
             // failure and earns us a permanent IP ban, so share at most

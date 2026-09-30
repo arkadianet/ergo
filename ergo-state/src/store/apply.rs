@@ -606,6 +606,7 @@ impl StateStore {
         wallet_payload: Option<&crate::store::WalletApplyPayload>,
     ) -> Result<(), StateError> {
         let (to_remove, to_insert, emission) = changes;
+        let promote_header = self.should_promote_applied_header(height, header_id)?;
         let digest_before = self.tree.root_digest();
         let cache_advance = voted_params_row.clone();
 
@@ -640,7 +641,7 @@ impl StateStore {
                 self.tree.arena_commit(durability);
                 self.chain_state.best_full_block_height = height;
                 self.chain_state.best_full_block_id = *header_id;
-                if self.chain_state.best_header_height < height {
+                if promote_header {
                     self.chain_state.best_header_id = *header_id;
                     self.chain_state.best_header_height = height;
                 }

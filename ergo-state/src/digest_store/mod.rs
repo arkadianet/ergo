@@ -142,6 +142,7 @@ pub struct DigestStateStore {
     db_path: PathBuf,
     root_digest: [u8; 33],
     chain_state: ChainStateMeta,
+    keep_versions: u32,
     /// Network voting parameters (`voting_length` + soft-fork
     /// thresholds). The epoch-boundary guard reads `voting_length`;
     /// block validation reads the soft-fork thresholds. Holds the whole
@@ -181,6 +182,10 @@ mod voted_params;
 pub(crate) use voted_params::has_digest_verifier_markers;
 
 impl DigestStateStore {
+    /// Configure header admission independently of digest history retention.
+    pub fn set_keep_versions(&mut self, keep_versions: u32) {
+        self.keep_versions = keep_versions;
+    }
     pub fn database_path(&self) -> &Path {
         &self.db_path
     }
@@ -396,9 +401,8 @@ fn genesis_chain_state() -> ChainStateMeta {
 
 /// Internal fork-choice invariants every `ChainStateMeta` the store
 /// accepts must satisfy, independent of any header store:
-/// - `best_header_height >= best_full_block_height` — headers are
-///   validated before the full blocks they cover, so the header tip
-///   can never trail the full-block tip.
+/// - A non-empty full chain needs a non-empty header chain. A heavier
+///   header branch may have a lower tip while its blocks are unavailable.
 /// - `best_header_score` is non-empty — even genesis carries `[0]`.
 ///
 /// Returns a static reason on violation so callers can route it to
@@ -407,9 +411,8 @@ fn genesis_chain_state() -> ChainStateMeta {
 /// persisted header rows — that needs header tables this sibling
 /// does not own.
 fn chain_state_internal_invariant(cs: &ChainStateMeta) -> Result<(), &'static str> {
-    if cs.best_header_height < cs.best_full_block_height {
-        return Err("chain state best_header_height < best_full_block_height \
-             (headers must lead or equal full blocks)");
+    if cs.best_header_height == 0 && cs.best_full_block_height > 0 {
+        return Err("chain state has full blocks without a best header");
     }
     if cs.best_header_score.is_empty() {
         return Err("chain state best_header_score is empty (must be non-empty)");

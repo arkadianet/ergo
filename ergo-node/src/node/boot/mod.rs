@@ -331,7 +331,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         config.utxo_bootstrap,
     );
     if is_mode_5 {
-        let store = ergo_state::DigestStateStore::open(
+        let mut store = ergo_state::DigestStateStore::open(
             &db_path,
             launch_parameters,
             config.chain_spec.voting,
@@ -341,6 +341,7 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
             report_boot_storage_failure(&db_path, "open_digest_state", &e);
             Box::new(e) as NodeError
         })?;
+        store.set_keep_versions(config.keep_versions);
         info!(
             path = %db_path.display(),
             state_type = config.state_type.as_str(),

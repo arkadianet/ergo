@@ -766,6 +766,30 @@ pub enum AdProofsApplyPolicy {
 }
 
 impl StateStore {
+    /// Applying on the full chain must not replace a shorter, heavier header
+    /// branch merely because the applied block has a greater height.
+    fn should_promote_applied_header(
+        &self,
+        height: u32,
+        id: &[u8; 32],
+    ) -> Result<bool, StateError> {
+        if height <= self.chain_state.best_header_height {
+            return Ok(false);
+        }
+        if let Some(meta) = self.get_header_meta(id)? {
+            return Ok(num_bigint::BigUint::from_bytes_be(&meta.cumulative_score)
+                > num_bigint::BigUint::from_bytes_be(&self.chain_state.best_header_score));
+        }
+        // Synthetic state tests can bypass header validation entirely.
+        #[cfg(feature = "test-helpers")]
+        return Ok(true);
+        #[cfg(not(feature = "test-helpers"))]
+        Err(StateError::DbCorruption {
+            table: "header_meta",
+            key: hex::encode(id),
+            reason: "applied block has no validated header metadata".to_owned(),
+        })
+    }
     /// Default cache budget for the disk-backed AVL arena: 1 GB.
     /// Profiling at h=505k showed 128 MB undersized for IBD: redb page-cache
     /// reads + LRU evictions were ~3% of samples while DB had grown to 3.8 GB.
@@ -3721,7 +3745,7 @@ impl StateStore {
         .to_vec();
 
         let old_best_header_height = self.chain_state.best_header_height;
-        let best_header_bumped = old_best_header_height < height;
+        let best_header_bumped = self.should_promote_applied_header(height, header_id)?;
         // Pre-apply `best_full_block_height` for the Phase 2a/2b
         // eviction-range computation. Captured here so both the
         // synchronous seam below AND the pipeline-batch seam (via

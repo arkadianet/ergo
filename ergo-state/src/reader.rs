@@ -61,6 +61,21 @@ pub fn committed_tip_in(
 }
 
 impl ChainStoreReader {
+    /// Check full-block availability in one snapshot without copying payloads.
+    pub fn block_sections_exist(&self, ids: &[[u8; 32]]) -> Result<bool, StateError> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(BLOCK_SECTIONS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for id in ids {
+            if table.get(id.as_slice())?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     /// Construct from an `Arc<Database>` shared with the owning
     /// [`crate::store::StateStore`]. Crate-private so external callers
     /// always go through `StateStore::reader()`.

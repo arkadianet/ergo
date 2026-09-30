@@ -326,10 +326,6 @@ pub struct PopowBootstrap {
     expected_k: u32,
     difficulty_params: DifficultyParams,
     verifier: NipopowVerifier,
-    /// Peers we've already sent `GetNipopowProof` to during the
-    /// current bootstrap. Cleared per-peer on disconnect via
-    /// [`Self::forget_peer`].
-    requested_peers: BTreeSet<PeerId>,
     /// Peers we've received a proof from (regardless of validity). Gates
     /// [`Self::on_proof_received`]: a peer already in this set has its
     /// further proofs dropped before the verifier, so it cannot contribute
@@ -366,7 +362,6 @@ impl PopowBootstrap {
             expected_k: P2P_NIPOPOW_PROOF_K as u32,
             difficulty_params: chain_config.clone(),
             verifier: NipopowVerifier::new(genesis_id_opt, chain_config),
-            requested_peers: BTreeSet::new(),
             seen_providers: BTreeSet::new(),
             best_proof_peer: None,
             started_at: None,
@@ -398,39 +393,31 @@ impl PopowBootstrap {
         )
     }
 
-    /// Filter `eligible_peers` down to those we have NOT yet sent
-    /// `GetNipopowProof` to during this bootstrap.
+    /// Ask peers that have not answered on each sync cycle, matching Scala.
+    /// Sending a request does not make a silent peer a proof provider.
     pub fn pending_request_peers(&self, eligible_peers: &[PeerId]) -> Vec<PeerId> {
         if self.is_terminal() {
             return Vec::new();
         }
         eligible_peers
             .iter()
-            .filter(|p| !self.requested_peers.contains(p))
+            .filter(|p| !self.seen_providers.contains(p))
             .copied()
             .collect()
     }
 
     /// Record that we sent `GetNipopowProof` to `peer`. Caller
     /// invokes after a successful send.
-    pub fn mark_requested(&mut self, peer: PeerId, now: Instant) {
+    pub fn mark_requested(&mut self, _peer: PeerId, now: Instant) {
         if self.is_terminal() {
             return;
         }
-        self.requested_peers.insert(peer);
         if self.started_at.is_none() {
             self.started_at = Some(now);
         }
         if matches!(self.state, PopowBootstrapState::Idle) {
             self.state = PopowBootstrapState::Requesting;
         }
-    }
-
-    /// Drop a peer from our outstanding-request set so it can be
-    /// re-queried on reconnect (matches the per-peer "discovery_queried"
-    /// pattern in `SnapshotBootstrap`).
-    pub fn forget_peer(&mut self, peer: PeerId) {
-        self.requested_peers.remove(&peer);
     }
 
     /// Record an inbound proof's provider, check the bootstrap response profile,
@@ -801,11 +788,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_request_peers_excludes_already_requested() {
+    fn pending_request_peers_retries_silent_peers_and_excludes_providers() {
         let mut b = fresh_bootstrap(2);
         b.mark_requested(peer(1), Instant::now());
         let pending = b.pending_request_peers(&[peer(1), peer(2)]);
-        assert_eq!(pending, vec![peer(2)]);
+        assert_eq!(pending, vec![peer(1), peer(2)]);
+        b.on_proof_received(peer(1), valid_proof());
+        assert_eq!(b.pending_request_peers(&[peer(1), peer(2)]), vec![peer(2)]);
     }
 
     #[test]
@@ -840,12 +829,21 @@ mod tests {
     }
 
     #[test]
-    fn forget_peer_allows_re_request() {
+    fn initially_silent_providers_can_complete_quorum_after_retry() {
         let mut b = fresh_bootstrap(2);
-        b.mark_requested(peer(1), Instant::now());
-        assert_eq!(b.pending_request_peers(&[peer(1)]).len(), 0);
-        b.forget_peer(peer(1));
-        assert_eq!(b.pending_request_peers(&[peer(1)]), vec![peer(1)]);
+        let peers = [peer(1), peer(2)];
+        let now = Instant::now();
+        for p in peers {
+            b.mark_requested(p, now);
+        }
+        assert_eq!(b.pending_request_peers(&peers), peers);
+        for p in b.pending_request_peers(&peers) {
+            b.mark_requested(p, now + std::time::Duration::from_secs(10));
+            b.on_proof_received(p, valid_proof());
+        }
+        assert!(b.pending_request_peers(&peers).is_empty());
+        assert!(b.quorum_reached());
+        assert_eq!(b.state(), PopowBootstrapState::BestSelected);
     }
 
     #[test]

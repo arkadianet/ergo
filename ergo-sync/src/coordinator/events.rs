@@ -577,6 +577,11 @@ impl SyncCoordinator {
             return actions;
         }
 
+        // Below-tip fork downloads are registered by the executor, which
+        // knows the fork point. Do not create unowned assembly entries here.
+        if height <= self.sync_state.best_full_block_height() {
+            return actions;
+        }
         self.sync_state.add_pending_block(height, header_id);
         self.assembly
             .register_header(expected_sections.clone(), self.requires_proofs);
@@ -632,6 +637,14 @@ impl SyncCoordinator {
 
     /// Called after a full block has been assembled and applied to state.
     pub fn on_block_applied(&mut self, header_id: [u8; 32], height: u32) {
+        self.sync_state.retain_pending_blocks(|block| {
+            if block.height <= height {
+                self.assembly.remove(&block.header_id);
+                false
+            } else {
+                true
+            }
+        });
         self.sync_state.set_best_full_block(height);
         self.assembly.remove(&header_id);
     }

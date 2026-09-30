@@ -1012,34 +1012,12 @@ pub(super) fn handle_mining_request(
                         "see node logs for the validation failure".to_owned()
                     }
                     super::block_relay::MinedSubmission::Fork => {
-                        match best_header_missing_sections_at(state, mined.height) {
-                            Some(best) => {
-                                warn!(
-                                    expected = %hex::encode(header_id),
-                                    best_header = %hex::encode(best),
-                                    height = mined.height,
-                                    "mining: block stored as a fork of a best header whose \
-                                     sections are not all stored; no block at this height \
-                                     applies until they are, or until a chain with more \
-                                     work replaces that header",
-                                );
-                                format!(
-                                    "stored as a fork: best header {} at height {} ties or \
-                                     outweighs it, and its sections are not all stored",
-                                    hex::encode(best),
-                                    mined.height
-                                )
-                            }
-                            None => {
-                                warn!(
-                                    expected = %hex::encode(header_id),
-                                    observed = %observed,
-                                    "mining: block stored as a fork; only the best header chain \
-                                     is applied",
-                                );
-                                "stored as a fork; only the best header chain is applied".to_owned()
-                            }
-                        }
+                        warn!(
+                            expected = %hex::encode(header_id),
+                            observed = %observed,
+                            "mining: stored fork did not advance the applied full chain",
+                        );
+                        "stored as a fork; full-chain selection did not apply it".to_owned()
                     }
                 };
                 // Scala's `onSolvedBlockFailed` (CandidateGenerator.scala
@@ -1076,34 +1054,6 @@ pub(super) fn handle_mining_request(
             unreachable!("GetRewardKey is handled before the mining-started gate")
         }
     }
-}
-
-/// The best-chain header at `height` when some of its sections are not stored.
-/// Presence is read without draining persistence results, so a pending
-/// persistence failure still reaches the next apply.
-/// Apply takes only the best header chain, so a mined block at that height
-/// that does not outscore it is stored as a fork, and no block at that height
-/// applies until those sections arrive or a chain with more work replaces the
-/// header.
-fn best_header_missing_sections_at(state: &NodeState, height: u32) -> Option<[u8; 32]> {
-    let id = state.store.get_header_id_at_height(height).ok().flatten()?;
-    let bytes = state.store.get_header(&id).ok().flatten()?;
-    let header =
-        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes)).ok()?;
-    let sections = ergo_ser::modifier_id::ExpectedSections::from_header(
-        &id,
-        header.transactions_root.as_bytes(),
-        header.extension_root.as_bytes(),
-        header.ad_proofs_root.as_bytes(),
-    );
-    [
-        sections.transactions_id,
-        sections.extension_id,
-        sections.ad_proofs_id,
-    ]
-    .iter()
-    .any(|section| matches!(state.store.read_section_for_serving(section, 1), Ok(None)))
-    .then_some(id)
 }
 
 /// How apply left an announced mined block that did not apply, with what that

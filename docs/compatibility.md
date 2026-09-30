@@ -41,6 +41,29 @@ here.
 
 ## What is implemented and parity-tested
 
+Header admission enforces Scala's fatal rule 209 (`hdrTooOld`): a child's
+parent must be less than `[node] keep_versions` blocks below the applied
+full-block tip, and genesis requires the full tip to be below that window.
+The default window is 200. Header-only sync uses the full height, so headers
+ahead of block application remain eligible. Digest nodes use the same
+admission setting even though their persisted rollback history is unbounded.
+
+Full-chain switching waits for a contiguous, available replacement suffix
+whose cumulative work exceeds the applied tip's work. Header-only forks
+leave the applied state intact; a shorter, heavier full chain can replace a
+longer one. The header and full-block tips can differ while bodies are being
+downloaded, including across a digest-store restart. Regression coverage lives
+in `ergo-sync/src/executor/relay_tests.rs`, `ergo-sync/tests/it/header_too_old.rs`,
+and the node's periodic-driver tests.
+
+Peer gossip, sharing-list rotation, discovery fanout and sync fanout draw
+their production seeds from OS randomness. Selection functions keep explicit
+seed inputs for deterministic tests. Download reassignment retains its
+connected-peer filtering, degradation preference and recency ranking; those
+quality rules do not use wall-clock entropy. Wallet mutations `/wallet/lock`
+and `/wallet/deriveNextKey` accept POST as well as Scala-compatible GET, with
+the same API-key authentication on both methods.
+
 The surfaces below are exercised by oracle-backed tests against
 Scala-produced fixtures and/or replayed against real mainnet bytes. The
 authoritative live, subsystem-by-subsystem status is the project's parity

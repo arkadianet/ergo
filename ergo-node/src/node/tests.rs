@@ -14,7 +14,7 @@ use ergo_p2p::peer_manager::PeerManager;
 use ergo_p2p::throttle::ThroughputLimiter;
 use ergo_p2p::types::{InvData, ModifierTypeId};
 use ergo_state::store::StateStore;
-use ergo_state::HeaderSectionStore;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::{Action, SyncCoordinator};
 use ergo_sync::executor::SyncExecutor;
 use ergo_validation::ProtocolParams;
@@ -5508,8 +5508,8 @@ mod block_relay {
             sibling.header_id
         );
         if digest {
-            // A heavier extension of the marked branch can trigger rollback.
-            // Digest history must not reinstall the previous sibling selection.
+            // A heavier header extension changes header selection, but cannot
+            // roll back the applied sibling while its bodies are unavailable.
             let child = solved_child(
                 &read_header(&mut VlqReader::new(&bad.header_bytes)).unwrap(),
                 bad.header_id,
@@ -5524,7 +5524,10 @@ mod block_relay {
                 state.store.get_header_id_at_height(2).unwrap(),
                 Some(bad.header_id)
             );
-            assert_eq!(state.store.chain_state_meta().best_full_block_id, parent);
+            assert_eq!(
+                state.store.chain_state_meta().best_full_block_id,
+                sibling.header_id
+            );
         }
     }
 
@@ -5591,11 +5594,6 @@ mod block_relay {
 
     fn apply_failed(result: &Result<(), ergo_api::MiningApiError>) -> bool {
         matches!(result, Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("block apply failed"))
-    }
-
-    /// The reply for a mined block stored as a fork, which is never applied.
-    fn stored_as_fork(result: &Result<(), ergo_api::MiningApiError>) -> bool {
-        matches!(result, Err(ergo_api::MiningApiError::Internal(reason)) if reason.starts_with("block apply failed (stored as a fork"))
     }
 
     fn wall_clock_ms() -> u64 {
@@ -6179,12 +6177,7 @@ mod block_relay {
     }
 
     #[test]
-    fn locally_mined_block_tying_bodyless_best_header_is_stored_as_fork() {
-        // A block on the full tip ties the score of a best header one height
-        // up, so it is stored as a fork, and only the best header chain is
-        // applied. While that header's sections are missing, as after a
-        // section write failing behind it, no other block at that height
-        // applies here.
+    fn locally_mined_block_tying_bodyless_best_header_applies_and_announces() {
         let dir = tempfile::tempdir().unwrap();
         let (mut state, handle) = devnet_node(dir.path());
         mine_and_apply(&mut state, &handle);
@@ -6194,29 +6187,21 @@ mod block_relay {
         let mut rx = register_connected_peer(&mut state, test_peer());
         let sibling = solve(&state, &handle, 1);
         let submitted = submit(&mut state, &handle, sibling.nonce);
-        let result = submitted.result;
-        assert!(
-            matches!(
-                &result,
-                Err(ergo_api::MiningApiError::Internal(reason))
-                    if reason.starts_with("block apply failed (stored as a fork")
-                        && reason.contains(&hex::encode(bodyless.id))
-                        && reason.contains("sections are not all stored")
-            ),
-            "the reply names the bodyless best header: {result:?}"
-        );
-        // A fork is never applied, so nothing failed: the template stays
-        // offered for the bodyless header's own solution to be resubmitted.
+        assert!(submitted.result.is_ok(), "{:?}", submitted.result);
         assert!(!submitted.rebuild);
-        assert!(handle.cached_work_if_synced().is_some());
-        assert!(state.store.get_header(&sibling.id).unwrap().is_some());
         let chain = state.store.chain_state_meta();
         assert_eq!(
-            (chain.best_header_id, chain.best_full_block_height),
-            (bodyless.id, 1)
+            (
+                chain.best_header_id,
+                chain.best_full_block_id,
+                chain.best_full_block_height
+            ),
+            (bodyless.id, sibling.id, 2)
         );
         flush_actions(&mut state, vec![]);
-        assert!(inventories(&mut rx).is_empty());
+        let announced = inventories(&mut rx);
+        assert_eq!(announced, stored_inventory(&state, sibling.id));
+        assert_announced_ids_served(&mut state, &announced);
     }
 
     #[test]
@@ -6275,22 +6260,15 @@ mod block_relay {
         assert_eq!(state.store.chain_state_meta().best_header_id, rival.id);
         let mut rx = register_connected_peer(&mut state, test_peer());
         let submitted = submit(&mut state, &handle, ours.nonce);
-        // Only the best header is applied, so the handler reports the fork
-        // as not applied.
-        assert!(stored_as_fork(&submitted.result), "{:?}", submitted.result);
-        assert!(
-            state.store.get_header(&ours.id).unwrap().is_some(),
-            "the mined header is stored as a fork"
-        );
-        // Nothing failed to apply, so the template it came from stays served.
+        // Its full chain beats the applied tip despite tying the rival header.
+        assert!(submitted.result.is_ok(), "{:?}", submitted.result);
+        assert_eq!(state.store.chain_state_meta().best_full_block_id, ours.id);
         assert!(!submitted.rebuild);
-        assert!(handle.cached_work_if_synced().is_some());
         flush_actions(&mut state, vec![]);
-        assert!(
-            inventories(&mut rx).is_empty(),
-            "a non-best mined block is not announced before apply"
-        );
-        // A child of ours makes our fork the best chain, and ours applies.
+        let announced = inventories(&mut rx);
+        assert_eq!(announced, stored_inventory(&state, ours.id));
+        assert_announced_ids_served(&mut state, &announced);
+        // A child makes our already applied branch the best header chain.
         process_header(&mut state, &solved_child(&ours.header, ours.id));
         state.executor.try_apply_next_blocks(
             &mut state.store,
@@ -6300,15 +6278,10 @@ mod block_relay {
         );
         assert_eq!(state.store.chain_state_meta().best_full_block_id, ours.id);
         flush_actions(&mut state, vec![]);
-        let announced = inventories(&mut rx);
-        assert_eq!(
-            announced,
-            stored_inventory(&state, ours.id),
-            "the applied-block relay announces it once it applies"
+        assert!(
+            inventories(&mut rx).is_empty(),
+            "the applied block is not announced twice"
         );
-        flush_actions(&mut state, vec![]);
-        assert!(inventories(&mut rx).is_empty());
-        assert_announced_ids_served(&mut state, &announced);
     }
 
     #[test]
@@ -6930,30 +6903,6 @@ mod block_relay {
             .unwrap()
             .test_force_set_minimal_full_block_height_unsafe(window)
             .unwrap();
-        // A different solution for the newer work does not reconstruct the
-        // stored header, so it still selects the newer template. Its fork
-        // cannot apply while the best header is bodyless.
-        let different = solve(&state, &handle, 1);
-        assert_ne!(different.nonce, mined.nonce);
-        let fork = submit(&mut state, &handle, different.nonce);
-        assert!(
-            matches!(&fork.result, Err(ergo_api::MiningApiError::Internal(reason))
-            if reason.starts_with("block apply failed (stored as a fork")),
-            "{:?}",
-            fork.result
-        );
-        assert!(!fork.rebuild);
-        assert!(state
-            .store
-            .as_utxo()
-            .unwrap()
-            .get_header(&different.id)
-            .unwrap()
-            .is_some());
-        assert_eq!(state.store.chain_state_meta().best_full_block_id, parent);
-        flush_actions(&mut state, vec![]);
-        assert!(drain(&queue).is_empty());
-
         let recovered = submit_probing_apply(&mut state, &handle, mined.nonce, &queue);
         assert!(
             recovered.result.is_ok(),
@@ -8236,4 +8185,88 @@ mod block_relay {
         flush_actions(&mut state, actions);
         assert!(inventories(&mut rx).is_empty());
     }
+}
+
+#[tokio::test]
+async fn sync_tick_drives_shorter_heavier_fork_without_rolling_back_for_headers() {
+    use ergo_primitives::{digest::blake2b256, reader::VlqReader, writer::VlqWriter};
+    use ergo_ser::header::{read_header, write_header};
+    use ergo_state::chain::HeaderMeta;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+    store.initialize_genesis(&[]).unwrap();
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let mut tip = [0; 32];
+    for height in 1..=3u32 {
+        let raw = hex::decode(
+            headers.iter().find(|h| h["height"] == height).unwrap()["bytes"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+        tip = *blake2b256(&raw).as_bytes();
+        store
+            .store_validated_header(
+                &tip,
+                &raw,
+                &HeaderMeta {
+                    parent_id: *header.parent_id.as_bytes(),
+                    height,
+                    cumulative_score: vec![height as u8],
+                    pow_validity: 1,
+                    timestamp: header.timestamp,
+                },
+                Some((height, vec![height as u8])),
+            )
+            .unwrap();
+        let root = store.root_digest();
+        store
+            .apply_block_unchecked_for_test(height, &tip, &root, &[])
+            .unwrap();
+    }
+    let raw = hex::decode(headers[1]["bytes"].as_str().unwrap()).unwrap();
+    let mut header = read_header(&mut VlqReader::new(&raw)).unwrap();
+    match &mut header.solution {
+        ergo_ser::autolykos::AutolykosSolution::V1 { nonce, .. }
+        | ergo_ser::autolykos::AutolykosSolution::V2 { nonce, .. } => nonce[0] ^= 1,
+    }
+    let mut writer = VlqWriter::new();
+    write_header(&mut writer, &header).unwrap();
+    let raw = writer.result();
+    let branch = *blake2b256(&raw).as_bytes();
+    store
+        .store_validated_header(
+            &branch,
+            &raw,
+            &HeaderMeta {
+                parent_id: *header.parent_id.as_bytes(),
+                height: 2,
+                cumulative_score: vec![9],
+                pow_validity: 1,
+                timestamp: header.timestamp,
+            },
+            Some((2, vec![9])),
+        )
+        .unwrap();
+    let mut state = make_state_with_store(store);
+    state.coordinator = SyncCoordinator::new(3);
+    state
+        .coordinator
+        .sync_state_mut()
+        .mark_headers_chain_synced();
+    handle_sync_tick(&mut state);
+    assert_eq!(state.store.chain_state_meta().best_full_block_id, tip);
+    assert!(
+        state
+            .coordinator
+            .sync_state()
+            .blocks_to_download()
+            .iter()
+            .any(|b| b.header_id == branch),
+        "the driver must run the executor even when the heavier header tip is lower"
+    );
 }
