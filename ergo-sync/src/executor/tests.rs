@@ -8,7 +8,7 @@ use ergo_ser::autolykos::AutolykosSolution;
 use ergo_ser::header::{write_header, Header};
 use ergo_state::store::StateStore;
 use ergo_state::test_helpers::SharedBuf;
-use ergo_state::ChainStateRead;
+use ergo_state::{ChainStateRead, HeaderSectionStore};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -428,81 +428,58 @@ fn too_deep_fork_sets_wedge_and_reagreement_clears_it() {
 }
 
 #[test]
-fn full_chain_reorg_rolls_back_without_marking_new_branch_invalid() {
+fn header_only_reorg_keeps_applied_chain_and_registers_fork_downloads() {
     let mut store = open_initialized_store();
-    let h2b = id(0x22);
-    let h3b = id(0x33);
-
-    let h1 = apply_empty_block(&mut store, 1, [0u8; 32]);
-    let h2a = apply_empty_block(&mut store, 2, h1);
-    let _h3a = apply_empty_block(&mut store, 3, h2a);
-
+    let common = apply_empty_block(&mut store, 1, [0; 32]);
+    let old2 = apply_empty_block(&mut store, 2, common);
+    let old3 = apply_empty_block(&mut store, 3, old2);
+    let mut raw = store.get_header(&old2).unwrap().unwrap();
+    let mut header =
+        ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&raw)).unwrap();
+    header.solution = AutolykosSolution::V2 {
+        pk: GroupElement::from_bytes([0; 33]),
+        nonce: [1; 8],
+    };
+    let mut writer = VlqWriter::new();
+    write_header(&mut writer, &header).unwrap();
+    raw = writer.result();
+    let branch = *blake2b256(&raw).as_bytes();
     store
         .store_validated_header(
-            &h2b,
-            &[0x22; 8],
+            &branch,
+            &raw,
             &ergo_state::chain::HeaderMeta {
-                parent_id: h1,
+                parent_id: common,
                 height: 2,
-                cumulative_score: vec![2],
-                pow_validity: 1,
-                timestamp: 2,
-            },
-            None,
-        )
-        .unwrap();
-    store
-        .store_validated_header(
-            &h3b,
-            &[0x33; 8],
-            &ergo_state::chain::HeaderMeta {
-                parent_id: h2b,
-                height: 3,
                 cumulative_score: vec![9],
                 pow_validity: 1,
-                timestamp: 3,
+                timestamp: header.timestamp,
             },
-            Some((3, vec![9])),
+            Some((2, vec![9])),
         )
         .unwrap();
-
     let mut executor = SyncExecutor::new(
         ProtocolParams::mainnet_default(),
         DifficultyParams::mainnet(),
     );
-    let mut coordinator = SyncCoordinator::new(1);
-    coordinator.sync_state_mut().add_pending_block(2, h2a);
-    coordinator.sync_state_mut().add_pending_block(2, h2b);
-
+    let mut coordinator = SyncCoordinator::new(3);
     let mut store = ergo_state::StateBackendKind::Utxo(store);
     assert_eq!(
-        executor
-            .rollback_full_chain_to_best_header(&mut store, &mut coordinator, None)
-            .unwrap(),
-        ReorgOutcome::Performed
+        executor.full_chain_fork_point(&store).unwrap(),
+        ForkPoint::Found(1, common)
     );
-
-    let cs = store.chain_state_meta();
-    assert_eq!(cs.best_full_block_height, 1);
-    assert_eq!(cs.best_full_block_id, h1);
-    assert_eq!(cs.best_header_id, h3b);
-    assert_eq!(coordinator.sync_state().best_full_block_height(), 1);
-    assert!(!ergo_state::HeaderSectionStore::is_invalid(&store, &h2b).unwrap());
-    assert!(!ergo_state::HeaderSectionStore::is_invalid(&store, &h3b).unwrap());
-
-    let pending: Vec<[u8; 32]> = coordinator
+    executor.try_apply_next_blocks(&mut store, &mut coordinator, Instant::now(), None);
+    assert_eq!(store.chain_state_meta().best_full_block_id, old3);
+    assert!(!store.is_invalid(&branch).unwrap());
+    assert!(coordinator
         .sync_state()
-        .pending_blocks_iter()
-        .map(|b| b.header_id)
-        .collect();
-    assert!(
-        !pending.contains(&h2a),
-        "stale old-branch pending block must be pruned"
-    );
-    assert!(
-        pending.contains(&h2b),
-        "new best-branch pending block must be retained"
-    );
+        .blocks_to_download()
+        .iter()
+        .any(|block| block.header_id == branch));
+    assert!(coordinator
+        .assembly_mut()
+        .expected_section_ids(&branch)
+        .is_some());
 }
 
 #[test]

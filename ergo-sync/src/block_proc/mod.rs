@@ -21,6 +21,54 @@ mod utxo;
 use digest::process_block_digest;
 use utxo::process_block_utxo;
 
+/// Tally the applied block's ancestors. The best-header height index can
+/// belong to a different branch while that branch's bodies are unavailable.
+fn branch_epoch_votes(
+    store: &impl ergo_state::HeaderSectionStore,
+    parent_id: [u8; 32],
+    height: u32,
+    voting_length: u32,
+) -> Result<Vec<(i8, i32)>, BlockProcessError> {
+    struct EpochHeaders(std::collections::HashMap<u32, ergo_validation::HeaderView>);
+    impl ergo_validation::ChainHeaderReader for EpochHeaders {
+        fn header_at(
+            &self,
+            height: u32,
+        ) -> Result<ergo_validation::HeaderView, ergo_validation::ChainHeaderReaderError> {
+            self.0
+                .get(&height)
+                .cloned()
+                .ok_or(ergo_validation::ChainHeaderReaderError::NotFound(height))
+        }
+    }
+    let mut headers = EpochHeaders(std::collections::HashMap::new());
+    let mut id = parent_id;
+    for ancestor_height in (height.saturating_sub(voting_length).max(1)..height).rev() {
+        let bytes = store
+            .get_header(&id)?
+            .ok_or(BlockProcessError::ParentNotFound { id })?;
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .map_err(|e| BlockProcessError::Deserialize(format!("epoch ancestor: {e:?}")))?;
+        if header.height != ancestor_height {
+            return Err(BlockProcessError::Deserialize(format!(
+                "epoch ancestor height {}, expected {ancestor_height}",
+                header.height
+            )));
+        }
+        headers.0.insert(
+            ancestor_height,
+            ergo_validation::HeaderView {
+                votes: header.votes,
+            },
+        );
+        id = *header.parent_id.as_bytes();
+    }
+    ergo_validation::compute_epoch_votes(&headers, height, voting_length).map_err(|e| {
+        BlockProcessError::Deserialize(format!("compute_epoch_votes at h={height}: {e}"))
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum BlockProcessError {
     #[error("header not found: {}", hex::encode(id))]

@@ -567,7 +567,7 @@ pub fn router_with_security(
         .route("/wallet/init", post(lifecycle::init))
         .route("/wallet/restore", post(lifecycle::restore))
         .route("/wallet/unlock", post(lifecycle::unlock))
-        .route("/wallet/lock", get(lifecycle::lock))
+        .route("/wallet/lock", get(lifecycle::lock).post(lifecycle::lock))
         .route("/wallet/check", post(lifecycle::check))
         .route("/wallet/rescan", post(state_mut::rescan))
         .route(
@@ -608,7 +608,7 @@ pub fn router_with_security(
         .route("/wallet/deriveKey", post(admin_advanced::derive_key))
         .route(
             "/wallet/deriveNextKey",
-            get(admin_advanced::derive_next_key),
+            get(admin_advanced::derive_next_key).post(admin_advanced::derive_next_key),
         )
         .route(
             "/wallet/getPrivateKey",

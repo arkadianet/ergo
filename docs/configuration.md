@@ -217,6 +217,10 @@ The whole wallet, scan and node prefixes are gated, including unknown subpaths;
 other unmatched paths return `404`. Public means no API-key authentication;
 normal validation, subsystem availability and admission policies still apply.
 
+Use `POST /wallet/lock` and `POST /wallet/deriveNextKey` for these wallet
+mutations. Their GET forms remain available for Scala-compatible clients;
+both methods use the same handlers and require the configured API key.
+
 Transaction submission is public in Scala (`TransactionsApiRoute.scala:174-209`).
 Block submission requires an API key, matching Scala (`BlocksApiRoute.scala:127`). This node gates all four mining routes above;
 Scala leaves those four open (`MiningApiRoute.scala:45,77,86,98`).

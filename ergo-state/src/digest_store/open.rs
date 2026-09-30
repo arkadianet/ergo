@@ -161,6 +161,7 @@ impl DigestStateStore {
             db_path: path.to_path_buf(),
             root_digest: loaded.root_digest,
             chain_state: loaded.chain_state,
+            keep_versions: crate::store::ROLLBACK_WINDOW,
             voting_settings,
             headers,
             active_params,

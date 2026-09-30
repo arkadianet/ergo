@@ -1,21 +1,19 @@
 //! Block assemble/persist action handlers for [`SyncExecutor`].
 //!
-//! `handle_assemble_block` applies one block via
-//! [`crate::block_proc::process_block`] — the same pattern as the
-//! sequential drain in [`super::reorg`]'s
-//! [`SyncExecutor::try_apply_next_blocks`]; review them side by side.
+//! `handle_assemble_block` drives [`SyncExecutor::try_apply_next_blocks`]
+//! so arrival-driven and periodic application share full-chain selection.
 //! `handle_persist_section` stores a delivered block section with the
 //! Mode 3 receive-side prune gating.
 
 use std::time::Instant;
 
 use ergo_state::{ChainStateRead, HeaderSectionStore};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use crate::block_proc::{self, BlockProcessError};
+use crate::block_proc::BlockProcessError;
 use crate::coordinator::{Action, SyncCoordinator};
 
-use super::{ReorgOutcome, SyncExecutor};
+use super::SyncExecutor;
 
 fn report_section_storage_failure(
     store: &ergo_state::StateBackendKind,
@@ -77,126 +75,33 @@ impl SyncExecutor {
         coordinator: &mut SyncCoordinator,
         wallet_wiring: Option<ergo_state::wallet::WalletWiring<'_>>,
     ) -> Vec<Action> {
-        match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-            Ok(ReorgOutcome::Performed) => {
-                self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
-                return Vec::new();
-            }
-            Ok(ReorgOutcome::NotNeeded) => {}
-            // Wedged: nothing at or above the stuck tip can assemble/apply.
-            Ok(ReorgOutcome::TooDeep) => return Vec::new(),
-            Err(e) => {
-                super::report_sync_storage_failure(
-                    store,
-                    "block_apply",
-                    "full_block_reorg_check",
-                    &e,
-                );
-                return Vec::new();
-            }
-        }
-
-        // Only assemble the next sequential block.
-        let next_height = store.chain_state_meta().best_full_block_height + 1;
-        match self.best_chain_header_id_at(store, next_height) {
-            Ok(Some(best_id)) if best_id == *header_id => {}
-            Ok(Some(_)) | Ok(None) => return Vec::new(),
-            Err(e) => {
-                super::report_sync_storage_failure(
-                    store,
-                    "block_apply",
-                    "best_chain_header_lookup",
-                    &e,
-                );
-                return Vec::new();
-            }
-        }
-        let meta = match store.get_header_meta(header_id) {
-            Ok(Some(m)) => m,
-            _ => return Vec::new(),
-        };
-        if meta.height != next_height {
-            return Vec::new();
-        }
-
-        let cache = if self.block_context_headers.is_empty() {
-            None
-        } else {
-            Some(self.block_context_headers.as_slice())
-        };
-        let guard = self.apply_phase.begin();
-        match block_proc::process_block(
-            store,
-            header_id,
-            &self.params,
-            cache,
-            self.script_validation_checkpoint,
-            self.reemission.as_ref(),
-            Some(&self.block_perf),
-            wallet_wiring.map(|w| w.hook),
-        ) {
-            Ok(processed) => {
-                guard.success(processed.height);
-                self.update_block_context_cache(&processed);
-                coordinator.on_block_applied(processed.header_id, processed.height);
-                self.record_applied_block(processed.header_id);
-                if processed.height % 100 == 0 {
-                    info!(height = processed.height, "block applied");
-                }
-                // Chain: apply as many consecutive blocks as possible.
-                // Don't wait for the next sync tick.
-                self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
-                Vec::new()
-            }
-            Err(
-                BlockProcessError::HeaderNotFound { .. }
-                | BlockProcessError::SectionNotFound { .. }
-                | BlockProcessError::ParentNotFound { .. }
-                // Digest data-availability: the ADProofs section has not
-                // arrived yet. Same "wait for the section" semantics as
-                // SectionNotFound — NOT block invalidity, never poison.
-                | BlockProcessError::AdProofsUnavailable { .. },
-            ) => {
-                guard.failure();
-                Vec::new()
-            }
-            Err(
-                BlockProcessError::ParentNotBestFull { .. }
-                // Digest fork / out-of-order: the block's parent is not
-                // the committed tip, or its height is not tip+1. Not
-                // invalid — drive the same reorg path as the UTXO arm.
-                | BlockProcessError::DigestNonLinearParent { .. }
-                | BlockProcessError::DigestOutOfOrder { .. },
-            ) => {
-                guard.failure();
-                match self.rollback_full_chain_to_best_header(store, coordinator, wallet_wiring) {
-                    Ok(ReorgOutcome::Performed) => {
-                        self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
-                    }
-                    Ok(ReorgOutcome::NotNeeded | ReorgOutcome::TooDeep) => {}
-                    Err(e) => super::report_sync_storage_failure(
+        match store.get_header_meta(header_id) {
+            Ok(Some(meta)) => match store.get_header_id_at_height(meta.height) {
+                Ok(Some(id)) if id == *header_id => {}
+                Ok(_) => self.full_candidate_height = Some(meta.height),
+                Err(error) => {
+                    super::report_sync_storage_failure(
                         store,
                         "block_apply",
-                        "full_block_reorg",
-                        &e,
-                    ),
+                        "assembled_chain_lookup",
+                        &error,
+                    );
+                    return Vec::new();
                 }
-                Vec::new()
-            }
-            Err(e) => {
-                guard.failure();
-                report_block_process_failure(store, header_id, &e);
-                self.record_failed_transaction(&e);
-                self.record_block_apply_error(*header_id, meta.height, e.to_string());
-                // Same classifier as try_apply_next_blocks: a definitive
-                // validation verdict durably invalidates the block + its
-                // descendants and re-anchors best_header across restart, so an
-                // invalid block isn't retried every tick; anything else stays a
-                // session-only mark.
-                self.invalidate_or_session_mark(store, coordinator, *header_id, meta.height, &e);
-                Vec::new()
+            },
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                super::report_sync_storage_failure(
+                    store,
+                    "block_apply",
+                    "assembled_header_lookup",
+                    &error,
+                );
+                return Vec::new();
             }
         }
+        self.try_apply_next_blocks(store, coordinator, Instant::now(), wallet_wiring);
+        Vec::new()
     }
 
     pub(super) fn handle_persist_section(

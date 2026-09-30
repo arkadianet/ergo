@@ -24,6 +24,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HeaderProcessError {
+    #[error("header parent at height {parent_height} is too old for full tip {full_height} (keep_versions={keep_versions}, rule 209)")]
+    TooOld {
+        parent_height: u32,
+        full_height: u32,
+        keep_versions: u32,
+    },
     #[error("deserialization failed: {0}")]
     Deserialize(String),
     #[error("parent header not found: {}", hex::encode(parent_id))]
@@ -77,6 +83,22 @@ pub enum HeaderProcessError {
     Validation(#[from] HeaderValidationError),
     #[error("storage error: {0}")]
     Storage(#[from] ergo_state::store::StateError),
+}
+
+fn check_header_age<S: ChainStateRead + ?Sized>(
+    store: &S,
+    parent_height: u32,
+) -> Result<(), HeaderProcessError> {
+    let full_height = store.chain_state_meta().best_full_block_height;
+    let keep_versions = store.keep_versions();
+    if i64::from(full_height) - i64::from(parent_height) >= i64::from(keep_versions) {
+        return Err(HeaderProcessError::TooOld {
+            parent_height,
+            full_height,
+            keep_versions,
+        });
+    }
+    Ok(())
 }
 
 /// Operator-supplied header-level trust anchor: "the block at `height`
@@ -486,23 +508,6 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     let parent_id = *header.parent_id.as_bytes();
     let height = header.height;
 
-    // Refuse to extend a branch already reported invalid. `finalize_header`
-    // rejects a header whose own id is flagged, but a NEVER-SEEN header
-    // building on an invalidated parent has no flag of its own yet — the
-    // parent check is what makes invalidity hereditary and permanent (Scala
-    // `HeadersProcessor.validate` fails a header whose parent
-    // `isSemanticallyValid == Invalid`). Without it a peer could re-feed the
-    // dead branch one header at a time and re-grow best_header above the
-    // re-anchor, re-wedging the apply loop.
-    //
-    // DURABLE-only: a session-scoped mark is a transient/IO verdict (the parent
-    // may still apply), so it must not permanently block the whole descendant
-    // subtree for the session. Scala's parent check tests the durable
-    // `isSemanticallyValid == Invalid` row.
-    if store.is_durably_invalid(&parent_id)? {
-        return Err(HeaderProcessError::Invalid { header_id });
-    }
-
     // Look up parent
     let parent_bytes = store
         .get_header(&parent_id)?
@@ -606,6 +611,26 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
         Err(e) => return Err(HeaderProcessError::Validation(e)),
     };
 
+    // Scala rule 209 uses the FULL tip, including during header-only sync.
+    check_header_age(store, parent_meta.height)?;
+
+    // Refuse to extend a branch already reported invalid. `finalize_header`
+    // rejects a header whose own id is flagged, but a NEVER-SEEN header
+    // building on an invalidated parent has no flag of its own yet — the
+    // parent check is what makes invalidity hereditary and permanent (Scala
+    // `HeadersProcessor.validate` fails a header whose parent
+    // `isSemanticallyValid == Invalid`). Without it a peer could re-feed the
+    // dead branch one header at a time and re-grow best_header above the
+    // re-anchor, re-wedging the apply loop.
+    //
+    // DURABLE-only: a session-scoped mark is a transient/IO verdict (the parent
+    // may still apply), so it must not permanently block the whole descendant
+    // subtree for the session. Scala's parent check tests the durable
+    // `isSemanticallyValid == Invalid` row.
+    if store.is_durably_invalid(&parent_id)? {
+        return Err(HeaderProcessError::Invalid { header_id });
+    }
+
     // 8. Compute cumulative score: parent_score + this_header's required difficulty.
     // Uses ergo_ser::difficulty::decode_compact_bits (shared with ergo-crypto),
     // not a local reimplementation. BigUint → bytes only at the storage boundary.
@@ -659,7 +684,7 @@ fn process_header_inner<S: HeaderSectionStore + ChainStateRead + ?Sized>(
 /// - PoW valid
 ///
 /// No parent header lookup, no timestamp check against parent.
-fn process_genesis_header<S: HeaderSectionStore + ?Sized>(
+fn process_genesis_header<S: HeaderSectionStore + ChainStateRead + ?Sized>(
     store: &mut S,
     header: ergo_ser::header::Header,
     header_id: [u8; 32],
@@ -691,6 +716,8 @@ fn process_genesis_header<S: HeaderSectionStore + ?Sized>(
             ),
         ));
     }
+
+    check_header_age(store, 0)?;
 
     // Cumulative score = initial difficulty
     let score = initial_diff.to_bytes_be();

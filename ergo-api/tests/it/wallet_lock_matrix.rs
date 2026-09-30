@@ -370,3 +370,45 @@ async fn status_route_returns_json_body() {
     let _: serde_json::Value =
         serde_json::from_slice(&bytes).expect("/wallet/status body must be valid JSON");
 }
+
+#[tokio::test]
+async fn mutating_post_aliases_match_get_and_preserve_authentication() {
+    use ergo_api::auth::{ApiSecurity, API_KEY_HEADER};
+    for unlocked in [false, true] {
+        let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin {
+            initialized: true,
+            unlocked,
+        });
+        let security = Arc::new(ApiSecurity::new(ApiSecurity::hash_key(b"alias-test")).unwrap());
+        let app = ergo_api::wallet::router_with_security(admin, Some(security));
+        for route in ["/wallet/lock", "/wallet/deriveNextKey"] {
+            let mut responses = Vec::new();
+            for method in [Method::GET, Method::POST] {
+                for key in [None, Some("wrong-key"), Some("alias-test")] {
+                    let mut request = Request::builder().method(method.clone()).uri(route);
+                    if let Some(key) = key {
+                        request = request.header(API_KEY_HEADER, key);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    if key != Some("alias-test") {
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                    } else {
+                        let status = response.status();
+                        assert_ne!(status, StatusCode::NOT_FOUND);
+                        assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED);
+                        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                        responses.push((status, bytes));
+                    }
+                }
+            }
+            assert_eq!(
+                responses[0], responses[1],
+                "GET and POST must use the same handler for {route}"
+            );
+        }
+    }
+}

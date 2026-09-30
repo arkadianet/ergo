@@ -100,10 +100,7 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
     // early-return because a healthy node never reaches the dial
     // logic below.
     if now.duration_since(state.last_gossip_at) >= ergo_p2p::peer_manager::GOSSIP_INTERVAL {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let seed = rand::RngCore::next_u64(&mut rand::rngs::OsRng);
         if let Some(peer) = state.peer_manager.select_peer_for_gossip(now, seed) {
             if state.registry.peers.contains_key(&peer) {
                 send_to_peer(state, &peer, message::CODE_GET_PEERS, Vec::new());
@@ -176,11 +173,8 @@ pub(super) fn try_dial_peers(state: &mut NodeState) {
             // leading peers each cycle — spreads discovery load and pulls a
             // more diverse address set over time. `fanout <= len`, so the
             // wrapped window still yields distinct peers.
-            let start = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as usize)
-                .unwrap_or(0)
-                % gossip_targets.len();
+            let start =
+                (rand::RngCore::next_u64(&mut rand::rngs::OsRng) as usize) % gossip_targets.len();
             for addr in gossip_targets.iter().cycle().skip(start).take(fanout) {
                 send_to_peer(state, addr, message::CODE_GET_PEERS, Vec::new());
             }

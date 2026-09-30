@@ -48,8 +48,8 @@ impl DigestStateStore {
             });
         }
         // Internal fork-choice invariants on the caller-supplied
-        // chain state (best_header must lead or equal best_full_block;
-        // score is never empty). Full validation of best_header_*
+        // chain state (a full chain needs a header chain; score is never
+        // empty). A heavier header branch can be shorter. Validation of best_header_*
         // against persisted header state needs the header tables this
         // sibling does not own; these cheap invariants catch an
         // obviously-nonsense best-header view at the seam.
@@ -136,6 +136,9 @@ impl DigestStateStore {
 }
 
 impl crate::backend::ChainStateRead for DigestStateStore {
+    fn keep_versions(&self) -> u32 {
+        self.keep_versions
+    }
     fn height(&self) -> u32 {
         self.chain_state.best_full_block_height
     }

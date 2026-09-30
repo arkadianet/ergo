@@ -59,6 +59,7 @@ tempfile           = { workspace = true }
 time               = { workspace = true }
 k256               = { workspace = true }
 zeroize            = { workspace = true }
+rand               = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]

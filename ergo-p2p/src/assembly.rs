@@ -33,6 +33,7 @@ pub struct AssemblyTracker {
 }
 
 struct SectionState {
+    expected: ExpectedSections,
     has_transactions: bool,
     has_extension: bool,
     has_ad_proofs: bool,
@@ -82,6 +83,7 @@ impl AssemblyTracker {
         self.headers.insert(
             hid,
             SectionState {
+                expected,
                 has_transactions: false,
                 has_extension: false,
                 has_ad_proofs: false,
@@ -128,8 +130,11 @@ impl AssemblyTracker {
     /// Remove tracking for a header (after block assembled and applied).
     /// Also cleans up the reverse index.
     pub fn remove(&mut self, header_id: &[u8; 32]) {
-        self.headers.remove(header_id);
-        self.section_index.retain(|_, (_, hid)| hid != header_id);
+        if let Some(state) = self.headers.remove(header_id) {
+            self.section_index.remove(&state.expected.transactions_id);
+            self.section_index.remove(&state.expected.extension_id);
+            self.section_index.remove(&state.expected.ad_proofs_id);
+        }
     }
 
     /// Number of headers being tracked.
@@ -145,16 +150,12 @@ impl AssemblyTracker {
     /// Get the expected section IDs for a header (type_id, section_id pairs).
     /// Returns None if the header isn't tracked.
     pub fn expected_section_ids(&self, header_id: &[u8; 32]) -> Option<Vec<(u8, [u8; 32])>> {
-        if !self.headers.contains_key(header_id) {
-            return None;
-        }
-        let mut result = Vec::new();
-        for (section_id, (type_id, hid)) in &self.section_index {
-            if hid == header_id {
-                result.push((*type_id, *section_id));
-            }
-        }
-        Some(result)
+        let expected = &self.headers.get(header_id)?.expected;
+        Some(vec![
+            (TYPE_BLOCK_TRANSACTIONS, expected.transactions_id),
+            (TYPE_EXTENSION, expected.extension_id),
+            (TYPE_AD_PROOFS, expected.ad_proofs_id),
+        ])
     }
 }
 

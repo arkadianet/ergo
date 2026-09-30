@@ -1,8 +1,6 @@
 //! UTXO-backend block processing (Modes 1/3): load sections, validate,
-//! apply to the AVL+ box arena. This is the original `process_block`
-//! body, unchanged — the UTXO path stays byte-for-byte equivalent to
-//! the pre-Mode-5 code and is deliberately NOT unified with the digest
-//! path in [`super::digest`].
+//! apply to the AVL+ box arena. Transaction application remains separate
+//! from the digest path in [`super::digest`].
 
 use std::time::Instant;
 
@@ -23,7 +21,6 @@ use ergo_validation::block::{
 use ergo_validation::context::ProtocolParams;
 use ergo_validation::header::CheckedHeader;
 use ergo_validation::voting::validate_epoch_extension;
-use ergo_validation::{ChainHeaderReader, ChainHeaderReaderError, HeaderView};
 
 use crate::perf::BlockPerfCounters;
 
@@ -31,42 +28,6 @@ use super::{BlockProcessError, ProcessedBlock};
 
 /// Scala's default `adProofsSuffixLength`, measured from the best known header.
 const AD_PROOFS_SUFFIX_LENGTH: u32 = 114_688;
-
-/// Bridge `StateStore` → `ChainHeaderReader` so the voting recompute
-/// pipeline can read `header.votes` for the previous voting epoch
-/// (`compute_epoch_votes` walks 1024 headers per call).
-struct StoreChainHeaderReader<'a> {
-    store: &'a StateStore,
-}
-
-impl<'a> ChainHeaderReader for StoreChainHeaderReader<'a> {
-    fn header_at(&self, height: u32) -> Result<HeaderView, ChainHeaderReaderError> {
-        let header_id = self
-            .store
-            .get_header_id_at_height(height)
-            .map_err(|e| ChainHeaderReaderError::Backend {
-                height,
-                source: Box::new(e),
-            })?
-            .ok_or(ChainHeaderReaderError::NotFound(height))?;
-        let header_bytes = self
-            .store
-            .get_header(&header_id)
-            .map_err(|e| ChainHeaderReaderError::Backend {
-                height,
-                source: Box::new(e),
-            })?
-            .ok_or(ChainHeaderReaderError::NotFound(height))?;
-        let mut r = VlqReader::new(&header_bytes);
-        let header = read_header(&mut r).map_err(|e| ChainHeaderReaderError::Backend {
-            height,
-            source: format!("header decode at h={height}: {e:?}").into(),
-        })?;
-        Ok(HeaderView {
-            votes: header.votes,
-        })
-    }
-}
 
 /// Build the last 10 headers preceding a block at `height` by walking
 /// backward from `parent_id`. Used for CONTEXT.headers in script evaluation.
@@ -268,15 +229,8 @@ pub(super) fn process_block_utxo(
         Option<ergo_validation::ActiveProtocolParameters>,
         bool,
     ) = if height > 0 && height.is_multiple_of(voting_length) {
-        let chain_reader = StoreChainHeaderReader { store };
-        let epoch_votes = ergo_validation::compute_epoch_votes(
-            &chain_reader,
-            height,
-            voting_length,
-        )
-        .map_err(|e| {
-            BlockProcessError::Deserialize(format!("compute_epoch_votes at h={height}: {e}"))
-        })?;
+        let epoch_votes =
+            super::branch_epoch_votes(store, *header.parent_id.as_bytes(), height, voting_length)?;
         // Mode 2 install trust path: armed by `install_snapshot_state`,
         // peeked here, consumed only AFTER apply commits. Peeking
         // (rather than taking) keeps the flag set across an in-process
@@ -729,6 +683,60 @@ mod tests {
             .unwrap();
         let bytes = hex::decode(entry["bytes"].as_str().unwrap()).unwrap();
         read_header(&mut VlqReader::new(&bytes)).unwrap()
+    }
+
+    #[test]
+    fn epoch_votes_follow_block_ancestors_when_best_headers_are_another_branch() {
+        let mut store = store_at_height_1();
+        let genesis = header_at(1);
+        let (bytes, genesis_id) = ergo_ser::header::serialize_header(&genesis).unwrap();
+        store
+            .store_validated_header(
+                genesis_id.as_bytes(),
+                &bytes,
+                &ergo_state::chain::HeaderMeta {
+                    parent_id: *genesis.parent_id.as_bytes(),
+                    height: 1,
+                    cumulative_score: vec![1],
+                    pow_validity: 1,
+                    timestamp: genesis.timestamp,
+                },
+                Some((1, vec![1])),
+            )
+            .unwrap();
+        let mut tip = [0; 32];
+        for vote in [1, 2] {
+            let mut parent = *genesis_id.as_bytes();
+            for height in 2..=3 {
+                let mut header = header_at(u64::from(height));
+                header.parent_id = ergo_primitives::digest::ModifierId::from_bytes(parent);
+                header.votes = [vote, 0, 0];
+                let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+                parent = *id.as_bytes();
+                store
+                    .store_validated_header(
+                        &parent,
+                        &bytes,
+                        &ergo_state::chain::HeaderMeta {
+                            parent_id: *header.parent_id.as_bytes(),
+                            height,
+                            cumulative_score: vec![vote * 10 + height as u8],
+                            pow_validity: 1,
+                            timestamp: header.timestamp,
+                        },
+                        Some((height, vec![vote * 10 + height as u8])),
+                    )
+                    .unwrap();
+            }
+            if vote == 1 {
+                tip = parent;
+            }
+        }
+        assert_ne!(store.chain_state().best_header_id, tip);
+        assert_eq!(
+            super::super::branch_epoch_votes(&store, tip, 4, 2).unwrap(),
+            vec![(1, 2)]
+        );
     }
 
     fn tx_at(height: u64) -> ergo_ser::transaction::Transaction {

@@ -278,6 +278,11 @@ impl SyncState {
         if height <= self.best_full_block_height {
             return;
         }
+        self.add_fork_pending_block(height, header_id);
+    }
+
+    /// A competing chain can need blocks below the current applied tip.
+    pub fn add_fork_pending_block(&mut self, height: u32, header_id: [u8; 32]) {
         if self.pending_blocks.iter().any(|b| b.header_id == header_id) {
             return;
         }

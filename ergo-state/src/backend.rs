@@ -40,6 +40,10 @@ use crate::store::StateError;
 /// backend projects its in-memory `ChainState` via `to_persisted()`,
 /// the digest backend clones its persisted `ChainStateMeta`.
 pub trait ChainStateRead {
+    /// Local history horizon for Scala's fatal `hdrTooOld` rule (209).
+    fn keep_versions(&self) -> u32 {
+        crate::store::ROLLBACK_WINDOW
+    }
     /// Best fully-applied block height.
     fn height(&self) -> u32;
     /// Owned snapshot of the committed chain pointers.
@@ -175,6 +179,9 @@ impl<T: ChainStateRead + HeaderSectionStore + BlockApply> StateBackend for T {}
 use crate::store::StateStore;
 
 impl ChainStateRead for StateStore {
+    fn keep_versions(&self) -> u32 {
+        self.rollback_window()
+    }
     fn height(&self) -> u32 {
         StateStore::height(self)
     }
@@ -411,6 +418,12 @@ impl StateBackendKind {
 }
 
 impl ChainStateRead for StateBackendKind {
+    fn keep_versions(&self) -> u32 {
+        match self {
+            Self::Utxo(s) => s.keep_versions(),
+            Self::Digest(d) => d.keep_versions(),
+        }
+    }
     fn height(&self) -> u32 {
         match self {
             StateBackendKind::Utxo(s) => s.height(),
