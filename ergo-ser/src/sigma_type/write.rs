@@ -5,13 +5,37 @@ use crate::error::WriteError;
 use ergo_primitives::writer::VlqWriter;
 
 use super::{
-    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, OPTION_CODE, OPTION_COLL_CODE, PAIR1_CODE,
-    PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE, SGLOBAL_CODE,
-    SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE, TUPLE_CODE,
+    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_DEPTH, OPTION_CODE, OPTION_COLL_CODE,
+    PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE,
+    SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE,
+    TUPLE_CODE,
 };
 
 /// Serialize a Sigma type descriptor.
 pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
+    write_type_at(w, t, 0)
+}
+
+/// [`write_type`] with the current nesting level, so the walk can bound its own
+/// recursion the way [`super::read_type`] bounds its own.
+///
+/// This walk is recursive on the native stack, unlike the reader's heap stack,
+/// so it needs its own guard. The reader refuses a descriptor deeper than
+/// [`MAX_TYPE_DEPTH`], so a parsed type cannot drive this past that depth; the
+/// guard covers the other direction, a `SigmaType` built in-process to a depth
+/// the reader would never have produced. It returns an error instead of
+/// overflowing the stack, which is unrecoverable and takes the process down
+/// rather than the one call.
+fn write_type_at(w: &mut VlqWriter, t: &SigmaType, depth: usize) -> Result<(), WriteError> {
+    if depth > MAX_TYPE_DEPTH {
+        // Past this depth the reference's own recursive writer overflows its
+        // thread stack, so refusing matches the reference rather than
+        // diverging from it. See read.rs's `read_type_byte` for the same
+        // reasoning on the read side.
+        return Err(WriteError::InvalidData(format!(
+            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
+        )));
+    }
     match t {
         // Primitives: single byte = type code
         SigmaType::SBoolean => w.put_u8(1),
@@ -73,14 +97,14 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
         SigmaType::SGlobal => w.put_u8(SGLOBAL_CODE),
 
         // Coll[T] — constrId 1, or Coll[Coll[T]] — constrId 2
-        SigmaType::SColl(elem) => write_coll(w, elem)?,
+        SigmaType::SColl(elem) => write_coll(w, elem, depth)?,
 
         // Option[T] — constrId 3, or Option[Coll[T]] — constrId 4
-        SigmaType::SOption(elem) => write_option(w, elem)?,
+        SigmaType::SOption(elem) => write_option(w, elem, depth)?,
 
         // Tuples: pairs (constrId 5/6/7), triples (constrId 6 primId=0),
         // quads (constrId 7 primId=0), and general (TUPLE_CODE for 5+)
-        SigmaType::STuple(elems) => write_tuple(w, elems)?,
+        SigmaType::STuple(elems) => write_tuple(w, elems, depth)?,
 
         // SFunc: FUNC_CODE + 1-byte domain count + domain types + range
         // type + 1-byte tpeParams count + STypeVar idents. Counts are
@@ -116,19 +140,19 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
             w.put_u8(FUNC_CODE);
             w.put_u8(t_dom.len() as u8);
             for d in t_dom {
-                write_type(w, d)?;
+                write_type_at(w, d, depth + 1)?;
             }
-            write_type(w, t_range)?;
+            write_type_at(w, t_range, depth + 1)?;
             w.put_u8(tpe_params.len() as u8);
             for p in tpe_params {
-                write_type(w, p)?;
+                write_type_at(w, p, depth + 1)?;
             }
         }
     }
     Ok(())
 }
 
-fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
+fn write_coll(w: &mut VlqWriter, elem: &SigmaType, depth: usize) -> Result<(), WriteError> {
     // Coll[Coll[embeddable]] has a compressed single-byte form (constrId 2,
     // 0x18 + the embeddable code). This optimization applies ONLY when the
     // innermost element is embeddable; Coll[Coll[non-embeddable]] uses the
@@ -148,12 +172,12 @@ fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
         w.put_u8(COLL_CODE + code);
     } else {
         w.put_u8(COLL_CODE);
-        write_type(w, elem)?;
+        write_type_at(w, elem, depth + 1)?;
     }
     Ok(())
 }
 
-fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
+fn write_option(w: &mut VlqWriter, elem: &SigmaType, depth: usize) -> Result<(), WriteError> {
     // Option[Coll[embeddable]] has a compressed single-byte form (constrId 4,
     // OPTION_COLL_CODE + the embeddable code). This applies ONLY when the
     // collection's element is embeddable; Option[Coll[non-embeddable]] uses
@@ -177,12 +201,12 @@ fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
         w.put_u8(OPTION_CODE + code);
     } else {
         w.put_u8(OPTION_CODE);
-        write_type(w, elem)?;
+        write_type_at(w, elem, depth + 1)?;
     }
     Ok(())
 }
 
-fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError> {
+fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType], depth: usize) -> Result<(), WriteError> {
     match elems.len() {
         0 | 1 => {
             // Deliberate read/write asymmetry, matching Scala exactly: the
@@ -198,19 +222,19 @@ fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError>
                 elems.len()
             )));
         }
-        2 => write_pair(w, &elems[0], &elems[1])?,
+        2 => write_pair(w, &elems[0], &elems[1], depth)?,
         3 => {
             // Triple: constrId 6, primId 0 => byte 72, then 3 types
             w.put_u8(PAIR2_CODE);
             for elem in elems {
-                write_type(w, elem)?;
+                write_type_at(w, elem, depth + 1)?;
             }
         }
         4 => {
             // Quad: constrId 7, primId 0 => byte 84, then 4 types
             w.put_u8(PAIR_SYM_CODE);
             for elem in elems {
-                write_type(w, elem)?;
+                write_type_at(w, elem, depth + 1)?;
             }
         }
         n => {
@@ -226,14 +250,19 @@ fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError>
             w.put_u8(TUPLE_CODE);
             w.put_u8(n as u8);
             for elem in elems {
-                write_type(w, elem)?;
+                write_type_at(w, elem, depth + 1)?;
             }
         }
     }
     Ok(())
 }
 
-fn write_pair(w: &mut VlqWriter, t1: &SigmaType, t2: &SigmaType) -> Result<(), WriteError> {
+fn write_pair(
+    w: &mut VlqWriter,
+    t1: &SigmaType,
+    t2: &SigmaType,
+    depth: usize,
+) -> Result<(), WriteError> {
     // Symmetric pair: both elements are the same embeddable type — constrId 7
     if t1 == t2 {
         if let Some(code) = t1.embeddable_code() {
@@ -244,19 +273,19 @@ fn write_pair(w: &mut VlqWriter, t1: &SigmaType, t2: &SigmaType) -> Result<(), W
     // First element embeddable — constrId 5
     if let Some(code) = t1.embeddable_code() {
         w.put_u8(PAIR1_CODE + code);
-        write_type(w, t2)?;
+        write_type_at(w, t2, depth + 1)?;
         return Ok(());
     }
     // Second element embeddable — constrId 6
     if let Some(code) = t2.embeddable_code() {
         w.put_u8(PAIR2_CODE + code);
-        write_type(w, t1)?;
+        write_type_at(w, t1, depth + 1)?;
         return Ok(());
     }
     // Neither element embeddable — constrId 5, primId 0 (general pair)
     w.put_u8(PAIR1_CODE);
-    write_type(w, t1)?;
-    write_type(w, t2)?;
+    write_type_at(w, t1, depth + 1)?;
+    write_type_at(w, t2, depth + 1)?;
     Ok(())
 }
 
@@ -280,6 +309,85 @@ mod tests {
         let decoded = read_type(&mut r).unwrap();
         assert!(r.is_empty(), "leftover bytes after decoding {t:?}");
         assert_eq!(&decoded, t);
+    }
+
+    // ----- recursion-depth guard -----
+
+    /// `Coll^n[Byte]`, built directly rather than parsed. The reader cannot
+    /// produce a type past `MAX_TYPE_DEPTH`, but an in-process `SigmaType` can,
+    /// and the writer walks the AST recursively on the native stack.
+    fn nested_coll(depth: usize) -> SigmaType {
+        let mut t = SigmaType::SByte;
+        for _ in 0..depth {
+            t = SigmaType::SColl(Box::new(t));
+        }
+        t
+    }
+
+    /// The writer must refuse a type deeper than the reader accepts rather
+    /// than overflowing the stack. Overflowing aborts the process instead of
+    /// failing the one call, so under ASan — whose frames are several times
+    /// larger, tipping an 8 MiB stack around 6.5 k levels where release needs
+    /// ~48 k — the fuzzer found this as a `stack-overflow` abort on an
+    /// `ergo_box_candidate` input whose tree nests `Coll` types deeply.
+    /// Run `f` on a thread with enough stack for the recursive walks at the
+    /// guard's own depth, matching read.rs's `on_big_stack` for the same
+    /// reason: an unoptimized test build's frames overflow a default 8 MiB
+    /// test thread well before the guard is reached, which would abort the
+    /// process instead of exercising the refusal.
+    fn on_big_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The writer must refuse a type deeper than the reader accepts rather than
+    /// overflowing the stack. Overflowing aborts the process instead of
+    /// failing the one call, so under ASan — whose frames are several times
+    /// larger, tipping an 8 MiB stack around 6.5 k levels where release needs
+    /// ~48 k — the fuzzer found this as a `stack-overflow` abort on an
+    /// `ergo_box_candidate` input whose tree nests `Coll` types deeply.
+    #[test]
+    fn write_type_past_max_depth_errors_instead_of_overflowing() {
+        on_big_stack(|| {
+            let mut w = VlqWriter::new();
+            match write_type(&mut w, &nested_coll(MAX_TYPE_DEPTH + 4_000)) {
+                Err(WriteError::InvalidData(msg)) => {
+                    assert!(msg.contains("type recursion depth"), "got: {msg}")
+                }
+                other => panic!("expected a depth refusal, got: {other:?}"),
+            }
+        });
+    }
+
+    /// The load-bearing invariant: the guard must never reject a type the
+    /// reader accepts, or a parsed value could not be written back. The writer
+    /// is allowed to be MORE permissive than the reader (nothing produces such
+    /// a type on the wire), never less.
+    #[test]
+    fn write_type_accepts_everything_the_reader_accepts() {
+        on_big_stack(|| {
+            // The reader accepts a chain of `MAX_TYPE_DEPTH + 1` levels: the
+            // compact `Coll[Coll[Byte]]` code charges two levels in one byte,
+            // so an `n`-level chain is `n - 2` generic bytes plus that byte.
+            // The cases are probed from the wire rather than hardcoded so this
+            // test tracks the reader instead of restating its boundary.
+            for delta in -2i32..=2 {
+                let levels = (MAX_TYPE_DEPTH as i32 + delta) as usize;
+                let mut bytes = vec![0x0Cu8; levels.saturating_sub(2)];
+                bytes.push(0x1A);
+                let Ok(parsed) = read_type(&mut VlqReader::new(&bytes)) else {
+                    continue; // the reader refuses this one; nothing to write back
+                };
+                let mut w = VlqWriter::new();
+                write_type(&mut w, &parsed)
+                    .unwrap_or_else(|e| panic!("reader accepted {levels} levels: {e}"));
+                assert_eq!(read_type(&mut VlqReader::new(&w.result())).unwrap(), parsed);
+            }
+        });
     }
 
     // ----- canonical-form checks -----
