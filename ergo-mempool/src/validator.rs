@@ -303,7 +303,8 @@ fn map_validation_error(err: ValidationError) -> ValidationErr {
         | E::BoxTooLarge { .. }
         | E::PropositionTooLarge { .. }
         | E::OutputFromFuture { .. }
-        | E::OutputCreationHeightBelowInputs { .. } => ValidationErr::Structural,
+        | E::OutputCreationHeightBelowInputs { .. }
+        | E::DuplicateStorageRentOutput { .. } => ValidationErr::Structural,
         E::InputBoxNotFound { .. } => ValidationErr::UnresolvedInput,
         E::DataInputBoxNotFound { .. } => ValidationErr::UnresolvedDataInput,
         E::ResolvedInputsMismatch { .. }

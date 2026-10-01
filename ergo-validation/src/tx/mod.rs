@@ -2,6 +2,7 @@ pub mod ge;
 pub mod heights;
 pub mod monetary;
 pub mod reemission;
+mod rent_outputs;
 pub(crate) mod script;
 pub mod structural;
 
@@ -177,6 +178,7 @@ pub fn validate_transaction(
 
     // Stage 5: monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
+    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
 
     // Stage 5.5: transaction init cost
     let init_cost = script::compute_tx_init_cost(&tx, &resolved_inputs, cx.params);
@@ -297,6 +299,7 @@ pub fn validate_transaction_parsed_with_group_elements(
 
     // Monetary
     monetary::validate_monetary(&tx, &resolved_inputs)?;
+    rent_outputs::validate_rent_output_indices(&tx, cx.ctx.height)?;
 
     // Compute bytes_to_sign + tx_id once. Always needed (tx_id is stored
     // on CheckedTransaction for state apply, regardless of script
