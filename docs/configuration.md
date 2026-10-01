@@ -414,6 +414,8 @@ either way.
 | `claim_storage_rent` | bool | `false` | When `true`, the node sweeps storage-rent-eligible boxes into a self-claim transaction paid to the miner's reward key, inserted ahead of mempool selection so any conflicting fee-bearing claim on the same box is excluded. Opt-in: it changes block contents and seizes rent to the miner. Requires `[indexer] enabled = true` (see cross-section rules). While the index backfills, enumeration may be partial but never claims an invalid box — a lagging index only under-collects. |
 | `max_storage_rent_claims` | u32 | `4096` | Safety ceiling on the number of storage-rent boxes swept into one block's self-claim. The block's cost and size budgets are the real binding limit (typically ~3,700 boxes by cost on mainnet); this cap prevents unbounded iteration. Lower it to leave more room for fee-paying user transactions. Only meaningful when `claim_storage_rent = true`. |
 
+Storage-rent claims enforce distinct context-extension variable 127 values from height 1,885,000 on every network, matching Scala 6.0.7. This consensus check applies to blocks regardless of `reject_storage_rent_txs`. The self-collector gives each fully consumed input a separate miner output from that height; if proceeds cannot cover the additional outputs' dust floors, the batch is skipped. Earlier blocks retain the historical rules.
+
 ## `[voting]`
 
 On-chain protocol-parameter voting. When this node mines, each block it

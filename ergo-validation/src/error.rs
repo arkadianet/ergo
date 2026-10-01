@@ -134,6 +134,10 @@ pub enum ValidationError {
         max_input_height: u32,
     },
 
+    /// Scala rule 125: repeated context-extension variable 127 value after activation.
+    #[error("repeated storage rent var-127 value at input {index} (rule 125)")]
+    DuplicateStorageRentOutput { index: usize },
+
     // --- State-dependent (UTXO resolution) ---
     /// A spending input references a box that the UTXO view does not
     /// know about.
