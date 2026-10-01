@@ -33,14 +33,18 @@ pub(super) fn validate_rent_output_indices(
     Ok(())
 }
 
-/// Scala `Seq[Any].distinct` compares boxed primitive numbers across widths,
-/// tuples/options by their contents, and collections with their element RType.
-/// Wire node encodings (GroupGenerator/ConcreteCollection) do not affect values.
+/// Scala `Seq[Any].distinct` compares primitive numbers across widths and
+/// Tuple2/Option fields with Scala equality. Tuple nodes and tuple constants
+/// of other arities are Coll[Any], whose elements use Java equality (boxed
+/// numeric widths matter). Typed collections retain their element RType;
+/// GroupGenerator/ConcreteCollection node encodings do not affect equality.
 #[derive(PartialEq, Eq, Hash)]
 enum RuntimeKey {
     Number(i64),
+    BoxedNumber(u8, i64),
     Leaf(Vec<u8>),
     Tuple(Vec<RuntimeKey>),
+    AnyCollection(Vec<RuntimeKey>),
     Option(Option<Box<RuntimeKey>>),
     Collection(Vec<u8>, Vec<RuntimeKey>),
     Header([u8; 32]),
@@ -74,13 +78,21 @@ fn runtime_key(tpe: &SigmaType, value: &SigmaValue) -> Result<RuntimeKey, Valida
                     "tuple type mismatch",
                 ));
             };
-            RuntimeKey::Tuple(
-                items
-                    .iter()
-                    .zip(types)
-                    .map(|(v, t)| runtime_key(t, v))
-                    .collect::<Result<_, _>>()?,
-            )
+            let key = if items.len() == 2 {
+                runtime_key
+            } else {
+                java_runtime_key
+            };
+            let items = items
+                .iter()
+                .zip(types)
+                .map(|(v, t)| key(t, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            if items.len() == 2 {
+                RuntimeKey::Tuple(items)
+            } else {
+                RuntimeKey::AnyCollection(items)
+            }
         }
         SigmaValue::Opt(item) => {
             let SigmaType::SOption(inner) = tpe else {
@@ -92,6 +104,18 @@ fn runtime_key(tpe: &SigmaType, value: &SigmaValue) -> Result<RuntimeKey, Valida
                 item.as_ref()
                     .map(|v| runtime_key(inner, v).map(Box::new))
                     .transpose()?,
+            )
+        }
+        SigmaValue::Coll(CollValue::Values(items)) if matches!(tpe, SigmaType::STuple(_)) => {
+            let SigmaType::STuple(types) = tpe else {
+                unreachable!()
+            };
+            RuntimeKey::AnyCollection(
+                items
+                    .iter()
+                    .zip(types)
+                    .map(|(v, t)| java_runtime_key(t, v))
+                    .collect::<Result<_, _>>()?,
             )
         }
         SigmaValue::Coll(_) | SigmaValue::ConcreteCollection { .. } => {
@@ -125,6 +149,18 @@ fn runtime_key(tpe: &SigmaType, value: &SigmaValue) -> Result<RuntimeKey, Valida
             write_constant(&mut writer, tpe, value).map_err(fail)?;
             RuntimeKey::Leaf(writer.result())
         }
+    })
+}
+
+/// Coll[Any]'s object array uses Java equals on each element. Non-numeric
+/// objects keep their own equality, including Scala equality in Tuple2/Option.
+fn java_runtime_key(tpe: &SigmaType, value: &SigmaValue) -> Result<RuntimeKey, ValidationError> {
+    Ok(match value {
+        SigmaValue::Byte(n) => RuntimeKey::BoxedNumber(2, i64::from(*n)),
+        SigmaValue::Short(n) => RuntimeKey::BoxedNumber(3, i64::from(*n)),
+        SigmaValue::Int(n) => RuntimeKey::BoxedNumber(4, i64::from(*n)),
+        SigmaValue::Long(n) => RuntimeKey::BoxedNumber(5, *n),
+        _ => runtime_key(tpe, value)?,
     })
 }
 
@@ -236,5 +272,118 @@ mod tests {
             vec![],
         );
         assert!(validate_rent_output_indices(&tx, height).is_ok());
+    }
+
+    /// Exact ValueSerializer bytes from RentTupleEqualityProbe.scala; parse the
+    /// complete input so ContextExtension retains tuple node/constant identity.
+    #[test]
+    fn rent_distinct_tuple_values_match_scala_wire_probe() {
+        let cases = [
+            (
+                "a identical tuple nodes",
+                "860203020304",
+                "860203020304",
+                true,
+            ),
+            (
+                "b tuple node boxed widths",
+                "860203020304",
+                "860204020304",
+                false,
+            ),
+            ("c pair constant vs node", "570204", "860203020304", false),
+            (
+                "d pair constants numeric widths",
+                "3f040204",
+                "40030204",
+                true,
+            ),
+            (
+                "e triple constants boxed widths",
+                "48030303020406",
+                "48040404020406",
+                false,
+            ),
+            (
+                "f triple constant vs node",
+                "48030303020406",
+                "8603030203040306",
+                true,
+            ),
+            (
+                "g nested pair constants numeric widths",
+                "86023f0402040306",
+                "8602400302040306",
+                true,
+            ),
+            (
+                "h nested tuple nodes boxed widths",
+                "86028602030203040306",
+                "86028602040203040306",
+                false,
+            ),
+            (
+                "i nested typed collections different types",
+                "86020f01020306",
+                "86021001020306",
+                false,
+            ),
+            (
+                "j nested typed collection constant vs node",
+                "86020f01020306",
+                "860283010303020306",
+                true,
+            ),
+            (
+                "k tuple nodes different values",
+                "860203020304",
+                "860203020306",
+                false,
+            ),
+            ("l primitive numeric widths", "0302", "0402", true),
+        ];
+        let height = DISTINCT_RENT_OUTPUTS_ACTIVATION_HEIGHT;
+        for (name, left, right, duplicate) in cases {
+            for values in [[left, right], [right, left]] {
+                for proof in [vec![], vec![1]] {
+                    let inputs = values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            let mut wire = vec![index as u8; 32];
+                            wire.push(proof.len() as u8);
+                            wire.extend(&proof);
+                            wire.extend([1, 127]);
+                            wire.extend(hex::decode(value).unwrap());
+                            let mut reader = VlqReader::new(&wire).with_activated_script_version(3);
+                            let input = ergo_ser::input::read_input(&mut reader)
+                                .unwrap_or_else(|e| panic!("{name}: {value}: {e:?}"));
+                            assert!(reader.is_empty(), "{name}: {value}: trailing bytes");
+                            input
+                        })
+                        .collect();
+                    let tx = Transaction {
+                        inputs,
+                        data_inputs: vec![],
+                        output_candidates: vec![],
+                    };
+                    assert!(validate_rent_output_indices(&tx, height - 1).is_ok());
+                    for h in [height, height + 1] {
+                        let result = validate_rent_output_indices(&tx, h);
+                        if duplicate {
+                            assert!(
+                                matches!(
+                                    result,
+                                    Err(ValidationError::DuplicateStorageRentOutput { index: 1 })
+                                ),
+                                "{name}: {values:?}: {result:?}"
+                            );
+                        } else {
+                            assert!(result.is_ok(), "{name}: {values:?}: {result:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
