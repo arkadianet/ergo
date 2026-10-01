@@ -1547,6 +1547,74 @@ mod tests {
             .unwrap();
     }
 
+    /// Local campaign: a box candidate whose tree is `XorOf^n(FalseLeaf)` to
+    /// the read-depth limit. sigma-state 6.0.6 parses it, re-serializes it to
+    /// 117 bytes, and then CANNOT re-read its own output
+    /// (`DeserializeCallDepthExceeded: ...depth(111) exceeds allowed maximum
+    /// 110`), because writing the leaf as a Boolean constant costs one more
+    /// read level. `WriteRejected` is therefore the reference-compatible
+    /// verdict.
+    ///
+    /// #459 already pinned that verdict for the standalone `ergo_tree`
+    /// surface, but `has_depth_expanding_boolean` defaulted to false and
+    /// `view!` never forwarded it, so the box surface could not reach it.
+    #[test]
+    fn box_boolean_depth_exemption_reaches_container_surfaces() {
+        let transcript =
+            include_str!("../../test-vectors/scala/sigma/nightly_box_boolean_depth.txt");
+        let field = |key: &str| {
+            transcript
+                .lines()
+                .find_map(|l| l.strip_prefix(key).map(str::trim))
+                .unwrap_or_else(|| panic!("{key} missing from the oracle transcript"))
+        };
+        assert_eq!(field("verdict="), "ACCEPT");
+        assert_eq!(
+            field("redecode_exception="),
+            "sigma.serialization.DeserializeCallDepthExceeded"
+        );
+
+        let bytes = hex::decode(field("input=")).unwrap();
+        assert_eq!(
+            bytes.len(),
+            field("parsed_bytes=").parse::<usize>().unwrap()
+        );
+        // The corpus seed and the pinned oracle input are the same bytes, so
+        // the fuzzer's reproducer and the transcript cannot drift apart.
+        assert_eq!(
+            bytes,
+            include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth")
+        );
+
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+        // The exemption has to see THROUGH the box to the tree it carries.
+        assert!(candidate.ergo_tree().has_depth_expanding_boolean());
+        assert!(candidate.has_depth_expanding_boolean());
+
+        let mut writer = VlqWriter::new();
+        ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &candidate).unwrap();
+        let output = writer.result().to_vec();
+        assert_eq!(
+            output.len(),
+            field("reencoded_bytes=").parse::<usize>().unwrap()
+        );
+        assert_eq!(hex::encode(&output), field("reencoded_hex="));
+
+        // The reference cannot read this back; we must not call that a Bug.
+        assert!(matches!(
+            ergo_ser::ergo_box::read_ergo_box_candidate(
+                &mut VlqReader::new(&output).with_activated_script_version(3)
+            ),
+            Err(ReadError::DepthLimitExceeded { max: 110 })
+        ));
+        assert_eq!(
+            (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        crate::fuzz::fuzz_one("ergo_box_candidate", &bytes);
+    }
+
     #[test]
     fn tree_size_expansion_exception_requires_growth_and_position_rule() {
         for (input_size, output_size, rule_id, expected_bug) in [
