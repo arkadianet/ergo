@@ -91,13 +91,13 @@ where
                 return Outcome::WriteRejected;
             }
             // Scala also expands compact type descriptors (e.g. 0x18 into
-            // two 0x0c bytes). An accepted standalone tree can consequently
+            // two 0x0c bytes). An accepted tree or box candidate can consequently
             // serialize past MaxPropositionSize and fail rule 1014 on re-read.
             // Restrict this to a tree that grew from within its size window;
-            // other errors and containing boxes/transactions remain Bugs.
+            // other validation errors and surfaces remain Bugs.
             if matches!(e, ReadError::SigmaValidation { rule_id: 1014, .. })
                 && v1
-                    .tree_position_limit()
+                    .wire_position_limit()
                     .is_some_and(|limit| r1.position() <= limit && b1.len() > limit)
             {
                 return Outcome::WriteRejected;
@@ -151,7 +151,7 @@ where
         // A sized tree catches the same size expansion as a rule-1014 wrap
         // instead of returning an error. Require exact retained output bytes.
         if v1
-            .tree_position_limit()
+            .wire_position_limit()
             .is_some_and(|limit| r1.position() <= limit && b1.len() > limit)
             && v2.is_position_limit_wrap(&b1)
         {
@@ -1450,6 +1450,97 @@ mod tests {
                         Outcome::WriteRejected
                     );
                 }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Runs 36835270692 and 36792671282: pinned sigma-state 6.0.6 behavior.
+    #[test]
+    fn nightly_box_serialization_size_and_tuple_failures() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let bytes = include_bytes!(
+                    "../fuzz/corpus/ergo_box_candidate/nightly-2026-10-01-type-expansion"
+                );
+                let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
+                let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+                assert_eq!(reader.position(), 2656);
+                let mut writer = VlqWriter::new();
+                ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &candidate).unwrap();
+                let output = writer.result();
+                let expected =
+                    include_str!("../../test-vectors/scala/sigma/nightly_box_type_expansion.hex")
+                        .lines()
+                        .find(|line| !line.starts_with('#'))
+                        .unwrap();
+                assert_eq!(hex::encode(&output), expected);
+                assert_eq!(output.len(), 4589);
+                assert!(matches!(
+                    ergo_ser::ergo_box::read_ergo_box_candidate(
+                        &mut VlqReader::new(&output).with_activated_script_version(3)
+                    ),
+                    Err(ReadError::SigmaValidation { rule_id: 1014, .. })
+                ));
+                assert_eq!(
+                    (registry(Some("ergo_box_candidate"))[0].run)(bytes),
+                    Outcome::WriteRejected
+                );
+                crate::fuzz::fuzz_one("ergo_box_candidate", bytes);
+
+                // The sigma-state 6.0.6 transcript lives beside the corpus seed;
+                // read the bytes from it so the pinned oracle input and the
+                // committed regression corpus cannot drift apart.
+                let transcript =
+                    include_str!("../../test-vectors/scala/sigma/nightly_box_unwritable_tuple.txt");
+                let field = |key: &str| {
+                    transcript
+                        .lines()
+                        .find_map(|l| l.strip_prefix(key).map(str::trim))
+                        .unwrap_or_else(|| panic!("{key} missing from the oracle transcript"))
+                };
+                let expected_error = field("exception=");
+                let bytes = hex::decode(field("input=")).unwrap();
+                assert_eq!(
+                    bytes,
+                    include_bytes!(
+                        "../fuzz/corpus/ergo_box_candidate/nightly-2026-10-01-unwritable-tuple"
+                    )
+                );
+                assert_eq!(field("verdict="), "REJECT");
+                let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+                let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+                // The reference parses the same bytes and stops here too.
+                assert_eq!(
+                    reader.position(),
+                    field("parsed_bytes=").parse::<usize>().unwrap()
+                );
+                // Scala parses the degenerate tuple, then raises the pinned
+                // `expected_error` instead of writing the original script bytes.
+                // The Rust wording differs from Scala's, so pin the condition
+                // rather than the text.
+                assert!(expected_error.contains("less than 2 items"));
+                for indexed in [false, true] {
+                    let mut writer = VlqWriter::new();
+                    let result = if indexed {
+                        ergo_ser::ergo_box::write_ergo_box_candidate_indexed(
+                            &mut writer,
+                            &candidate,
+                            &[],
+                        )
+                    } else {
+                        ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &candidate)
+                    };
+                    assert!(matches!(result, Err(WriteError::InvalidData(message))
+                        if message.contains("STuple must have at least 2 elements")));
+                }
+                assert_eq!(
+                    (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
+                    Outcome::WriteRejected
+                );
+                crate::fuzz::fuzz_one("ergo_box_candidate", &bytes);
             })
             .unwrap()
             .join()

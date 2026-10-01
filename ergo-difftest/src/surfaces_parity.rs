@@ -21,9 +21,9 @@ use ergo_ser::{
 pub(super) trait ParityNormalize {
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq;
 
-    /// Only standalone ErgoTrees use a proposition-size window. Compact type
-    /// descriptors can expand beyond it when serialized, including in Scala.
-    fn tree_position_limit(&self) -> Option<usize> {
+    /// Standalone trees and box candidates start a 4096-byte reader window.
+    /// Compact type descriptors can expand beyond it, including in Scala.
+    fn wire_position_limit(&self) -> Option<usize> {
         None
     }
 
@@ -318,7 +318,7 @@ fn has_pending_strip(expr: &Expr) -> bool {
     children.into_iter().any(has_pending_strip)
 }
 impl ParityNormalize for ErgoTree {
-    fn tree_position_limit(&self) -> Option<usize> {
+    fn wire_position_limit(&self) -> Option<usize> {
         Some(4096)
     }
 
@@ -387,7 +387,22 @@ macro_rules! view {
         view!($ty, $v, _after_write, $body, $headers, $boxes, false);
     };
     ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr) => {
+        view!(
+            $ty,
+            $v,
+            $after_write,
+            $body,
+            $headers,
+            $boxes,
+            $pending,
+            None
+        );
+    };
+    ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr, $limit:expr) => {
         impl ParityNormalize for $ty {
+            fn wire_position_limit(&self) -> Option<usize> {
+                $limit
+            }
             fn parity_normalized(&self, $after_write: bool) -> impl PartialEq {
                 let $v = self;
                 $body
@@ -499,7 +514,8 @@ view!(
         boxes.extend(v.additional_registers.retained_boxes());
         boxes
     },
-    v.ergo_tree().has_pending_upcast_strip()
+    v.ergo_tree().has_pending_upcast_strip(),
+    Some(4096)
 );
 view!(
     ErgoBox,

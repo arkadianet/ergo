@@ -258,6 +258,20 @@ impl ErgoBoxCandidate {
             .unwrap_or(&self.ergo_tree_bytes)
     }
 
+    /// Validate structured scripts before falling back to uncached wire bytes.
+    /// Scala propagates script serialization failures when writing a box.
+    pub(super) fn checked_serialized_ergo_tree_bytes(&self) -> Result<&[u8], WriteError> {
+        // Box writers preserve opaque soft-fork scripts verbatim, even when
+        // the standalone tree writer cannot prove they are self-delimiting.
+        if self.canonical_tree_bytes.is_none()
+            && !matches!(self.ergo_tree.body, crate::opcode::Expr::Unparsed(_))
+        {
+            let mut writer = VlqWriter::new();
+            crate::ergo_tree::write_ergo_tree(&mut writer, &self.ergo_tree)?;
+        }
+        Ok(self.serialized_ergo_tree_bytes())
+    }
+
     /// The serialized `additional_registers`: the `count(u8) ||
     /// concat(register_bytes)` wire form, feed it to `split_register_bytes` to
     /// recover per-register hex. A parsed box keeps the CANONICAL
