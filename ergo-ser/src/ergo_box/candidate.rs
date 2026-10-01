@@ -16,7 +16,7 @@ use super::{check_token_count, ErgoBoxCandidate};
 /// the Scala/sigma-rust wire format.
 pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(c.serialized_ergo_tree_bytes());
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);

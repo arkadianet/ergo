@@ -18,7 +18,7 @@ pub fn write_ergo_box_candidate_indexed(
     token_id_table: &[TokenId],
 ) -> Result<(), WriteError> {
     w.put_u64(c.value);
-    w.put_bytes(c.serialized_ergo_tree_bytes());
+    w.put_bytes(c.checked_serialized_ergo_tree_bytes()?);
     w.put_u32(c.creation_height);
     check_token_count(c.tokens.len())?;
     w.put_u8(c.tokens.len() as u8);
