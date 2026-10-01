@@ -1615,6 +1615,39 @@ mod tests {
         crate::fuzz::fuzz_one("ergo_box_candidate", &bytes);
     }
 
+    /// The exemption has to survive being nested: a transaction reaches its
+    /// tree through `output_candidates`, a `Vec`, so forwarding only one level
+    /// (container -> Vec) still loses it. Found by a later local campaign,
+    /// after the container forwarding above looked complete: the output box's
+    /// own predicate was `true` while the transaction's was `false`, because
+    /// neither the `Vec<T>` nor the tuple impl forwarded the predicate at all.
+    #[test]
+    fn boolean_depth_exemption_survives_vec_and_tuple_nesting() {
+        let bytes: &[u8] =
+            include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
+        let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
+        let tx = ergo_ser::transaction::read_transaction(&mut reader).unwrap();
+
+        // The box itself sees it...
+        let box_predicate = tx.output_candidates[0]
+            .ergo_tree()
+            .has_depth_expanding_boolean();
+        assert!(
+            box_predicate,
+            "the output box carries the depth-109 Boolean"
+        );
+        // ...and so must the box, its Vec, and the transaction around it.
+        assert!(tx.output_candidates[0].has_depth_expanding_boolean());
+        assert!(tx.output_candidates.has_depth_expanding_boolean());
+        assert!(tx.has_depth_expanding_boolean());
+
+        assert_eq!(
+            (registry(Some("transaction"))[0].run)(bytes),
+            Outcome::WriteRejected
+        );
+        crate::fuzz::fuzz_one("transaction", bytes);
+    }
+
     #[test]
     fn tree_size_expansion_exception_requires_growth_and_position_rule() {
         for (input_size, output_size, rule_id, expected_bug) in [

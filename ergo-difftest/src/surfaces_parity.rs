@@ -76,6 +76,9 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
     fn has_pending_upcast_strip(&self) -> bool {
         self.0.has_pending_upcast_strip() || self.1.has_pending_upcast_strip()
     }
+    fn has_depth_expanding_boolean(&self) -> bool {
+        self.0.has_depth_expanding_boolean() || self.1.has_depth_expanding_boolean()
+    }
     fn retained_boxes(&self) -> Vec<&[u8]> {
         let mut boxes = self.0.retained_boxes();
         boxes.extend(self.1.retained_boxes());
@@ -96,6 +99,10 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
 impl<T: ParityNormalize> ParityNormalize for Vec<T> {
     fn has_pending_upcast_strip(&self) -> bool {
         self.iter().any(ParityNormalize::has_pending_upcast_strip)
+    }
+    fn has_depth_expanding_boolean(&self) -> bool {
+        self.iter()
+            .any(ParityNormalize::has_depth_expanding_boolean)
     }
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         self.iter()
