@@ -6812,7 +6812,7 @@ mod block_relay {
     }
 
     #[test]
-    fn locally_mined_block_section_write_failure_then_tip_build_recovers_original() {
+    fn locally_mined_block_section_write_failure_then_same_parent_refresh_recovers_original() {
         // A serving window above the mined height stands in for a section
         // storage fault. The original template remains offered for recovery.
         use super::super::mining_dispatch::{
@@ -6866,7 +6866,8 @@ mod block_relay {
         flush_actions(&mut state, vec![]);
         assert!(drain(&queue).is_empty(), "nothing is announced");
 
-        // The stored header triggers a Tip build on the unchanged full parent.
+        // A stored header without its body leaves the applied parent unchanged
+        // and does not regenerate work. The retained template permits recovery.
         let now = Instant::now();
         let reason = decide_mining_signal(
             &MiningProducerState {
@@ -6886,14 +6887,16 @@ mod block_relay {
                 refresh_debounce: Duration::from_secs(1),
             },
         );
-        assert_eq!(reason, Some(BuildReason::Tip));
+        assert_eq!(reason, None, "a header-only transition keeps current work");
 
+        // Even if another refresh occurs before the storage fault clears, the
+        // original template and incomplete header remain recoverable.
         publish_candidate_after(&state, &handle, mined.header.timestamp);
         let newer = solve(&state, &handle, 0);
         assert_eq!(newer.nonce, mined.nonce, "both templates accept the nonce");
         assert_ne!(
             newer.id, mined.id,
-            "the Tip build publishes a different header"
+            "the same-parent refresh publishes a different header"
         );
         assert_eq!(newer.header.parent_id, mined.header.parent_id);
 

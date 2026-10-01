@@ -7,6 +7,9 @@ use thiserror::Error;
 ///
 /// Variant taxonomy (operators triage by class, not by free-text):
 ///
+/// * [`MiningError::BuildCancelled`] — cooperative cancellation after the
+///   applied parent changes; the engine treats this as an ordinary stale build.
+///
 /// * [`MiningError::InvalidConfig`] — operator-supplied configuration
 ///   was rejected at parse time, or a runtime height/regime gate was
 ///   crossed (mining off-tip, post-EIP-27 helper called pre-activation,
@@ -32,6 +35,12 @@ use thiserror::Error;
 ///   header for interlinks computation failed.
 #[derive(Debug, Error)]
 pub enum MiningError {
+    /// The applied parent changed while a candidate was being assembled.
+    /// This cooperative stop is mapped to a stale-build outcome by the engine,
+    /// rather than reported as a validation or storage failure.
+    #[error("candidate build superseded by a new applied parent")]
+    BuildCancelled,
+
     /// Configuration was rejected at parse time, or a runtime regime
     /// gate refused to assemble. Includes the human-readable reason.
     #[error("invalid mining configuration: {0}")]
@@ -135,4 +144,13 @@ pub enum MiningError {
     /// so the caller can fail the candidate cleanly instead of aborting.
     #[error("failed to serialize parent header while computing interlinks: {0}")]
     HeaderSerialization(#[from] ergo_ser::error::WriteError),
+}
+
+/// Poll between expensive stages, never inside a speculative AVL mutation.
+pub(crate) fn check_build_cancelled(should_cancel: &dyn Fn() -> bool) -> Result<(), MiningError> {
+    if should_cancel() {
+        Err(MiningError::BuildCancelled)
+    } else {
+        Ok(())
+    }
 }

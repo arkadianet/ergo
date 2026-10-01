@@ -63,9 +63,9 @@ pub struct MiningConfig {
     /// milliseconds. When the mempool changes but the tip has not, the action
     /// loop coalesces the burst and re-signals the engine at most once per
     /// window with a fresh mempool snapshot. Lower = fresher candidates but
-    /// faster churn of the bounded template ring (8 retained); higher = staler
+    /// faster churn of the bounded template ring (16 retained); higher = staler
     /// candidates but longer same-parent history for in-flight solves.
-    /// Default: 1000.
+    /// Default: 250.
     #[serde(default = "default_candidate_interval_ms")]
     pub block_candidate_generation_interval_ms: u64,
 
@@ -95,9 +95,11 @@ pub struct MiningConfig {
     pub max_storage_rent_claims: u32,
 
     /// `true`: the candidate engine keeps the hydrated AVL working set resident
-    /// between candidate builds, keyed on the committed tip. The first build per
-    /// block pays the full hydration; same-tip rebuilds (the enriched refresh
-    /// and every mempool-driven rebuild) then reuse it and are near-instant.
+    /// between candidate builds, keyed on the committed tip. Same-tip rebuilds
+    /// reuse the tree and loaded paths, while changed transaction sets still pay
+    /// validation and AVL-operation/proof costs. Independently of this option,
+    /// the worker can reuse a prior state proof for an identical applied parent
+    /// and ordered transaction bytes after fresh transaction validation.
     /// Default `false` uses authenticated on-demand snapshot reads instead.
     /// The opt-in cache holds the full UTXO AVL node graph resident
     /// (multi-GB on a mainnet archival node, scaling with the UTXO-set size), so
@@ -167,7 +169,7 @@ pub struct CustomExtensionField {
 }
 
 fn default_candidate_interval_ms() -> u64 {
-    1000
+    250
 }
 
 fn default_use_external_miner() -> bool {
@@ -182,7 +184,7 @@ impl Default for MiningConfig {
     /// Mirrors the per-field serde defaults so a programmatically- or
     /// CLI-built config (which starts from `Default`, not a deserialized TOML
     /// table) gets the same values a fully-defaulted `[mining]` table would —
-    /// notably `use_external_miner = true` and the 1000 ms refresh debounce.
+    /// notably `use_external_miner = true` and the 250 ms refresh debounce.
     /// serde's per-field `default = "…"` only applies to a present-but-partial
     /// table; a *missing* `[mining]` section deserializes via `Default`, and
     /// the CLI enable path (`--mining-enabled` with no `[mining]` TOML) builds
@@ -248,7 +250,7 @@ impl MiningConfig {
             return Err(MiningError::InvalidConfig(format!(
                 "[mining].block_candidate_generation_interval_ms must be at least \
                  {MIN_CANDIDATE_INTERVAL_MS} ms (got {}): lower values churn the bounded \
-                 template ring faster than miners repoll; default is 1000",
+                 template ring faster than miners repoll; default is 250",
                 self.block_candidate_generation_interval_ms,
             )));
         }
@@ -572,7 +574,7 @@ value = "01aabb""#,
     fn default_matches_serde_field_defaults() {
         // `Default` must equal a fully-defaulted deserialized table, so the
         // CLI enable path (which starts from `Default`, not a parsed TOML
-        // table) gets `use_external_miner = true` and the 1000 ms debounce —
+        // table) gets `use_external_miner = true` and the 250 ms debounce —
         // not the derived all-zero values that would fail validation.
         let cfg = MiningConfig::default();
         assert!(!cfg.enabled);
@@ -581,7 +583,7 @@ value = "01aabb""#,
             cfg.block_candidate_generation_interval_ms,
             default_candidate_interval_ms(),
         );
-        assert_eq!(cfg.block_candidate_generation_interval_ms, 1000);
+        assert_eq!(cfg.block_candidate_generation_interval_ms, 250);
         assert!(cfg.use_external_miner);
         assert_eq!(
             cfg.max_storage_rent_claims,
@@ -602,7 +604,7 @@ value = "01aabb""#,
             ..MiningConfig::default()
         };
         assert!(cfg.use_external_miner);
-        assert_eq!(cfg.block_candidate_generation_interval_ms, 1000);
+        assert_eq!(cfg.block_candidate_generation_interval_ms, 250);
         cfg.validate()
             .expect("CLI-enabled default config validates (external miner default true)");
     }
@@ -619,7 +621,7 @@ value = "01aabb""#,
             parsed.miner_public_key_hex.as_deref(),
             Some("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
         );
-        assert_eq!(parsed.block_candidate_generation_interval_ms, 1000);
+        assert_eq!(parsed.block_candidate_generation_interval_ms, 250);
         assert!(parsed.use_external_miner);
         // Storage-rent self-claim is opt-in (off); the cap is a high
         // safety ceiling (the block budget is the real limit).

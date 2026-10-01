@@ -96,7 +96,7 @@ pub(super) fn mempool_refresh_due(
 }
 
 /// The action-loop producer's tracked state between iterations, as the
-/// signal decision consumes it: the tip the last signal reflected, the pool
+/// signal decision consumes it: the last observed tip, the pool
 /// revision it built against, the timestamps that throttle the recovery
 /// retry and the same-parent mempool refresh, and whether a mining request
 /// asked for a rebuild since the last signal.
@@ -121,6 +121,37 @@ pub(super) struct MiningSignalIntervals {
     pub(super) refresh_debounce: Duration,
 }
 
+/// Next wake needed when no external event arrives. Deadlines are measured
+/// from the last signal, so the first mutation after a quiet period is ready
+/// immediately and later mutations share the same pending refresh deadline.
+/// The same timer covers missing-work recovery, and stays disarmed while mining
+/// is closed or the current tip and pool already have available work.
+pub(super) fn mining_signal_deadline(
+    prev: &MiningProducerState,
+    mining_started: bool,
+    has_cached_candidate: bool,
+    revision_now: u64,
+    now: Instant,
+    intervals: MiningSignalIntervals,
+) -> Option<Instant> {
+    if !mining_started {
+        return None;
+    }
+    let recovery = (!has_cached_candidate)
+        .then(|| {
+            prev.last_recovery
+                .map_or(Some(now), |at| at.checked_add(intervals.recovery))
+        })
+        .flatten();
+    let refresh = (revision_now != prev.last_revision)
+        .then(|| {
+            prev.last_mempool_signal
+                .map_or(Some(now), |at| at.checked_add(intervals.refresh_debounce))
+        })
+        .flatten();
+    recovery.into_iter().chain(refresh).min()
+}
+
 /// What the action-loop producer should signal this iteration, given the
 /// current observations. Pure decision (no I/O) so the
 /// tip/rebuild/recovery/refresh precedence is unit-testable. `None` = signal
@@ -139,8 +170,11 @@ pub(super) fn decide_mining_signal(
     now: Instant,
     intervals: MiningSignalIntervals,
 ) -> Option<BuildReason> {
-    // 1. Tip moved (full OR header-only) → always re-signal; preempts the rest.
-    if tip_now != prev.last_tip {
+    // 1. A new applied parent needs fresh work immediately, including an
+    // equal-height reorg. While starting, still observe header changes for the
+    // startup gate; once started they cannot affect candidate contents.
+    if tip_now.applied_tip_changed(&prev.last_tip) || (!mining_started && tip_now != prev.last_tip)
+    {
         return Some(BuildReason::Tip);
     }
     // 2. A mined block on this tip failed to apply and its templates were
@@ -183,6 +217,11 @@ pub(super) struct MiningTipSnapshot {
 }
 
 impl MiningTipSnapshot {
+    fn applied_tip_changed(&self, previous: &Self) -> bool {
+        self.best_full_id != previous.best_full_id
+            || self.best_full_height != previous.best_full_height
+    }
+
     /// Capture the current committed tip identity from the action-loop state.
     pub(super) fn capture(state: &NodeState) -> Self {
         let cs = state.store.chain_state_meta();
@@ -1436,6 +1475,124 @@ mod tests {
     }
 
     #[test]
+    fn decide_same_height_applied_reorg_rebuilds_before_refresh_deadline() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        assert_eq!(
+            decide_mining_signal(&prev, synced_tip(2, 100), true, true, 6, now, INTERVALS,),
+            Some(BuildReason::Tip),
+        );
+    }
+
+    #[test]
+    fn decide_started_header_advance_and_reanchor_do_not_rebuild_applied_parent() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        let header_ahead = header_ahead_tip(1, 100, 40);
+        assert_eq!(
+            decide_mining_signal(&prev, header_ahead, true, true, 5, now, INTERVALS),
+            None,
+        );
+        prev.last_tip = header_ahead;
+        assert_eq!(
+            decide_mining_signal(&prev, synced_tip(1, 100), true, true, 5, now, INTERVALS),
+            None,
+        );
+    }
+
+    #[test]
+    fn decide_started_header_change_does_not_delay_pending_pool_refresh() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        assert_eq!(
+            decide_mining_signal(
+                &prev,
+                header_ahead_tip(1, 100, 1),
+                true,
+                true,
+                6,
+                now + DEBOUNCE,
+                INTERVALS,
+            ),
+            Some(BuildReason::MempoolRefresh),
+        );
+    }
+
+    #[test]
+    fn decide_starting_header_changes_still_evaluate_startup_gate() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        assert_eq!(
+            decide_mining_signal(
+                &prev,
+                header_ahead_tip(1, 100, 1),
+                false,
+                false,
+                5,
+                now,
+                INTERVALS
+            ),
+            Some(BuildReason::Tip),
+        );
+        assert!(
+            !mining_started_latch(false, synced_tip(1, 100), false, true, false,),
+            "observing a header is not a freshly applied block"
+        );
+    }
+
+    #[test]
+    fn mining_deadline_burst_uses_original_deadline_then_disarms() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        let deadline = now + DEBOUNCE;
+        assert_eq!(
+            mining_signal_deadline(&prev, true, true, 6, now, INTERVALS),
+            Some(deadline)
+        );
+        assert_eq!(
+            mining_signal_deadline(&prev, true, true, 9, now + DEBOUNCE / 2, INTERVALS),
+            Some(deadline)
+        );
+        prev.last_revision = 9;
+        prev.last_mempool_signal = Some(deadline);
+        assert_eq!(
+            mining_signal_deadline(&prev, true, true, 9, deadline, INTERVALS),
+            None
+        );
+        assert_eq!(
+            mining_signal_deadline(&prev, false, false, 10, deadline, INTERVALS),
+            None
+        );
+    }
+
+    #[test]
+    fn mining_deadline_pending_pool_refresh_survives_minimal_build_gap() {
+        let now = Instant::now();
+        let mut prev = after_failed_mined_block(synced_tip(1, 100), now);
+        prev.rebuild_requested = false;
+        let intervals = MiningSignalIntervals {
+            recovery: RECOVERY,
+            refresh_debounce: Duration::from_millis(250),
+        };
+        let deadline = now + intervals.refresh_debounce;
+        // A pool mutation while the first template builds must not be lost
+        // just because the previous signal already started a minimal/full pair.
+        assert_eq!(
+            mining_signal_deadline(&prev, true, false, 6, now, intervals),
+            Some(deadline)
+        );
+        assert_eq!(
+            decide_mining_signal(&prev, prev.last_tip, true, false, 6, deadline, intervals),
+            Some(BuildReason::MempoolRefresh)
+        );
+    }
+
+    #[test]
     fn decide_synced_uncovered_recovery_due_returns_wallet_ready() {
         let base = Instant::now();
         let tip = synced_tip(1, 10);
@@ -1702,13 +1859,12 @@ mod tests {
 
     #[test]
     fn decide_tip_change_preempts_rebuild_request() {
-        // A failure without a verdict leaves the failed block as the best
-        // header, so the tip snapshot moved: the tip signal already rebuilds
-        // on the applied parent.
+        // An applied-parent change already requires new work, even when a
+        // failed solution also requested a same-parent rebuild.
         let base = Instant::now();
         let got = decide_mining_signal(
             &after_failed_mined_block(synced_tip(1, 10), base),
-            MiningTipSnapshot::for_test([1; 32], 10, [2; 32], 11),
+            synced_tip(2, 11),
             /* mining_started */ true,
             /* has_cached */ false,
             5,
@@ -1716,6 +1872,23 @@ mod tests {
             INTERVALS,
         );
         assert_eq!(got, Some(BuildReason::Tip));
+    }
+
+    #[test]
+    fn decide_failed_solution_with_header_change_rebuilds_same_parent() {
+        let base = Instant::now();
+        assert_eq!(
+            decide_mining_signal(
+                &after_failed_mined_block(synced_tip(1, 10), base),
+                header_ahead_tip(1, 10, 1),
+                true,
+                false,
+                5,
+                base,
+                INTERVALS,
+            ),
+            Some(BuildReason::SolvedBlockFailed),
+        );
     }
 
     #[test]

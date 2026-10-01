@@ -860,6 +860,7 @@ dependencies = [
  "ergo-ser",
  "ergo-state",
  "ergo-validation",
+ "flate2",
  "hex",
  "num-bigint",
  "serde",

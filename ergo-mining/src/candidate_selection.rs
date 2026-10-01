@@ -12,12 +12,13 @@
 //!   validator's is not: selection sees unvalidated mempool txs, so a box
 //!   whose id can't be derived is skipped, never `expect()`-panicked.
 //! - Selection is a sequential greedy pass in the snapshot's
-//!   relay-priority order, mirroring Scala `CandidateGenerator.collectTxs`:
+//!   relay-priority order:
 //!   skip any tx that double-spends an already-consumed box (this is how a
 //!   pinned storage-rent self-claim excludes conflicting fee-bearing bot
 //!   claims — seed the overlay with the rent tx first), skip any tx that
-//!   fails revalidation against the candidate's frozen context, and stop
-//!   when the running block cost/size budget would be exceeded.
+//!   fails revalidation against the candidate's frozen context, or would exceed
+//!   the remaining block cost/size budget. Later fitting transactions retain
+//!   their priority order and can still fill the block.
 //! - Block cost is summed exactly as the validator does: each tx is
 //!   validated with its OWN fresh `CostAccumulator` (because `add` commits
 //!   before checking the limit, a shared accumulator would be polluted by
@@ -27,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ergo_mempool::MempoolReadSnapshot;
-use ergo_primitives::digest::Digest32;
+use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
@@ -37,7 +38,7 @@ use ergo_validation::{
     ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules, UtxoView,
 };
 
-use crate::error::MiningError;
+use crate::error::{check_build_cancelled, MiningError};
 
 /// Intra-block UTXO overlay over a base `UtxoView` (the committed state
 /// tip). Tracks boxes created and spent by txs already placed in the
@@ -64,13 +65,27 @@ impl<'a> CandidateOverlay<'a> {
     /// applies only txs that have passed validation, so this never fails in
     /// practice, but it is surfaced rather than panicked.
     pub fn apply_tx(&mut self, tx: &Transaction) -> Result<(), MiningError> {
-        for input in &tx.inputs {
-            self.spent_in_block.insert(input.box_id);
-        }
         let tx_id = transaction_id(tx).map_err(|e| MiningError::IdComputation {
             op: "overlay_tx_id",
             reason: format!("{e:?}"),
         })?;
+        self.apply_tx_with_id(tx, tx_id);
+        Ok(())
+    }
+
+    /// Reuse the id already computed by consensus validation. Context-sensitive
+    /// checks still run for every candidate; only immutable id work is reused.
+    pub fn apply_checked(&mut self, checked: &CheckedTransaction) {
+        self.apply_tx_with_id(
+            checked.transaction(),
+            ModifierId::from_bytes(*checked.tx_id()),
+        );
+    }
+
+    fn apply_tx_with_id(&mut self, tx: &Transaction, tx_id: ModifierId) {
+        for input in &tx.inputs {
+            self.spent_in_block.insert(input.box_id);
+        }
         for (idx, output) in tx.output_candidates.iter().enumerate() {
             let ergo_box = ErgoBox {
                 candidate: output.clone(),
@@ -81,7 +96,6 @@ impl<'a> CandidateOverlay<'a> {
                 self.in_block_outputs.insert(box_id, ergo_box);
             }
         }
-        Ok(())
     }
 
     /// True if `box_id` has been spent by a tx already in the candidate.
@@ -166,9 +180,9 @@ pub struct Selected {
 /// fee-collecting tx can resolve their fee outputs.
 ///
 /// `cost_budget` / `size_budget` are the block budgets remaining after the
-/// pinned txs (and a safety gap); selection stops at the first tx that
-/// would exceed either. Transactions that conflict, fail to resolve, or
-/// fail revalidation are skipped.
+/// pinned txs (and a safety gap). Transactions that do not fit, conflict, fail
+/// to resolve, or fail revalidation are skipped. A skipped parent's descendants
+/// cannot resolve its outputs, while later independent transactions can fit.
 #[allow(clippy::too_many_arguments)]
 pub fn select_user_txs(
     overlay: &mut CandidateOverlay,
@@ -180,6 +194,38 @@ pub fn select_user_txs(
     size_budget: u64,
     reemission_rules: Option<&ReemissionRuleInputs>,
 ) -> Result<Selected, MiningError> {
+    select_user_txs_cancellable(
+        overlay,
+        snapshot,
+        ctx,
+        params,
+        last_headers,
+        cost_budget,
+        size_budget,
+        reemission_rules,
+        &|| false,
+    )
+}
+
+/// Selection with cooperative cancellation at transaction boundaries. A newer
+/// mempool snapshot on the same parent must not cancel this pass: its validated
+/// result can still be published while the next refresh waits.
+#[allow(clippy::too_many_arguments)]
+pub fn select_user_txs_cancellable(
+    overlay: &mut CandidateOverlay,
+    snapshot: &MempoolReadSnapshot,
+    ctx: &TransactionContext,
+    params: &ProtocolParams,
+    last_headers: &[Header],
+    cost_budget: u64,
+    size_budget: u64,
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Selected, MiningError> {
+    check_build_cancelled(should_cancel)?;
+    if cost_budget == 0 || size_budget == 0 {
+        return Ok(Selected::default());
+    }
     let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
             op: "select_block_cap",
@@ -190,9 +236,10 @@ pub fn select_user_txs(
     let mut sel = Selected::default();
 
     for entry in snapshot.iter() {
-        // Size budget: stop once the next tx would overrun the block.
+        check_build_cancelled(should_cancel)?;
+        // A large priority entry must not block smaller independent entries.
         if sel.total_size.saturating_add(u64::from(entry.size_bytes)) > size_budget {
-            break;
+            continue;
         }
 
         // Conflict / double-spend: cheap precheck on the precomputed input
@@ -206,6 +253,7 @@ pub fn select_user_txs(
             Ok(t) => t,
             Err(_) => continue,
         };
+        check_build_cancelled(should_cancel)?;
 
         // Resolve inputs/data-inputs against the evolving overlay. A None
         // means an input is already spent in-block or not yet available
@@ -216,6 +264,7 @@ pub fn select_user_txs(
         let Some(resolved_data_inputs) = overlay.resolve_data_inputs(&tx) else {
             continue;
         };
+        check_build_cancelled(should_cancel)?;
 
         // Revalidate against the candidate's frozen context with a FRESH
         // accumulator (a shared one would be polluted by a rejected tx).
@@ -231,7 +280,7 @@ pub fn select_user_txs(
                 },
             };
             match validate_transaction_parsed(
-                tx.clone(),
+                tx,
                 &entry.bytes,
                 resolved_inputs,
                 resolved_data_inputs,
@@ -251,14 +300,16 @@ pub fn select_user_txs(
                 }
             }
         };
+        check_build_cancelled(should_cancel)?;
 
-        // Cost budget: stop if this tx would push the block over.
+        // Validation used a fresh accumulator and has not touched the overlay.
+        // A budget skip is a fit decision, never a consensus-invalid suspect.
         let tx_cost = cost.total_block_cost();
         if sel.total_cost.saturating_add(tx_cost) > cost_budget {
-            break;
+            continue;
         }
 
-        overlay.apply_tx(&tx)?;
+        overlay.apply_checked(&checked);
         sel.total_cost = sel.total_cost.saturating_add(tx_cost);
         sel.total_size = sel.total_size.saturating_add(u64::from(entry.size_bytes));
         sel.total_fee = sel.total_fee.saturating_add(entry.fee);
@@ -468,6 +519,55 @@ mod tests {
 
         assert_eq!(sel.checked.len(), 1, "a valid mempool tx must be selected");
         assert!(sel.suspects.is_empty(), "a selected tx is not a suspect");
+    }
+
+    #[test]
+    fn parent_change_during_resolution_stops_before_applying_transaction() {
+        struct CancelOnRead {
+            base: MapUtxo,
+            cancelled: std::cell::Cell<bool>,
+            reads: std::cell::Cell<usize>,
+        }
+        impl UtxoView for CancelOnRead {
+            fn get_box(&self, id: &Digest32) -> Option<ErgoBox> {
+                self.reads.set(self.reads.get() + 1);
+                self.cancelled.set(true);
+                self.base.get_box(id)
+            }
+        }
+        let input = box_at(1_000_000_000, HEIGHT, 1);
+        let next_input = box_at(1_000_000_000, HEIGHT, 2);
+        let tx = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let next_tx = spend_tx(&next_input, 1_000_000_000, HEIGHT);
+        let utxo = CancelOnRead {
+            base: MapUtxo::new(&[input.clone(), next_input]),
+            cancelled: std::cell::Cell::new(false),
+            reads: std::cell::Cell::new(0),
+        };
+        let snapshot = MempoolReadSnapshot::from_entries(vec![
+            entry(&tx, 1, 100, 0xA0),
+            entry(&next_tx, 1, 100, 0xB0),
+        ]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let result = select_user_txs_cancellable(
+            &mut overlay,
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            &|| utxo.cancelled.get(),
+        );
+        assert!(matches!(result, Err(MiningError::BuildCancelled)));
+        assert_eq!(
+            utxo.reads.get(),
+            1,
+            "the next transaction must not be resolved"
+        );
+        assert!(!overlay.is_spent(&input.box_id().unwrap()));
+        assert!(overlay.in_block_outputs.is_empty());
     }
 
     // ----- suspect feed (Component B) -----
@@ -716,7 +816,7 @@ mod tests {
     // ----- budgets -----
 
     #[test]
-    fn size_budget_stops_selection() {
+    fn size_budget_limits_included_transactions() {
         let boxes: Vec<ErgoBox> = (0..3)
             .map(|i| box_at(1_000_000_000, HEIGHT, i + 1))
             .collect();
@@ -743,7 +843,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(sel.checked.len(), 2, "size budget must stop at 2 txs");
+        assert_eq!(
+            sel.checked.len(),
+            2,
+            "only two transactions fit the size budget"
+        );
         assert_eq!(sel.total_size, 200);
     }
 
@@ -760,6 +864,127 @@ mod tests {
             select_user_txs(&mut overlay, &snap, &ctx(), &params, &[], 0, u64::MAX, None).unwrap();
 
         assert!(sel.checked.is_empty(), "a zero cost budget admits nothing");
+    }
+
+    /// Three priority-ordered transactions: a large parent, its small child,
+    /// and a small independent spend. Sizes are their actual wire lengths.
+    fn non_fitting_parent_family() -> (MapUtxo, Transaction, Transaction, Transaction) {
+        let parent_input = box_at(1_000_000_000, HEIGHT, 1);
+        let independent_input = box_at(1_000_000_000, HEIGHT, 2);
+        let mut parent = spend_tx(&parent_input, 250_000_000, HEIGHT);
+        parent.output_candidates = vec![parent.output_candidates[0].clone(); 4];
+        let parent_output = ErgoBox {
+            candidate: parent.output_candidates[0].clone(),
+            transaction_id: transaction_id(&parent).unwrap(),
+            index: 0,
+        };
+        let child = spend_tx(&parent_output, 250_000_000, HEIGHT);
+        let independent = spend_tx(&independent_input, 1_000_000_000, HEIGHT);
+        (
+            MapUtxo::new(&[parent_input, independent_input]),
+            parent,
+            child,
+            independent,
+        )
+    }
+
+    fn wire_entry(tx: &Transaction, fee: u64, seed: u8) -> Entry {
+        entry(tx, fee, tx_bytes(tx).len() as u32, seed)
+    }
+
+    #[test]
+    fn size_skip_keeps_later_small_independent_transaction_and_excludes_descendant() {
+        let (utxo, parent, child, independent) = non_fitting_parent_family();
+        let budget = tx_bytes(&independent).len() as u64;
+        assert!(tx_bytes(&parent).len() as u64 > budget);
+        assert!(tx_bytes(&child).len() as u64 <= budget);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![
+            wire_entry(&parent, 500, 0xA0),
+            wire_entry(&child, 400, 0xB0),
+            wire_entry(&independent, 100, 0xC0),
+        ]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            budget,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(
+            selected.checked[0].0.tx_id(),
+            transaction_id(&independent).unwrap().as_bytes()
+        );
+        assert_eq!(selected.total_size, budget);
+        assert!(selected.suspects.is_empty());
+        assert!(!overlay.is_spent(&parent.inputs[0].box_id));
+        assert!(overlay.is_spent(&independent.inputs[0].box_id));
+    }
+
+    #[test]
+    fn cost_skip_keeps_later_cheap_independent_transaction_and_excludes_descendant() {
+        let (utxo, parent, child, independent) = non_fitting_parent_family();
+        let params = ProtocolParams::mainnet_default();
+        let measured_cost = |tx: &Transaction| {
+            let mut overlay = CandidateOverlay::new(&utxo);
+            let snapshot = MempoolReadSnapshot::from_entries(vec![wire_entry(tx, 0, 0xFF)]);
+            let selected = select_user_txs(
+                &mut overlay,
+                &snapshot,
+                &ctx(),
+                &params,
+                &[],
+                u64::MAX,
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                selected.checked.len(),
+                1,
+                "cost probe must fully validate its transaction"
+            );
+            selected.total_cost
+        };
+        let budget = measured_cost(&independent);
+        assert!(
+            measured_cost(&parent) > budget,
+            "the first transaction is valid but more expensive"
+        );
+        let snapshot = MempoolReadSnapshot::from_entries(vec![
+            wire_entry(&parent, 500, 0xA0),
+            wire_entry(&child, 400, 0xB0),
+            wire_entry(&independent, 100, 0xC0),
+        ]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &ctx(),
+            &params,
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(
+            selected.checked[0].0.tx_id(),
+            transaction_id(&independent).unwrap().as_bytes()
+        );
+        assert_eq!(selected.total_cost, budget);
+        assert!(
+            selected.suspects.is_empty(),
+            "fit skips and unresolved descendants remain in the mempool"
+        );
+        assert!(!overlay.is_spent(&parent.inputs[0].box_id));
+        assert!(overlay.is_spent(&independent.inputs[0].box_id));
     }
 
     // ----- invalid tx skip -----

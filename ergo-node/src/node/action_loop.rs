@@ -1,6 +1,6 @@
 //! The action loop body — owned by the spawned task returned in
-//! [`super::RunHandle::loop_handle`]. Drives the four timers (dial,
-//! sync, mempool, memory), inbound event coalescing, API submission
+//! [`super::RunHandle::loop_handle`]. Drives the periodic timers (dial,
+//! sync, mempool, memory), pending mining deadlines, inbound event coalescing, API submission
 //! drain, and mining-request dispatch; runs the in-loop persist
 //! shutdown when the `shutdown_rx` arm fires.
 //!
@@ -22,8 +22,8 @@ use super::admission::{admit_api_transaction, route_mempool_actions};
 use super::events::handle_event_batch;
 use super::memory_sampler::sample_memory;
 use super::mining_dispatch::{
-    decide_mining_signal, handle_mining_request, signal_mining_engine, MiningProducerState,
-    MiningSignalIntervals, MiningTipSnapshot, MiningWiring,
+    decide_mining_signal, handle_mining_request, mining_signal_deadline, signal_mining_engine,
+    MiningProducerState, MiningSignalIntervals, MiningTipSnapshot, MiningWiring,
 };
 use super::peer_actions::{connect_to_address, flush_actions, try_dial_peers};
 use super::sync_tick::handle_sync_tick;
@@ -32,6 +32,15 @@ use super::{NodeError, NodeState};
 
 use ergo_mining::engine::BuildReason;
 use ergo_mining::handle::MiningHandle;
+
+/// Park indefinitely while no mining work is pending. An armed deadline wakes
+/// the normal post-arm producer check without depending on mempool polling.
+async fn wait_for_mining_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
 
 /// Mirrors the pre-refactor inline loop one-for-one: signal arms are
 /// replaced by a single `shutdown_rx` arm, and the cleanup runs inside
@@ -85,7 +94,7 @@ pub(super) async fn action_loop(
     }
 
     // --- Off-loop mining engine producer state ---
-    // After every state-mutating select arm we recompute the tip; on a tip
+    // After every select arm we recompute the tip; on an applied-parent
     // change we re-signal the engine (`Tip`), and while started-but-uncovered we
     // retry (`WalletReady`). On an unchanged tip whose mempool advanced,
     // a debounced `MempoolRefresh` re-signals with the same parent and a fresh
@@ -96,7 +105,7 @@ pub(super) async fn action_loop(
     // Throttle for the synced-but-uncovered recovery retry below: a build is
     // already in flight right after a tip signal, so we must NOT re-resolve the
     // reward key / re-snapshot the mempool on every post-arm pass until it
-    // publishes. Retry at most once per interval (≈ the sync-tick cadence),
+    // publishes. Retry at most once per interval through the mining deadline,
     // which both recovers promptly after a wallet unlock and keeps the loop
     // from doing redundant build-input resolution while a build is outstanding.
     const MINING_RECOVERY_RETRY: Duration = Duration::from_secs(1);
@@ -117,6 +126,7 @@ pub(super) async fn action_loop(
     // post-arm mining block, which signals a same-tip rebuild so the miner
     // gets fresh work without waiting for the recovery retry.
     let mut mining_rebuild_requested = false;
+    let mut mining_deadline: Option<Instant> = None;
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
     // latch; offline generation and an empty devnet have explicit exceptions.
@@ -129,7 +139,7 @@ pub(super) async fn action_loop(
             &prev,
             BuildReason::Startup,
         );
-        mining_last_recovery = Some(Instant::now());
+        mining_last_recovery = Some(tokio::time::Instant::now().into_std());
     }
 
     loop {
@@ -161,6 +171,7 @@ pub(super) async fn action_loop(
             _ = mempool_tick.tick() => {
                 handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
             }
+            _ = wait_for_mining_deadline(mining_deadline) => {}
             Some(first) = event_rx.recv() => {
                 // INGEST COALESCE: drain additional queued events
                 // without yielding so consecutive header-Modifier
@@ -242,7 +253,7 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
-            let now = Instant::now();
+            let now = tokio::time::Instant::now().into_std();
             let tip_now = MiningTipSnapshot::capture(&state);
             let revision_now = state.mempool.revision();
             let has_cached = wiring.handle.cached_work_if_synced().is_some();
@@ -309,7 +320,29 @@ pub(super) async fn action_loop(
                     // Startup is only used at the prime call above, never here.
                     BuildReason::Startup => {}
                 }
+            } else {
+                // Header-only transitions do not regenerate an unchanged
+                // applied parent's work, but must still be recorded so startup
+                // and future applied-tip comparisons use the latest observation.
+                mining_last_tip = tip_now;
             }
+            mining_deadline = mining_signal_deadline(
+                &MiningProducerState {
+                    last_tip: mining_last_tip,
+                    last_revision: mining_last_revision,
+                    last_recovery: mining_last_recovery,
+                    last_mempool_signal: mining_last_mempool_signal,
+                    rebuild_requested: false,
+                },
+                wiring.handle.best_tip().synced,
+                wiring.handle.cached_work_if_synced().is_some(),
+                state.mempool.revision(),
+                now,
+                MiningSignalIntervals {
+                    recovery: MINING_RECOVERY_RETRY,
+                    refresh_debounce: wiring.refresh_debounce,
+                },
+            );
         }
     }
 
@@ -623,6 +656,150 @@ mod tests {
             TxSource::Api,
         );
         mempool.pool_mut().insert(entry).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_pending_pool_wakes_without_external_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = crate::node::tests::make_state(&tmp.path().join("state.redb"));
+        let base = tokio::time::Instant::now().into_std();
+        let tip = MiningTipSnapshot::capture(&state);
+        let handle = MiningHandle::new(
+            [0x02; 33],
+            ergo_mining::emission_rules::MonetarySettings::mainnet(),
+            None,
+            ergo_crypto::difficulty::DifficultyParams::mainnet(),
+            ergo_validation::VotingSettings::mainnet(),
+        );
+        // Exercise refresh scheduling for a node that has already started;
+        // no block validation or candidate construction is involved here.
+        handle.set_best_tip(ergo_mining::engine::BestTip {
+            parent_id: tip.best_full_id(),
+            chain_seq: 0,
+            synced: true,
+        });
+        let (intent_tx, intent_rx) = tokio::sync::watch::channel(None);
+        let wiring = MiningWiring {
+            handle,
+            intent_tx,
+            refresh_debounce: Duration::from_millis(250),
+            block_interval_ms: 120_000,
+            offline_generation: false,
+        };
+        let mut prev = MiningProducerState {
+            last_tip: tip,
+            last_revision: 0,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+            rebuild_requested: false,
+        };
+        let intervals = MiningSignalIntervals {
+            recovery: Duration::from_secs(1),
+            refresh_debounce: Duration::from_millis(250),
+        };
+        seed(&mut state.mempool, 1);
+        let deadline =
+            mining_signal_deadline(&prev, true, true, state.mempool.revision(), base, intervals);
+        let waiter = tokio::spawn(wait_for_mining_deadline(deadline));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        seed(&mut state.mempool, 2);
+        seed(&mut state.mempool, 3);
+        assert_eq!(
+            mining_signal_deadline(
+                &prev,
+                true,
+                true,
+                state.mempool.revision(),
+                tokio::time::Instant::now().into_std(),
+                intervals
+            ),
+            deadline
+        );
+        tokio::time::advance(Duration::from_millis(149)).await;
+        assert!(
+            !waiter.is_finished(),
+            "pending refresh must respect its interval"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        waiter.await.unwrap();
+        let now = tokio::time::Instant::now().into_std();
+        assert_eq!(
+            now,
+            base + intervals.refresh_debounce,
+            "no polling tick should be required"
+        );
+        let reason = decide_mining_signal(
+            &prev,
+            tip,
+            true,
+            true,
+            state.mempool.revision(),
+            now,
+            intervals,
+        )
+        .expect("deadline signals the pending refresh");
+        assert_eq!(reason, BuildReason::MempoolRefresh);
+        let mut chain_seq = 0;
+        signal_mining_engine(&state, &wiring, &mut chain_seq, &tip.best_full_id(), reason);
+        let intent = intent_rx
+            .borrow()
+            .clone()
+            .expect("refresh publishes an intent");
+        let mut ids: Vec<_> = intent.mempool.iter().map(|entry| entry.tx_id).collect();
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(
+            ids,
+            vec![dig(1), dig(2), dig(3)],
+            "intent captures the complete latest burst"
+        );
+        assert_eq!(intent.expected_parent, tip.best_full_id());
+        assert_eq!(
+            chain_seq, 0,
+            "same-parent refresh leaves the chain era unchanged"
+        );
+        prev.last_revision = state.mempool.revision();
+        prev.last_mempool_signal = Some(now);
+        assert_eq!(
+            mining_signal_deadline(&prev, true, true, state.mempool.revision(), now, intervals),
+            None,
+            "publishing the latest revision disarms the timer"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_first_mutation_after_quiet_interval_is_immediate() {
+        let base = tokio::time::Instant::now().into_std();
+        let tip = MiningTipSnapshot::for_test([1; 32], 100, [1; 32], 100);
+        let prev = MiningProducerState {
+            last_tip: tip,
+            last_revision: 5,
+            last_recovery: Some(base),
+            last_mempool_signal: Some(base),
+            rebuild_requested: false,
+        };
+        let intervals = MiningSignalIntervals {
+            recovery: Duration::from_secs(1),
+            refresh_debounce: Duration::from_millis(250),
+        };
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let now = tokio::time::Instant::now().into_std();
+        wait_for_mining_deadline(mining_signal_deadline(&prev, true, true, 6, now, intervals))
+            .await;
+        assert_eq!(tokio::time::Instant::now().into_std(), now);
+        assert_eq!(
+            decide_mining_signal(&prev, tip, true, true, 6, now, intervals),
+            Some(BuildReason::MempoolRefresh)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mining_deadline_disarmed_does_not_wake_or_spin() {
+        let waiter = tokio::spawn(wait_for_mining_deadline(None));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
     }
 
     /// XC-1: when the tip-change diff is unrecoverable (a forward catch-up jump

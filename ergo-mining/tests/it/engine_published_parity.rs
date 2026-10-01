@@ -1040,11 +1040,19 @@ fn build_full_surface<V: ergo_mining::state_view::CandidateStateView>(
     view: &V,
     regime: &Regime,
 ) -> FullSurface {
+    build_full_surface_with_pool(view, regime, &MempoolReadSnapshot::empty())
+}
+
+fn build_full_surface_with_pool<V: ergo_mining::state_view::CandidateStateView>(
+    view: &V,
+    regime: &Regime,
+    mempool: &MempoolReadSnapshot,
+) -> FullSurface {
     let (c, w, _timings) = generate_candidate(
         view,
         ergo_chain_spec::Network::Mainnet,
         BuildMode::Full,
-        &MempoolReadSnapshot::empty(),
+        mempool,
         &MINER_PK,
         &MonetarySettings::mainnet(),
         regime.reemission.as_ref(),
@@ -1859,4 +1867,292 @@ fn generated_candidate_emits_neutral_votes_without_targets() {
         [0, 0, 0],
         "no configured targets must leave the candidate voting neutral",
     );
+}
+
+#[test]
+fn engine_tip_change_during_rent_resolution_cancels_before_candidate_proof() {
+    use ergo_mining::{engine::build_and_publish_cached, state_view::CandidateProofCache};
+
+    let regime = Regime::pre_eip27();
+    let (_directory, store, tip) = synced_store(&regime);
+    let handle = handle(&regime).with_rent_config(true, 64);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut base = None;
+    let mut proof_cache = CandidateProofCache::default();
+    let mut disposition = None;
+    let outcome = build_and_publish_cached(
+        &store.reader_handle(),
+        &handle,
+        &build_intent(tip, regime.parent_height),
+        BuildMode::Full,
+        Some(&mut base),
+        &mut proof_cache,
+        || BUILT_AT_MS,
+        |_, _| {
+            handle.set_best_tip(BestTip {
+                parent_id: [0xEE; 32],
+                chain_seq: 2,
+                synced: true,
+            });
+            Vec::new()
+        },
+        &mut disposition,
+    )
+    .unwrap();
+    assert!(matches!(outcome, BuildOutcome::DroppedStale));
+    assert!(base.is_none(), "cancelled before any AVL base hydration");
+    assert!(disposition.is_none());
+    assert!(!handle.has_template_for_parent(&tip));
+    assert!(handle.cached_work_if_synced().is_none());
+}
+
+#[test]
+fn candidate_cancelled_after_completed_proof_preserves_pristine_base() {
+    use ergo_mining::{candidate::generate_candidate_cancellable, state_view::CachedSnapshotView};
+
+    let regime = Regime::pre_eip27();
+    let (_directory, store, _tip) = synced_store(&regime);
+    let snapshot = store.committed_snapshot().unwrap().unwrap();
+    let expected = build_full_surface(&snapshot, &regime);
+    let mut base = None;
+    {
+        let view = CachedSnapshotView::new(&snapshot, &mut base);
+        // The disposition is written only after the entire underlying dry-run
+        // (including proof generation and self-check) returns. Cancellation
+        // therefore happens at the following checkpoint, never mid-operation.
+        let should_cancel = || view.last_disposition().is_some();
+        let result = generate_candidate_cancellable(
+            &view,
+            ergo_chain_spec::Network::Mainnet,
+            BuildMode::Full,
+            &MempoolReadSnapshot::empty(),
+            &MINER_PK,
+            &MonetarySettings::mainnet(),
+            regime.reemission.as_ref(),
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &std::collections::BTreeMap::new(),
+            &ergo_validation::VotingSettings::mainnet(),
+            &[],
+            &mut Vec::new(),
+            &should_cancel,
+        );
+        assert!(matches!(result, Err(MiningError::BuildCancelled)));
+        assert_eq!(
+            view.last_disposition(),
+            Some(ergo_state::store::BaseDisposition::Rehydrated)
+        );
+    }
+    assert!(
+        base.is_some(),
+        "completed proof cleaned shared visited flags"
+    );
+    let view = CachedSnapshotView::new(&snapshot, &mut base);
+    assert_eq!(build_full_surface(&view, &regime), expected);
+    assert_eq!(
+        view.last_disposition(),
+        Some(ergo_state::store::BaseDisposition::Hit)
+    );
+}
+
+/// Warm synthetic engine benchmark: a fixed parent, fixed script-visible
+/// timestamp, 32 independent fee-paying true-script transactions, and a
+/// separately primed AVL base for each path. Timed regions include the engine
+/// build and publish; solution inspection and byte-parity checks are excluded.
+/// This measures repeated identical selection, not live mainnet workloads.
+#[test]
+#[ignore = "manual synthetic candidate-refresh benchmark"]
+fn benchmark_same_parent_full_refresh_proof_reuse() {
+    use ergo_mempool::{pool::Entry, types::TxSource};
+    use ergo_mining::{
+        engine::build_and_publish_cached, solution::SolutionOutcome,
+        state_view::CandidateProofCache, work_message::MinerSolution,
+    };
+    use ergo_ser::{
+        ergo_tree::ErgoTree,
+        opcode::Expr,
+        sigma_type::SigmaType,
+        sigma_value::{SigmaBoolean, SigmaValue},
+        transaction::transaction_id,
+    };
+
+    const COUNT: usize = 32;
+    const SAMPLES: usize = 31;
+    let regime = Regime::pre_eip27();
+    let tree = ErgoTree {
+        version: 0,
+        has_size: true,
+        constant_segregation: false,
+        reserved_header_bits: 0,
+        constants: Vec::new(),
+        body: Expr::Const {
+            tpe: SigmaType::SSigmaProp,
+            val: SigmaValue::SigmaProp(SigmaBoolean::TrivialProp(true)),
+        },
+    };
+    let inputs: Vec<_> = (0..COUNT)
+        .map(|index| ErgoBox {
+            candidate: ErgoBoxCandidate::new(
+                100_000_000,
+                tree.clone(),
+                0,
+                Vec::new(),
+                AdditionalRegisters::empty(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0xCC; 32]),
+            index: index as u16,
+        })
+        .collect();
+    let (_directory, store, tip) = synced_store_with_inputs(&regime, &inputs, |tip| {
+        pack_interlinks(&[ModifierId::from_bytes(*tip)])
+    });
+    let fee_tree = read_ergo_tree(&mut VlqReader::new(
+        ergo_mempool::validator::MAINNET_FEE_PROPOSITION_BYTES,
+    ))
+    .unwrap();
+    let entries: Vec<_> = inputs
+        .iter()
+        .map(|input| {
+            let fee = 1_100_000;
+            let tx = Transaction {
+                inputs: vec![Input {
+                    box_id: input.box_id().unwrap(),
+                    spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty())
+                        .unwrap(),
+                }],
+                data_inputs: Vec::new(),
+                output_candidates: vec![
+                    ErgoBoxCandidate::new(
+                        100_000_000 - fee,
+                        tree.clone(),
+                        regime.candidate_height(),
+                        Vec::new(),
+                        AdditionalRegisters::empty(),
+                    )
+                    .unwrap(),
+                    ErgoBoxCandidate::new(
+                        fee,
+                        fee_tree.clone(),
+                        regime.candidate_height(),
+                        Vec::new(),
+                        AdditionalRegisters::empty(),
+                    )
+                    .unwrap(),
+                ],
+            };
+            let bytes = serialize_txs(std::slice::from_ref(&tx)).pop().unwrap();
+            Entry::new(
+                Digest32::from_bytes(*transaction_id(&tx).unwrap().as_bytes()),
+                Arc::from(bytes.clone()),
+                vec![input.box_id().unwrap()],
+                Vec::new(),
+                Vec::new(),
+                fee,
+                1,
+                bytes.len() as u32,
+                0,
+                TxSource::Api,
+            )
+        })
+        .collect();
+    let pool = MempoolReadSnapshot::from_entries(entries);
+    let expected = {
+        let snapshot = store.committed_snapshot().unwrap().unwrap();
+        build_full_surface_with_pool(&snapshot, &regime, &pool)
+    };
+    assert_eq!(expected.metrics.selected_transaction_count, COUNT as u32);
+    let mut intent = build_intent(tip, regime.parent_height);
+    intent.mempool = Arc::new(pool);
+    intent.reason = BuildReason::MempoolRefresh;
+    let handles = [handle(&regime), handle(&regime)];
+    for handle in &handles {
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+    }
+    let reader = store.reader_handle();
+    let mut bases = [None, None];
+    let mut cache = CandidateProofCache::default();
+    let mut samples = [Vec::new(), Vec::new()];
+    for pass in 0..=SAMPLES {
+        // Alternate order so neither path always benefits from running second.
+        let order = if pass % 2 == 0 { [0, 1] } else { [1, 0] };
+        for path in order {
+            let started = std::time::Instant::now();
+            let mut disposition = None;
+            let outcome = if path == 0 {
+                build_and_publish(
+                    &reader,
+                    &handles[path],
+                    &intent,
+                    BuildMode::Full,
+                    Some(&mut bases[path]),
+                    || BUILT_AT_MS,
+                    |_, _| Vec::new(),
+                    &mut disposition,
+                )
+            } else {
+                build_and_publish_cached(
+                    &reader,
+                    &handles[path],
+                    &intent,
+                    BuildMode::Full,
+                    Some(&mut bases[path]),
+                    &mut cache,
+                    || BUILT_AT_MS,
+                    |_, _| Vec::new(),
+                    &mut disposition,
+                )
+            }
+            .unwrap();
+            let elapsed = started.elapsed();
+            let BuildOutcome::Published { timings } = outcome else {
+                panic!("benchmark build did not publish: {outcome:?}");
+            };
+            assert_eq!(timings.proof_reused, path == 1 && pass != 0);
+            if pass > 0 {
+                samples[path].push(elapsed);
+            }
+            let work = handles[path].cached_work_if_synced().unwrap();
+            let SolutionOutcome::Accepted(block) = handles[path]
+                .verify_solution(
+                    &MinerSolution {
+                        nonce: [0; 8],
+                        pk: None,
+                    },
+                    &store,
+                )
+                .unwrap()
+            else {
+                panic!("difficulty-one fixture solution must expose published block");
+            };
+            assert_eq!(
+                serialize_header(&block.header).unwrap().0,
+                expected.header_bytes
+            );
+            assert_eq!(serialize_txs(&block.transactions), expected.serialized_txs);
+            assert_eq!(block.header.state_root, expected.state_root);
+            assert_eq!(block.ad_proof_bytes, expected.ad_proof_bytes);
+            assert_eq!(block.extension_fields, expected.extension_fields);
+            assert_eq!(work.msg, expected.work_msg);
+            assert_eq!(work.metrics, expected.metrics);
+        }
+    }
+    for (label, mut durations) in ["without proof reuse", "with proof reuse"]
+        .into_iter()
+        .zip(samples)
+    {
+        durations.sort_unstable();
+        let median = durations[durations.len() / 2].as_secs_f64() * 1000.0;
+        let p95 = durations[(durations.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0;
+        eprintln!("{label}: median_ms={median:.3} p95_ms={p95:.3} samples={SAMPLES} txs={COUNT}");
+    }
 }

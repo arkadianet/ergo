@@ -1728,7 +1728,7 @@ fn load_mining_enabled_via_cli_without_toml_section_uses_serde_defaults() {
     assert!(cfg.mining_config.use_external_miner);
     assert_eq!(
         cfg.mining_config.block_candidate_generation_interval_ms,
-        1000
+        250
     );
 }
 
@@ -1744,6 +1744,19 @@ fn load_mining_enabled_via_toml_without_pubkey_succeeds() {
     assert!(cfg.mining_config.enabled);
     assert!(cfg.mining_config.miner_public_key_hex.is_none());
     assert!(cfg.mining_config.use_external_miner);
+}
+
+#[test]
+fn load_mining_explicit_refresh_interval_preserves_override() {
+    let path = write_toml(
+        "[peers]\nknown = [\"127.0.0.1:9030\"]\n\
+         [mining]\nenabled = true\nblock_candidate_generation_interval_ms = 1000\n",
+    );
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).expect("load");
+    assert_eq!(
+        cfg.mining_config.block_candidate_generation_interval_ms,
+        1000
+    );
 }
 
 // ----- Mode 2 (UTXO snapshot bootstrap) part 1 -----
