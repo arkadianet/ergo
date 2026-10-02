@@ -161,7 +161,11 @@ pub(crate) struct CompileResponse {
     responses(
         (status = 200, description = "Compiled tree + addresses + typed AST", body = CompileResponse),
         (status = 400, description = "Compile error (position/phase/Scala class in detail)", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn compile(State(state): State<ScriptState>, body: V1Json<CompileBody>) -> Response {
@@ -255,6 +259,11 @@ pub(crate) struct InspectResponse {
     responses(
         (status = 200, description = "Structured typed decompilation", body = InspectResponse),
         (status = 400, description = "Invalid ergo_tree/address, or neither/both supplied", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn inspect(State(state): State<ScriptState>, body: V1Json<InspectBody>) -> Response {
@@ -437,7 +446,11 @@ pub(crate) struct ExecuteResponse {
     responses(
         (status = 200, description = "Reduction result + cost", body = ExecuteResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn execute(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
@@ -502,7 +515,11 @@ struct CostBreakdownEntry {
     responses(
         (status = 200, description = "Total reduce cost (breakdown empty until cost-trace is wired)", body = CostResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
-        (status = 413, description = "Source exceeds the size cap", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn cost(State(state): State<ScriptState>, body: V1Json<ExecuteBody>) -> Response {
@@ -574,8 +591,12 @@ struct SimulateResponse {
     responses(
         (status = 200, description = "Spendability against the real resolved box (single-box scope — no tx/proof verified)", body = SimulateResponse),
         (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
         (status = 404, description = "No unspent box with that id", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn simulate(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
@@ -719,8 +740,12 @@ pub(crate) struct ExplainResponse {
     responses(
         (status = 200, description = "Reduction trace + human_diagnosis (non-authoritative)", body = ExplainResponse),
         (status = 400, description = "Malformed box_id, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
         (status = 404, description = "No unspent box with that id", body = V1Error),
-        (status = 503, description = "Chain reader unavailable", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
+        (status = 503, description = "Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn explain(State(state): State<ScriptState>, body: V1Json<SimulateBody>) -> Response {
@@ -856,7 +881,12 @@ pub(crate) struct DiffResponse {
     responses(
         (status = 200, description = "Rust vs Scala-oracle verdict comparison", body = DiffResponse),
         (status = 400, description = "Invalid input, cost_limit exceeded, or too_deep", body = V1Error),
+        (status = 401, description = "API key required when [api.script] require_api_key = true", body = V1Error),
+        (status = 429, description = "Rate limited or input exceeds a resource cap (Retry-After on governor refusal)", body = V1Error, headers(("Retry-After" = String, description = "Present on governor refusals; retry delay in seconds"))),
+        (status = 500, description = "Internal computation failure (internal_error)", body = V1Error),
         (status = 501, description = "No Scala reference oracle configured on this node", body = V1Error),
+        (status = 503, description = "Compute overloaded or shutting_down (Retry-After: 1 on overload)", body = V1Error, headers(("Retry-After" = String, description = "Present on overloaded responses; retry after 1 second"))),
+        (status = 504, description = "Computation or Scala oracle timed out (timeout)", body = V1Error),
     ),
 )]
 pub async fn diff(State(state): State<ScriptState>, body: V1Json<DiffBody>) -> Response {

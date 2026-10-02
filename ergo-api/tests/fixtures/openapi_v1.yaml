@@ -3667,8 +3667,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3701,8 +3735,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3736,8 +3804,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '501':
           description: No Scala reference oracle configured on this node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation or Scala oracle timed out (timeout)
           content:
             application/json:
               schema:
@@ -3770,8 +3878,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
-        '413':
-          description: Source exceeds the size cap
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3805,14 +3947,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '404':
           description: No unspent box with that id
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3840,6 +4016,46 @@ paths:
                 $ref: '#/components/schemas/InspectResponse'
         '400':
           description: Invalid ergo_tree/address, or neither/both supplied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '503':
+          description: 'Compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
@@ -3872,14 +4088,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '401':
+          description: API key required when [api.script] require_api_key = true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '404':
           description: No unspent box with that id
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/V1Error'
+        '429':
+          description: Rate limited or input exceeds a resource cap (Retry-After on governor refusal)
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on governor refusals; retry delay in seconds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '500':
+          description: Internal computation failure (internal_error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
         '503':
-          description: Chain reader unavailable
+          description: 'Chain reader unavailable, compute overloaded or shutting_down (Retry-After: 1 on overload)'
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              description: Present on overloaded responses; retry after 1 second
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/V1Error'
+        '504':
+          description: Computation timed out (timeout)
           content:
             application/json:
               schema:
