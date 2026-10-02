@@ -1298,7 +1298,7 @@ components:
               bootstrapped history. Absent when the store reports the
               default (Dense) and no NiPoPoW bootstrap is in progress.
 
-              Distinct from [`ApiIdentity::history_mode`] — that field is the
+              Distinct from [`crate::ApiIdentity::history_mode`] — that field is the
               operator-configured chain-retention policy (archive / pruned /
               utxo-bootstrapped / headers-only), this field is the on-disk
               header-section shape (dense from genesis vs sparse with a
@@ -2694,7 +2694,7 @@ components:
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
 
-        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        Derives `Default` (like [`crate::ApiIdentity`]) so test stubs can write
         `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
         on every added field.
       required:

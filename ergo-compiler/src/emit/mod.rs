@@ -1,6 +1,6 @@
 //! Typed ErgoScript AST → `ergo-ser` opcode IR (backend emission).
 //!
-//! Provides the type map ([`map_type`]), the constant map ([`map_const`]),
+//! Provides the type map (`map_type`), the constant map (`map_const`),
 //! and [`emit`]'s coverage: fixed-arity opcode arms (context singletons,
 //! relations, arithmetic/boolean operators, collection transformers, sigma
 //! combinators, crypto primitives, option/context access), binding forms
@@ -10,23 +10,23 @@
 //! properties, `FuncApply`), and defensive mixed-width `Upcast`
 //! normalization inside the binary arith/relation and `ByIndex` arms. Bit
 //! operators are GraphBuilding-parity rejects (see
-//! [`EmitError::GraphBuildingReject`], lib.rs D-C5) — Scala's full compiler
+//! [`EmitError::GraphBuildingReject`], compiler-design-ledger.md D-C5) — Scala's full compiler
 //! cannot lower them.
 //!
 //! This module keeps `EmitError`, the entry points ([`emit`]/
 //! [`emit_with_version`]/[`emit_with_placeholders`]), and the small shared
 //! helpers (`node`/`bit_op_symbol`/`known_predef_gap`/`upcast_ir`); the walk
 //! itself is split across submodules:
-//! - [`scope`] — the `Scope` binding-frame stack, id allocator, and
+//! - `scope` — the `Scope` binding-frame stack, id allocator, and
 //!   fixed-positional payload builders (`one`/`two`/`three`/`four`/
 //!   `items_of`/`two_upcast`/`emit_index`).
-//! - [`dispatch`] — the big `emit()` match over every `TypedExpr` variant,
+//! - `dispatch` — the big `emit()` match over every `TypedExpr` variant,
 //!   plus `emit_block`/`emit_lambda`/`emit_apply`.
-//! - [`select`] — the residual `Select` lowering catalog (numeric casts,
+//! - `select` — the residual `Select` lowering catalog (numeric casts,
 //!   box/sigma-prop/tuple properties).
-//! - [`method_call`] — `MethodCall`/`PropertyCall` wire dispatch, including
+//! - `method_call` — `MethodCall`/`PropertyCall` wire dispatch, including
 //!   the GraphBuilding-parity reject gates and the v6-numeric-constant fold.
-//! - [`types`] — [`map_type`]/[`map_const`].
+//! - `types` — `map_type`/`map_const`.
 //!
 //! Opcode bytes come from the `opcode_pattern` dispatch table
 //! (`ergo-ser/src/opcode/types.rs:276-436`), which is the crate's consensus
@@ -116,7 +116,7 @@ pub enum EmitError {
     /// bytes + addresses the reference compiler can never produce (several
     /// such trees are unspendable — the funds-stranding surface the
     /// oracle-parity bar exists for). `class` is the ORACLE's exception
-    /// class, verbatim, for reject-class parity grading (lib.rs D-C5).
+    /// class, verbatim, for reject-class parity grading (compiler-design-ledger.md D-C5).
     #[error("rejected for Scala GraphBuilding parity ({class}): {what}")]
     GraphBuildingReject {
         /// The Scala exception class the oracle reports for this reject.
@@ -144,9 +144,9 @@ const V6_ERGO_TREE_VERSION: u8 = 3;
 ///
 /// Fixed-arity forms map 1:1 onto `Payload::Zero/One/Two/Three/Four` and the
 /// named-field payloads per the `opcode_pattern` table; constants map through
-/// [`map_const`]; binding forms allocate ids through a fresh [`Scope`].
+/// `map_const`; binding forms allocate ids through a fresh `Scope`.
 ///
-/// Version-agnostic entry: emits under [`V6_ERGO_TREE_VERSION`] (V6 active), so
+/// Version-agnostic entry: emits under `V6_ERGO_TREE_VERSION` (V6 active), so
 /// the emit-time V6-method gates never fire. Use [`emit_with_version`] from the
 /// compile route to feed the requested `tree_version` and reject V6-only
 /// `SGlobal` predefs under a v5 target.

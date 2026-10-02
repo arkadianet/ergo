@@ -4,19 +4,18 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~10,100 total across `src` (~5,500 production; the rest is inline `#[cfg(test)]` modules plus the standalone `src/peer_manager/tests.rs`)
 
 ## Start here
 - The crate doc comment + module list in `src/lib.rs:1-51` — the authoritative module map and the layer's charter (sits on `ergo_primitives` + `ergo_ser`, driven by the sync coordinator).
 - `framing.rs` (`serialize_frame`/`deserialize_frame`, `src/framing.rs:69`/`:97`) — the wire-frame contract (`magic||code||len||checksum||payload`); everything else is payloads inside this envelope.
-- `message.rs` — the message-code constants (`CODE_*`, `src/message.rs:19-33`) and the per-message payload codecs; the clearest map of what protocol messages exist.
+- `message.rs` — the message-code constants (`CODE_*`, `src/message/mod.rs:19-33`) and the per-message payload codecs; the clearest map of what protocol messages exist.
 - `handshake.rs` (`Handshake`, `PeerSpec`, `Version`, `PeerFeature`) — the connection-admission gate and the wire types reused by the `Peers` gossip message.
 - `peer_manager/mod.rs` (`PeerManager`) — the connection lifecycle + anti-eclipse policy hub; the largest behavioral surface.
 
 ## Modules
 - `src/framing.rs` — wire-frame codec (big-endian header, blake2b256 4-byte checksum, magic constants); `MessageFrame`, `FrameError`, `wire_len` for byte accounting.
 - `src/connection.rs` — async `Connection` over `TcpStream`: buffered framed read/write, `MAX_PAYLOAD_SIZE` (8 MiB) early-reject, `ConnectionError`.
-- `src/message.rs` — payload (de)serializers for every message code (Inv, Modifiers, GetPeers/Peers, SyncInfo V1/V2, snapshot codes 76-81, NiPoPoW codes 90-91); `MessageError`, allocation-bound + size-cap guards, Scala-parity pad-length handling.
+- `src/message/mod.rs` — payload (de)serializers for every message code (Inv, Modifiers, GetPeers/Peers, SyncInfo V1/V2, snapshot codes 76-81, NiPoPoW codes 90-91); `MessageError`, allocation-bound + size-cap guards, Scala-parity pad-length handling.
 - `src/handshake.rs` — `Handshake`/`PeerSpec`/`Version`/`PeerFeature` (Mode/SessionId/LocalAddress/RestApiUrl/Unknown) codecs; `MAX_HANDSHAKE_SIZE`; `HandshakeError`. Reused by `message::serialize_peers`.
 - `src/peer.rs` — per-peer state machine + penalty/scoring model: `PeerInfo`, `PeerScore`, `ConnectionState`, `Penalty`, `SyncVersion`, version floor, byte counters.
 - `src/peer_manager/mod.rs` — `PeerManager`: dial/accept registration, handshake completion + self-connect detection, ban table, peer selection (download/gossip/capability-filtered), `known_addresses` dial pool with backoff, address-book write-through.
@@ -28,7 +27,7 @@
 - `src/partition.rs` — pure `distribute` of pending modifier IDs across peers into per-(peer,type) `Bucket`s; deterministic, rotation-cursored, deliberate Scala divergences documented.
 - `src/throttle.rs` — `ThroughputLimiter`: per-peer sliding-window (1000 msg/s, 2 MB/s) rate limiter; pure state, `now`-parameterized. The byte axis never drops a *solicited* delivery — `ergo-node`'s dispatch admits over-cap `Modifier` frames and charges them via `record_admitted_over_cap`, because dropping one makes our own delivery checker penalize the honest holder.
 - `src/assembly.rs` — `AssemblyTracker`: per-header section-arrival aggregator (transactions/extension/AD-proofs) with reverse modifier-id index; section-id recipe itself lives in `ergo_ser::modifier_id`.
-- `src/delivery.rs` — `DeliveryTracker`: request ownership, per-peer in-flight caps, timeout/retry/reassignment, duplicate + unsolicited-modifier policy, late-delivery acceptance.
+- `src/delivery/mod.rs` — `DeliveryTracker`: request ownership, per-peer in-flight caps, timeout/retry/reassignment, duplicate + unsolicited-modifier policy, late-delivery acceptance.
 - `src/sync.rs` — per-peer `SyncState` download-window tracker + `compare_sync_info`/`PeerChainStatus` height-based preliminary classifier (full fork choice lives in `ergo-sync`).
 - `src/types.rs` — shared payload types: `ModifierTypeId`, `InvData`, `ModifiersData`, `SnapshotsInfo`, `NipopowProofData`.
 
@@ -36,8 +35,8 @@
 - `serialize_frame` / `deserialize_frame` (fn) — the frame codec; deserialize returns `Ok(None)` on a partial buffer, `Err` on protocol violation — `src/framing.rs:69` / `src/framing.rs:97`
 - `MessageFrame` (struct) / `FrameError` (enum) — parsed `code`+`payload`; WrongMagic/NegativeLength/ChecksumMismatch/UnknownCode — `src/framing.rs:46` / `:24`
 - `Connection` (struct) — async framed TCP wrapper; `read_message`/`write_message`/`send`, `new_with_buffer` for post-handshake leftover bytes — `src/connection.rs:21`
-- `CODE_*` (consts) — message id registry (GetPeers 1, Peers 2, RequestModifier 22, Modifier 33, Inv 55, SyncInfo 65, Handshake 75, snapshot 76-81, NiPoPoW 90-91) — `src/message.rs:19`
-- `SyncInfo` (enum) — V1 header-id list / V2 serialized-header list with the `-1` marker convention — `src/message.rs:238`
+- `CODE_*` (consts) — message id registry (GetPeers 1, Peers 2, RequestModifier 22, Modifier 33, Inv 55, SyncInfo 65, Handshake 75, snapshot 76-81, NiPoPoW 90-91) — `src/message/mod.rs:19`
+- `SyncInfo` (enum) — V1 header-id list / V2 serialized-header list with the `-1` marker convention — `src/message/mod.rs:238`
 - `Handshake` / `PeerSpec` / `DeclaredAddress` (structs) — handshake wire shape; `serialize_peer_spec_to`/`deserialize_peer_spec_from` shared with `Peers` — `src/handshake.rs:394` / `:276` / `:285`
 - `Version` (struct) — 3-byte protocol version with named milestones (`EIP37_FORK`, `NIPOPOW`, `CURRENT` = 6.0.2) and `Ord` — `src/handshake.rs:16`
 - `PeerFeature` (enum) — LocalAddress(2)/SessionId(3)/RestApiUrl(4)/Mode(16)/Unknown; unknown features round-trip verbatim — `src/handshake.rs:74`
@@ -50,7 +49,7 @@
 - `distribute` (fn) / `Bucket` (type) / `BucketConfig` (struct) — pure per-round modifier-ID partitioner across sorted peers — `src/partition.rs:91` / `:41` / `:59`
 - `ThroughputLimiter` (struct) / `LimiterVerdict` (enum) — per-peer rate limiter; `check_and_record` only records on `Ok`, `record_admitted_over_cap` charges a frame the caller admitted anyway — `src/throttle.rs` / `:39`
 - `AssemblyTracker` (struct) — section-arrival aggregator; `section_received` signals completion exactly once (incomplete→complete transition) — `src/assembly.rs:28`
-- `DeliveryTracker` (struct) / `DeliveryAction` (enum) / `ModifierStatus` (enum) — in-flight request bookkeeping; `on_received` → Accept/Ignore/RejectSpam — `src/delivery.rs:121` / `:76` / `:63`
+- `DeliveryTracker` (struct) / `DeliveryAction` (enum) / `ModifierStatus` (enum) — in-flight request bookkeeping; `on_received` → Accept/Ignore/RejectSpam — `src/delivery/mod.rs:121` / `:76` / `:63`
 - `SyncState` (struct) / `compare_sync_info` (fn) / `PeerChainStatus` (enum) — download-window + per-peer SyncInfo cadence; height-based status classifier — `src/sync.rs:63` / `:338` / `:21`
 - `ModifierTypeId` (enum) / `InvData` / `ModifiersData` / `SnapshotsInfo` / `NipopowProofData` — shared protocol payload types — `src/types.rs:8` / `:67` / `:77` / `:88` / `:96`
 

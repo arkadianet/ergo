@@ -25,8 +25,22 @@ members = [
 [workspace.package]
 version    = "0.11.0"
 edition    = "2021"
+rust-version = "1.95.0"
 license    = "MIT OR Apache-2.0"
 repository = "https://github.com/arkadianet/ergo"
+
+# Small, reviewable policy shared by every member. Test unwraps remain allowed;
+# public API documentation is enforced by the strict rustdoc CI gate.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.

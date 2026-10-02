@@ -1,0 +1,112 @@
+# Audit remediation checklist
+
+The [historical audit](audit-2026-10-03.md) reviewed `5d62fd58` (0.10.0).
+Remediation was revalidated against `a6b193ef` (0.11.0), incorporating already
+merged upstream fixes. The five draft PRs form a dependency stack; review and
+merge them from persistence through engineering. Each changes at most 100 paths
+relative to its own base, including fixtures, tests and documentation.
+
+This checklist distinguishes implemented fixes from validation that needs
+external infrastructure. It does not establish an exhaustive audit, cryptographic
+proof, live-mainnet performance or perfection.
+
+## Completed implementation
+
+- [x] F01: Give header and full-state transactions separate metadata ownership;
+  exercise queued writes, advancement, same-height forks and database reopen.
+- [x] F02: Make persistence failure terminal and sticky, including full
+  notification channels and repeated shutdown/re-enable attempts.
+- [x] F03: Retain frame admission and byte permits across cancelled reads;
+  cover resume, completion, disconnect and aggregate connection limits.
+- [x] F04: Bound constructed AST/type depth, including flat operators and
+  suffixes; test compilation and destruction on a bounded stack.
+- [x] F05: Publish restrictive encrypted wallet files atomically; sync before
+  success and cover injected write/publication failures.
+- [x] F06: Wire validated script authentication and cost settings through
+  production boot; reject unknown security keys and check every script route.
+- [x] F07: Return persistence and join failures from explicit shutdown.
+- [x] F08: Own, cancel and join wallet writers/rescans before final storage close;
+  check database reopen and per-node isolation.
+- [x] F09: Service ready API/mining work under continuously ready peer input,
+  preserving shutdown priority; retain a regression against old selection.
+- [x] F10: Propagate indexer read/decode failures to routes and degraded health;
+  distinguish corrupt rows from missing balances and bound range queries.
+- [x] F11: Encapsulate parsed registers and cached bytes; replace them atomically
+  through a fallible operation and preserve canonical box identity.
+- [x] F12: Enforce the Scala writer's 127-entry context-extension boundary using
+  freshly generated external fixtures, including constructor propagation.
+- [x] F13: Own API services, worker pools and stores per node; close admission
+  and retain task ownership when a shutdown caller is cancelled.
+- [x] F14: Inventory and zeroize owned secrets; reduce copies and document
+  concrete limits of memory erasure.
+- [x] F15: Generate Scala wallet encryption/storage/legacy derivation fixtures;
+  correct authenticated encryption layout and execute bidirectional interop.
+- [x] F16: Repair strict workspace Rustdoc links/HTML and gate documentation.
+- [x] R01: Share immutable Sigma propositions; make drop, proof traversal and
+  comparison iterative; charge logical materialization before allocation.
+  Preserve bounded Scala byte/cost/verdict and malformed-proof parity.
+- [x] R02: Distinguish committed and synchronously durable persistence; make
+  IBD policy transitions fallible and drained.
+- [x] R03: Bound per-node blocking read/compute admission; retain permits until
+  work completes after cancellation/timeout and document service responses.
+- [x] R04: Remove global rescan state and supervise wallet lifecycle tasks.
+- [x] R05 implementation review: Revalidate IPv6 `/48` admission grouping,
+  webhook DNS/address policy, operating modes and reorg coverage against current
+  upstream behavior. Record the external evidence still needed below.
+- [x] Split large node and evaluator test modules by behavior, preserving test
+  bodies and oracle provenance; explicitly format included Rust fragments.
+- [x] Move the historical compiler design ledger out of current API docs;
+  reconcile crate maps, configuration, lifecycle and compatibility guidance.
+- [x] Inherit workspace MSRV/lints; pin CI actions, tools and nightly; use locked
+  resolution and configure automated dependency updates.
+- [x] Require validation of the exact release commit, bundle runnable config
+  and operator docs, and smoke-test extracted archives with shutdown/reopen.
+- [x] Add compiler/evaluator fuzz workloads and curated seeds; record bounded
+  campaigns, serialization/resource measurements, mempool/API publication
+  samples and three fresh replay/root/reopen runs with workload limitations.
+- [x] Make diagnostics that depend on external nodes or optional captures
+  explicit manual tests; missing prerequisites must fail when requested.
+
+## Delivery and verification
+
+The delivery table is completed after each isolated layer passes its gates and
+its draft PR is opened. The PR base defines the file count, rather than `main`
+for every layer. More than 400 unique paths require at least five PRs under the
+requested limit; this stack uses five.
+
+| Order | Scope | Draft PR | Changed paths | Checks |
+| --- | --- | --- | ---: | --- |
+| 1 | Persistence/wallet | Pending | Pending | Running |
+| 2 | Runtime/API | Pending | Pending | Running |
+| 3 | Query/codec contracts | Pending | Pending | Running |
+| 4 | Compiler/evaluator | Pending | Pending | Running |
+| 5 | Engineering/release | Pending | Pending | Running |
+
+Required per-layer checks are locked workspace tests, all-target/all-feature
+Clippy with warnings denied, and Rust formatting. Included fragments are checked
+from the layer that introduces them. The complete stack additionally runs strict
+all-feature Rustdoc, all-feature tests, cost-trace and wallet proving targets,
+CI/release policy checks, browser model tests, dependency checks and a Linux
+archive smoke. Existing intentional ignores are reported, not counted as passes.
+Recorded measurements and oracle provenance are linked from
+[resource safety](perf/resource-safety-profile.md),
+[wallet remediation](audit-remediation-storage-wallet.md), and
+[operating evidence](operating-mode-evidence.md).
+
+## External validation still open
+
+- [ ] R05: Run Mode 2 against a Scala-produced trust snapshot and retain roots,
+  provenance and reopen evidence.
+- [ ] R05: Complete a live Mode 3 activation campaign and a long Mode 4 soak.
+- [ ] R05: Broaden Mode 5 cold-open/replay coverage using a closed, separately
+  owned historical snapshot; the early-mainnet smoke is insufficient.
+- [ ] Run streamed archival replay with an available `REPLAY_NODE_URL` and the
+  explicitly manual live-Scala/capture diagnostics on their required datasets.
+- [ ] Execute the native macOS, Windows and musl release archive smoke in CI;
+  local validation covers Linux GNU only. Physical power-cut durability and
+  Windows directory persistence require platform-specific validation.
+
+Cooperative distributed multisig orchestration and the compact-selector external
+oracle are deliberately deferred features in the compatibility inventory.
+Existing signed-size overflow asymmetries are disclosed in the Scala growth
+fixture README. These are not marked as completed validation campaigns.

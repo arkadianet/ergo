@@ -8,14 +8,13 @@ admission and block validation call to check whether an input may be spent.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-crypto
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~15,200 production (~28,000 incl. `evaluator/tests.rs`)
 
 ## Start here
 - `reduce::verify_spending_proof_with_context` (`src/reduce.rs:149`) — the
   single spending-validation entry point. Read this first: it shows the whole
   flow (trivial reduce → fall back to evaluator → cost snap → crypto cost →
   proof verify).
-- `evaluator::dispatch::eval_op` (`src/evaluator/dispatch.rs:449`) — the
+- `evaluator::dispatch::eval_op` (`src/evaluator/dispatch/mod.rs:449`) — the
   `(opcode, payload)` jump table. The fastest map of *which opcodes exist* and
   which handler each routes to.
 - `evaluator::types::Value` and `ReductionContext` (`src/evaluator/types.rs:375`,
@@ -32,13 +31,13 @@ admission and block validation call to check whether an input may be spent.
   reduction outcomes into fall-through vs. hard-reject.
 - `src/evaluator/` — the AST-walking interpreter (see submodules below).
   `mod.rs` re-exports `dispatch::*`, `types::*`, and `sigma_to_value`.
-- `src/evaluator/dispatch.rs` — top-level `reduce_expr*` drivers, depth-guarded
+- `src/evaluator/dispatch/mod.rs` — top-level `reduce_expr*` drivers, depth-guarded
   `eval_expr`, and the `eval_op` opcode jump table; also `reduce_expr_traced*`.
 - `src/evaluator/types.rs` — `Value`, `ReductionContext`, `EvalBox`,
   `EvalHeader`, `BoxSource`, `EvalError`, the `Env` type alias, `MAX_EVAL_DEPTH`.
 - `src/evaluator/eval_ctx.rs` — `EvalCtx`, the six-borrow bundle threaded
   through opcode helpers (evaluator-internal only).
-- `src/evaluator/helpers.rs` — wire↔runtime conversion (`sigma_to_value`,
+- `src/evaluator/helpers/mod.rs` — wire↔runtime conversion (`sigma_to_value`,
   `value_to_typed_sigma`), `DataValueComparer`-parity equality (`values_equal`),
   collection carrier machinery (`collection_to_values`,
   `values_to_collection`), `SubstConstants` rewrite, box resolution.
@@ -95,8 +94,8 @@ admission and block validation call to check whether an input may be spent.
   callers map each to the right consensus/mempool envelope —
   `src/reduce.rs:282`, `:61`
 - `reduce_expr_with_cost` (fn) — the evaluator driver behind the fallback path —
-  `src/evaluator/dispatch.rs:22`
-- `eval_op` (fn) — the opcode jump table — `src/evaluator/dispatch.rs:449`
+  `src/evaluator/dispatch/mod.rs:22`
+- `eval_op` (fn) — the opcode jump table — `src/evaluator/dispatch/mod.rs:449`
 - `Value` (enum) — runtime evaluation value (typed coll carriers, `BigInt` vs
   distinct `UnsignedBigInt`, box refs, closures) — `src/evaluator/types.rs:375`
 - `ReductionContext<'a>` (struct) — transaction-scoped context (HEIGHT, SELF,
@@ -160,7 +159,7 @@ admission and block validation call to check whether an input may be spent.
   `activated_script_version >= 3` (block-header version 4); a below-threshold
   invocation is rejected with `EvalError::SoftForkNotActivated`, mirroring
   Scala's `MethodCall.evaluate` methodVersion check
-  (`src/evaluator/types.rs:340-355`, `src/evaluator/opcodes/method_call.rs:48-50`).
+  (`src/evaluator/types.rs:340-355`, `src/evaluator/opcodes/method_call/mod.rs:48-50`).
 - **Type-strict value equality.** `Value`'s `PartialEq` is type-strict like
   Scala's `DataValueComparer` (notably `UnsignedBigInt` is a distinct carrier
   from `BigInt`, and the only sanctioned cross-representation arm is
@@ -178,7 +177,7 @@ admission and block validation call to check whether an input may be spent.
   materializes as the raw `Coll` and is rejected, mirroring Scala's
   `SelectField.eval` (`src/evaluator/opcodes/binding.rs:283-300`).
 - **Depth bound.** Recursion is capped at `MAX_EVAL_DEPTH = 110`
-  (`DepthLimitExceeded`) — `src/evaluator/dispatch.rs:430-432`,
+  (`DepthLimitExceeded`) — `src/evaluator/dispatch/mod.rs:430-432`,
   `src/evaluator/types.rs:693`.
 - **AVL dependency containment.** All `ergo_avltree_rust` imports are confined
   to `src/avl.rs`; the rest of the evaluator never touches the underlying crate.

@@ -115,7 +115,7 @@ def nextest_commands(group, platform):
         ["-p", package, *selection] for package, selection in selectors.items()
     ]
     threads = ["--test-threads", "8"] if platform == "Windows" else []
-    return [["cargo", "nextest", "run", *selection, *threads] for selection in selections]
+    return [["cargo", "nextest", "run", "--locked", *selection, *threads] for selection in selections]
 
 
 def main():
@@ -129,7 +129,7 @@ def main():
     if args.shards != len(groups) or not 1 <= args.shard <= len(groups):
         parser.error("matrix shard count/index does not match configured crate groups")
     metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1"], text=True,
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True,
     ))
     member_ids = set(metadata["workspace_members"])
     members = {p["name"]: test_targets(p) for p in metadata["packages"] if p["id"] in member_ids}

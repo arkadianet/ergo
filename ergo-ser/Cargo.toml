@@ -3,6 +3,7 @@ name        = "ergo-ser"
 description = "Consensus-typed wire-format serializers for Ergo: headers, block transactions, ergo boxes, ErgoTree (with sigma type/value codecs), addresses, AD proofs, autolykos solutions, and difficulty encoding. Built on top of ergo-primitives' VlqReader/VlqWriter."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -30,3 +31,6 @@ serde_json = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

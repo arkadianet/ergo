@@ -198,6 +198,9 @@ and `cargo-machete`. See
 
 Areas where parity is incomplete, partial, or deliberately out of scope.
 Be aware of these before depending on the node.
+The [operating-mode evidence inventory](operating-mode-evidence.md) separates
+bounded fixture/recovery tests, recorded external campaigns and remaining
+closure criteria.
 
 ### Partial (landed but incomplete)
 
@@ -232,7 +235,7 @@ Be aware of these before depending on the node.
   Archive (`blocks_to_keep = -1`) and headers-only Mode 6
   (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
   would reach below the sentinel are refused rather than half-applied.
-- **Mode 4 (pruned + UTXO bootstrap)** ? builds on Mode 3 (landed) plus
+- **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
   boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
   rejects the later proof and preserves state
@@ -251,7 +254,11 @@ Be aware of these before depending on the node.
   The additional corpus exercises full transaction validation, root-preserving
   rollback/replay, and corrupted-proof rejection with unchanged committed
   state (`ergo-sync/tests/it/mode5_corpus_breadth.rs`). Broader historical-era
-  coverage and reorg-abort recovery remain open.
+  coverage remains open. Bounded subprocess tests kill both digest and UTXO
+  executors after rollback/partial apply and recover external early-mainnet
+  replacement roots on reopen (`ergo-sync/src/executor/relay_tests.rs`).
+  External-window cold-open reorg campaigns still need an owned database with
+  complete historical rollback/index/parameter substrate.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference

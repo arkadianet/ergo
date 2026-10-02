@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** none (only `blake2`, `hex`, `thiserror`)
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~2600 (incl. tests)
 
 ## Start here
 - `src/lib.rs` — the module tree and a precise "what is / is NOT here" boundary statement (lines 18-26).

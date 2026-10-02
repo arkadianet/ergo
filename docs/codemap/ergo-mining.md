@@ -9,7 +9,6 @@ solutions back through the block-apply path. No internal CPU miner, no wallet.
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec,
 ergo-crypto, ergo-validation, ergo-state, ergo-mempool
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~9,140 (src only)
 
 ## Start here
 - `generate_candidate` (`src/candidate.rs:160`) — the orchestrator; read this
