@@ -266,14 +266,25 @@ evidence.
 
 ### CI
 
-The nightly `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same
-set, uploads `regressions/` plus the per-surface oracle transcripts as an artifact,
-fails on any unbaselined `PENDING`, and fails louder (exit 3) if the run did not
-check what it planned to. It is `workflow_dispatch`-only rather than scheduled, because
-`ergo-core 6.0.6` is not on Maven Central: a cold GitHub-hosted runner has to
-clone the Scala node and `sbt avldb/publishLocal ergoWallet/publishLocal
-ergoCore/publishLocal`, which does not fit the ~20 min budget. The job caches
-`~/.ivy2/local` + `~/.cache/coursier` keyed on the oracle script hash, so a warm
-runner skips that entirely — point the `runner` input at a self-hosted label (or
-an operator cron) for the green path. The hermetic PR-time `difftest` job in
-`ci.yml` needs none of this and is unchanged.
+The `consensus-guard` job in `.github/workflows/fuzz.yml` runs the same set every
+night at 02:00 UTC and on `workflow_dispatch`. It fails on any unbaselined
+`PENDING`, and fails louder (exit 3) if the run did not check what it planned to.
+Scheduled campaigns use the workflow run ID as their seed, so successive runs
+exercise different inputs. Reproduce a recorded campaign by supplying its
+`guard_seed` and `guard_iters` through manual dispatch or the local command.
+
+The artifact preserves the source SHA, seed, iteration count, reference version,
+full guard output, oracle warm-up output, minimized `regressions/`, and per-surface
+oracle transcripts. Bootstrap or oracle failures remain failed steps; an empty
+or incomplete campaign cannot pass. Runs on the same ref are serialized without
+cancelling an active campaign.
+
+`ergo-core 6.0.6` is not on Maven Central: a cold hosted runner publishes
+`avldb`, `ergoWallet`, and `ergoCore` from the pinned reference tag locally. The
+120-minute job budget allows this cold path. The job caches `~/.ivy2/local` and
+`~/.cache/coursier`, keyed on the oracle script hash and reference version, so
+subsequent runs reuse those dependencies. Set the repository Actions variable
+`CONSENSUS_GUARD_RUNNER` to a warm runner label to use an existing local cache;
+otherwise runs use `ubuntu-latest`. A manual `runner` input overrides that
+variable. This job runs scheduled or manually selected repository code, never
+untrusted pull-request code. The hermetic PR-time `difftest` job remains separate.

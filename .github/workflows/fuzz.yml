@@ -8,8 +8,9 @@ name: Fuzz (nightly scheduled)
 # The structured and mutation campaigns use stable Rust; cargo-fuzz runs in
 # a separate nightly-toolchain matrix with libFuzzer and ASan instrumentation.
 #
-# The JVM oracle differential requires scala-cli + a published local ergo-core
-# and stays manual/local. The streamed replay driver IS wired below (the `replay`
+# The JVM oracle differential runs on the same nightly schedule, with cached
+# reference jars and an optional warm runner selected by CONSENSUS_GUARD_RUNNER.
+# The streamed replay driver IS wired below (the `replay`
 # job) but is gated on a `REPLAY_NODE_URL` secret pointing at a reachable archival
 # Scala node — it no-ops when unset (GitHub-hosted runners have no node), so it
 # runs on a self-hosted runner or an operator `workflow_dispatch`. This is where
@@ -21,14 +22,12 @@ on:
     # 02:00 UTC every night (off-peak for cache efficiency)
     - cron: '0 2 * * *'
   workflow_dispatch:
-    # Allow manual trigger for an on-demand long campaign, and for the
-    # JVM-oracle `consensus-guard` job (which only runs on this event — see
-    # the job's own comment for why it is not on the nightly schedule).
+    # Manual runs can reproduce a recorded seed on a selected runner.
     inputs:
       runner:
-        description: 'Runner label for consensus-guard (self-hosted recommended)'
+        description: 'Runner label (empty uses CONSENSUS_GUARD_RUNNER or ubuntu-latest)'
         required: false
-        default: 'ubuntu-latest'
+        default: ''
       guard_seed:
         description: 'consensus-guard PRNG seed'
         required: false
@@ -243,24 +242,21 @@ jobs:
 
   consensus-guard:
     name: consensus guard (JVM oracle differential — reduce / reduce_ctx / tx / box / validate)
-    # `workflow_dispatch` ONLY, deliberately — not on the nightly schedule.
-    #
-    # Why: the oracle runs the REAL reference jars, and `ergo-core 6.0.6` is not
+    # The oracle runs the REAL reference jars, and `ergo-core 6.0.6` is not
     # published to Maven Central. Standing it up on a cold GitHub-hosted runner
     # means cloning the Scala node and running
     # `sbt avldb/publishLocal ergoWallet/publishLocal ergoCore/publishLocal`,
-    # which alone exceeds the ~20 min this job is budgeted for (an sbt cold start
-    # plus three subproject publishes; the coursier + sigma-state fetch is on top).
-    # The `~/.ivy2/local` cache below removes that cost on a WARM runner, so the
-    # honest wiring is: green-path = a self-hosted runner (or a hosted runner
-    # whose ivy cache is already populated), triggered on demand or by an
-    # operator cron; the bootstrap step is here so a cold run still works, just
-    # slowly. Point `runner` at a self-hosted label to take the fast path.
+    # (three subproject publishes, plus coursier and sigma-state dependency fetches).
+    # The 120-minute timeout allows a cold run; the immutable-version dependency
+    # cache removes this cost on subsequent hosted runs. Set the repository
+    # variable CONSENSUS_GUARD_RUNNER to a warm runner label to reuse local jars.
     #
     # The hermetic PR-time `difftest` job in ci.yml is unchanged and needs none
     # of this.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CONSENSUS_GUARD_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: consensus-guard-${{ github.ref }}
+      cancel-in-progress: false
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -319,8 +315,8 @@ jobs:
           set -euo pipefail
           echo "ergo_tree 0008d3" \
             | scala-cli run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala \
-            | tee /tmp/oracle-warm.txt
-          grep -q '^ACCEPT 0008d3$' /tmp/oracle-warm.txt
+            | tee "$RUNNER_TEMP/oracle-warm.txt"
+          grep -q '^ACCEPT 0008d3$' "$RUNNER_TEMP/oracle-warm.txt"
 
       - name: cargo build (release)
         run: cargo build --release -p ergo-difftest
@@ -337,10 +333,33 @@ jobs:
       - name: consensus guard
         env:
           DIFFTEST_ORACLE_LOG: ${{ runner.temp }}/oracle-transcript.log
-          GUARD_SEED: ${{ inputs.guard_seed || '991' }}
+          # A scheduled run gets a recorded, rotating seed; manual runs retain
+          # the explicit input so a failing campaign can be reproduced exactly.
+          GUARD_SEED: ${{ inputs.guard_seed || github.run_id }}
           GUARD_ITERS: ${{ inputs.guard_iters || '2000' }}
         run: |
-          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS"
+          set -euo pipefail
+          printf 'seed=%s\niters=%s\nsource=%s\nreference=ergo-core-6.0.6\n' \
+            "$GUARD_SEED" "$GUARD_ITERS" "$GITHUB_SHA" > "$RUNNER_TEMP/consensus-guard-run.txt"
+          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS" \
+            2>&1 | tee "$RUNNER_TEMP/consensus-guard.log"
+
+      - name: summarize consensus guard
+        if: always()
+        run: |
+          {
+            echo '### Scala consensus differential campaign'
+            echo
+            echo '```text'
+            if [ -f "$RUNNER_TEMP/consensus-guard-run.txt" ]; then
+              cat "$RUNNER_TEMP/consensus-guard-run.txt"
+            else
+              echo 'Campaign did not start; check dependency bootstrap and oracle warm-up.'
+            fi
+            echo '```'
+            echo
+            echo 'The artifact preserves the campaign log, seed, reference version, minimized regressions and per-surface oracle transcripts.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Always upload: on a pass this is the empty-queue evidence, on a failure
       # it is the minimized, classified record set plus the oracle transcript
@@ -352,5 +371,8 @@ jobs:
           name: consensus-guard-regressions
           path: |
             ergo-difftest/regressions/
+            ${{ runner.temp }}/consensus-guard-run.txt
+            ${{ runner.temp }}/consensus-guard.log
+            ${{ runner.temp }}/oracle-warm.txt
             ${{ runner.temp }}/oracle-transcript.log.*
           if-no-files-found: ignore
