@@ -313,14 +313,16 @@ async fn mode4_snapshot_waits_for_real_header_catchup_installs_applies_and_resta
     config.nipopow_bootstrap = true;
     config.blocks_to_keep = 250;
     config.script_validation_checkpoint = None;
+    // Keep all three suppliers on the configured localhost address. Extra
+    // 127/8 aliases require host configuration on macOS; distinct ports still
+    // identify independent P2P connections in the snapshot quorum.
+    config.peer_limits.per_ip_limit = 3;
     let (discovered_tx, mut discovered_rx) = mpsc::channel(3);
     let mut commands = Vec::new();
     let mut tasks = Vec::new();
     config.known_peers.clear();
     for number in 0..3 {
-        let listener = TcpListener::bind(format!("127.0.0.{}:0", number + 1))
-            .await
-            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         config.known_peers.push(listener.local_addr().unwrap());
         let (tx, rx) = mpsc::channel(2);
         commands.push(tx);
