@@ -117,6 +117,22 @@ class EngineeringPolicy(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     policy.check_policy(self.root)
 
+    def test_unsupported_cargo_fuzz_lock_flag_is_rejected(self):
+        for toolchain in ('nightly', '${{ steps.rust.outputs.nightly }}'):
+            with self.subTest(toolchain=toolchain):
+                self.workflow.write_text(f'run: cargo +{toolchain} fuzz run bounded_evaluator --locked -- -runs=1\n')
+                with self.assertRaisesRegex(ValueError, "cargo-fuzz has no --locked"):
+                    policy.check_policy(self.root)
+
+    def test_separate_fuzz_workspace_requires_a_lockfile(self):
+        fuzz = self.root / "ergo-difftest/fuzz"
+        fuzz.mkdir(parents=True)
+        (fuzz / "Cargo.toml").write_text('[workspace]\n')
+        with self.assertRaisesRegex(ValueError, "own committed Cargo.lock"):
+            policy.check_policy(self.root)
+        (fuzz / "Cargo.lock").write_text('version = 4\n')
+        policy.check_policy(self.root)
+
     def test_smoke_overrides_preserve_other_config_sections(self):
         text = '[api]\nbind = "old"\ndisabled = false\n[peers]\nknown = ["127.0.0.1:1"]\n'
         result = release.configure_section(text, "api", {"bind": '"127.0.0.1:9099"'})

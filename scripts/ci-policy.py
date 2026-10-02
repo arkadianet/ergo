@@ -8,6 +8,7 @@ import re
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+CARGO_COMMAND = r"\bcargo\s+(?:\+(?:\$\{\{.*?\}\}|\S+)\s+)?"
 
 
 def read_versions(root=ROOT):
@@ -28,6 +29,9 @@ def check_policy(root=ROOT):
     versions = read_versions(root)
     manifest = tomllib.loads((root / "Cargo.toml").read_text())
     workspace = manifest["workspace"]
+    fuzz_manifest = root / "ergo-difftest/fuzz/Cargo.toml"
+    if fuzz_manifest.exists() and not fuzz_manifest.with_name("Cargo.lock").is_file():
+        raise ValueError("the separate fuzz workspace requires its own committed Cargo.lock")
     if workspace["package"].get("rust-version") != versions["channel"]:
         raise ValueError("workspace rust-version must match rust-toolchain.toml")
     for member in workspace["members"]:
@@ -48,9 +52,12 @@ def check_policy(root=ROOT):
         if re.search(r"toolchain:\s*\d+\.\d+", text):
             raise ValueError(f"{path.relative_to(root)} duplicates stable Rust version")
         for line in text.splitlines():
-            if re.search(r"\bcargo\s+(?:\+\S+\s+)?(?:build|check|clippy|doc|test|run|metadata|nextest\s+run)\b", line):
-                if line.lstrip().startswith("#") or line.strip().startswith("- name:"):
-                    continue
+            if line.lstrip().startswith("#") or line.strip().startswith("- name:"):
+                continue
+            if re.search(CARGO_COMMAND + r"fuzz\s+(?:run|build)\b", line):
+                if "--locked" in line.split(" -- ", 1)[0]:
+                    raise ValueError(f"{path.relative_to(root)}: cargo-fuzz has no --locked option; use locked metadata and a drift check")
+            if re.search(CARGO_COMMAND + r"(?:build|check|clippy|doc|test|run|metadata|nextest\s+run)\b", line):
                 if "--locked" not in line:
                     raise ValueError(f"{path.relative_to(root)}: missing --locked: {line.strip()}")
             if re.search(r"\bcargo\s+install\s+cargo-(?:audit|deny|machete|fuzz)\b", line):
