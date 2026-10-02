@@ -76,11 +76,16 @@ requested limit; this stack uses five.
 
 | Order | Scope | Draft PR | Changed paths | Checks |
 | --- | --- | --- | ---: | --- |
-| 1 | Persistence/wallet | Pending | Pending | Running |
-| 2 | Runtime/API | Pending | Pending | Running |
-| 3 | Query/codec contracts | Pending | Pending | Running |
-| 4 | Compiler/evaluator | Pending | Pending | Running |
-| 5 | Engineering/release | Pending | Pending | Running |
+| 1 | Persistence/wallet | [#481](https://github.com/arkadianet/ergo/pull/481) | 84 | Format/Clippy; 7,779 workspace tests passed, 97 ignored |
+| 2 | Runtime/API | [#482](https://github.com/arkadianet/ergo/pull/482) | 99 | Format/Clippy; 7,796 workspace tests passed, 97 ignored |
+| 3 | Query/codec contracts | [#483](https://github.com/arkadianet/ergo/pull/483) | 93 | Format/Clippy; 7,801 workspace tests passed, 97 ignored |
+| 4 | Compiler/evaluator | [#484](https://github.com/arkadianet/ergo/pull/484) | 99 | Format/Clippy; 7,820 workspace tests passed, 97 ignored |
+| 5 | Engineering/release | Pending | 100 | Final workspace suites running |
+
+All four published layers passed their required local gates. Hosted CI is
+separate and may still be running. Layer 1 additionally passed 249 wallet
+test-utils/proving tests (one intentional oracle ignore); layer 4 passed its
+cost-trace suite.
 
 Required per-layer checks are locked workspace tests, all-target/all-feature
 Clippy with warnings denied, and Rust formatting. Included fragments are checked
@@ -105,6 +110,12 @@ Recorded measurements and oracle provenance are linked from
 - [ ] Execute the native macOS, Windows and musl release archive smoke in CI;
   local validation covers Linux GNU only. Physical power-cut durability and
   Windows directory persistence require platform-specific validation.
+
+The final bounded-evaluator ASan campaign used seed `20261003`, pinned
+`cargo-fuzz 0.13.1` and `nightly-2026-09-30`: 9,163 executions in 31 seconds,
+480 MiB peak RSS, no findings and no lockfile drift. Earlier source-compiler
+and evaluator campaigns completed 191,677 and 16,219 executions respectively.
+These bounded campaigns do not replace scheduled long runs.
 
 Cooperative distributed multisig orchestration and the compact-selector external
 oracle are deliberately deferred features in the compatibility inventory.
