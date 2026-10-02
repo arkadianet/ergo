@@ -21,8 +21,10 @@ mod avl_tree;
 mod bigint;
 mod boxed;
 mod coll;
+mod shared;
 mod sigma_boolean;
 
+pub use shared::{SigmaChildren, SigmaChildrenIntoIter};
 pub use sigma_boolean::write_sigma_boolean;
 
 use avl_tree::{read_avl_tree, write_avl_tree};
@@ -37,7 +39,7 @@ use sigma_boolean::read_sigma_boolean_at_depth;
 /// atoms (`ProveDlog`, `ProveDHTuple`); inner nodes (`Cand`, `Cor`,
 /// `Cthreshold`) compose them into the conjunctions / disjunctions /
 /// k-of-n thresholds that an [`super::ergo_tree::ErgoTree`] reduces to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum SigmaBoolean {
     /// Statically-known proposition that always evaluates to the wrapped
     /// boolean — used when reduction collapses the tree to a constant.
@@ -58,9 +60,9 @@ pub enum SigmaBoolean {
         v: GroupElement,
     },
     /// Conjunction — every child must be satisfied.
-    Cand(Vec<SigmaBoolean>),
+    Cand(SigmaChildren),
     /// Disjunction — at least one child must be satisfied.
-    Cor(Vec<SigmaBoolean>),
+    Cor(SigmaChildren),
     /// `k`-of-n threshold — at least `k` of the `children` must be
     /// satisfied.
     Cthreshold {
@@ -69,7 +71,7 @@ pub enum SigmaBoolean {
         /// 255 must not be truncated to a `u8`.
         k: u16,
         /// Candidate sub-propositions.
-        children: Vec<SigmaBoolean>,
+        children: SigmaChildren,
     },
 }
 

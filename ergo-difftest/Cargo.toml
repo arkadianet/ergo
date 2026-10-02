@@ -21,6 +21,7 @@ ergo-state      = { workspace = true }
 ergo-validation = { workspace = true, features = ["test-helpers"] }
 ergo-rest-json  = { workspace = true }
 ergo-p2p        = { workspace = true }
+ergo-compiler   = { workspace = true }
 num-bigint      = { workspace = true }
 serde           = { workspace = true, features = ["derive"] }
 serde_json      = { workspace = true }

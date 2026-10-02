@@ -562,9 +562,9 @@ fn sigmaprop_equality_value_error_and_cost() {
     let ctx = ReductionContext::minimal(500_000, 0);
     let dlog = |b: u8| Value::SigmaProp(SigmaBoolean::ProveDlog(GroupElement::from_bytes([b; 33])));
     let cand = |b: u8| {
-        Value::SigmaProp(SigmaBoolean::Cand(vec![SigmaBoolean::ProveDlog(
-            GroupElement::from_bytes([b; 33]),
-        )]))
+        Value::SigmaProp(SigmaBoolean::Cand(
+            vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([b; 33]))].into(),
+        ))
     };
     let eqc = |l: &Value, r: &Value| {
         let mut c = CostAccumulator::recording_only();
@@ -598,7 +598,7 @@ fn sigmaprop_equality_value_error_and_cost() {
     let cth = |k: u16| {
         Value::SigmaProp(SigmaBoolean::Cthreshold {
             k,
-            children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33]))],
+            children: vec![SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33]))].into(),
         })
     };
     assert!(eqc(&cth(1), &cth(1)).unwrap().0);
@@ -608,7 +608,8 @@ fn sigmaprop_equality_value_error_and_cost() {
         children: vec![
             SigmaBoolean::ProveDlog(GroupElement::from_bytes([1; 33])),
             SigmaBoolean::ProveDlog(GroupElement::from_bytes([2; 33])),
-        ],
+        ]
+        .into(),
     });
     assert!(!eqc(&cth(1), &cth2).unwrap().0);
 }
@@ -3775,10 +3776,13 @@ fn serialize_put_cost_matches_v6_0_2_dynamiccost() {
     assert_eq!(
         cost(
             T::SSigmaProp,
-            Sv::SigmaProp(SigmaBoolean::Cand(vec![
-                SigmaBoolean::TrivialProp(true),
-                SigmaBoolean::TrivialProp(false),
-            ]))
+            Sv::SigmaProp(SigmaBoolean::Cand(
+                vec![
+                    SigmaBoolean::TrivialProp(true),
+                    SigmaBoolean::TrivialProp(false),
+                ]
+                .into()
+            ))
         ),
         6
     );

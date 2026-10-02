@@ -33,31 +33,24 @@ use crate::token::{tokenize, TokenKind};
 
 mod block;
 mod cursor;
+mod depth;
 mod expr_atoms;
 mod operators;
 mod types;
 pub(crate) use block::*;
 pub(crate) use cursor::*;
+use depth::{check_expr_depth, check_type_depth};
 pub(crate) use expr_atoms::*;
 pub(crate) use operators::*;
 pub(crate) use types::*;
 
-/// Maximum combined `expr()`/`type_()` recursion depth this crate's own
-/// recursive-descent parser accepts before rejecting with
-/// [`ParseError::TooDeep`].
+/// Maximum parser recursion and constructed expression/type depth.
 ///
-/// Source-text nesting depth upper-bounds every downstream structure (typed
-/// AST, emitted IR, wire body -- the M4/M5 transform passes rewrite the tree,
-/// they don't deepen it beyond source depth times a small constant), so this
-/// ONE cap -- shared by both of this parser's structural-nesting recursion
-/// families (`expr()`'s statement/block/paren/lambda nesting AND `type_()`'s
-/// `Coll[Coll[...]]`-style type nesting, via a single [`Cursor::depth`]
-/// counter both entry points share) -- bounds the whole compile pipeline in
-/// one place, rather than adding separate counters to the `emit` module and
-/// every downstream transform pass individually: `fold`, `lower`, `inline`,
-/// `cse`, `isproven`, and `tuple` are all call-stack-recursive 1:1 tree walks
-/// over the already-depth-bounded typed AST, so none amplifies depth beyond
-/// what the parser already accepted and none needs its own guard.
+/// `expr()` and `type_()` share a recursion counter. Independently, structural
+/// checks cover their results and every iterative operator/selector/type fold:
+/// a flat source expression can produce a deep AST without recursive parsing.
+/// Each fold checks its result before another layer can be added, keeping error
+/// cleanup as well as downstream compiler walks bounded.
 ///
 /// NOT oracle-pinned: the compiler's own limits are explicitly not
 /// consensus-critical (see the deviation ledger in `lib.rs`), unlike

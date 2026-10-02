@@ -642,26 +642,25 @@ fn visit_sigma_boolean_puts(
     charge: &mut impl FnMut(u64) -> Result<(), EvalError>,
 ) -> Result<(), EvalError> {
     use ergo_ser::sigma_value::SigmaBoolean as Sb;
-    charge(1)?;
-    match sb {
-        Sb::TrivialProp(_) => {}
-        Sb::ProveDlog(_) => charge(36)?,
-        Sb::ProveDHTuple { .. } => {
-            for _ in 0..4 {
-                charge(36)?;
+    let mut pending = vec![sb];
+    while let Some(sb) = pending.pop() {
+        charge(1)?;
+        match sb {
+            Sb::TrivialProp(_) => {}
+            Sb::ProveDlog(_) => charge(36)?,
+            Sb::ProveDHTuple { .. } => {
+                for _ in 0..4 {
+                    charge(36)?;
+                }
             }
-        }
-        Sb::Cand(children) | Sb::Cor(children) => {
-            charge(3)?;
-            for child in children {
-                visit_sigma_boolean_puts(child, charge)?;
+            Sb::Cand(children) | Sb::Cor(children) => {
+                charge(3)?;
+                pending.extend(children.iter().rev());
             }
-        }
-        Sb::Cthreshold { children, .. } => {
-            charge(3)?;
-            charge(3)?;
-            for child in children {
-                visit_sigma_boolean_puts(child, charge)?;
+            Sb::Cthreshold { children, .. } => {
+                charge(3)?;
+                charge(3)?;
+                pending.extend(children.iter().rev());
             }
         }
     }

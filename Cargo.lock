@@ -789,6 +789,7 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "ergo-compiler",
  "ergo-p2p",
  "ergo-primitives",
  "ergo-rest-json",

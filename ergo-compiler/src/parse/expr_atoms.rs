@@ -113,10 +113,13 @@ pub(crate) fn try_literal(t: &Token, src: &str) -> Option<Expr> {
 /// this module goes through here (not `expr_impl` directly), so the shared
 /// `Cursor::depth` counter (`MAX_PARSE_DEPTH`) bounds every nesting path:
 /// parens, blocks, `if`/`else` branches, lambda bodies, `val`/`def` right-hand
-/// sides. See `MAX_PARSE_DEPTH`'s doc for why one counter at this single
-/// choke point covers the whole pipeline.
+/// sides. The result is also checked for actual expression/type depth.
 pub(crate) fn expr(c: &mut Cursor, ctx: Ctx) -> Result<Expr, ParseError> {
-    with_depth_guard(c, |c| expr_impl(c, ctx))
+    with_depth_guard(c, |c| {
+        let expr = expr_impl(c, ctx)?;
+        check_expr_depth(&expr)?;
+        Ok(expr)
+    })
 }
 
 /// `Expr` (Exprs.scala:46-75): `If | Fun | PostfixLambda`. Ordered choice by
