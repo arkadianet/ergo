@@ -94,8 +94,9 @@ pub async fn box_by_id_handler(
     };
     let box_id: BoxId = BoxId::from_bytes(raw);
     match state.indexer.box_by_id(&box_id) {
-        Some(b) => render_indexed_box(state.network, &b),
-        None => not_found("box not found"),
+        Ok(Some(b)) => render_indexed_box(state.network, &b),
+        Ok(None) => not_found("box not found"),
+        Err(error) => internal_error(&format!("indexer read failed: {error}")),
     }
 }
 
@@ -109,8 +110,9 @@ pub async fn box_by_index_handler(
         return not_found("box not found");
     }
     match state.indexer.box_by_global_index(n as u64) {
-        Some(b) => render_indexed_box(state.network, &b),
-        None => not_found("box not found"),
+        Ok(Some(b)) => render_indexed_box(state.network, &b),
+        Ok(None) => not_found("box not found"),
+        Err(error) => internal_error(&format!("indexer read failed: {error}")),
     }
 }
 

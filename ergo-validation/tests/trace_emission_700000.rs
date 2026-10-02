@@ -176,7 +176,7 @@ fn trace_inner() {
                 }
                 eprintln!(
                     "    registers: {}",
-                    box_data.candidate.additional_registers.registers.len()
+                    box_data.candidate.additional_registers().registers.len()
                 );
 
                 eprintln!("\n    ErgoTree:");

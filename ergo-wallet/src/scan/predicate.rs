@@ -292,7 +292,7 @@ fn register_value(register: ScanRegister, b: &ErgoBox) -> Option<(SigmaType, Sig
         )),
         other => {
             let rid = other.additional()?;
-            let rv = b.candidate.additional_registers.get(rid)?;
+            let rv = b.candidate.additional_registers().get(rid)?;
             Some((rv.tpe.clone(), rv.value.clone()))
         }
     }

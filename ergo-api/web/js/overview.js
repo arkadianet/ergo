@@ -429,7 +429,7 @@ function paintAlerts(guidance) {
   setText('[data-diagnostic-headers]', num(s?.best_header_height));
   setText('[data-diagnostic-applied]', num(s?.best_full_block_height));
   setText('[data-diagnostic-peers]', num(s?.peer_count));
-  const index = state._slow?.indexerHealth || state._slow?.indexer;
+  const index = state._slow?.indexerHealth;
   setText('[data-diagnostic-index]', index ? `${index.status === 'caughtUp' ? 'Ready' : index.status} · ${num(index.indexedHeight)} / ${num(index.fullHeight)} blocks` : 'Unavailable');
   const indexIssues = [];
   if (index?.haltReason) indexIssues.push(`Index halt reason: ${index.haltReason}.`);
@@ -482,7 +482,7 @@ function paintSyncSummary(blkH, hdrH, guidance = null) {
       ? 'Block sync is current. Address, box and token searches require the optional search index.'
       : idx?.status === 'syncing'
         ? 'Block sync is current. Address, box and token searches are still indexing.'
-        : idx?.status === 'caughtUp'
+        : idx?.status === 'caughtUp' && state._slow?.indexerHealth?.status === 'caughtUp'
           ? 'Block sync and chain search are ready.'
           : 'Block sync is current. Search index availability is not yet confirmed.';
     setText('[data-sync-copy]', kind === 'at_tip' ? searchCopy : copy);
@@ -517,7 +517,7 @@ function paintSyncRings() {
   for (const layer of layers) {
     const ring = root.querySelector(`[data-ring="${layer.id}"]`);
     ring.dataset.state = layer.state;
-    const unknown = layer.percent == null || layer.state === 'disabled';
+    const unknown = layer.percent == null || layer.state === 'disabled' || layer.state === 'unknown';
     ring.setAttribute('stroke-dasharray', unknown ? '1 3' : `${layer.percent} 100`);
     root.querySelector(`[data-ring-legend="${layer.id}"]`).dataset.state = layer.state;
     setText(`[data-ring-state="${layer.id}"]`, layer.text);
@@ -767,7 +767,7 @@ function renderBody() {
     const indexTarget = idx?.fullHeight ?? blkH;
     const indexGap = indexTarget != null && idx?.indexedHeight != null ? Math.max(0, indexTarget - idx.indexedHeight) : null;
     const indexHalted = idx?.status === 'halted' || slow.indexerHealth?.status === 'halted';
-    const indexReady = idx?.status === 'caughtUp' && !indexHalted;
+    const indexReady = idx?.status === 'caughtUp' && slow.indexerHealth?.status === 'caughtUp' && !indexHalted;
     const indexStatus = indexHalted ? 'Halted' : indexReady ? 'Ready' : idx?.status === 'syncing' ? (indexGap > 0 ? `${num(indexGap)} behind` : 'Indexing') : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
     const stages = document.createElement('table');
     stages.className = 'ov-stages';

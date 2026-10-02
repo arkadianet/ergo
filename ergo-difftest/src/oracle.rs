@@ -719,7 +719,7 @@ fn reduce_ctx_verdict(bytes: &[u8]) -> (Verdict, usize) {
         id,
         transaction_id: [0u8; 32],
         output_index: 0,
-        registers: copy_registers(&candidate.additional_registers),
+        registers: copy_registers(candidate.additional_registers()),
         tokens: candidate
             .tokens
             .iter()

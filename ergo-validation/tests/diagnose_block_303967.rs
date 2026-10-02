@@ -231,9 +231,9 @@ fn dump_culprit_tx1_bytes() {
         eprintln!("  scala registers: {:?}", scala_regs);
         eprintln!(
             "  our   registers (count): {}",
-            out.additional_registers.registers.len()
+            out.additional_registers().registers.len()
         );
-        for (idx, reg_bytes) in out.additional_registers.registers.iter().enumerate() {
+        for (idx, reg_bytes) in out.additional_registers().registers.iter().enumerate() {
             eprintln!("    R{}: {:?}", 4 + idx, reg_bytes);
         }
     }

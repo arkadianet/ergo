@@ -28,7 +28,12 @@ fn render_transaction_range(state: &BlockchainState, q: PagedQuery) -> Response 
     };
     let lo = page.offset as u64;
     let hi = lo.saturating_add(page.limit as u64);
-    let txs = state.indexer.txs_by_global_range(lo, hi);
+    let txs = match state.indexer.txs_by_global_range(lo, hi) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let ids: Vec<String> = txs.iter().map(|tx| hex::encode(tx.id.as_bytes())).collect();
     Json(ids).into_response()
 }
@@ -54,7 +59,12 @@ fn render_box_range(state: &BlockchainState, q: PagedQuery) -> Response {
     };
     let lo = page.offset as u64;
     let hi = lo.saturating_add(page.limit as u64);
-    let boxes = state.indexer.boxes_by_global_range(lo, hi);
+    let boxes = match state.indexer.boxes_by_global_range(lo, hi) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let ids: Result<Vec<String>, String> = boxes
         .iter()
         .map(|b| {

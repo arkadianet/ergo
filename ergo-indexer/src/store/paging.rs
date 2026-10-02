@@ -35,6 +35,10 @@ impl IndexerStore {
 }
 
 impl PageReader {
+    pub(crate) fn read_meta(&self) -> Result<super::IndexerMeta, IndexerError> {
+        super::meta::read_meta(&self.txn)
+    }
+
     pub(crate) fn entries(
         &self,
         owner: PageOwner,

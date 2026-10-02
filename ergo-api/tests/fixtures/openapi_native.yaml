@@ -164,11 +164,13 @@ paths:
       tags:
       - node
       summary: |-
-        `GET /api/v1/indexer/status`. Always 200; never gated (like
+        `GET /api/v1/indexer/status`. Never gated (like
         `indexedHeight`, this must keep answering while the index is syncing,
         repairing, or halted — that is exactly when the operator needs it).
         `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
-        the self-repair markers and totals live here instead.
+        the self-repair markers and totals live here instead. Failed database
+        snapshots or previously observed read corruption return 500. Offline
+        syncing/halted handles still report their explicit status.
       description: |-
         Mounted only when an indexer handle is plumbed — on indexer-less wiring
         the route 404s, which the UI reads as "extra-index disabled".
@@ -180,6 +182,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiIndexerStatus'
+        '500':
+          description: Indexer health snapshot failed or read corruption was observed
   /api/v1/info:
     get:
       tags:

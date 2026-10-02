@@ -480,7 +480,8 @@ fn b4_q4_nested_empty_collections_accept_canonical_bytes() {
     // Mutate every nested collection in the parsed Transaction to
     // its empty form. SpendingProof preserves both the parsed
     // ContextExtension and the canonical wire bytes, so we rebuild
-    // the proof via SpendingProof::new to keep them consistent.
+    // the proof via SpendingProof::new to keep them consistent. Register
+    // replacement updates the parsed block and cached wire bytes atomically.
     for inp in &mut tx.inputs {
         inp.spending_proof =
             SpendingProof::new(inp.spending_proof.proof.clone(), ContextExtension::empty())
@@ -488,7 +489,8 @@ fn b4_q4_nested_empty_collections_accept_canonical_bytes() {
     }
     for out in &mut tx.output_candidates {
         out.tokens.clear();
-        out.additional_registers = AdditionalRegisters::empty();
+        out.replace_additional_registers(AdditionalRegisters::empty())
+            .unwrap();
     }
 
     // EXPECTED canonical bytes via the production write path.

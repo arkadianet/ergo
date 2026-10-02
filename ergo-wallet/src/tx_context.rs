@@ -316,6 +316,6 @@ fn candidate_to_eval_box_simple(c: &ErgoBoxCandidate, index: usize) -> EvalBox {
 /// `AdditionalRegisters.registers` is a densely-packed `Vec` (R4 first);
 /// slots past the vec's length are `None`.
 fn copy_registers_to_eval(c: &ErgoBoxCandidate) -> [Option<ergo_ser::register::RegisterValue>; 6] {
-    let regs = &c.additional_registers.registers;
+    let regs = &c.additional_registers().registers;
     std::array::from_fn(|i| regs.get(i).cloned())
 }

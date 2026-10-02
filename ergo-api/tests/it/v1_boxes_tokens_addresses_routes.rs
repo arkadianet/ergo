@@ -7,9 +7,8 @@
 //! `invalid_*` reasons, the `addresses/{addr}/{boxes,unspent}` ≡
 //! `boxes/{by-address,unspent/by-address}` dual mount (O10), and the honest
 //! `state_unavailable` for the not-yet-indexable mint-order token list (G3).
-//! Handlers are driven via `oneshot` over the store-less `IndexerHandle` (all
-//! infallible reads empty/None) for gating. Point-miss tests use a real empty
-//! store so a successful read is distinct from an unavailable store.
+//! Handlers are driven via `oneshot`. Successful missing-data reads use
+//! a real empty store; storeless handles model only syncing/halted gating.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,11 +41,6 @@ fn mainnet_address() -> String {
 
 // ----- indexer handles ----------------------------------------------------
 
-fn caught_up() -> Arc<dyn IndexerQuery> {
-    let h = IndexerHandle::syncing(HEIGHT as u64);
-    h.set_status(IndexerStatus::CaughtUp);
-    Arc::new(h)
-}
 fn empty_index() -> (tempfile::TempDir, Arc<dyn IndexerQuery>) {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = ergo_indexer::IndexerStore::open(&dir.path().join("index.redb")).unwrap();
@@ -162,7 +156,8 @@ async fn box_by_id_unknown_is_box_not_found() {
 
 #[tokio::test]
 async fn box_by_id_malformed_is_invalid_box_id() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/boxes/NOTHEX").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/boxes/NOTHEX").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reason(&body), "invalid_box_id");
 }
@@ -171,8 +166,9 @@ async fn box_by_id_malformed_is_invalid_box_id() {
 
 #[tokio::test]
 async fn boxes_by_address_empty_is_collection_envelope() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/by-address/{}", mainnet_address()),
     )
     .await;
@@ -186,15 +182,21 @@ async fn boxes_by_address_empty_is_collection_envelope() {
 
 #[tokio::test]
 async fn boxes_by_address_invalid_address_is_invalid_address() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/boxes/by-address/not-an-address").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(
+        Some(indexer.clone()),
+        "/api/v1/boxes/by-address/not-an-address",
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reason(&body), "invalid_address");
 }
 
 #[tokio::test]
 async fn boxes_by_address_bad_sort_is_invalid_sort_direction() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!(
             "/api/v1/boxes/by-address/{}?sort=sideways",
             mainnet_address()
@@ -207,8 +209,9 @@ async fn boxes_by_address_bad_sort_is_invalid_sort_direction() {
 
 #[tokio::test]
 async fn boxes_by_address_tampered_cursor_is_invalid_cursor() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!(
             "/api/v1/boxes/by-address/{}?cursor=!!!bad",
             mainnet_address()
@@ -223,8 +226,9 @@ async fn boxes_by_address_tampered_cursor_is_invalid_cursor() {
 
 #[tokio::test]
 async fn boxes_by_ergo_tree_bad_hex_is_invalid_ergo_tree() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = send(
-        app(Some(caught_up())),
+        app(Some(indexer.clone())),
         Method::POST,
         "/api/v1/boxes/by-ergo-tree",
         Body::from(serde_json::json!({ "ergo_tree": "zzzz" }).to_string()),
@@ -238,8 +242,9 @@ async fn boxes_by_ergo_tree_bad_hex_is_invalid_ergo_tree() {
 
 #[tokio::test]
 async fn boxes_by_template_unknown_is_empty_page_not_404() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/by-template/{HEX_64}"),
     )
     .await;
@@ -250,8 +255,9 @@ async fn boxes_by_template_unknown_is_empty_page_not_404() {
 
 #[tokio::test]
 async fn boxes_by_token_unknown_is_empty_page_not_404() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/by-token/{HEX_64}"),
     )
     .await;
@@ -261,7 +267,8 @@ async fn boxes_by_token_unknown_is_empty_page_not_404() {
 
 #[tokio::test]
 async fn box_range_is_id_collection_with_range_cap_limit() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/boxes/range").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/boxes/range").await;
     assert_eq!(status, StatusCode::OK);
     assert_page_envelope(&body);
     assert_eq!(body["page"]["limit"].as_u64(), Some(100)); // range default
@@ -279,22 +286,25 @@ async fn token_by_id_unknown_is_token_not_found() {
 
 #[tokio::test]
 async fn token_by_id_malformed_is_invalid_token_id() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/tokens/NOTHEX").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/tokens/NOTHEX").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(reason(&body), "invalid_token_id");
 }
 
 #[tokio::test]
 async fn tokens_list_is_honest_state_unavailable_not_faked() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/tokens").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/tokens").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reason(&body), "state_unavailable");
 }
 
 #[tokio::test]
 async fn token_holders_empty_is_collection_with_meta() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/tokens/{HEX_64}/holders"),
     )
     .await;
@@ -326,8 +336,9 @@ async fn token_stats_unknown_token_is_token_not_found() {
 
 #[tokio::test]
 async fn address_balance_shape_uses_value_leaf_and_dual_scopes() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/addresses/{}/balance", mainnet_address()),
     )
     .await;
@@ -342,8 +353,9 @@ async fn address_balance_shape_uses_value_leaf_and_dual_scopes() {
 
 #[tokio::test]
 async fn address_transactions_is_collection_envelope() {
+    let (_directory, indexer) = empty_index();
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/addresses/{}/transactions", mainnet_address()),
     )
     .await;
@@ -353,14 +365,15 @@ async fn address_transactions_is_collection_envelope() {
 
 #[tokio::test]
 async fn addresses_boxes_is_dual_mount_of_boxes_by_address() {
+    let (_directory, indexer) = empty_index();
     let addr = mainnet_address();
     let (s1, b1) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/by-address/{addr}"),
     )
     .await;
     let (s2, b2) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/addresses/{addr}/boxes"),
     )
     .await;
@@ -372,14 +385,15 @@ async fn addresses_boxes_is_dual_mount_of_boxes_by_address() {
 
 #[tokio::test]
 async fn addresses_unspent_is_dual_mount_of_boxes_unspent_by_address() {
+    let (_directory, indexer) = empty_index();
     let addr = mainnet_address();
     let (s1, b1) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/unspent/by-address/{addr}"),
     )
     .await;
     let (s2, b2) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/addresses/{addr}/unspent"),
     )
     .await;
@@ -438,17 +452,19 @@ async fn protocol_detail_unknown_is_protocol_not_found() {
 
 #[tokio::test]
 async fn protocol_state_unknown_protocol_is_protocol_not_found() {
-    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/nope/state").await;
+    let (_directory, indexer) = empty_index();
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/protocols/nope/state").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(reason(&body), "protocol_not_found");
 }
 
 #[tokio::test]
 async fn protocol_state_mismatched_box_role_names_the_real_role() {
+    let (_directory, indexer) = empty_index();
     // A wrong `box_role` on a singleton protocol is a client error naming the
     // actual role — NOT the many-instance `not_a_singleton_protocol` answer.
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         "/api/v1/protocols/sigmausd/state?box_role=nope",
     )
     .await;
@@ -463,9 +479,10 @@ async fn protocol_state_mismatched_box_role_names_the_real_role() {
 
 #[tokio::test]
 async fn protocol_state_unresolved_nft_is_state_unavailable() {
+    let (_directory, indexer) = empty_index();
     // The store-less caught-up handle holds no boxes, so the singleton NFT
     // cannot resolve — the honest `state_unavailable`, not a 500.
-    let (status, body) = get(Some(caught_up()), "/api/v1/protocols/sigmausd/state").await;
+    let (status, body) = get(Some(indexer.clone()), "/api/v1/protocols/sigmausd/state").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
     assert_eq!(reason(&body), "state_unavailable");
 }
@@ -613,10 +630,11 @@ impl NodeReadState for StubRead {
 
 #[tokio::test]
 async fn malformed_query_param_is_v1_invalid_params_envelope() {
+    let (_directory, indexer) = empty_index();
     // `limit=abc` fails V1Query extraction; the failure must render the v1
     // envelope, not axum's default plain-text 400.
     let (status, body) = get(
-        Some(caught_up()),
+        Some(indexer.clone()),
         &format!("/api/v1/boxes/by-token/{HEX_64}?limit=abc"),
     )
     .await;
@@ -626,10 +644,11 @@ async fn malformed_query_param_is_v1_invalid_params_envelope() {
 
 #[tokio::test]
 async fn malformed_json_body_is_v1_bad_request_envelope() {
+    let (_directory, indexer) = empty_index();
     // A body that isn't valid JSON fails V1Json extraction on the POST
     // by-ergo-tree route; the failure must render the v1 envelope.
     let (status, body) = send(
-        app(Some(caught_up())),
+        app(Some(indexer.clone())),
         Method::POST,
         "/api/v1/boxes/by-ergo-tree",
         Body::from("{ not json"),

@@ -617,32 +617,32 @@ pub fn sigma_to_value(tpe: &SigmaType, val: &SigmaValue) -> Result<Value, EvalEr
             let registers = [
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R4)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R5)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R6)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R7)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R8)
                     .cloned(),
                 ergo_box
                     .candidate
-                    .additional_registers
+                    .additional_registers()
                     .get(RegisterId::R9)
                     .cloned(),
             ];

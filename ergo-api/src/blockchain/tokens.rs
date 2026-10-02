@@ -81,8 +81,9 @@ pub async fn token_by_id_handler(
         None => return not_found("token not found"),
     };
     match state.indexer.token_by_id(&token_id) {
-        Some(t) => Json(build_indexed_token_response(&t)).into_response(),
-        None => not_found("token not found"),
+        Ok(Some(t)) => Json(build_indexed_token_response(&t)).into_response(),
+        Ok(None) => not_found("token not found"),
+        Err(error) => internal_error(&format!("indexer read failed: {error}")),
     }
 }
 
@@ -99,7 +100,12 @@ pub async fn tokens_by_ids_handler(
         .iter()
         .filter_map(|s| parse_modifier_id(s).map(TokenId::from_bytes))
         .collect();
-    let tokens = state.indexer.tokens_by_ids(&ids);
+    let tokens = match state.indexer.tokens_by_ids(&ids) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let items: Vec<IndexedTokenResponse> =
         tokens.iter().map(build_indexed_token_response).collect();
     Json(items).into_response()
@@ -122,8 +128,18 @@ pub async fn boxes_by_token_id_handler(
         Ok(p) => p,
         Err(resp) => return *resp,
     };
-    let boxes = state.indexer.token_boxes_paged(&token_id, page);
-    let total = state.indexer.token_total_boxes(&token_id) as i64;
+    let boxes = match state.indexer.token_boxes_paged(&token_id, page) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.token_total_boxes(&token_id) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    } as i64;
     let items = match boxes
         .iter()
         .map(|b| build_indexed_box_response(state.network, b))
@@ -180,7 +196,12 @@ fn render_unspent_by_token_id(
     };
     let include_unconfirmed = q.include_unconfirmed.unwrap_or(false);
     let exclude_mempool_spent = q.exclude_mempool_spent.unwrap_or(false);
-    let mut confirmed = state.indexer.token_unspent_paged(token_id, page, dir);
+    let mut confirmed = match state.indexer.token_unspent_paged(token_id, page, dir) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     if exclude_mempool_spent {
         confirmed.retain(|b| match b.box_data.box_id() {
             Ok(id) => !state.mempool.is_spent_by_pool(&id),

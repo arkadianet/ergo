@@ -139,7 +139,7 @@ fn make_eval_box(b: &ErgoBox) -> EvalBox {
                 [None, None, None, None, None, None];
             for (i, reg) in b
                 .candidate
-                .additional_registers
+                .additional_registers()
                 .registers
                 .iter()
                 .enumerate()
@@ -286,13 +286,17 @@ fn diagnose_auction_divergence_700001() {
             eprintln!("  tokens: {}", resolved_box.candidate.tokens.len());
             eprintln!(
                 "  registers: {}",
-                resolved_box.candidate.additional_registers.registers.len()
+                resolved_box
+                    .candidate
+                    .additional_registers()
+                    .registers
+                    .len()
             );
 
             // Dump register contents
             for (ri, reg) in resolved_box
                 .candidate
-                .additional_registers
+                .additional_registers()
                 .registers
                 .iter()
                 .enumerate()

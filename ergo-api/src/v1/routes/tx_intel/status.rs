@@ -84,7 +84,11 @@ pub async fn status(State(state): State<V1State>, Path(tx_id_hex): Path<String>)
             // Confirmed path (extra index, when caught up).
             if let Some(indexer) = state.indexer.as_ref() {
                 if matches!(indexer.status(), IndexerStatus::CaughtUp) {
-                    if let Some(itx) = indexer.tx_by_id(&tx_id) {
+                    let indexed_tx = match indexer.tx_by_id(&tx_id) {
+                        Ok(value) => value,
+                        Err(error) => return crate::v1::routes::indexer_read_failed(error),
+                    };
+                    if let Some(itx) = indexed_tx {
                         let bstate = state.blockchain_state(indexer);
                         return match crate::blockchain::build_indexed_tx_response(&bstate, &itx) {
                             Ok(resp) => Json(StatusResponse {
