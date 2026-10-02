@@ -443,10 +443,18 @@ pub(super) async fn bind(
 fn api_security(
     config: &NodeConfig,
 ) -> Result<Option<Arc<ergo_api::auth::ApiSecurity>>, NodeError> {
+    if config.allow_unauthenticated_legacy_mining && config.api_key_hash.is_none() {
+        return Err("allow_unauthenticated_legacy_mining requires api_key_hash".into());
+    }
     config
         .api_key_hash
         .clone()
-        .map(ergo_api::auth::ApiSecurity::new)
+        .map(|hash| {
+            ergo_api::auth::ApiSecurity::new(hash).map(|security| {
+                security
+                    .with_unauthenticated_legacy_mining(config.allow_unauthenticated_legacy_mining)
+            })
+        })
         .transpose()
         .map(|security| security.map(Arc::new))
         .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })

@@ -9,6 +9,7 @@
 //! - `derive [--mnemonic-file <path|-] --path "m/44'/429'/0'/0/N"` — show pubkey at custom path
 //! - `pubkey [--mnemonic-file <path|-]` — print just the mining pubkey hex
 //! - `address --pubkey <hex> [--network mainnet|testnet]` — pubkey → P2PK address
+//! - `export-keystore --keystore <file> --output-dir <directory>` — an Appkit-compatible encrypted copy
 //!
 //! The recovery phrase is read from `--mnemonic-file` (path or `-` for
 //! stdin) or an interactive prompt. Passing it as a raw `--mnemonic` argv
@@ -47,6 +48,24 @@ enum Cmd {
     Pubkey(PubkeyArgs),
     /// Render a pubkey as a P2PK address.
     Address(AddressArgs),
+    /// Export a separate encrypted keystore that Lithos/Appkit can unlock.
+    ExportKeystore(ExportKeystoreArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ExportKeystoreArgs {
+    /// Existing encrypted wallet file. It is never modified.
+    #[arg(long)]
+    keystore: std::path::PathBuf,
+
+    /// Destination directory, which must be empty or absent.
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+
+    /// Read the password from a file (`-` for stdin), instead of a hidden prompt.
+    /// Trailing newline characters are removed; other whitespace is preserved.
+    #[arg(long, value_name = "PATH")]
+    password_file: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -267,6 +286,7 @@ fn dispatch(cmd: Cmd) -> Result<(), WalletError> {
         Cmd::Derive(a) => derive(a),
         Cmd::Pubkey(a) => pubkey(a),
         Cmd::Address(a) => address(a),
+        Cmd::ExportKeystore(a) => export_keystore(a),
     }
 }
 
@@ -341,5 +361,37 @@ fn address(a: AddressArgs) -> Result<(), WalletError> {
     })?;
     let addr = pubkey_to_p2pk_address(&arr, a.network.prefix())?;
     println!("{addr}");
+    Ok(())
+}
+
+fn export_keystore(a: ExportKeystoreArgs) -> Result<(), WalletError> {
+    let mut password = Zeroizing::new(String::new());
+    let from_file = a.password_file.is_some();
+    match a.password_file {
+        Some(path) if path == std::path::Path::new("-") => {
+            std::io::stdin()
+                .read_to_string(&mut password)
+                .map_err(|e| WalletError::SecretFile(format!("read password from stdin: {e}")))?;
+        }
+        Some(path) => {
+            *password = std::fs::read_to_string(&path).map_err(|e| {
+                WalletError::SecretFile(format!("read password file {path:?}: {e}"))
+            })?;
+        }
+        None => {
+            *password = rpassword::prompt_password("Wallet password: ")
+                .map_err(|e| WalletError::SecretFile(format!("read wallet password: {e}")))?;
+        }
+    }
+    if from_file {
+        let length = password.trim_end_matches(['\r', '\n']).len();
+        password.truncate(length);
+    }
+    let path = ergo_wallet::storage::SecretStorage::export_for_appkit(
+        &a.keystore,
+        &a.output_dir,
+        &password,
+    )?;
+    println!("{}", path.display());
     Ok(())
 }

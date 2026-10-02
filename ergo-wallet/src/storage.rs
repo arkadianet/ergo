@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// Field names match Scala `EncryptedSecret.scala:37-42` camelCase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CipherParams {
-    /// PRF used for PBKDF2 — always `"HmacSHA512"` for Scala parity.
+    /// PRF used for PBKDF2: Scala/Appkit's `"HmacSHA256"` or legacy `"HmacSHA512"`.
     pub prf: String,
     /// PBKDF2 iteration count. Scala default = 128_000.
     pub c: u32,
@@ -25,19 +25,31 @@ pub struct CipherParams {
     #[serde(rename = "dkLen")]
     pub dk_len: u32,
     /// Cipher algorithm. Always `"AES"`.
-    #[serde(rename = "encryptionAlgorithm")]
+    #[serde(
+        rename = "encryptionAlgorithm",
+        default = "default_encryption_algorithm"
+    )]
     pub encryption_algorithm: String,
     /// Cipher mode. Always `"GCM"`.
-    #[serde(rename = "encryptionMode")]
+    #[serde(rename = "encryptionMode", default = "default_encryption_mode")]
     pub encryption_mode: String,
 }
 
+// Scala/Appkit's current EncryptionSettings JSON contains only prf, c, dkLen.
+fn default_encryption_algorithm() -> String {
+    "AES".to_string()
+}
+
+fn default_encryption_mode() -> String {
+    "GCM".to_string()
+}
+
 impl CipherParams {
-    /// Scala-default parameters: PBKDF2-HMAC-SHA512 128k iterations,
+    /// Scala/Appkit-default parameters: PBKDF2-HMAC-SHA256 128k iterations,
     /// AES-256-GCM.
     pub fn scala_default() -> Self {
         Self {
-            prf: "HmacSHA512".to_string(),
+            prf: "HmacSHA256".to_string(),
             c: 128_000,
             dk_len: 256,
             encryption_algorithm: "AES".to_string(),
@@ -54,14 +66,16 @@ impl CipherParams {
 /// by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedSecret {
-    /// AES-256-GCM ciphertext (excluding auth tag). Hex-encoded.
+    /// Scala's GCM output after its first 16 bytes. Legacy Rust files
+    /// contain the conventional ciphertext excluding the trailing tag.
     #[serde(rename = "cipherText")]
     pub cipher_text: String,
     /// PBKDF2 salt. Hex-encoded.
     pub salt: String,
     /// AES-GCM IV (96 bits / 12 bytes). Hex-encoded.
     pub iv: String,
-    /// AES-GCM authentication tag (128 bits / 16 bytes). Hex-encoded.
+    /// First 16 bytes of Scala's GCM output. Legacy Rust files contain
+    /// the conventional trailing authentication tag instead.
     #[serde(rename = "authTag")]
     pub auth_tag: String,
     /// PBKDF2 + AES-GCM parameters.
@@ -371,32 +385,49 @@ impl SecretStorage {
         self.persist_seed(&seed, password, use_pre_1627)
     }
 
-    /// Unlock the wallet using the given password. Loads + decrypts
-    /// the secret file, recovers the BIP39 seed bytes, derives the
-    /// master key, stores it in memory for later use. No
-    /// `mnemonic_pass` argument — the passphrase was mixed into the
-    /// seed at `init`/`restore` time and is "baked in".
-    pub fn unlock(&mut self, password: &str) -> Result<(), WalletError> {
-        // Load the secret file if not cached.
-        if self.cached_secret_file.is_none() {
-            let path = Self::find_secret_file(&self.secret_dir)?;
-            let json = std::fs::read_to_string(&path)
-                .map_err(|e| WalletError::SecretFile(format!("read {path:?}: {e}")))?;
-            let secret: EncryptedSecret = serde_json::from_str(&json)
-                .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
-            self.cached_secret_file = Some(secret);
+    /// Write a separate Appkit-compatible copy of an existing encrypted wallet.
+    /// Authenticates the original password and preserves its seed, password,
+    /// and key-derivation mode. The source is never modified; the destination
+    /// directory must be empty. No mnemonic or private key is returned.
+    pub fn export_for_appkit(
+        source_file: &Path,
+        output_dir: &Path,
+        password: &str,
+    ) -> Result<PathBuf, WalletError> {
+        let bytes = std::fs::read(source_file)
+            .map_err(|e| WalletError::SecretFile(format!("read {source_file:?}: {e}")))?;
+        let secret: EncryptedSecret = serde_json::from_slice(&bytes)
+            .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
+        let seed = Self::decrypt_seed(&secret, password)?;
+        if output_dir.exists() {
+            let mut entries = std::fs::read_dir(output_dir)
+                .map_err(|e| WalletError::SecretFile(format!("read output directory: {e}")))?;
+            if entries.next().is_some() {
+                return Err(WalletError::SecretFile(
+                    "output directory must be empty".to_string(),
+                ));
+            }
         }
-        let secret = self.cached_secret_file.as_ref().unwrap();
+        let mut output = Self::open(output_dir.to_path_buf());
+        output.persist_seed(&seed, password, secret.use_pre_1627_key_derivation)?;
+        Self::find_secret_file(output_dir)
+    }
 
+    fn decrypt_seed(
+        secret: &EncryptedSecret,
+        password: &str,
+    ) -> Result<zeroize::Zeroizing<[u8; 64]>, WalletError> {
         // Enforce the full Scala cipherParams contract — any divergence
         // means we'd read a wallet file we don't fully understand and
         // could silently use wrong parameters.
-        if secret.cipher_params.prf != "HmacSHA512" {
-            return Err(WalletError::SecretFile(format!(
-                "unsupported PRF {:?} (expected HmacSHA512)",
-                secret.cipher_params.prf
-            )));
-        }
+        let prf = crate::encryption::Pbkdf2Prf::from_name(&secret.cipher_params.prf).ok_or_else(
+            || {
+                WalletError::SecretFile(format!(
+                    "unsupported PRF {:?} (expected HmacSHA256 or HmacSHA512)",
+                    secret.cipher_params.prf
+                ))
+            },
+        )?;
         if secret.cipher_params.dk_len != 256 {
             return Err(WalletError::SecretFile(format!(
                 "unsupported dkLen {} (expected 256)",
@@ -431,11 +462,25 @@ impl SecretStorage {
             .map_err(|_| WalletError::SecretFile("authTag must be 16 bytes".to_string()))?;
 
         let iterations = secret.cipher_params.c;
-        let key = crate::encryption::derive_key_pbkdf2(password.as_bytes(), &salt, iterations);
+        if iterations == 0 {
+            return Err(WalletError::SecretFile(
+                "PBKDF2 iteration count must be positive".to_string(),
+            ));
+        }
+        let key = crate::encryption::derive_key_pbkdf2_with_prf(
+            password.as_bytes(),
+            &salt,
+            iterations,
+            prf,
+        );
 
         // Decrypt the SEED bytes (64 bytes). Validate length explicitly
         // — anything else means corrupt or wrong-format file.
-        let seed_bytes = crate::encryption::decrypt(&key, &iv, &ciphertext, &auth_tag)?;
+        // Authenticate the Scala layout first; early Rust wallets used a
+        // trailing-tag layout without a format marker. Both attempts require
+        // valid GCM authentication, and loading never rewrites the file.
+        let seed_bytes = crate::encryption::decrypt_scala(&key, &iv, &ciphertext, &auth_tag)
+            .or_else(|_| crate::encryption::decrypt(&key, &iv, &ciphertext, &auth_tag))?;
         let seed: zeroize::Zeroizing<[u8; 64]> =
             zeroize::Zeroizing::new(seed_bytes.as_slice().try_into().map_err(|_| {
                 WalletError::SecretFile(format!(
@@ -443,6 +488,28 @@ impl SecretStorage {
                     seed_bytes.len(),
                 ))
             })?);
+
+        Ok(seed)
+    }
+
+    /// Unlock the wallet using the given password. Loads + decrypts
+    /// the secret file, recovers the BIP39 seed bytes, derives the
+    /// master key, stores it in memory for later use. No
+    /// `mnemonic_pass` argument — the passphrase was mixed into the
+    /// seed at `init`/`restore` time and is "baked in".
+    pub fn unlock(&mut self, password: &str) -> Result<(), WalletError> {
+        // Load the secret file if not cached.
+        if self.cached_secret_file.is_none() {
+            let path = Self::find_secret_file(&self.secret_dir)?;
+            let json = std::fs::read_to_string(&path)
+                .map_err(|e| WalletError::SecretFile(format!("read {path:?}: {e}")))?;
+            let secret: EncryptedSecret = serde_json::from_str(&json)
+                .map_err(|e| WalletError::SecretFile(format!("parse: {e}")))?;
+            self.cached_secret_file = Some(secret);
+        }
+        let secret = self.cached_secret_file.as_ref().unwrap();
+
+        let seed = Self::decrypt_seed(secret, password)?;
 
         // Derive the master key directly from the seed bytes — no
         // mnemonic involvement at unlock time. Branch on use_pre_1627
@@ -538,11 +605,14 @@ impl SecretStorage {
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut iv);
 
-        // Derive key + encrypt the seed bytes. Scala uses
-        // `password.getBytes(StandardCharsets.UTF_8)` for the PBKDF2
-        // password input; Rust's `str.as_bytes()` is already UTF-8.
-        let key = crate::encryption::derive_key_pbkdf2(password.as_bytes(), &salt, 128_000);
-        let (ciphertext, auth_tag) = crate::encryption::encrypt(&key, &iv, seed)?;
+        // Java PBEKeySpec encodes the password as UTF-8 for these PRFs.
+        let key = crate::encryption::derive_key_pbkdf2_with_prf(
+            password.as_bytes(),
+            &salt,
+            128_000,
+            crate::encryption::Pbkdf2Prf::HmacSha256,
+        );
+        let (ciphertext, auth_tag) = crate::encryption::encrypt_scala(&key, &iv, seed)?;
 
         // Build the EncryptedSecret JSON struct.
         let secret = EncryptedSecret {
@@ -602,7 +672,7 @@ mod tests {
         // Field order: prf, c, dkLen, encryptionAlgorithm, encryptionMode
         assert_eq!(
             json,
-            r#"{"prf":"HmacSHA512","c":128000,"dkLen":256,"encryptionAlgorithm":"AES","encryptionMode":"GCM"}"#,
+            r#"{"prf":"HmacSHA256","c":128000,"dkLen":256,"encryptionAlgorithm":"AES","encryptionMode":"GCM"}"#,
         );
     }
 

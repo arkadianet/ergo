@@ -21,6 +21,7 @@ Repository: <https://github.com/arkadianet/ergo>
   the full build / test / run / configure surface.
 - [`docs/configuration.md`](./docs/configuration.md) — every config field, by type.
 - [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
+- [`docs/lithos.md`](./docs/lithos.md) — Lithos mining integration and keystore setup.
 - [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 

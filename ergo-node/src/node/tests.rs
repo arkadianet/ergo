@@ -1590,6 +1590,7 @@ fn cfg_with_mode(
         api_bind: None,
         peer_details: Default::default(),
         api_key_hash: None,
+        allow_unauthenticated_legacy_mining: false,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         allow_direct_block_submit: false,
@@ -4610,6 +4611,7 @@ mod block_relay {
             target: block.candidate.target.clone(),
             height: block.candidate.header.height,
             pk: MINER_PK,
+            proof: None,
             metrics: Default::default(),
         };
         assert!(handle
@@ -4639,6 +4641,7 @@ mod block_relay {
             state,
             Some(handle),
             false,
+            None,
             crate::mining_bridge::MiningRequest::SubmitSolution {
                 solution: ergo_rest_json::mining::AutolykosSolutionJson {
                     pk: None,
@@ -4676,6 +4679,7 @@ mod block_relay {
             state,
             Some(handle),
             false,
+            None,
             crate::mining_bridge::MiningRequest::GetCandidate { reply },
         );
         assert!(!rebuild, "serving work never asks for a rebuild");
@@ -7387,6 +7391,7 @@ mod block_relay {
         let wiring = MiningWiring {
             handle: handle.clone(),
             intent_tx,
+            request_tx: std::sync::mpsc::channel().0,
             refresh_debounce: Duration::from_secs(1),
             block_interval_ms: 120_000,
             offline_generation: false,

@@ -40,6 +40,8 @@ get /emission/at/{blockHeight}
 get /emission/scripts
 get /info
 get /mining/candidate
+post /mining/candidateWithTxs
+post /mining/candidateWithTxsAndPk
 get /mining/rewardAddress
 get /mining/rewardPublicKey
 post /mining/solution

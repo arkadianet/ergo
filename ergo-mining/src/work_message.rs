@@ -40,7 +40,25 @@ pub struct WorkMessage {
     pub height: u32,
     /// Compressed secp256k1 miner pubkey the candidate was built for.
     pub pk: [u8; 33],
+    /// Header preimage and membership proofs for requested transactions that
+    /// survived validation and final block-budget trimming.
+    pub proof: Option<UpcomingTransactionsProof>,
     pub metrics: CandidateMetrics,
+}
+
+/// Evidence for the exact unproven header handed to an external miner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpcomingTransactionsProof {
+    pub msg_preimage: Vec<u8>,
+    pub tx_proofs: Vec<TransactionMembershipProof>,
+}
+
+/// Scala's mining proof encoding: each level starts with the side byte,
+/// followed by the sibling digest (which can be empty for tree padding).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionMembershipProof {
+    pub leaf: [u8; 32],
+    pub levels: Vec<Vec<u8>>,
 }
 
 /// Autolykos v2 solution posted by an external miner, decoded to typed form.
