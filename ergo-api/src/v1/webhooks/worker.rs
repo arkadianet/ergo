@@ -16,7 +16,7 @@
 //! delivery log are in-memory and bounded, so a node restart loses all
 //! registrations until a durable `*-db` schema lands.
 //!
-//! **Never stalls the bus.** The worker owns a bounded [`BusSubscription`]; a
+//! **Never stalls the bus.** The worker owns a bounded [`crate::v1::realtime::BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
 //! drop policy protects the fan-out if the worker itself falls behind.

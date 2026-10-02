@@ -4,9 +4,9 @@
 //! AVL+ implementation used by the Ergo reference node. The authoritative
 //! Rust oracle is `ergo_avltree_rust` crate (batch_node.rs lines 83-111).
 //!
-//! Leaf label  = blake2b256(0x00 || key[32] || value[var] || next_leaf_key[32])
-//! Internal label = blake2b256(0x01 || balance_as_u8[1] || left_label[32] || right_label[32])
-//! ADDigest = root_label[32] || tree_height[1]
+//! Leaf label  = blake2b256(0x00 || `key[32]` || `value[var]` || `next_leaf_key[32]`)
+//! Internal label = blake2b256(0x01 || `balance_as_u8[1]` || `left_label[32]` || `right_label[32]`)
+//! ADDigest = `root_label[32]` || `tree_height[1]`
 
 use ergo_primitives::digest::{ADDigest, Digest32};
 

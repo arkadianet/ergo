@@ -2480,7 +2480,7 @@ impl StateStore {
     ///
     /// Returns `Ok(vec![])` when no headers are indexed at `height`.
     /// First entry is always the best-header-chain id at `height`
-    /// (the [`HEADERS_BY_HEIGHT`] invariant); subsequent entries are
+    /// (the `HEADERS_BY_HEIGHT` invariant); subsequent entries are
     /// orphans (validated headers at this height that aren't on the
     /// current best chain). Order beyond slot 0 is insertion-order
     /// of the orphan arrivals.
@@ -2722,7 +2722,7 @@ impl StateStore {
     ///
     /// The walk, the durable `pow_validity = 3` writes, and the best-header
     /// re-anchor all live in the shared header tables
-    /// ([`crate::header_store::HeaderSectionTables::invalidate_validation_branch`]),
+    /// (`crate::header_store::HeaderSectionTables::invalidate_validation_branch`),
     /// which the digest backend drives with the same semantics. This wrapper
     /// supplies the committed chain-state snapshot and mirrors the re-anchored
     /// best-header back onto the in-memory `ChainState`.

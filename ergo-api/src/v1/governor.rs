@@ -23,7 +23,7 @@
 //! The shared [`Governor`] (one per node) is cloned by `Arc` into each
 //! per-class [`GovernorState`], so every class shares ONE per-IP budget.
 //!
-//! **Client IP** comes from [`super::client_ip`] (the `ConnectInfo` axum
+//! **Client IP** comes from `super::client_ip` (the `ConnectInfo` axum
 //! installs when served with `.into_make_service_with_connect_info::<SocketAddr>()`).
 //! When connect-info is absent the request is bucketed under a shared
 //! "unknown" key — bounded, never exempt.
@@ -85,7 +85,7 @@ pub struct GovernorConfig {
     /// When `true`, a reverse proxy terminates in front of the API on
     /// loopback, so the peer socket is the proxy — its loopback-ness cannot
     /// grant the [`GovernorConfig::exempt_loopback`] exemption. Default
-    /// `false` (direct bind). See [`super::is_trusted_loopback`].
+    /// `false` (direct bind). See `super::is_trusted_loopback`.
     pub local_reverse_proxy: bool,
 }
 
@@ -134,7 +134,7 @@ impl GovernorConfig {
     /// non-finite/non-positive `refill_per_sec` or `burst`
     /// and any non-finite/non-positive route weight (a zero weight would make
     /// its whole route class unmetered — every charge costs 0), so
-    /// [`Governor::charge_at`] never operates on config that would corrupt or
+    /// `Governor::charge_at` never operates on config that would corrupt or
     /// bypass the token bucket.
     pub fn validate(&self) -> Result<(), GovernorConfigError> {
         if !self.refill_per_sec.is_finite() || self.refill_per_sec <= 0.0 {

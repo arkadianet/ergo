@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use super::NodeError;
 
-/// Live handle to a running node returned by [`run_inner`].
+/// Live handle to a running node returned by [`super::run_inner`].
 ///
 /// Exposes the production surface tests and embedders need to drive the
 /// node without going through HTTP or signal handling:

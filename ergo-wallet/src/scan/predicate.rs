@@ -98,7 +98,7 @@ pub enum ScanningPredicate {
     /// `EqualsScanningPredicate.filter` is type-restricted, not a generic value
     /// equality: it matches **only** `Coll[Byte]`, `GroupElement`, `Boolean`,
     /// `Int`, and `Long` values (and returns false for any other type, e.g.
-    /// tuples / `BigInt`). See [`equals_filter`].
+    /// tuples / `BigInt`). See `equals_filter`.
     Equals {
         #[serde(default, deserialize_with = "de_register_or_default")]
         register: ScanRegister,
@@ -157,7 +157,7 @@ impl ScanningPredicate {
     /// (This is the registration-boundary rejection; without it a malformed
     /// value would persist and silently never match.)
     ///
-    /// Note: [`parse_constant`] requires the whole `value` slice to be consumed,
+    /// Note: `parse_constant` requires the whole `value` slice to be consumed,
     /// so a valid constant followed by trailing bytes is rejected here. Scala's
     /// registration decode parses a prefix and re-encodes the canonical form, so
     /// it would accept such input. We are deliberately stricter on this

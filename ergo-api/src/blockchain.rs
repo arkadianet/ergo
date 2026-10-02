@@ -264,7 +264,7 @@ pub(super) struct ErrorEnvelope {
 /// invoking the inner handler unless the status is `CaughtUp`.
 ///
 /// `/blockchain/indexedHeight` is mounted on a separate router that
-/// does not carry this layer — see [`router`] in `server.rs`.
+/// does not carry this layer — see [`crate::server::router`] in `server.rs`.
 pub async fn enforce_status_gate(
     State(state): State<BlockchainState>,
     req: Request,

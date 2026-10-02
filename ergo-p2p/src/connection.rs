@@ -67,7 +67,7 @@ pub const PER_READER_MAX: usize = framing::wire_len(MAX_PAYLOAD_SIZE) + READ_BUF
 /// back. All P2P reading stops, permanently.
 ///
 /// The slot pool removes the cycle by bounding the readers that may
-/// hold-and-wait to [`Self::slots`] = budget / [`PER_READER_MAX`], so
+/// hold-and-wait to `Self::slots` = budget / [`PER_READER_MAX`], so
 /// their combined worst case still fits the budget and they can always
 /// finish. The rules that make that argument sound:
 ///

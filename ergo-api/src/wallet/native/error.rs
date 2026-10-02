@@ -2,7 +2,7 @@
 //!
 //! One envelope `{reason, detail?}` (no numeric `error` — the HTTP status line
 //! carries it), mirroring the native submit error shape. This is a SEPARATE
-//! table from the Scala-compat [`crate::wallet::lifecycle::map_err`]: the two
+//! table from the Scala-compat `crate::wallet::lifecycle::map_err`: the two
 //! surfaces map the same [`WalletAdminError`] differently (Scala maps `Locked`
 //! → 400; native → 409). The native table must **not** be applied on the sign
 //! path (that path never produces `Locked`).

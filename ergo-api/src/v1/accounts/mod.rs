@@ -19,11 +19,11 @@
 //!   accounts subsystem is built — honest seam, never a fabricated balance).
 //! * **T2** (admin api-key + loopback-preferred): `accounts/private-key`
 //!   (exports the raw secret scalar). Gated by the fail-closed
-//!   [`require_tier`](crate::v1::auth::require_tier) at `Tier::Admin` — a secret
+//!   [`require_tier`] at `Tier::Admin` — a secret
 //!   export is unreachable at T0/T1 and, under `admin_hard_deny_nonloopback`,
 //!   from any non-loopback caller.
 //!
-//! Every backed endpoint reuses the existing [`WalletAdmin`](crate::wallet::WalletAdmin)
+//! Every backed endpoint reuses the existing [`WalletAdmin`]
 //! machinery (scan trait methods, `scan_p2s_rule`, `get_private_key`); nothing
 //! here reimplements scan matching or key derivation.
 

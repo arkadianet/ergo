@@ -75,9 +75,9 @@ pub enum MiningError {
     /// tx assembly (build / serialize / validate of the candidate's own coinbase),
     /// and difficulty / cost retargeting that share the same "honest
     /// flow shouldn't reach here, but if it does we surface the
-    /// failure typed" semantics. Distinct from [`Decode`] (on-disk
-    /// bytes refused to parse), [`StateRead`] (storage `None`/I/O
-    /// fault), and [`EmissionInvariant`] (emission protocol contract
+    /// failure typed" semantics. Distinct from [`Self::Decode`] (on-disk
+    /// bytes refused to parse), [`Self::StateRead`] (storage `None`/I/O
+    /// fault), and [`Self::EmissionInvariant`] (emission protocol contract
     /// violated by chain data).
     #[error("{op} failed: {reason}")]
     IdComputation {
@@ -120,8 +120,8 @@ pub enum MiningError {
     /// `Ok(None)` reaching this point means `best_full_block_id` /
     /// `chain_index` referenced storage that isn't there, which is
     /// state corruption equivalent to a redb-level fault. Distinct
-    /// from [`Decode`] (bytes present but parse failed) and from
-    /// [`EmissionInvariant`] (data present and decoded but violated
+    /// from [`Self::Decode`] (bytes present but parse failed) and from
+    /// [`Self::EmissionInvariant`] (data present and decoded but violated
     /// the emission protocol contract).
     #[error("state read failed during {op}: {reason}")]
     StateRead {

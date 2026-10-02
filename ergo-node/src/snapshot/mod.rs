@@ -13,8 +13,8 @@
 //! else reads cached in-memory state.
 //!
 //! This struct holds the DTOs ([`NodeSnapshot`], [`SnapshotParts`]) and
-//! their small support types; [`build`] assembles a `NodeSnapshot` from a
-//! `SnapshotParts`, and [`publisher`] owns the per-tick publish + stall-clock
+//! their small support types; `build` assembles a `NodeSnapshot` from a
+//! `SnapshotParts`, and `publisher` owns the per-tick publish + stall-clock
 //! bookkeeping.
 
 mod build;

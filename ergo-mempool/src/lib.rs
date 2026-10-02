@@ -94,7 +94,7 @@ pub trait MempoolObserver: Send + Sync {
     /// A tx left the pool without confirming (policy eviction, tip-invalid,
     /// etc.). `reason` is `EvictionReason`'s `Debug` rendering — a short,
     /// stable tag. Never used for `EvictionReason::Confirmed` (see
-    /// [`on_confirmed`]) or replacement losers (see [`on_replaced`]).
+    /// [`Self::on_confirmed`]) or replacement losers (see [`Self::on_replaced`]).
     fn on_evicted(&self, tx_id: TxId, reason: &str);
     /// A pooled tx was applied in our tip. Not a drop — confirmation.
     fn on_confirmed(&self, tx_id: TxId, height: u32, header_id: Digest32);

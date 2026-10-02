@@ -155,12 +155,10 @@ pub(super) struct TomlIndexer {
 
 /// `[api]` TOML section: operator HTTP API.
 ///
-/// Bind address is loopback by enforcement: a non-loopback `bind`
-/// requires `public_bind = true` plus a configured
-/// `[api.security].api_key_hash`, and a loud warning is logged.
-/// `/wallet/*` and `/node/shutdown` are wrapped with API-key
-/// middleware whenever the API is enabled; every other route stays
-/// unauthenticated.
+/// A non-loopback bind requires `public_bind = true`. API credentials are
+/// optional; privileged routes fail closed without a configured hash. Supplied
+/// hashes are validated even when the API is disabled. See the route inventory
+/// in `docs/configuration.md` for public reads/submission and privileged paths.
 #[derive(serde::Deserialize, Default, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct TomlApi {
@@ -170,9 +168,8 @@ pub(super) struct TomlApi {
     /// Disable the API server entirely.
     pub(super) disabled: Option<bool>,
     /// Permit binding a non-loopback address. Default false. Setting
-    /// this to true while exposing the port publicly requires
-    /// `[api.security].api_key_hash`; auth gates `/wallet/*` and
-    /// `/node/shutdown`.
+    /// this to true does not authenticate public routes; configure the
+    /// credential and a reverse proxy according to the API security notes.
     pub(super) public_bind: Option<bool>,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub(super) allow_direct_block_submit: Option<bool>,

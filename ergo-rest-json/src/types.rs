@@ -78,7 +78,7 @@ pub struct ScalaHeader {
 /// bare JSON NUMBER (`ApiCodecs.bigIntEncoder` =
 /// `JsonNumber.fromDecimalStringUnsafe`), while circe's
 /// `Decoder[BigInt]` — and so this crate — also tolerates a decimal
-/// string inbound. Read it with [`unsigned_bigint_from_json`] rather
+/// string inbound. Read it with `unsigned_bigint_from_json` rather
 /// than matching the value inline; that is the one place both spellings
 /// are handled.
 #[derive(Clone, Debug, Serialize, Deserialize)]

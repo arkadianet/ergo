@@ -471,7 +471,7 @@ impl SnapshotBootstrap {
     /// single manifest responder. Returns an empty `Vec` before a
     /// selection exists.
     ///
-    /// Targets the [`Self::latched_target`] (verified > pending >
+    /// Targets the `Self::latched_target` (verified > pending >
     /// selected), not the live `selected` tally, so a vote change
     /// after verification cannot repoint chunk requests away from the
     /// verified manifest. Includes the peer that already served the

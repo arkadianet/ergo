@@ -1,5 +1,5 @@
 //! The v1 product-API OpenAPI document (`/api/v1/*`, distinct from the older
-//! pre-v1 [`crate::server::NativeOpenApi`] surface — wallet/mining/votes/
+//! pre-v1 `crate::server::NativeOpenApi` surface — wallet/mining/votes/
 //! indexer/node — that this derive does NOT re-document). This remains a
 //! compatibility fragment at `/api-docs/openapi-v1.yaml`; the canonical RUST
 //! API document merges it with the legacy operator fragment.
