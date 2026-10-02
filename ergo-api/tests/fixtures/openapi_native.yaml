@@ -3895,7 +3895,7 @@ components:
             type:
             - object
             - 'null'
-            description: Non-default registers (R4..R9), hex-encoded constants. `unsupported_intent` until wired.
+            description: Non-default registers (R4..R9), densely packed hex-encoded evaluated constants.
             additionalProperties:
               type: string
             propertyNames:
@@ -3958,7 +3958,7 @@ components:
             - burn
       description: |-
         One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-        assets/registers) and `burn` are load-bearing; `mint` and `payment.registers`
+        assets/registers) and `burn` are load-bearing; `mint`
         are valid shapes that ship `unsupported_intent(422)` until builder support
         lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
         change). Manual `Deserialize` so unknown sibling fields and cross-variant field
