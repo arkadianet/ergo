@@ -1415,7 +1415,6 @@ mod tests {
             pipeline.send(minimal_job(height)).unwrap();
             assert!(pipeline.flush().is_none());
         }
-        assert_eq!(pipeline.result_rx.len(), 2);
         let mut bad = minimal_job(3);
         let mut params = ergo_validation::active_params::scala_launch_mainnet();
         params.epoch_start_height = 3;
@@ -1433,6 +1432,18 @@ mod tests {
             pipeline.shutdown(),
             Err(StateError::PersistFailed { height: 3, .. })
         ));
+        // The commit watch advances before notifications, so flush alone
+        // cannot prove their delivery. The joined worker must have sent both
+        // successes before receiving the failing job, filling the channel
+        // and preventing its error notification from fitting.
+        assert_eq!(pipeline.result_rx.len(), 2);
+        for height in 1..=2 {
+            assert!(matches!(
+                pipeline.result_rx.try_recv(),
+                Ok(PersistResult::Ok { height: got, .. }) if got == height
+            ));
+        }
+        assert!(pipeline.result_rx.is_empty());
         let read = db.begin_read().unwrap();
         let chain = read.open_table(CHAIN_INDEX).unwrap();
         assert!(chain.get(3).unwrap().is_none());
