@@ -58,7 +58,7 @@ impl StateStore {
     /// network-aware shape; defaults `voting_settings` to mainnet.
     /// Tests that pass `scala_launch_for_network(Network::Testnet)`
     /// here will silently use mainnet voting cadence — use
-    /// [`open_with_cache_launch_voting`] instead.
+    /// [`Self::open_with_cache_launch_voting`] instead.
     pub fn open_with_cache_and_launch(
         path: &Path,
         cache_bytes: usize,

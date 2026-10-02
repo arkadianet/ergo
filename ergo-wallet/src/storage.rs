@@ -189,7 +189,7 @@ pub enum UnlockedMaster {
 }
 
 impl UnlockedMaster {
-    /// Walk a [`DerivationPath`] in the appropriate mode. Returns
+    /// Walk a [`crate::DerivationPath`] in the appropriate mode. Returns
     /// the leaf's compressed-SEC1 public key bytes.
     pub fn derive_pubkey_at_path(
         &self,

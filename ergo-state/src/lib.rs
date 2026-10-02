@@ -24,7 +24,7 @@
 //!   changed boxes) used by the indexer.
 //! * [`chain`] — chain header index: best-header / best-full-block
 //!   tracking and reorg-aware lookups.
-//! * [`active_params`] — per-epoch voted-protocol-parameter persistence
+//! * `active_params` — per-epoch voted-protocol-parameter persistence
 //!   wired into the store at epoch boundaries.
 //!
 //! What is **not** here:

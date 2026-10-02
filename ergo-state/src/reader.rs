@@ -144,7 +144,7 @@ impl ChainStoreReader {
     /// route. First entry (when non-empty) is always the best-chain
     /// header id at `height`; subsequent entries are orphans.
     /// Mirrors Scala's `headerIdsAtHeight` in
-    /// `HeadersProcessor.scala:274` and the [`HEADERS_BY_HEIGHT`]
+    /// `HeadersProcessor.scala:274` and the `HEADERS_BY_HEIGHT`
     /// invariant documented on the table definition.
     pub fn header_ids_at_height_all(&self, height: u32) -> Result<Vec<[u8; 32]>, StateError> {
         let read_txn = self.db.begin_read()?;

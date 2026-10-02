@@ -336,7 +336,7 @@ pub enum StateError {
         at: PopowMissingAt,
     },
     /// Internal invariant violation at a specific block height —
-    /// typed-detail companion to [`InternalInvariant`] for sites
+    /// typed-detail companion to [`Self::InternalInvariant`] for sites
     /// where the failure context is a height (e.g. expected
     /// HEADER_CHAIN_INDEX row missing for a height the prover just
     /// validated, voted_params cache reload missing a row the
