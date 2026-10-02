@@ -162,6 +162,76 @@ mod tests {
 
     // ----- error paths -----
 
+    #[tokio::test]
+    async fn graceful_worker_shutdown_joins_hanging_attempt_before_immediate_reopen() {
+        use ergo_api::v1::webhooks::worker::{spawn_webhook_worker_with_shutdown, WebhookSink};
+        use ergo_api::v1::webhooks::PreparedRequest;
+        use std::time::Duration;
+        struct HangingSink(Arc<tokio::sync::Notify>);
+        #[async_trait::async_trait]
+        impl WebhookSink for HangingSink {
+            async fn post(&self, _: &PreparedRequest) -> DeliveryOutcome {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("webhooks.redb");
+        let store = Arc::new(RedbWebhookStore::open(&path).unwrap());
+        let engine = Arc::new(WebhookEngine::durable(Default::default(), store.clone()).unwrap());
+        let subscription = engine
+            .register(
+                "https://receiver.invalid/hook".into(),
+                vec!["blocks".into()],
+                Some("private".into()),
+                1,
+                0,
+            )
+            .unwrap();
+        let bus = Arc::new(ergo_api::v1::realtime::RealtimeBus::blocks_only());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (shutdown, signal) = tokio::sync::oneshot::channel();
+        let worker = spawn_webhook_worker_with_shutdown(
+            bus.clone(),
+            engine.clone(),
+            Arc::new(HangingSink(entered.clone())),
+            Duration::from_millis(1),
+            signal,
+        );
+        tokio::task::yield_now().await;
+        bus.publish(ergo_api::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "block".into(),
+            100,
+            1,
+            1,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        let pending = engine
+            .deliveries_for(&subscription.webhook_id, 0, 1)
+            .remove(0);
+        assert_eq!(pending.attempts, 1);
+        drop(engine);
+        drop(store);
+        shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("shutdown must cancel and join hanging transport")
+            .unwrap();
+        // No sleeps or retry loop: the awaited shutdown must have released
+        // every engine/database reference before a same-path restart.
+        let recovered = WebhookEngine::durable(
+            Default::default(),
+            Arc::new(RedbWebhookStore::open(&path).unwrap()),
+        )
+        .unwrap();
+        let request = recovered.take_due(u64::MAX).remove(0);
+        assert_eq!(request.delivery_id, pending.delivery_id);
+        assert_eq!(request.body, pending.body);
+    }
+
     #[test]
     fn webhook_database_corrupt_snapshot_refuses_startup() {
         let directory = tempfile::tempdir().unwrap();

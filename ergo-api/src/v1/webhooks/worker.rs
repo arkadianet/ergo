@@ -67,6 +67,29 @@ pub fn spawn_webhook_worker(
     sink: Arc<dyn WebhookSink>,
     tick: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_worker(bus, engine, sink, tick, None)
+}
+
+/// Production worker with cooperative shutdown. It cancels and joins every
+/// outbound request before returning, releasing durable store handles before
+/// the API server reports shutdown complete.
+pub fn spawn_webhook_worker_with_shutdown(
+    bus: Arc<RealtimeBus>,
+    engine: Arc<WebhookEngine>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_worker(bus, engine, sink, tick, Some(shutdown))
+}
+
+fn spawn_worker(
+    bus: Arc<RealtimeBus>,
+    engine: Arc<WebhookEngine>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+    mut shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut sub = bus.subscribe();
         // The engine keeps this filter synced to the union of active webhooks'
@@ -81,6 +104,12 @@ pub fn spawn_webhook_worker(
 
         loop {
             tokio::select! {
+                _ = async {
+                    match &mut shutdown {
+                        Some(signal) => { let _ = signal.await; }
+                        None => std::future::pending().await,
+                    }
+                } => break,
                 event = sub.rx.recv() => {
                     match event {
                         Some(ev) => {
@@ -95,6 +124,8 @@ pub fn spawn_webhook_worker(
                 _ = requests.join_next(), if !requests.is_empty() => {}
             }
         }
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
     })
 }
 

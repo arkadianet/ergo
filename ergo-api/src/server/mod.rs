@@ -139,10 +139,28 @@ enum WebhookRuntime {
     Server(Option<Arc<crate::v1::WebhookEngine>>),
 }
 
-struct WebhookWorkerGuard(Option<JoinHandle<()>>);
+struct WebhookWorkerGuard {
+    worker: Option<JoinHandle<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl WebhookWorkerGuard {
+    async fn shutdown(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.await;
+        }
+    }
+}
 impl Drop for WebhookWorkerGuard {
     fn drop(&mut self) {
-        if let Some(worker) = &self.0 {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        // Abrupt cancellation cannot await children; normal server shutdown
+        // uses the cooperative path above and joins them before returning.
+        if let Some(worker) = &self.worker {
             worker.abort();
         }
     }
@@ -358,7 +376,7 @@ fn serve_with_webhook_runtime(
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
     let (app, _, worker) = router_with_webhooks(ctx, admin, wallet_admin, security, webhooks);
-    let mut worker = WebhookWorkerGuard(worker);
+    let mut worker = worker;
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -416,9 +434,8 @@ fn serve_with_webhook_runtime(
         if let Err(e) = server.await {
             error!(error = %e, "api server exited with error");
         }
-        if let Some(worker) = worker.0.take() {
-            worker.abort();
-            let _ = worker.await;
+        if let Some(worker) = &mut worker {
+            worker.shutdown().await;
         }
     })
 }
@@ -762,7 +779,7 @@ fn router_with_webhooks(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
     webhooks: WebhookRuntime,
-) -> (Router, ApiRouteInventory, Option<JoinHandle<()>>) {
+) -> (Router, ApiRouteInventory, Option<WebhookWorkerGuard>) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
         read,
@@ -1061,12 +1078,18 @@ fn router_with_webhooks(
         match crate::v1::ReqwestSink::new() {
             Ok(sink) => {
                 if server_owned {
-                    webhook_worker = Some(crate::v1::spawn_webhook_worker(
+                    let (shutdown, signal) = tokio::sync::oneshot::channel();
+                    let worker = crate::v1::webhooks::worker::spawn_webhook_worker_with_shutdown(
                         v1_realtime.bus.clone(),
                         engine,
                         Arc::new(sink),
                         crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
-                    ));
+                        signal,
+                    );
+                    webhook_worker = Some(WebhookWorkerGuard {
+                        worker: Some(worker),
+                        shutdown: Some(shutdown),
+                    });
                 } else {
                     crate::v1::spawn_webhook_worker_once(
                         v1_realtime.bus.clone(),
