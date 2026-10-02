@@ -82,3 +82,8 @@ path = "tests/it/main.rs"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "mempool_publication"
+path = "benches/mempool_publication.rs"
+harness = false
