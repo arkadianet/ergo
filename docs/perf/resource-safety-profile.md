@@ -34,7 +34,10 @@ logical/stored-node walks are excluded from the operation timers.
 [Raw CSVs and binary/host provenance](data/resource-safety-2026-10-03/provenance.json)
 were captured on Linux with Rust 1.95.0, release optimization, before combined
 subsystem integration. Other builds and desktop activity were present. Times
-are observations from one process, not statistical speedup claims.
+are observations from one process, not statistical speedup claims. The candidate
+source was uncommitted when sampled and its exact tree hash was not captured;
+retained binary hashes identify those runs but cannot bind them to an exact
+source revision. The commands above reproduce the current workload.
 
 | Fold steps | Logical nodes | Old stored nodes | Shared stored nodes | Old reduction, µs | Shared reduction, µs |
 | ---: | ---: | ---: | ---: | ---: | ---: |
