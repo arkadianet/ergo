@@ -14,6 +14,7 @@
     "single process measurements; simultaneous unrelated build/desktop load",
     "peak RSS covers different layer ranges and repeat counts",
     "stored_nodes measures unique proposition addresses, not allocator operations",
-    "usize saturation is reported for unrepresentably large logical graphs"
+    "usize saturation is reported for unrepresentably large logical graphs",
+    "candidate source was uncommitted when sampled; no exact source tree hash was captured, so binary hashes do not establish an exact source revision"
   ]
 }
