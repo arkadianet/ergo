@@ -118,6 +118,8 @@ pub(super) struct SyncSetup {
     pub executor: SyncExecutor,
     pub indexer_handle: Option<IndexerHandle>,
     pub indexer_task_handle: Option<IndexerWorker>,
+    pub indexer_event_observer:
+        Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     pub indexer_cancel: Arc<AtomicBool>,
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
     pub shadow_task_handle: Option<JoinHandle<()>>,
@@ -357,6 +359,7 @@ pub(super) fn setup(
     // signal it on shutdown regardless of whether a task was actually
     // spawned. `indexer_task_handle` is `Some` only when a task is live.
     let indexer_cancel = Arc::new(AtomicBool::new(false));
+    let mut indexer_event_observer = None;
     let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<IndexerWorker>) =
         match IndexerHandle::boot(&config.indexer_config, &config.data_dir) {
             Some(handle) if handle.store().is_some() => {
@@ -366,7 +369,16 @@ pub(super) fn setup(
                     "indexer enabled",
                 );
                 let chain = ChainReaderAdapter::new(store.reader_handle());
-                let task = IndexerTask::new(handle.clone(), chain);
+                let mut task = IndexerTask::new(handle.clone(), chain);
+                if config.api_bind.is_some() {
+                    let observer = Arc::new(
+                        crate::realtime_indexer_bridge::RealtimeIndexerObserver::new(
+                            config.chain_spec.network_params.address_prefix,
+                        ),
+                    );
+                    task = task.with_observer(observer.clone());
+                    indexer_event_observer = Some(observer);
+                }
                 let cancel_for_task = indexer_cancel.clone();
                 let poll_idle = Duration::from_millis(config.indexer_config.poll_idle_ms);
                 let task_handle = task.spawn(cancel_for_task, poll_idle)?;
@@ -606,6 +618,7 @@ pub(super) fn setup(
         executor,
         indexer_handle,
         indexer_task_handle,
+        indexer_event_observer,
         indexer_cancel,
         shadow_state,
         shadow_task_handle,

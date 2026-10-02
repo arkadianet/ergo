@@ -866,6 +866,7 @@ async fn run_inner_with_backend(
         scaffold.read_state.clone(),
         scaffold.submit_bridge.clone(),
         sync.indexer_handle.clone(),
+        sync.indexer_event_observer.clone(),
         &mut mempool,
         mining_subsystem.bridge.clone(),
         scaffold.voting_targets_slot.clone(),
