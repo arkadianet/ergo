@@ -15,7 +15,7 @@
 //! fine-grained address/box/token/tx taps live in node internals and are a
 //! follow-up; until they land those classes are `channel_unavailable`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -389,8 +389,8 @@ fn project_tick(
 
 /// Spawn the server-seam bridge feeder: poll the coarse operator event ring and
 /// republish `block_applied` / `reorg` / peer connect-disconnect into the bus.
-/// Spawn ONLY from an async context (a Tokio runtime must be current); the
-/// server wiring guards the call exactly like the O4 depth sampler.
+/// Spawn only from an async context. The API server owns and joins the task;
+/// router construction starts no workers.
 pub fn spawn_event_bridge(
     read: Arc<dyn NodeReadState>,
     bus: Arc<RealtimeBus>,
@@ -407,26 +407,6 @@ pub fn spawn_event_bridge(
             project_tick(&feed, &bus, &mut last_seq, &mut seeded);
         }
     })
-}
-
-/// One bridge feeder per process — repeated router assembly in one runtime
-/// must not stack pollers (same idempotence rule as the O4 depth sampler and
-/// the webhook worker).
-static BRIDGE_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Spawn the bridge feeder at most ONCE per process (idempotent across
-/// repeated router assembly). Subsequent calls are no-ops. Call only from an
-/// async context (a Tokio runtime must be current).
-pub fn spawn_event_bridge_once(
-    read: Arc<dyn NodeReadState>,
-    bus: Arc<RealtimeBus>,
-    interval: Duration,
-) {
-    if BRIDGE_STARTED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    // The JoinHandle is deliberately dropped: the task runs for the process.
-    drop(spawn_event_bridge(read, bus, interval));
 }
 
 #[cfg(test)]

@@ -1593,6 +1593,7 @@ fn cfg_with_mode(
         api_key_hash: None,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
+        api_script: Default::default(),
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config,
@@ -8284,5 +8285,88 @@ async fn sync_tick_drives_shorter_heavier_fork_without_rolling_back_for_headers(
             .iter()
             .any(|b| b.header_id == branch),
         "the driver must run the executor even when the heavier header tip is lower"
+    );
+}
+
+/// Capture queue state synchronously when the production loop sends its reply,
+/// so task scheduling cannot hide which work was serviced first.
+#[tokio::test]
+async fn action_loop_services_queued_api_before_ready_peer_flood() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::task::{Context, Wake, Waker};
+    struct ReplyWake {
+        peers: mpsc::Sender<PeerEvent>,
+        capacity_at_reply: Arc<AtomicUsize>,
+        sent: Arc<tokio::sync::Notify>,
+    }
+    impl Wake for ReplyWake {
+        fn wake(self: Arc<Self>) {
+            self.capacity_at_reply
+                .store(self.peers.capacity(), Ordering::Release);
+            self.sent.notify_one();
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let state = make_state(&temp.path().join("state.redb"));
+    let (event_tx, event_rx) = mpsc::channel(8192);
+    for _ in 0..8192 {
+        event_tx
+            .try_send(PeerEvent::TcpConnected { addr: test_peer() })
+            .unwrap_or_else(|_| panic!("queue capacity"));
+    }
+    let (submit_tx, submit_rx) = mpsc::channel(1);
+    let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+    let sent = Arc::new(tokio::sync::Notify::new());
+    let capacity_at_reply = Arc::new(AtomicUsize::new(usize::MAX));
+    let waker = Waker::from(Arc::new(ReplyWake {
+        peers: event_tx,
+        capacity_at_reply: capacity_at_reply.clone(),
+        sent: sent.clone(),
+    }));
+    assert!(Pin::new(&mut reply_rx)
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+    submit_tx
+        .try_send(crate::api_bridge::SubmitRequest {
+            bytes: vec![0],
+            mode: ergo_api::types::SubmitMode::CheckOnly,
+            reply: reply_tx,
+        })
+        .unwrap_or_else(|_| panic!("submit queue capacity"));
+    let (_mining_tx, mining_rx) = mpsc::channel(1);
+    let (_connect_tx, connect_rx) = mpsc::channel(1);
+    let (_votes_tx, votes_rx) = mpsc::channel(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(super::action_loop::action_loop(
+        state,
+        event_rx,
+        submit_rx,
+        mining_rx,
+        connect_rx,
+        votes_rx,
+        None,
+        shutdown_rx,
+        1000,
+    ));
+    tokio::time::timeout(Duration::from_secs(2), sent.notified())
+        .await
+        .unwrap();
+    let capacity = capacity_at_reply.load(Ordering::Acquire);
+    let reply = reply_rx.try_recv().unwrap();
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(reply.is_err()); // cold-tip admission remains honest
+    assert_eq!(
+        capacity, 0,
+        "peer events were consumed before queued API admission"
     );
 }

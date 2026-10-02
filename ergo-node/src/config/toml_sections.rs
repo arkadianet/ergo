@@ -162,7 +162,7 @@ pub(super) struct TomlIndexer {
 /// middleware whenever the API is enabled; every other route stays
 /// unauthenticated.
 #[derive(serde::Deserialize, Default, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct TomlApi {
     pub(super) peer_details: crate::peer_details::PeerLookupConfig,
     /// Bind address for the HTTP API. Default `127.0.0.1:9099`.
@@ -188,17 +188,26 @@ pub(super) struct TomlApi {
     /// Optional `[api.security]` subsection. Without a hash, privileged
     /// routes stay closed; supplied hashes are validated at load.
     pub(super) security: Option<TomlApiSecurity>,
+    pub(super) script: TomlApiScript,
 }
 
 /// `[api.security]` TOML subsection. Carries the operator's
 /// `api_key_hash` used by `ergo_api::auth::ApiSecurity`.
 #[derive(serde::Deserialize, Default, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(super) struct TomlApiSecurity {
     /// Lowercase Base16 (hex) of `Blake2b256(api_key_plaintext)`.
     /// 64 chars. Generate a RANDOM secret first, then hash it, e.g.:
     /// `secret=$(openssl rand -hex 32); printf '%s' "$secret" | b2sum -l 256 | cut -d' ' -f1`.
     pub(super) api_key_hash: Option<String>,
+}
+
+/// Native script playground policy, validated before binding the API.
+#[derive(serde::Deserialize, Default, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct TomlApiScript {
+    pub(super) require_api_key: Option<bool>,
+    pub(super) max_cost: Option<u64>,
 }
 
 /// `[mempool]` TOML section: unconfirmed transaction pool configuration.

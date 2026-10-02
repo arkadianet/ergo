@@ -732,6 +732,19 @@ impl NodeConfig {
         // just never matches rather than failing to parse.
         let api_allowed_hosts = toml_cfg.api.allowed_hosts.clone().unwrap_or_default();
         let api_local_reverse_proxy = toml_cfg.api.local_reverse_proxy.unwrap_or(false);
+        let script = &toml_cfg.api.script;
+        let api_script = ergo_api::v1::ScriptConfig {
+            require_api_key: script.require_api_key.unwrap_or(false),
+            max_cost: script
+                .max_cost
+                .unwrap_or(ergo_api::v1::script::MAX_BLOCK_COST),
+        };
+        if !(1..=ergo_api::v1::script::MAX_BLOCK_COST).contains(&api_script.max_cost) {
+            return Err(format!(
+                "[api.script] max_cost must be between 1 and {}",
+                ergo_api::v1::script::MAX_BLOCK_COST
+            ));
+        }
 
         // [mempool] — TOML overrides defaults; CLI flags override TOML.
         let def = MempoolConfig::default();
@@ -1141,6 +1154,7 @@ impl NodeConfig {
             api_key_hash,
             api_allowed_hosts,
             api_local_reverse_proxy,
+            api_script,
             allow_direct_block_submit: toml_cfg.api.allow_direct_block_submit.unwrap_or(false),
             devnet_max_block_cost,
             mempool_config,

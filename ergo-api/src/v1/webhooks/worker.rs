@@ -10,10 +10,8 @@
 //! a shared `reqwest` client, rustls-TLS only (no system OpenSSL — see
 //! `ergo-api/Cargo.toml`), constructed once and spawned at the server seam
 //! (`server.rs`) exactly like the O4 depth sampler / realtime-bridge feeder —
-//! only under a live Tokio runtime, so non-async test router builds never
-//! spawn it, and process-guarded (see [`spawn_webhook_worker_once`]) so
-//! repeated router assembly across the test suite never opens a duplicate
-//! outbound-network worker. Deliveries now actually reach operator-registered
+//! when a listener starts. Router construction does not spawn workers; the
+//! server owns the worker and all its delivery children until shutdown. Deliveries now actually reach operator-registered
 //! URLs; **persistence is the one remaining deferral** — the registry +
 //! delivery log are in-memory and bounded, so a node restart loses all
 //! registrations until a durable `*-db` schema lands.
@@ -23,7 +21,6 @@
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
 //! drop policy protects the fan-out if the worker itself falls behind.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -77,8 +74,14 @@ pub fn spawn_webhook_worker(
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        let mut deliveries = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                Some(result) = deliveries.join_next(), if !deliveries.is_empty() => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "webhook send task failed");
+                    }
+                }
                 event = sub.rx.recv() => {
                     match event {
                         Some(ev) => {
@@ -88,7 +91,7 @@ pub fn spawn_webhook_worker(
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_due(&engine, &sink);
+                    drain_due(&engine, &sink, &mut deliveries);
                 }
             }
         }
@@ -98,43 +101,49 @@ pub fn spawn_webhook_worker(
 /// Take every due request and spawn a bounded send task per request; each task
 /// awaits the sink and records the outcome. Kept separate so the scheduling
 /// step is unit-testable without the bus loop.
-fn drain_due(engine: &Arc<WebhookEngine>, sink: &Arc<dyn WebhookSink>) {
+fn drain_due(
+    engine: &Arc<WebhookEngine>,
+    sink: &Arc<dyn WebhookSink>,
+    deliveries: &mut tokio::task::JoinSet<()>,
+) {
     let due = engine.take_due(now_unix_ms());
     for req in due {
         let engine = engine.clone();
         let sink = sink.clone();
-        tokio::spawn(async move {
+        let attempt = DeliveryAttempt {
+            engine,
+            id: req.delivery_id.clone(),
+            completed: false,
+        };
+        deliveries.spawn(async move {
             let outcome = sink.post(&req).await;
-            engine.record_result(&req.delivery_id, outcome, now_unix_ms());
+            attempt.complete(outcome);
         });
     }
 }
 
-/// Process-once guard for the production worker, mirroring
-/// [`crate::v1::mempool_depth::spawn_depth_sampler_once`]: router assembly
-/// runs once in production but many times across the test suite (each
-/// `#[tokio::test]` that builds the full server router does so under a live
-/// runtime); without this guard those builds would each spawn a duplicate
-/// worker. Unlike the depth sampler / realtime-bridge feeder, this worker
-/// opens real outbound network connections, so guarding against a duplicate
-/// spawn matters even more here.
-static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Spawn the production delivery worker at most ONCE per process (idempotent
-/// across repeated router assembly). Subsequent calls are no-ops. Call only
-/// from an async context (a Tokio runtime must be current) — the server
-/// wiring guards the call exactly like the O4 depth sampler.
-pub fn spawn_webhook_worker_once(
-    bus: Arc<RealtimeBus>,
+/// Cancellation must release the engine's in-flight admission too. Keeping
+/// this guard outside the child future also covers abort-before-first-poll.
+struct DeliveryAttempt {
     engine: Arc<WebhookEngine>,
-    sink: Arc<dyn WebhookSink>,
-    tick: Duration,
-) {
-    if WORKER_STARTED.swap(true, Ordering::SeqCst) {
-        return;
+    id: String,
+    completed: bool,
+}
+
+impl DeliveryAttempt {
+    fn complete(mut self, outcome: DeliveryOutcome) {
+        self.engine.record_result(&self.id, outcome, now_unix_ms());
+        self.completed = true;
     }
-    // The JoinHandle is deliberately dropped: the worker runs for the process.
-    drop(spawn_webhook_worker(bus, engine, sink, tick));
+}
+
+impl Drop for DeliveryAttempt {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.engine
+                .record_result(&self.id, DeliveryOutcome::TransportError, now_unix_ms());
+        }
+    }
 }
 
 /// Per-request timeout bound, covering the whole request lifecycle — DNS,
@@ -158,15 +167,13 @@ pub const SINK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`DeliveryOutcome::HttpError`] (retryable, never delivered) instead of
 /// being followed.
 ///
-/// **DNS-rebinding residual gap (pre-existing, not introduced here).** Per
-/// `model.rs`'s documented limitation, the guard checks the URL's *literal*
-/// host at registration time only; a hostname that later resolves to a
-/// private address is not re-checked at connect time by this sink. Closing
-/// that gap needs a custom resolver/connector hook and is left as a
-/// follow-up — this sink deliberately does not re-resolve or otherwise
-/// second-guess the already-validated registration URL.
+/// Every DNS answer is checked before connecting, including retries. The
+/// checked addresses are returned directly to the connector, so there is no
+/// second unchecked resolution. Environment proxies are disabled to preserve
+/// that destination guarantee.
 pub struct ReqwestSink {
     client: reqwest::Client,
+    policy: super::model::UrlPolicy,
 }
 
 impl ReqwestSink {
@@ -176,18 +183,76 @@ impl ReqwestSink {
     /// by disabling the webhook subsystem (`webhooks_disabled`) rather than
     /// taking the node down.
     pub fn new() -> Result<Self, reqwest::Error> {
+        Self::with_policy(Default::default())
+    }
+
+    /// Explicit destination opt-ins for trusted development integrations.
+    pub fn with_policy(policy: super::model::UrlPolicy) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .connect_timeout(SINK_REQUEST_TIMEOUT)
             .timeout(SINK_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .dns_resolver(Arc::new(CheckedResolver {
+                policy,
+                lookup: Arc::new(SystemResolver),
+            }))
             .build()?;
-        Ok(ReqwestSink { client })
+        Ok(ReqwestSink { client, policy })
+    }
+}
+
+struct CheckedResolver {
+    policy: super::model::UrlPolicy,
+    lookup: Arc<dyn reqwest::dns::Resolve>,
+}
+
+struct SystemResolver;
+
+impl reqwest::dns::Resolve for SystemResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((name.as_str(), 0))
+                .await?
+                .collect::<Vec<_>>();
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn checked_addresses(
+    addresses: Vec<std::net::SocketAddr>,
+    policy: &super::model::UrlPolicy,
+) -> Result<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>> {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|addr| !super::model::address_allowed(addr.ip(), policy))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "webhook DNS destination rejected",
+        )
+        .into());
+    }
+    Ok(Box::new(addresses.into_iter()))
+}
+
+impl reqwest::dns::Resolve for CheckedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let policy = self.policy;
+        let resolved = self.lookup.resolve(name);
+        Box::pin(async move { checked_addresses(resolved.await?.collect(), &policy) })
     }
 }
 
 #[async_trait]
 impl WebhookSink for ReqwestSink {
     async fn post(&self, req: &PreparedRequest) -> DeliveryOutcome {
+        if super::model::validate_url(&req.url, &self.policy).is_err() {
+            tracing::warn!("webhook delivery target rejected by destination policy");
+            return DeliveryOutcome::TransportError;
+        }
         let mut builder = self.client.post(&req.url);
         for (name, value) in &req.headers {
             builder = builder.header(*name, value);
@@ -219,6 +284,125 @@ mod tests {
     use crate::v1::webhooks::engine::WebhookEngineConfig;
     use crate::v1::webhooks::model::sign_body;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn hostname_resolving_to_private_address_never_connects() {
+        struct PrivateAnswer(std::net::SocketAddr);
+        impl reqwest::dns::Resolve for PrivateAnswer {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                let address = self.0;
+                Box::pin(
+                    async move { Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs) },
+                )
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let policy = super::super::model::UrlPolicy::default();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(CheckedResolver {
+                policy,
+                lookup: Arc::new(PrivateAnswer(address)),
+            }))
+            .build()
+            .unwrap();
+        let sink = ReqwestSink { client, policy };
+        let request = PreparedRequest {
+            delivery_id: "test".into(),
+            webhook_id: "test".into(),
+            url: format!("https://public-looking.invalid:{}/hook", address.port()),
+            headers: vec![],
+            body: "{}".into(),
+        };
+        assert!(super::super::model::validate_url(&request.url, &policy).is_ok());
+        assert_eq!(sink.post(&request).await, DeliveryOutcome::TransportError);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_private_and_mixed_dns_answers() {
+        let policy = super::super::model::UrlPolicy::default();
+        for private in [
+            "127.0.0.1:0",
+            "10.1.2.3:0",
+            "169.254.169.254:0",
+            "[::ffff:127.0.0.1]:0",
+            "[fc00::1]:0",
+        ] {
+            let private = private.parse().unwrap();
+            assert!(checked_addresses(vec![private], &policy).is_err());
+            assert!(
+                checked_addresses(vec!["93.184.216.34:0".parse().unwrap(), private], &policy)
+                    .is_err()
+            );
+        }
+        assert!(checked_addresses(Vec::new(), &policy).is_err());
+        let public = "93.184.216.34:0".parse().unwrap();
+        assert_eq!(
+            checked_addresses(vec![public], &policy)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![public]
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_worker_cancels_delivery_children_and_releases_admission() {
+        struct PendingSink;
+        #[async_trait]
+        impl WebhookSink for PendingSink {
+            async fn post(&self, _: &PreparedRequest) -> DeliveryOutcome {
+                std::future::pending().await
+            }
+        }
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let engine = Arc::new(WebhookEngine::new(Default::default()));
+        register_blocks(&engine);
+        let worker = spawn_webhook_worker(
+            bus.clone(),
+            engine.clone(),
+            Arc::new(PendingSink),
+            Duration::from_millis(1),
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while bus.subscriber_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        bus.publish(
+            crate::v1::realtime::model::RealtimeEventBody::block_applied(
+                1,
+                "header".into(),
+                10,
+                1,
+                10,
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while engine.inflight_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+        let _ = worker.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while engine.inflight_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(bus.subscriber_count(), 0);
+    }
 
     // ----- helpers: a deterministic in-process sink (no network) -----
 
@@ -286,7 +470,8 @@ mod tests {
             now_unix_ms(),
         );
         let sink: Arc<dyn WebhookSink> = FakeSink::new(DeliveryOutcome::Success(200));
-        drain_due(&engine, &sink);
+        let mut deliveries = tokio::task::JoinSet::new();
+        drain_due(&engine, &sink, &mut deliveries);
         // Let the spawned send task run.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let id = {
@@ -428,7 +613,11 @@ mod tests {
             body: body.clone(),
         };
 
-        let sink = ReqwestSink::new().expect("client builds");
+        let sink = ReqwestSink::with_policy(super::super::model::UrlPolicy {
+            allow_loopback: true,
+            ..Default::default()
+        })
+        .expect("client builds");
         let outcome = sink.post(&req).await;
         assert_eq!(outcome, DeliveryOutcome::Success(200));
 

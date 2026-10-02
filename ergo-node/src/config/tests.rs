@@ -2411,3 +2411,23 @@ fn redb_cache_budgets_allow_disabled_cache_and_reject_negative_sizes() {
         assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err());
     }
 }
+
+#[test]
+fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
+    let path = write_toml("[api.script]\nrequire_api_key = true\nmax_cost = 12345\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert!(config.api_script.require_api_key);
+    assert_eq!(config.api_script.max_cost, 12345);
+    for source in [
+        "[api.script]\nrequire_api_keys = true\n",
+        "[api]\nscript_require_api_key = true\n",
+        "[api.script]\nmax_cost = 0\n",
+        "[api.script]\nmax_cost = 8001092\n",
+    ] {
+        let path = write_toml(source);
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
+    }
+}

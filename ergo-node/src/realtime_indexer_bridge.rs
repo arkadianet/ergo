@@ -274,6 +274,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn indexed_availability_and_events_stay_with_the_owning_node_services() {
+        let first = ergo_api::ApiServices::new();
+        let second = ergo_api::ApiServices::new();
+        let observer = RealtimeIndexerObserver::new(NetworkPrefix::Mainnet);
+        observer.activate(first.realtime.bus.clone());
+        assert!(first.realtime.bus.is_live(ChannelClass::Address));
+        assert!(!second.realtime.bus.is_live(ChannelClass::Address));
+        observer.on_committed(changes(BoxChangeKind::Created, id(9)));
+        assert!(first.realtime.bus.latest_seq() > 0);
+        assert_eq!(second.realtime.bus.latest_seq(), 0);
+        let restarted = ergo_api::ApiServices::new();
+        assert!(!restarted.realtime.bus.is_live(ChannelClass::Address));
+        assert_eq!(restarted.realtime.bus.latest_seq(), 0);
+    }
+
     fn setup() -> (Arc<RealtimeBus>, RealtimeIndexerObserver) {
         let bus = Arc::new(RealtimeBus::blocks_and_mempool());
         let observer = RealtimeIndexerObserver::new(NetworkPrefix::Mainnet);

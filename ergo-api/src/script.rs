@@ -106,36 +106,55 @@ async fn compile_address_response(
     network: NetworkPrefix,
     wallet_admin: &Arc<dyn WalletAdmin>,
     req: CompileRequestDto,
-    pick: impl FnOnce(&ergo_compiler::CompileResult) -> &str,
+    compute: crate::v1::ComputePool,
+    pick: fn(&ergo_compiler::CompileResult) -> &str,
 ) -> Response {
     let addrs = match wallet_admin.addresses().await {
         Ok(list) => list.0,
         Err(e) => return wallet_error_response(e),
     };
-    let env = match build_env(&addrs, network) {
-        Ok(env) => env,
-        Err(e) => return bad_request(format!("{e}")),
-    };
-    match compile(&env, &req.source, req.tree_version, network) {
-        Ok(result) => Json(json!({ "address": pick(&result) })).into_response(),
-        Err(e) => bad_request(e.to_string()),
-    }
+    compute
+        .response(move || {
+            let env = match build_env(&addrs, network) {
+                Ok(env) => env,
+                Err(e) => return bad_request(format!("{e}")),
+            };
+            match compile(&env, &req.source, req.tree_version, network) {
+                Ok(result) => Json(json!({ "address": pick(&result) })).into_response(),
+                Err(e) => bad_request(e.to_string()),
+            }
+        })
+        .await
 }
 
 /// `POST /script/p2sAddress` — Scala `p2sAddressR` (`ScriptApiRoute.scala:71-76`).
 pub async fn p2s_address_handler(
-    State((network, wallet_admin)): State<(NetworkPrefix, Arc<dyn WalletAdmin>)>,
+    State((network, wallet_admin, compute)): State<(
+        NetworkPrefix,
+        Arc<dyn WalletAdmin>,
+        crate::v1::ComputePool,
+    )>,
     Json(req): Json<CompileRequestDto>,
 ) -> Response {
-    compile_address_response(network, &wallet_admin, req, |r| r.p2s_address.as_str()).await
+    compile_address_response(network, &wallet_admin, req, compute, |r| {
+        r.p2s_address.as_str()
+    })
+    .await
 }
 
 /// `POST /script/p2shAddress` — Scala `p2shAddressR` (`ScriptApiRoute.scala:78-83`).
 pub async fn p2sh_address_handler(
-    State((network, wallet_admin)): State<(NetworkPrefix, Arc<dyn WalletAdmin>)>,
+    State((network, wallet_admin, compute)): State<(
+        NetworkPrefix,
+        Arc<dyn WalletAdmin>,
+        crate::v1::ComputePool,
+    )>,
     Json(req): Json<CompileRequestDto>,
 ) -> Response {
-    compile_address_response(network, &wallet_admin, req, |r| r.p2sh_address.as_str()).await
+    compile_address_response(network, &wallet_admin, req, compute, |r| {
+        r.p2sh_address.as_str()
+    })
+    .await
 }
 
 #[cfg(test)]

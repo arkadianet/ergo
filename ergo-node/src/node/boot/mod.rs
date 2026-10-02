@@ -888,6 +888,7 @@ async fn run_inner_with_backend(
     let api_addr = api_bind.api_addr;
     let api_handle = api_bind.api_handle;
     let api_shutdown_tx = api_bind.api_shutdown_tx;
+    let api_services = api_bind.api_services;
     let live_wallet_hook = api_bind.live_wallet_hook;
     let wallet_rescan = api_bind.wallet_rescan;
     let wallet_cancel = api_bind.wallet_cancel;
@@ -1120,6 +1121,7 @@ async fn run_inner_with_backend(
         read: scaffold.read_state,
         shutdown_tx: Some(shutdown_tx),
         api_shutdown_tx,
+        api_services,
         loop_handle,
         api_handle,
         wallet_rescan,

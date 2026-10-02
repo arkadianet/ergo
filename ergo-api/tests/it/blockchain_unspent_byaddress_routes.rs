@@ -542,6 +542,8 @@ fn build_app_with_mempool(
             emission_scripts: None,
             utxo_reads_supported: true,
             local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None, // admin — tests don't exercise the shutdown endpoint
     )
