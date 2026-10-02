@@ -118,6 +118,17 @@ passed 2,484 tests (14 skipped), and
 passed 1,968 (64 skipped); both also passed three cost-trace tests. Other hosted
 checks may still be queued or running.
 
+A hosted API test also observed the response before the blocking worker released
+its permit. The corrected test joins the worker before checking capacity and
+passed 100 repeated runs plus 420 API unit and 861 integration tests;
+production completion behavior is unchanged. Windows
+also exposed locale-dependent decoding in the Rust fragment checker. The
+fragment checker and release/CI helpers now specify UTF-8 for repository and tool
+text rather than relying on the platform's default encoding. The old checker
+reproduced the hosted failure under simulated Windows cp1252 defaults; the fixed
+checker passed all 38 fragments. Policy, shard coverage and all 18 helper tests
+passed under both normal and simulated cp1252 defaults.
+
 The extracted archive review also checked operator commands and links. Packaged
 quick starts use archive paths, bundled links remain local, and omitted references
 point to the exact source revision. Both GNU archives passed the final smoke;
