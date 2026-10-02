@@ -41,7 +41,6 @@ pub enum PollOutcome {
     /// emit nothing. The next change triggers a real diff. The
     /// carried tip is informational (for logs/metrics) — callers
     /// typically destructure it only in tests.
-    #[allow(dead_code)]
     Initialized(TipPointer),
     /// Tip unchanged since last poll. No work.
     NoChange,
@@ -72,7 +71,6 @@ impl MempoolNotifier {
         Self { last_seen: None }
     }
 
-    #[allow(dead_code)]
     pub fn last_seen(&self) -> Option<TipPointer> {
         self.last_seen
     }
