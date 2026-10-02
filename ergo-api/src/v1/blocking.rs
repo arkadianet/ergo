@@ -121,6 +121,11 @@ mod tests {
             })
             .await;
         assert_eq!(response.status(), StatusCode::OK);
+        // The reply can arrive before the blocking task drops its permit.
+        // Shutdown joins accepted work before we check that its permit was released.
+        tokio::time::timeout(Duration::from_secs(2), reads.shutdown())
+            .await
+            .expect("blocking reads should finish shutting down");
         assert_eq!(reads.point.available_permits(), 16);
     }
 
