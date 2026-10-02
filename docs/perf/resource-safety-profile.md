@@ -38,10 +38,10 @@ are observations from one process, not statistical speedup claims.
 
 | Fold steps | Logical nodes | Old stored nodes | Shared stored nodes | Old reduction, µs | Shared reduction, µs |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 3 | 3 | 3 | 30 | 25 |
+| 1 | 3 | 3 | 3 | 30 | 31 |
 | 5 | 63 | 63 | 11 | 19 | 8 |
-| 10 | 2,047 | 2,047 | 21 | 494 | 13 |
-| 16 | 131,071 | 131,071 | 33 | 32,314 | 23 |
+| 10 | 2,047 | 2,047 | 21 | 494 | 11 |
+| 16 | 131,071 | 131,071 | 33 | 32,314 | 18 |
 
 The baseline process peaked at 50,904 KiB RSS over layers 1–16; the candidate
 peaked at 5,184 KiB over layers 1–64. Different layer ranges and repeat counts
