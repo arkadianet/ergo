@@ -132,6 +132,22 @@ pub struct ServerCtx {
     pub local_reverse_proxy: bool,
 }
 
+enum WebhookRuntime {
+    /// Legacy router fixtures share an in-memory engine and worker.
+    SharedTest,
+    /// Production supplies an engine explicitly; None fails closed.
+    Server(Option<Arc<crate::v1::WebhookEngine>>),
+}
+
+struct WebhookWorkerGuard(Option<JoinHandle<()>>);
+impl Drop for WebhookWorkerGuard {
+    fn drop(&mut self) {
+        if let Some(worker) = &self.0 {
+            worker.abort();
+        }
+    }
+}
+
 /// Bind a TCP listener for the API server without starting axum.
 ///
 /// Splits the bind step out of [`serve`] so callers that need to know
@@ -272,9 +288,9 @@ pub fn serve_on_with_mempool_and_wallet_and_security(
 /// the literal bind address); empty + a non-loopback bind disables the
 /// guard entirely, matching the module docs.
 ///
-/// Production (`ergo-node`) calls this entry point directly with the
-/// resolved `[api] allowed_hosts`; every other `serve_on*` variant
-/// forwards an empty list here.
+/// Convenience entrypoint with a shared in-memory webhook fixture engine.
+/// Production uses the sibling that accepts a durable webhook engine.
+/// Other convenience `serve_on*` variants forward an empty host list here.
 #[allow(clippy::too_many_arguments)]
 pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     ctx: ServerCtx,
@@ -285,6 +301,55 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     security: Option<Arc<crate::auth::ApiSecurity>>,
     allowed_hosts: &[String],
 ) -> JoinHandle<()> {
+    serve_with_webhook_runtime(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        allowed_hosts,
+        WebhookRuntime::SharedTest,
+    )
+}
+
+/// Production serve seam: each API owns its durable engine and delivery worker.
+/// An unavailable store disables webhook routes; it never uses the shared
+/// in-memory fixture engine. The worker stops when this server exits.
+#[allow(clippy::too_many_arguments)]
+pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts_and_webhooks(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    webhooks: Option<Arc<crate::v1::WebhookEngine>>,
+) -> JoinHandle<()> {
+    serve_with_webhook_runtime(
+        ctx,
+        listener,
+        shutdown_rx,
+        admin,
+        wallet_admin,
+        security,
+        allowed_hosts,
+        WebhookRuntime::Server(webhooks),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_with_webhook_runtime(
+    ctx: ServerCtx,
+    listener: tokio::net::TcpListener,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    allowed_hosts: &[String],
+    webhooks: WebhookRuntime,
+) -> JoinHandle<()> {
     let bind_addr = listener.local_addr().ok();
     // v1 boot-warn: loudly flag a network-reachable T1/T2 surface under
     // a weak/default (or absent) api_key. Called once here, right after the
@@ -292,7 +357,8 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     if let Some(addr) = bind_addr {
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
-    let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
+    let (app, _, worker) = router_with_webhooks(ctx, admin, wallet_admin, security, webhooks);
+    let mut worker = WebhookWorkerGuard(worker);
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
     // layers already attached), so it runs first on every request —
@@ -334,6 +400,8 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
         }
     }
     tokio::spawn(async move {
+        // Hold the cancellation guard inside the server future so aborting it
+        // also releases its durable delivery worker and database handle.
         // `into_make_service_with_connect_info` installs `ConnectInfo<SocketAddr>`
         // so the v1 governor / auth tier can read the real peer IP for per-IP
         // rate-bucketing and the loopback exemption (v1 `client_ip`). Absent it,
@@ -347,6 +415,10 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
         });
         if let Err(e) = server.await {
             error!(error = %e, "api server exited with error");
+        }
+        if let Some(worker) = worker.0.take() {
+            worker.abort();
+            let _ = worker.await;
         }
     })
 }
@@ -674,6 +746,23 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
 ) -> (Router, ApiRouteInventory) {
+    let (router, inventory, _) = router_with_webhooks(
+        ctx,
+        admin,
+        wallet_admin,
+        security,
+        WebhookRuntime::SharedTest,
+    );
+    (router, inventory)
+}
+
+fn router_with_webhooks(
+    ctx: ServerCtx,
+    admin: Option<Arc<dyn NodeAdmin>>,
+    wallet_admin: Arc<dyn crate::wallet::WalletAdmin>,
+    security: Option<Arc<crate::auth::ApiSecurity>>,
+    webhooks: WebhookRuntime,
+) -> (Router, ApiRouteInventory, Option<JoinHandle<()>>) {
     let mut inventory = ApiRouteInventory::default();
     let ServerCtx {
         read,
@@ -925,13 +1014,9 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // `RealtimeHandle::blocks_and_mempool()`, which marks `blocks`, `mempool`,
     // `peers`, and `tx` live; fine-grained address/box/token taps remain a
     // follow-up.
-    // Process singletons: the `*_once` workers below bind the FIRST bus/engine
-    // they see, so every router assembly must share those exact instances — a
-    // per-assembly bus/engine would leave later routers holding handles no
-    // worker feeds (registrations that never deliver, subscriptions that never
-    // fire).
-    static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
-        std::sync::OnceLock::new();
+    // The coarse event bridge shares this process bus. Production webhook
+    // engines/workers are owned by the individual server instead.
+
     let v1_realtime = realtime_handle();
     if tokio::runtime::Handle::try_current().is_ok() {
         crate::v1::spawn_event_bridge_once(
@@ -945,28 +1030,52 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // The registry + delivery-log + retry/backoff/HMAC state machine, and the
     // production `ReqwestSink` (rustls-TLS only — no system OpenSSL, see
     // `ergo-api/Cargo.toml`), are constructed here; the delivery worker is
-    // spawned exactly once per process (guarded to a live Tokio runtime, same
-    // idiom as the mempool-depth sampler / realtime-bridge feeder above), so
-    // registered webhooks now actually deliver. Persistence is the one
-    // remaining deferral: the registry + delivery log are in-memory, so
-    // registrations are lost on restart until a durable `*-db` store lands
-    // (documented in the webhooks module docs).
-    let v1_webhooks_engine = V1_WEBHOOKS_ENGINE
-        .get_or_init(|| std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default())))
-        .clone();
-    let mut v1_webhooks_handle = Some(crate::v1::WebhooksHandle {
-        engine: v1_webhooks_engine.clone(),
-        bus: v1_realtime.bus.clone(),
-        url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
-    });
-    if tokio::runtime::Handle::try_current().is_ok() {
+    // attached to the production server's lifetime. Production supplies the
+    // durable engine explicitly from bootstrap; an unavailable store disables
+    // webhook management instead of using the shared in-memory fixture engine.
+    let (v1_webhooks_engine, server_owned) = match webhooks {
+        WebhookRuntime::Server(engine) => (engine, true),
+        WebhookRuntime::SharedTest => {
+            static SHARED_TEST_ENGINE: std::sync::OnceLock<Arc<crate::v1::WebhookEngine>> =
+                std::sync::OnceLock::new();
+            (
+                Some(
+                    SHARED_TEST_ENGINE
+                        .get_or_init(|| Arc::new(crate::v1::WebhookEngine::new(Default::default())))
+                        .clone(),
+                ),
+                false,
+            )
+        }
+    };
+    let mut webhook_worker = None;
+    let mut v1_webhooks_handle =
+        v1_webhooks_engine
+            .as_ref()
+            .map(|engine| crate::v1::WebhooksHandle {
+                engine: engine.clone(),
+                bus: v1_realtime.bus.clone(),
+                url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
+            });
+    if let (Ok(_), Some(engine)) = (tokio::runtime::Handle::try_current(), v1_webhooks_engine) {
         match crate::v1::ReqwestSink::new() {
-            Ok(sink) => crate::v1::spawn_webhook_worker_once(
-                v1_realtime.bus.clone(),
-                v1_webhooks_engine,
-                std::sync::Arc::new(sink),
-                crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
-            ),
+            Ok(sink) => {
+                if server_owned {
+                    webhook_worker = Some(crate::v1::spawn_webhook_worker(
+                        v1_realtime.bus.clone(),
+                        engine,
+                        Arc::new(sink),
+                        crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
+                    ));
+                } else {
+                    crate::v1::spawn_webhook_worker_once(
+                        v1_realtime.bus.clone(),
+                        engine,
+                        Arc::new(sink),
+                        crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
+                    );
+                }
+            }
             Err(error) => {
                 // Webhooks are auxiliary — a sink build failure must not take
                 // the node down. Without a sink, registrations would accept
@@ -1079,7 +1188,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
                 },
             ),
     );
-    (router, inventory)
+    (router, inventory, webhook_worker)
 }
 
 /// Public redirect routes for the retired `/wallet/ui*` paths → the dashboard

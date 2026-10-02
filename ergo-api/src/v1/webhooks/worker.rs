@@ -1,6 +1,6 @@
 //! The delivery worker: a [`RealtimeBus`] subscriber that fans matched events
 //! into per-webhook deliveries and drives the injected transport
-//! ([`WebhookSink`]) under the [`WebhookEngine`]'s at-least-once retry
+//! ([`WebhookSink`]) under the [`WebhookEngine`]'s bounded retry
 //! discipline.
 //!
 //! **Transport seam.** The concrete outbound HTTP(S) client is abstracted
@@ -11,17 +11,16 @@
 //! `ergo-api/Cargo.toml`), constructed once and spawned at the server seam
 //! (`server.rs`) exactly like the O4 depth sampler / realtime-bridge feeder —
 //! only under a live Tokio runtime, so non-async test router builds never
-//! spawn it, and process-guarded (see [`spawn_webhook_worker_once`]) so
-//! repeated router assembly across the test suite never opens a duplicate
-//! outbound-network worker. Deliveries now actually reach operator-registered
-//! URLs; **persistence is the one remaining deferral** — the registry +
-//! delivery log are in-memory and bounded, so a node restart loses all
-//! registrations until a durable `*-db` schema lands.
+//! spawn it. Production workers belong to their API server; legacy in-memory
+//! router fixtures use [`spawn_webhook_worker_once`] to avoid duplicate workers. Deliveries now actually reach operator-registered
+//! URLs. The production engine persists the registry and bounded delivery log
+//! before it hands any request to this worker.
 //!
 //! **Never stalls the bus.** The worker owns a bounded [`BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
-//! drop policy protects the fan-out if the worker itself falls behind.
+//! drop policy protects the fan-out if the worker itself falls behind. Those
+//! pre-admission drops do not create durable obligations or webhook gap markers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -74,6 +73,9 @@ pub fn spawn_webhook_worker(
         // channels; the bus only fans matching events to us.
         engine.attach_filter(sub.filter.clone());
 
+        // Dropping/aborting this worker cancels every outbound attempt too,
+        // releasing engine/store handles rather than leaving detached sends.
+        let mut requests = tokio::task::JoinSet::new();
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -88,8 +90,9 @@ pub fn spawn_webhook_worker(
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_due(&engine, &sink);
+                    drain_due(&engine, &sink, &mut requests);
                 }
+                _ = requests.join_next(), if !requests.is_empty() => {}
             }
         }
     })
@@ -98,19 +101,23 @@ pub fn spawn_webhook_worker(
 /// Take every due request and spawn a bounded send task per request; each task
 /// awaits the sink and records the outcome. Kept separate so the scheduling
 /// step is unit-testable without the bus loop.
-fn drain_due(engine: &Arc<WebhookEngine>, sink: &Arc<dyn WebhookSink>) {
+fn drain_due(
+    engine: &Arc<WebhookEngine>,
+    sink: &Arc<dyn WebhookSink>,
+    requests: &mut tokio::task::JoinSet<()>,
+) {
     let due = engine.take_due(now_unix_ms());
     for req in due {
         let engine = engine.clone();
         let sink = sink.clone();
-        tokio::spawn(async move {
+        requests.spawn(async move {
             let outcome = sink.post(&req).await;
             engine.record_result(&req.delivery_id, outcome, now_unix_ms());
         });
     }
 }
 
-/// Process-once guard for the production worker, mirroring
+/// Process-once guard for legacy in-memory router fixtures, mirroring
 /// [`crate::v1::mempool_depth::spawn_depth_sampler_once`]: router assembly
 /// runs once in production but many times across the test suite (each
 /// `#[tokio::test]` that builds the full server router does so under a live
@@ -120,7 +127,7 @@ fn drain_due(engine: &Arc<WebhookEngine>, sink: &Arc<dyn WebhookSink>) {
 /// spawn matters even more here.
 static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Spawn the production delivery worker at most ONCE per process (idempotent
+/// Spawn the shared fixture delivery worker at most ONCE per process (idempotent
 /// across repeated router assembly). Subsequent calls are no-ops. Call only
 /// from an async context (a Tokio runtime must be current) — the server
 /// wiring guards the call exactly like the O4 depth sampler.
@@ -286,7 +293,8 @@ mod tests {
             now_unix_ms(),
         );
         let sink: Arc<dyn WebhookSink> = FakeSink::new(DeliveryOutcome::Success(200));
-        drain_due(&engine, &sink);
+        let mut requests = tokio::task::JoinSet::new();
+        drain_due(&engine, &sink, &mut requests);
         // Let the spawned send task run.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let id = {
@@ -352,6 +360,51 @@ mod tests {
         assert_eq!(v["seq"], 1);
         assert_eq!(v["data"]["height"], 1808901);
         assert_eq!(v["confirmed"], true);
+    }
+
+    #[tokio::test]
+    async fn aborting_worker_cancels_inflight_requests_and_releases_engine() {
+        struct HangingSink(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl WebhookSink for HangingSink {
+            async fn post(&self, _: &PreparedRequest) -> DeliveryOutcome {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let engine = Arc::new(WebhookEngine::new(Default::default()));
+        register_blocks(&engine);
+        let weak_engine = Arc::downgrade(&engine);
+        let bus = Arc::new(RealtimeBus::blocks_only());
+        let worker = spawn_webhook_worker(
+            bus.clone(),
+            engine.clone(),
+            Arc::new(HangingSink(entered.clone())),
+            Duration::from_millis(1),
+        );
+        // Wait until the worker installs its subscription.
+        tokio::task::yield_now().await;
+        bus.publish(crate::v1::realtime::RealtimeEventBody::block_applied(
+            1,
+            "block".into(),
+            1,
+            1,
+            1,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        drop(engine);
+        worker.abort();
+        let _ = worker.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak_engine.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker shutdown must release the durable engine");
     }
 
     // ----- ReqwestSink (real transport) -----

@@ -151,9 +151,14 @@ impl RealtimeBus {
         }
     }
 
-    /// A bus where only `blocks` has a live upstream (the coarse-ring
-    /// bridge). Every other class is `channel_unavailable` until its
-    /// node-internal fine-grained tap lands.
+    /// Seed the next cursor above recovered durable delivery state at boot.
+    /// Existing cursors never move backwards. Call before starting publishers.
+    pub fn advance_cursor_to(&self, next_seq: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.next_seq = inner.next_seq.max(next_seq);
+    }
+
+    /// A bus where only blocks has a live upstream (the coarse-ring bridge).
     pub fn blocks_only() -> Self {
         let mut s = HashSet::new();
         s.insert(ChannelClass::Blocks);
@@ -215,11 +220,16 @@ impl RealtimeBus {
 
     /// Publish one event: assign the next global `seq`, retain it in the resume
     /// window, and fan it out to every matching subscriber under the
-    /// never-block drop policy. Returns the assigned `seq`.
+    /// never-block drop policy. Returns the assigned `seq`. If the u64 cursor
+    /// is exhausted, drops the event and returns the last assigned cursor.
     pub fn publish(&self, body: RealtimeEventBody) -> u64 {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = g.next_seq;
-        g.next_seq += 1;
+        let Some(next_seq) = g.next_seq.checked_add(1) else {
+            tracing::error!("realtime cursor exhausted; event dropped");
+            return g.next_seq - 1;
+        };
+        g.next_seq = next_seq;
         let event = Arc::new(RealtimeEvent {
             seq,
             emitted_at_unix_ms: body.emitted_at_unix_ms,
@@ -405,6 +415,44 @@ mod tests {
         assert_eq!(bus.publish(blk(1)), 1);
         assert_eq!(bus.publish(blk(2)), 2);
         assert_eq!(bus.latest_seq(), 2);
+    }
+
+    #[test]
+    fn restored_cursor_is_monotonic_and_reports_missing_backfill() {
+        let bus = RealtimeBus::blocks_only();
+        bus.advance_cursor_to(18);
+        assert_eq!(bus.latest_seq(), 17);
+        let replay = bus.backfill(&keyset(&["blocks"]), 10, 100);
+        assert!(replay.gap);
+        assert!(replay.events.is_empty());
+        assert_eq!(bus.publish(blk(1)), 18);
+        bus.advance_cursor_to(4);
+        assert_eq!(bus.publish(blk(2)), 19);
+        let replay = bus.backfill(&keyset(&["blocks"]), 17, 100);
+        assert!(!replay.gap);
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![18, 19]
+        );
+    }
+
+    #[test]
+    fn exhausted_cursor_drops_events_without_wrapping() {
+        let bus = RealtimeBus::blocks_only();
+        bus.advance_cursor_to(u64::MAX - 1);
+        assert_eq!(bus.publish(blk(1)), u64::MAX - 1);
+        assert_eq!(bus.publish(blk(2)), u64::MAX - 1);
+        assert_eq!(bus.latest_seq(), u64::MAX - 1);
+        assert_eq!(
+            bus.backfill(&keyset(&["blocks"]), u64::MAX - 2, 100)
+                .events
+                .len(),
+            1
+        );
     }
 
     #[test]

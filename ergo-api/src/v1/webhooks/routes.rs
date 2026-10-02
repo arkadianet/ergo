@@ -60,13 +60,16 @@ impl WebhooksState {
     /// response. Boxed to keep the `Ok` path small — the repo convention
     /// for handler early-returns (a rendered [`Response`] is large).
     fn handle(&self) -> Result<&WebhooksHandle, Box<Response>> {
-        self.handle.as_ref().ok_or_else(|| {
-            Box::new(v1_error(
-                Reason::WebhooksDisabled,
-                "the webhook store is not wired on this node",
-                "webhooks require the durable delivery subsystem to be enabled",
-            ))
-        })
+        self.handle
+            .as_ref()
+            .filter(|handle| handle.engine.is_available())
+            .ok_or_else(|| {
+                Box::new(v1_error(
+                    Reason::WebhooksDisabled,
+                    "the webhook store is not wired on this node",
+                    "webhooks require the durable delivery subsystem to be enabled",
+                ))
+            })
     }
 }
 
@@ -238,6 +241,11 @@ pub(crate) async fn register(
             "the maximum number of webhooks is registered",
             "delete an existing webhook before registering another",
         ),
+        Err(RegisterError::StorageUnavailable) => v1_error(
+            Reason::WebhooksDisabled,
+            "the webhook store could not commit this registration",
+            "restore writable webhook storage and restart the node",
+        ),
         Err(RegisterError::TooManyChannels) => v1_error(
             Reason::LimitExceeded,
             "too many channels for one webhook",
@@ -331,6 +339,12 @@ pub(crate) async fn delete(State(state): State<WebhooksState>, Path(id): Path<St
     };
     if handle.engine.delete(&id) {
         Json(json!({ "webhook_id": id, "deleted": true })).into_response()
+    } else if !handle.engine.is_available() {
+        v1_error(
+            Reason::WebhooksDisabled,
+            "webhook deletion could not be committed",
+            "restore writable storage and restart",
+        )
     } else {
         webhook_not_found()
     }
@@ -360,6 +374,10 @@ pub(crate) async fn patch_active(
     };
     match handle.engine.set_active(&id, body.active) {
         Some(sub) => Json(sub.to_dto()).into_response(),
+        None if !handle.engine.is_available() => match state.handle() {
+            Err(response) => *response,
+            Ok(_) => webhook_not_found(),
+        },
         None => webhook_not_found(),
     }
 }
