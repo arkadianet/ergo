@@ -493,6 +493,13 @@ impl NodeAdmin for NoopNodeAdmin {
     fn request_shutdown(&self) {}
 }
 
+/// Coherent pool overlay for wallet selection and parent-input resolution.
+#[derive(Clone)]
+pub struct MempoolBoxSnapshot {
+    pub outputs: Arc<HashMap<BoxId, ErgoBox>>,
+    pub spent_box_ids: std::collections::HashSet<BoxId>,
+}
+
 /// Snapshot-read view over the mempool, consumed by the extra-index
 /// pool overlay. Handlers compose `IndexerQuery` (confirmed-only) with
 /// this trait to assemble the unconfirmed view that mirrors Scala's
@@ -524,6 +531,22 @@ pub trait MempoolView: Send + Sync {
     /// duration of the request even if the publisher rebuilds the
     /// snapshot mid-iteration.
     fn pool_outputs(&self) -> Arc<HashMap<BoxId, ErgoBox>>;
+
+    /// Capture outputs and spend marks from one pool snapshot. The production
+    /// implementation overrides this; the default supports immutable test views.
+    fn box_snapshot(&self, committed_ids: &[BoxId]) -> MempoolBoxSnapshot {
+        let outputs = self.pool_outputs();
+        let spent_box_ids = committed_ids
+            .iter()
+            .chain(outputs.keys())
+            .filter(|id| self.is_spent_by_pool(id))
+            .copied()
+            .collect();
+        MempoolBoxSnapshot {
+            outputs,
+            spent_box_ids,
+        }
+    }
 
     /// Coherent single-snapshot read for the tx-detail endpoint: the
     /// canonical wire bytes of the pooled tx `tx_id` (if present)

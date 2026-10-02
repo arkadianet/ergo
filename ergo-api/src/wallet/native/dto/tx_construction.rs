@@ -204,7 +204,7 @@ pub enum InputSource {
     /// Automatic wallet box selection.
     #[serde(rename_all = "camelCase")]
     Auto {
-        /// Minimum confirmations a candidate box must have (`-1` = include pool).
+        /// Minimum block depth (`tip - inclusionHeight`; `-1` also includes unspent wallet pool outputs).
         #[serde(default)]
         min_confirmations: i64,
         /// Box ids to exclude from selection.

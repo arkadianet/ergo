@@ -3748,7 +3748,7 @@ components:
           minConfirmations:
             type: integer
             format: int64
-            description: Minimum confirmations a candidate box must have (`-1` = include pool).
+            description: Minimum block depth (`tip - inclusionHeight`; `-1` also includes unspent wallet pool outputs).
           type:
             type: string
             enum:

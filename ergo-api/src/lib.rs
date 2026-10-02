@@ -46,3 +46,6 @@ pub use traits::{
     NoopNodeAdmin, PoolTxDetail, VotingControlError,
 };
 pub use types::*;
+
+/// Coherent pool output/spend overlay for wallet construction.
+pub use traits::MempoolBoxSnapshot;
