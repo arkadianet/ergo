@@ -728,13 +728,13 @@ fn threshold_own_commitment_without_secret_rejects() {
 
     let oc_a = OwnCommitment {
         image: a_image.clone(),
-        secret_randomness: r_bytes_a,
+        secret_randomness: r_bytes_a.into(),
         commitment: FirstProverMessage::Schnorr(r_pt_a),
         position: pos_child0,
     };
     let oc_b = OwnCommitment {
         image: b_image.clone(),
-        secret_randomness: r_bytes_b,
+        secret_randomness: r_bytes_b.into(),
         commitment: FirstProverMessage::Schnorr(r_pt_b),
         position: pos_child1,
     };

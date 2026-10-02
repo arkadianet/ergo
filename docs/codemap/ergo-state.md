@@ -57,7 +57,8 @@ same state root from a block's ADProofs instead of a box arena.
 - `src/reader.rs` — `ChainStoreReader`: lock-free `Clone` read handle (own redb
   read txn per call) used by the API layer and indexer.
 - `src/persist.rs` — background persist pipeline (`PersistPipeline`,
-  `PersistResult`) batching AVL writes into one redb commit off the action loop.
+  `PersistResult`, `PersistProgress`) batching AVL writes into one redb commit
+  off the action loop, with a shared first-failure latch and commit barrier.
 - `src/diff.rs` — block-apply tx diff (`TipPointer`, `AppliedTx`, `TxDiff`)
   consumed by the indexer/mempool.
 - `src/active_params.rs` — `voted_params` redb table read/write helpers
@@ -111,6 +112,31 @@ same state root from a block's ADProofs instead of a box arena.
   AVL+ node mutations + chain_index + state_meta + (epoch-boundary) voted_params
   + (when hooked) wallet rows in a single redb write transaction. Either all
   land or none do.
+- **Chain metadata ownership.** Header writes merge only their header pointer,
+  score and availability with the full-block pointer already committed in the
+  same transaction. Persist batches merge their full-block pointer with the
+  latest committed header selection. A stale batch cannot replace a newer
+  header or a same-height selected fork; a foreground header write cannot
+  publish queued AVL progress. Open rejects full-block height differing from
+  AVL metadata height instead of trusting an inconsistent snapshot baseline.
+- **Persistence failure is terminal.** The first failed batch stops the worker.
+  No dependent delta may commit after it. The shared failure latch is
+  authoritative even when result notifications are full; sends, drains,
+  barriers and explicit shutdown return the original error. Shutdown still
+  joins the worker and attempts the final synchronous commit, and reports
+  failure rather than claiming success. Joined pipelines retain their failure
+  and cannot be replaced in the same store; recovery requires reopening from
+  committed state. Repeated shutdown cannot erase an earlier failure.
+- **Commit and durability are separate.** `flush_persist_pipeline` waits for
+  transaction commit, not device synchronization. Normal and periodic durable
+  batches use `Durability::Immediate`; relaxed IBD batches use `None`. Leaving
+  IBD drains queued jobs and forces an Immediate barrier before changing mode.
+  `persistence_progress` reports admitted, committed and synchronously durable
+  job counts since this pipeline started, not heights. The configured IBD
+  interval alone does not bound replay loss: queued jobs add volatile work to
+  committed jobs since the last fsync. A process crash and a machine power
+  failure have different survival guarantees, and durable writes depend on
+  the operating system/device honoring fsync.
 - **Delta-based reorg.** There is no single "reorg" method; reorg is
   `rollback_to(common_ancestor)` then re-apply. Rollback replays each block's
   `ChangeLog` before-image in reverse via `apply_rollback_mutations`. Any

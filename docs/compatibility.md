@@ -135,6 +135,17 @@ exact figure depends on peer and hardware conditions.
 
 ## How parity is checked
 
+Wallet-file encryption and the modern/pre-1627 derivation paths are pinned to
+fresh fixtures from Scala wallet 6.0.6 at commit
+`23aabead88774d27f2c9190ace3c9abbc8f1d5cb`. Every PR regenerates the fixture and
+unlocks a newly created Rust wallet with the Scala implementation. See
+[wallet fixture provenance](../test-vectors/wallet/README.md). Import accepts
+Scala's historical encrypted-stream field split, absent cipher algorithm/mode
+fields, and a missing/null legacy flag, as well as the authenticated field
+layout written by earlier Rust versions. New files use the Scala field split;
+older Rust binaries that only understand the previous split cannot unlock
+them. Keep an upgraded binary available before creating/restoring a wallet.
+
 Four independent oracles, ranked by signal strength, with a strict rule
 about which one counts for consensus:
 

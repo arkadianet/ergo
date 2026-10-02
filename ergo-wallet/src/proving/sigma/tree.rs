@@ -63,8 +63,8 @@ pub(super) enum LeafState {
     /// Wallet holds the secret. `r_scalar` is the commitment randomness;
     /// `commit_bytes` is the public commitment (33B for Schnorr, 66B for DHT).
     Real {
-        secret: Scalar,
-        r_scalar: Scalar,
+        secret: zeroize::Zeroizing<Scalar>,
+        r_scalar: zeroize::Zeroizing<Scalar>,
         commit_bytes: Vec<u8>,
     },
     /// Wallet doesn't hold the secret. `challenge`, `z_bytes`, and

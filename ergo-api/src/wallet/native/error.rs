@@ -60,6 +60,7 @@ pub(crate) fn map_err(e: WalletAdminError) -> NativeErr {
         E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
         E::StaleChainTip(_) => (StatusCode::CONFLICT, "stale_chain_tip"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        E::ShuttingDown => (StatusCode::SERVICE_UNAVAILABLE, "shutting_down"),
         // Legacy compat-only `Forbidden` (getPrivateKey) maps to the same
         // sensitive-disabled reason as the native `SensitiveOpDisabled`.
         E::Forbidden(_) => (StatusCode::FORBIDDEN, "sensitive_op_disabled"),

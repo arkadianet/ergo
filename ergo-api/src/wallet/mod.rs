@@ -448,6 +448,9 @@ pub trait WalletAdmin: Send + Sync {
 /// the handler layer.
 #[derive(Debug, thiserror::Error)]
 pub enum WalletAdminError {
+    /// The node stopped wallet command admission. Maps to HTTP 503.
+    #[error("wallet shutting down")]
+    ShuttingDown,
     #[error("wallet uninitialized")]
     Uninitialized,
     #[error("wallet locked")]

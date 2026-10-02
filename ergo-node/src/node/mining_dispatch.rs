@@ -1002,14 +1002,14 @@ pub(super) fn handle_mining_request(
             // 4. Drive validation + apply through the executor's
             //    AssembleBlock path. Route follow-up actions through the
             //    same outbound dispatch used by peer-received blocks.
-            let rescan_guard = crate::wallet_boot::ProdRescanGuard;
+            let rescan_guard = state.wallet_rescan.as_ref();
             let wallet_wiring =
                 state
                     .wallet_hook
                     .as_deref()
                     .map(|h| ergo_state::wallet::WalletWiring {
                         hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                        rescan_guard: &rescan_guard,
+                        rescan_guard,
                     });
             let apply_started = Instant::now();
             let follow_ups = state.executor.execute(

@@ -251,8 +251,8 @@ fn main() -> Result<()> {
                 }
             }
             drop(data);
-            store.set_ibd_mode(true, 500);
-            store.enable_persist_pipeline(64);
+            store.set_ibd_mode(true, 500)?;
+            store.enable_persist_pipeline(64)?;
             let mut backend = ergo_state::StateBackendKind::Utxo(store);
             apply(&mut backend, &ids, &Default::default(), None)?;
             let store = backend.as_utxo_mut().ok_or("UTXO store")?;
@@ -326,8 +326,8 @@ fn main() -> Result<()> {
                 ProofPolicy::Regenerate => ergo_state::store::AdProofsApplyPolicy::Regenerate,
                 ProofPolicy::VerifyShipped => ergo_state::store::AdProofsApplyPolicy::VerifyShipped,
             });
-            store.set_ibd_mode(true, flush_interval);
-            store.enable_persist_pipeline(persist_jobs);
+            store.set_ibd_mode(true, flush_interval)?;
+            store.enable_persist_pipeline(persist_jobs)?;
             let csv_path = std::env::var_os("ERGO_MEM_CSV").ok_or("set ERGO_MEM_CSV")?;
             let mut file = mem_csv::open_or_init(std::path::Path::new(&csv_path))?;
             sample(&store, "BeforeApply", &mut file)?;
