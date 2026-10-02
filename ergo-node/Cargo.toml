@@ -64,6 +64,7 @@ ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 ergo-api           = { workspace = true }
 ergo-mempool       = { workspace = true, features = ["test-support"] }
 ergo-p2p           = { workspace = true }

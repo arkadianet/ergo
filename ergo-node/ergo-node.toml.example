@@ -225,9 +225,10 @@ peer_details.reverse_dns = false
 # initialized and unlocked once.
 # miner_public_key_hex = "02..."
 
-# Debounce window (ms) for same-parent mempool-refresh rebuilds.
-# Floor 50. Tip changes always rebuild immediately regardless.
-# block_candidate_generation_interval_ms = 1000
+# Minimum interval (ms) between same-parent mempool-refresh signals.
+# Floor 50. Pending changes share an exact deadline and use the latest pool.
+# Applied-parent changes rebuild immediately; header-only changes do not.
+# block_candidate_generation_interval_ms = 250
 
 # Must stay true — an internal CPU miner is not supported.
 # use_external_miner = true
@@ -241,9 +242,11 @@ peer_details.reverse_dns = false
 # Default false: load authenticated AVL paths on demand, without retaining
 # the full UTXO tree between builds. True enables the alternative full-tree
 # cache, keyed on the committed tip: the first build pays full hydration,
-# same-tip rebuilds are near-instant. Holds the full UTXO node graph
-# resident (multi-GB on mainnet archival) — enable only on a mining
-# node with RAM headroom. See docs/configuration.md.
+# same-tip rebuilds reuse the tree and loaded paths. Validation and changed
+# transaction-set proofs still run. Independent of this option, identical
+# applied-parent/ordered-transaction builds reuse a prior verified state proof.
+# Holds the full UTXO node graph resident (multi-GB on mainnet archival) —
+# enable only on a mining node with RAM headroom. See docs/configuration.md.
 # candidate_base_cache = false
 
 [voting]

@@ -23,6 +23,7 @@ serde_json      = { workspace = true }
 thiserror       = { workspace = true }
 
 [dev-dependencies]
+flate2          = { workspace = true }
 ergo-mempool    = { workspace = true, features = ["test-support"] }
 ergo-state      = { workspace = true, features = ["test-helpers"] }
 serde_json      = { workspace = true }
