@@ -1,5 +1,5 @@
 name: Repository Rust toolchain
-description: Install the compiler from rust-toolchain.toml and expose pinned Cargo tool versions
+description: Install the compiler from rust-toolchain.toml and expose pinned CI tool versions
 inputs:
   nightly:
     description: Install the pinned fuzz nightly instead of stable
@@ -35,6 +35,9 @@ outputs:
   fuzz:
     value: ${{ steps.versions.outputs.fuzz }}
     description: cargo-fuzz release
+  scala_cli:
+    value: ${{ steps.versions.outputs.scala_cli }}
+    description: Scala CLI release for JVM oracle checks
 runs:
   using: composite
   steps:
