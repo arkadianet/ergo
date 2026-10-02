@@ -46,8 +46,15 @@ object WalletOracle extends App {
     val (ciphertext, tag) = AES.encrypt(seed(phrase), "test-password".toCharArray, salt, iv)(settings)
     val modern = EncryptedSecret(ciphertext, salt, iv, tag, settings, Some(false)).asJson
     val legacy = EncryptedSecret(ciphertext, salt, iv, tag, settings, None).asJson
+    val legacyKeys = Seq(44 | 0x80000000, 429 | 0x80000000, 0x80000000, 0, 0)
+      .scanLeft(ExtendedSecretKey.deriveMasterKey(seed(legacyPhrase), true))(_.child(_))
+      .zipWithIndex.map { case (key, depth) =>
+        Json.obj("depth" -> depth.asJson, "secret" -> hex(key.keyBytes).asJson,
+          "chainCode" -> hex(key.chainCode).asJson)
+      }
     println(Json.obj("scalaVersion" -> "ergo-wallet 6.0.6 / sigma-state 6.0.6".asJson,
       "aes" -> vectors.asJson, "modern" -> modern, "legacy" -> legacy,
+      "legacyDerivation" -> legacyKeys.asJson,
       "modernAddress" -> address(phrase, false).asJson,
       "pre1627Address" -> address(legacyPhrase, true).asJson,
       "post1627Address" -> address(legacyPhrase, false).asJson).spaces2)

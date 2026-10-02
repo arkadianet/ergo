@@ -42,6 +42,38 @@
     },
     "usePre1627KeyDerivation" : null
   },
+  "legacyDerivation" : [
+    {
+      "depth" : 0,
+      "secret" : "3527de3227326920720f394281ac182689a7d7e29951d837e96612e4d4bbcfde",
+      "chainCode" : "fd11debf4469c0ccef8aceb5467980b41243ee2172f2256f70b1edad590d1f64"
+    },
+    {
+      "depth" : 1,
+      "secret" : "1368432076b443c9ed3110b6ed3f1973072c95a2999c7178014acc67cc60cdc3",
+      "chainCode" : "23c7ea7175611b914f331a545559c7b770f93150249224467855ef140656b1b4"
+    },
+    {
+      "depth" : 2,
+      "secret" : "6795ba06412cb46add55c13b480dbed4a4433ef6c79b2d7002c0462c09372e",
+      "chainCode" : "eeb77cc0472c8420b2ff25df16be02c9fd93e6bc57eae53d1f17364b0d05df37"
+    },
+    {
+      "depth" : 3,
+      "secret" : "2f2baceb97081f3ecdf5c083482bb2561e7cc183e0cbe172ab801a5e3d1a4b58",
+      "chainCode" : "9728b21aeab5feae2f55a204050c25aba5c98ca4b64bf8ae713c342feb4a73b5"
+    },
+    {
+      "depth" : 4,
+      "secret" : "41e56e303534c7c2dd33979e56629355b3d8f0b7ee9d1ac2fb3f72659268d7ab",
+      "chainCode" : "12e636680a5fc2d926b749b6203cf9948e742c2a1d5a3721d03eb8882c3ca098"
+    },
+    {
+      "depth" : 5,
+      "secret" : "c2253076e42620eddaff801723678ae36829627bd6fd25f6aa185a1cc8e75659",
+      "chainCode" : "465ff5ad8c93e7b14284da6ba72a2fc5a879f352425d64cd3bfe9daa9f4bb03d"
+    }
+  ],
   "modernAddress" : "9fv2n41gttbUx8oqqhexi68qPfoETFPxnLEEbTfaTk4SmY2knYC",
   "pre1627Address" : "9ewv8sxJ1jfr6j3WUSbGPMTVx3TZgcJKdnjKCbJWhiJp5U62uhP",
   "post1627Address" : "9eYMpbGgBf42bCcnB2nG3wQdqPzpCCw5eB1YaWUUen9uCaW3wwm"
