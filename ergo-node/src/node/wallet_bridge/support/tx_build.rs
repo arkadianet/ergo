@@ -63,6 +63,36 @@ pub(crate) async fn build_unsigned_tx(
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
 ) -> Result<BuiltTx, WalletAdminError> {
+    build_unsigned_tx_with_registers(
+        requests,
+        override_inputs,
+        override_data_inputs,
+        fee_override,
+        change_address_override,
+        state,
+        db,
+        chain,
+        network,
+        &[],
+    )
+    .await
+}
+
+/// Native payment registers are applied before serialization; compat callers
+/// use the wrapper above and retain empty registers on payment outputs.
+#[allow(clippy::too_many_arguments)]
+async fn build_unsigned_tx_with_registers(
+    requests: &[PaymentRequestDto],
+    override_inputs: Option<&[String]>,
+    override_data_inputs: Option<&[String]>,
+    fee_override: Option<u64>,
+    change_address_override: Option<&str>,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+    registers: &[ergo_ser::register::AdditionalRegisters],
+) -> Result<BuiltTx, WalletAdminError> {
     let state = state.read();
     let as_of = chain
         .wallet_scan_height()
@@ -304,7 +334,7 @@ pub(crate) async fn build_unsigned_tx(
 
         // Build output candidates.
         let mut output_candidates: Vec<ergo_ser::ergo_box::ErgoBoxCandidate> = Vec::new();
-        for req in &payment_reqs {
+        for (index, req) in payment_reqs.iter().enumerate() {
             let ergo_tree = {
                 let mut r = ergo_primitives::reader::VlqReader::new(&req.to_ergo_tree);
                 ergo_ser::ergo_tree::read_ergo_tree(&mut r)
@@ -324,7 +354,7 @@ pub(crate) async fn build_unsigned_tx(
                     ergo_tree,
                     current_height,
                     tokens,
-                    ergo_ser::register::AdditionalRegisters::empty(),
+                    registers.get(index).cloned().unwrap_or_default(),
                 )
                 .map_err(|e| {
                     WalletAdminError::Internal(format!("ErgoBoxCandidate (payment): {e:?}"))
@@ -504,9 +534,19 @@ pub(crate) async fn build_unsigned_tx(
         // re-emission token on a payment output (→ `ReemissionTokenOnOutput`,
         // mapped to `reemission_spend_not_allowed` by `map_build_error`), so the
         // invariant holds even on a direct builder call — no extra guard here.
-        let (unsigned_tx, plan) = builder
+        let (mut unsigned_tx, plan) = builder
             .build_with_plan(&payment_reqs)
             .map_err(map_build_error)?;
+        for (candidate, regs) in unsigned_tx.output_candidates.iter_mut().zip(registers) {
+            *candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                candidate.value,
+                candidate.ergo_tree().clone(),
+                candidate.creation_height,
+                candidate.tokens.clone(),
+                regs.clone(),
+            )
+            .map_err(|e| WalletAdminError::BadRequest(format!("payment registers: {e}")))?;
+        }
         let bytes = super::sign_submit::serialize_unsigned_tx(&unsigned_tx)?;
 
         // Reconstruct the response plan from the builder's `SelectionPlan` + the
@@ -890,9 +930,53 @@ pub(crate) fn select_boxes_impl(
     })
 }
 
+/// Decode each register independently so trailing bytes cannot turn into a
+/// different register. The consensus register reader enforces evaluated values
+/// and type restrictions. Dense R4..R9 packing is enforced at the API boundary.
+fn parse_native_registers(
+    registers: Option<&BTreeMap<String, String>>,
+) -> Result<ergo_ser::register::AdditionalRegisters, WalletAdminError> {
+    let mut result = ergo_ser::register::AdditionalRegisters::empty();
+    let Some(registers) = registers else {
+        return Ok(result);
+    };
+    if registers.len() > 6 {
+        return Err(WalletAdminError::BadRequest(
+            "at most six registers (R4..R9) are allowed".into(),
+        ));
+    }
+    for (index, (key, value)) in registers.iter().enumerate() {
+        if key != &format!("R{}", index + 4) {
+            return Err(WalletAdminError::BadRequest(
+                "registers must be densely packed from R4 through R9".into(),
+            ));
+        }
+        let bytes = hex::decode(value).map_err(|_| {
+            WalletAdminError::BadRequest(format!("{key}: invalid hexadecimal constant"))
+        })?;
+        let mut bytes_with_count = vec![1];
+        bytes_with_count.extend(bytes);
+        let mut reader = ergo_primitives::reader::VlqReader::new(&bytes_with_count);
+        let decoded = ergo_ser::register::read_registers(&mut reader)
+            .map_err(|e| WalletAdminError::BadRequest(format!("{key}: {e}")))?;
+        if !reader.is_empty() {
+            return Err(WalletAdminError::BadRequest(format!(
+                "{key}: trailing bytes after constant"
+            )));
+        }
+        for point in reader.group_elements() {
+            ergo_sigma::evaluator::validate_group_element(*point).map_err(|e| {
+                WalletAdminError::BadRequest(format!("{key}: invalid group element: {e:?}"))
+            })?;
+        }
+        result.registers.extend(decoded.registers);
+    }
+    Ok(result)
+}
+
 /// Native `transactions/build`: map a [`TxIntent`] to the burn-aware
 /// [`build_unsigned_tx`] and report exactly what was built. `payment` outputs are
-/// load-bearing; `mint`/`burn`/`payment.registers` and inline-serialized box
+/// load-bearing, including custom R4..R9 registers; `mint`/`burn` and inline-serialized box
 /// sources ship `unsupported_intent(422)` until wired (a later 422→200 for the
 /// same well-formed request).
 pub(crate) async fn build_transaction_impl(
@@ -910,6 +994,7 @@ pub(crate) async fn build_transaction_impl(
         ));
     }
     let mut payment_reqs: Vec<PaymentRequestDto> = Vec::with_capacity(intent.outputs.len());
+    let mut payment_registers = Vec::with_capacity(intent.outputs.len());
     for o in &intent.outputs {
         match o {
             ndto::OutputIntent::Payment {
@@ -918,9 +1003,7 @@ pub(crate) async fn build_transaction_impl(
                 assets,
                 registers,
             } => {
-                if registers.is_some() {
-                    return Err(WalletAdminError::UnsupportedIntent);
-                }
+                payment_registers.push(parse_native_registers(registers.as_ref())?);
                 let assets = assets
                     .iter()
                     .map(|a| {
@@ -967,7 +1050,7 @@ pub(crate) async fn build_transaction_impl(
         ndto::DataInputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
     };
 
-    let built = build_unsigned_tx(
+    let built = build_unsigned_tx_with_registers(
         &payment_reqs,
         override_inputs.as_deref(),
         override_data_inputs.as_deref(),
@@ -977,8 +1060,41 @@ pub(crate) async fn build_transaction_impl(
         db,
         chain,
         network,
+        &payment_registers,
     )
     .await?;
+
+    if payment_registers.iter().any(|r| r.count() != 0) {
+        // Registers change box size and therefore its required minimum value.
+        // Validate the complete candidate against the current voted parameters.
+        let bytes = &built.bytes;
+        let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
+        let unsigned = ergo_ser::transaction::read_unsigned_transaction(&mut reader)
+            .map_err(|e| WalletAdminError::Internal(format!("built transaction decode: {e}")))?;
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: unsigned
+                .inputs
+                .into_iter()
+                .map(|input| {
+                    Ok(ergo_ser::input::Input {
+                        box_id: input.box_id,
+                        spending_proof: ergo_ser::input::SpendingProof::new(
+                            vec![],
+                            input.extension,
+                        )
+                        .map_err(|e| WalletAdminError::Internal(format!("built input: {e}")))?,
+                    })
+                })
+                .collect::<Result<Vec<_>, WalletAdminError>>()?,
+            data_inputs: unsigned.data_inputs,
+            output_candidates: unsigned.output_candidates,
+        };
+        let params = chain
+            .build_protocol_params()
+            .map_err(crate::node::wallet_bridge::map_chain_error)?;
+        ergo_validation::tx::structural::validate_structural(&tx, &params)
+            .map_err(|e| WalletAdminError::BadRequest(format!("built transaction: {e}")))?;
+    }
 
     // Fail-closed: a reward-box spend (EIP-27 burn) needs explicit opt-in.
     if built.reemission_burn.is_some() && !intent.allow_reemission_spend {
@@ -1027,6 +1143,175 @@ mod tests {
     use super::*;
     use ergo_ser::address::NetworkPrefix;
 
+    // ----- helpers -----
+
+    fn register_map(value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([("R4".into(), value.into())])
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn native_registers_malformed_sparse_or_trailing_rejected() {
+        for registers in [
+            BTreeMap::from([("R5".into(), "0402".into())]),
+            BTreeMap::from([("R3".into(), "0402".into())]),
+            register_map("zz"),
+            register_map(""),
+            register_map("040200"),
+            register_map("280102"),
+            register_map(&format!("0702{}", "00".repeat(32))),
+            (4..=10).map(|n| (format!("R{n}"), "0402".into())).collect(),
+        ] {
+            assert!(matches!(
+                parse_native_registers(Some(&registers)),
+                Err(WalletAdminError::BadRequest(_))
+            ));
+        }
+        assert_eq!(
+            parse_native_registers(Some(&BTreeMap::new()))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn native_registers_group_normalization_matches_scala_candidate() {
+        // Scala-generated candidate fixtures, with provenance and extraction
+        // script recorded in their _comment. All cases carry only R4.
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/scala/canonical_extension_and_group_element.json"
+        ))
+        .unwrap();
+        for case in oracle["boxes"].as_array().unwrap() {
+            let input = case["candidate_wire_hex"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("c0843d10010101d17300000001")
+                .unwrap();
+            let regs = parse_native_registers(Some(&register_map(input))).unwrap();
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::register::write_registers(&mut writer, &regs).unwrap();
+            let expected = case["canonical_candidate_hex"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("c0843d10010101d173000000")
+                .unwrap();
+            assert_eq!(hex::encode(writer.result()), expected, "{}", case["label"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_build_registers_auto_and_explicit_preserve_payment_only() {
+        use ergo_api::wallet::native::dto::{InputSource, TxIntent};
+        use ergo_state::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        let address = test_addr();
+        let input_id = [0xAB; 32];
+        let chain = BurnTestChain {
+            reward_id: input_id,
+            reward_box: ergo_ser::ergo_box::ErgoBox {
+                candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    5_000_000,
+                    p2pk_tree(&address),
+                    100,
+                    vec![],
+                    Default::default(),
+                )
+                .unwrap(),
+                transaction_id: ergo_primitives::digest::ModifierId::from(
+                    ergo_primitives::digest::Digest32::from_bytes([0xCD; 32]),
+                ),
+                index: 0,
+            },
+            rules: ergo_validation::ReemissionRuleInputs {
+                activation_height: 1000,
+                reemission_token_id: REEMISSION_TOKEN,
+                pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+            },
+            tip: 200,
+        };
+        let mut wallet = ergo_wallet::state::WalletState::empty(false);
+        wallet.set_change_address(address.clone());
+        let state = RwLock::new(wallet);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            let wb = WalletBox {
+                box_id: input_id,
+                creation_tx_id: [0xCD; 32],
+                creation_output_index: 0,
+                creation_height: 100,
+                value: 5_000_000,
+                assets: vec![],
+                status: BoxStatus::Confirmed,
+                provenance: BoxProvenance::Owned,
+            };
+            table
+                .insert(input_id, bincode::serialize(&wb).unwrap())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let mut intent: TxIntent = serde_json::from_value(serde_json::json!({
+            "outputs": [{"type":"payment", "address":address, "value":"2000000",
+                "registers":{"R4":"070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}}]
+        })).unwrap();
+        for inputs in [
+            InputSource::default(),
+            InputSource::BoxIds {
+                box_ids: vec![hex::encode(input_id)],
+            },
+        ] {
+            intent.inputs = inputs;
+            let built =
+                build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet)
+                    .await
+                    .unwrap();
+            let bytes = hex::decode(built.unsigned_transaction.bytes_hex()).unwrap();
+            let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
+            let tx = ergo_ser::transaction::read_unsigned_transaction(&mut reader).unwrap();
+            // Scala fixture's R4 generator constant, retained byte-for-byte.
+            assert_eq!(
+                hex::encode(tx.output_candidates[0].register_bytes()),
+                "01070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            );
+            assert!(tx.output_candidates[1..]
+                .iter()
+                .all(|b| b.additional_registers.count() == 0));
+            assert_eq!(built.change_outputs[0].nano_erg, "2000000");
+        }
+        for length in [3900, 5000] {
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::sigma_value::write_constant(
+                &mut writer,
+                &ergo_ser::sigma_type::SigmaType::SColl(Box::new(
+                    ergo_ser::sigma_type::SigmaType::SByte,
+                )),
+                &ergo_ser::sigma_value::SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(
+                    vec![0; length],
+                )),
+            )
+            .unwrap();
+            intent.outputs = vec![ergo_api::wallet::native::dto::OutputIntent::Payment {
+                address: address.clone(),
+                value: "1000000".into(),
+                assets: vec![],
+                registers: Some(register_map(&hex::encode(writer.result()))),
+            }];
+            assert!(matches!(
+                build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet).await,
+                Err(WalletAdminError::BadRequest(_))
+            ));
+        }
+    }
+
     /// Real mainnet pay-to-reemission contract tree (valid; header byte 0x19).
     const PAY2R_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
     const REEMISSION_TOKEN: [u8; 32] = [0x11; 32];
@@ -1070,6 +1355,12 @@ mod tests {
         }
         fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
             Some(&self.rules)
+        }
+        fn build_protocol_params(
+            &self,
+        ) -> Result<ergo_validation::ProtocolParams, crate::node::wallet_bridge::ChainStateError>
+        {
+            Ok(ergo_validation::ProtocolParams::mainnet_default())
         }
         fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
             (box_id == &self.reward_id).then(|| self.reward_box.clone())

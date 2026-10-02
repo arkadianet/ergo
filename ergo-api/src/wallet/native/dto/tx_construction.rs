@@ -68,7 +68,7 @@ impl<'de> Deserialize<'de> for TxRepr {
 }
 
 /// One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-/// assets/registers) and `burn` are load-bearing; `mint` and `payment.registers`
+/// assets/registers) and `burn` are load-bearing; `mint`
 /// are valid shapes that ship `unsupported_intent(422)` until builder support
 /// lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
 /// change). Manual `Deserialize` so unknown sibling fields and cross-variant field
@@ -88,7 +88,7 @@ pub enum OutputIntent {
         /// Tokens to send alongside.
         #[serde(default)]
         assets: Vec<WalletAssetDto>,
-        /// Non-default registers (R4..R9), hex-encoded constants. `unsupported_intent` until wired.
+        /// Non-default registers (R4..R9), densely packed hex-encoded evaluated constants.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registers: Option<std::collections::BTreeMap<String, String>>,
     },
