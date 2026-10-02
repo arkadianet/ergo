@@ -166,6 +166,14 @@ impl PeerManager {
     /// Attach a persistent address book. Subsequent lifecycle hooks
     /// (handshake, dial outcome, gossip ingest, ban) will write through.
     /// Idempotent: replaces any existing handle.
+    /// Peer database budget and cumulative page-cache evictions, or zeros when unavailable.
+    pub fn address_book_cache_metrics(&self) -> (usize, u64) {
+        self.book
+            .as_ref()
+            .map(|b| b.cache_metrics())
+            .unwrap_or_default()
+    }
+
     pub fn set_address_book(&mut self, book: Arc<AddressBook>) {
         self.book = Some(book);
     }

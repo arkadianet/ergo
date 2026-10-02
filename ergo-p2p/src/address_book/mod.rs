@@ -47,7 +47,7 @@ fn begin_write_qr(db: &Database) -> Result<WriteTransaction, TransactionError> {
 /// shared helper, with `db = "address_book"`. See that helper's docs
 /// for the contract.
 #[allow(clippy::result_large_err)] // redb's DatabaseError shape is fixed upstream
-fn open_address_book_db(path: &Path) -> Result<Database, DatabaseError> {
+fn open_address_book_db(path: &Path, cache_bytes: usize) -> Result<Database, DatabaseError> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
@@ -58,6 +58,7 @@ fn open_address_book_db(path: &Path) -> Result<Database, DatabaseError> {
 
     let t0 = Instant::now();
     let db = Database::builder()
+        .set_cache_size(cache_bytes)
         .set_repair_callback(move |session| {
             let was_started = cb_started.swap(true, Ordering::SeqCst);
             let pct = session.progress() * 100.0;
@@ -208,9 +209,16 @@ impl RedbErrorMarker for redb::CommitError {}
 pub struct AddressBook {
     db: Database,
     writes: AtomicU64,
+    cache_bytes: usize,
 }
 
 impl AddressBook {
+    /// Effective redb page-cache budget and cumulative active eviction count.
+    /// The budget is a configuration limit, not an RSS measurement.
+    pub fn cache_metrics(&self) -> (usize, u64) {
+        (self.cache_bytes, self.db.cache_stats().evictions())
+    }
+
     /// Open or create `{data_dir}/peers.redb`. On corruption, rename the
     /// damaged file to `peers.redb.corrupt-{unix_secs}` and create a fresh
     /// one. Operator can inspect or delete the rename.
@@ -221,10 +229,16 @@ impl AddressBook {
 
     /// Direct path open — used by tests.
     pub fn open_at(path: &Path) -> Result<Self, AddressBookError> {
+        Self::open_at_with_cache(path, 1024 * 1024 * 1024)
+    }
+
+    /// Open a peer database with a separate redb page-cache budget. Recovery
+    /// of a corrupt database keeps the requested budget on the replacement.
+    pub fn open_at_with_cache(path: &Path, cache_bytes: usize) -> Result<Self, AddressBookError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| AddressBookError::Io(e.to_string()))?;
         }
-        let db = match open_address_book_db(path) {
+        let db = match open_address_book_db(path, cache_bytes) {
             Ok(db) => db,
             Err(e) => {
                 // Corruption: rename the damaged file out of the way and
@@ -248,7 +262,7 @@ impl AddressBook {
                         corrupt_path.display(),
                     )));
                 }
-                open_address_book_db(path)?
+                open_address_book_db(path, cache_bytes)?
             }
         };
 
@@ -285,6 +299,7 @@ impl AddressBook {
         Ok(Self {
             db,
             writes: AtomicU64::new(0),
+            cache_bytes,
         })
     }
 
@@ -728,6 +743,24 @@ mod tests {
     /// from disk so the node self-heals on the next boot instead of
     /// needing `peers.redb` moved aside — while keeping routable rows and
     /// operator-seeded loopback rows, which stay legitimately dialable.
+    #[test]
+    fn cache_budget_survives_reopen_and_corrupt_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.redb");
+        {
+            let book = AddressBook::open_at_with_cache(&path, 65536).unwrap();
+            assert_eq!(book.cache_metrics().0, 65536);
+        }
+        {
+            let book = AddressBook::open_at_with_cache(&path, 32768).unwrap();
+            assert_eq!(book.cache_metrics().0, 32768);
+        }
+        std::fs::write(&path, b"invalid redb file").unwrap();
+        let book = AddressBook::open_at_with_cache(&path, 16384).unwrap();
+        assert_eq!(book.cache_metrics().0, 16384);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn load_all_purges_learned_nonroutable_rows_and_keeps_seeds() {
         let dir = tempfile::tempdir().unwrap();

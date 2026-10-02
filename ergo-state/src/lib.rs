@@ -67,7 +67,10 @@ pub mod storage_observability;
 pub mod store;
 pub mod wallet;
 
-pub use redb_util::{begin_write_qr, open_with_repair_logging};
+pub use redb_util::{
+    begin_write_qr, open_with_repair_logging, open_with_repair_logging_and_cache,
+    DEFAULT_REDB_CACHE_BYTES,
+};
 
 /// The state-backend dispatch surface NodeState binds against: the
 /// `StateBackendKind` enum (UTXO arena or Mode 5 digest verifier) and

@@ -2369,3 +2369,45 @@ fn storage_rent_relay_policy_network_defaults_and_overrides() {
         }
     }
 }
+
+#[test]
+fn redb_cache_budgets_default_independently_of_avl_and_cli() {
+    let cfg = NodeConfig::load(minimal_cli::<&std::path::Path>(None)).unwrap();
+    assert_eq!(cfg.redb_cache_budgets, RedbCacheBudgets::default());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\ncache_bytes = 2097152\nstate_redb_cache_bytes = 16777216\nindexer_redb_cache_bytes = 33554432\npeers_redb_cache_bytes = 1048576\n").unwrap();
+    let mut cli = minimal_cli(Some(&path));
+    cli.cache_bytes = Some(4194304);
+    let cfg = NodeConfig::load(cli).unwrap();
+    assert_eq!(cfg.cache_bytes, Some(4194304));
+    assert_eq!(
+        cfg.redb_cache_budgets,
+        RedbCacheBudgets {
+            state: 16777216,
+            indexer: 33554432,
+            peers: 1048576
+        }
+    );
+}
+
+#[test]
+fn redb_cache_budgets_allow_disabled_cache_and_reject_negative_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\nstate_redb_cache_bytes = 0\n").unwrap();
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(cfg.redb_cache_budgets.state, 0);
+    assert_eq!(
+        cfg.redb_cache_budgets.peers,
+        ergo_state::DEFAULT_REDB_CACHE_BYTES
+    );
+    for field in [
+        "state_redb_cache_bytes",
+        "indexer_redb_cache_bytes",
+        "peers_redb_cache_bytes",
+    ] {
+        std::fs::write(&path, format!("[store]\n{field} = -1\n")).unwrap();
+        assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err());
+    }
+}

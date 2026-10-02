@@ -664,11 +664,14 @@ pub struct StateMetrics {
     /// Cumulative redb page-cache evictions for the state DB. Only non-zero
     /// when redb's `cache_metrics` feature is enabled.
     pub redb_cache_evictions: u64,
+    /// Configured redb page-cache budget; independent of the AVL arena.
+    pub redb_cache_capacity_bytes: usize,
 }
 
 pub struct StateStore {
     db: Arc<Database>,
     db_path: PathBuf,
+    redb_cache_bytes: usize,
     tree: AvlTree,
     height: u32,
     genesis_committed: bool,
@@ -1030,6 +1033,7 @@ impl StateStore {
             batch_headers_bytes: self.headers.batch_headers_bytes(),
             batch_meta_len: self.headers.batch_meta_len(),
             redb_cache_evictions: self.db.cache_stats().evictions(),
+            redb_cache_capacity_bytes: self.redb_cache_bytes,
         }
     }
 
