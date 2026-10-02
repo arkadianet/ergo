@@ -458,7 +458,7 @@ impl PeerManager {
 
     /// Check if an IP is currently banned (ban list, not peer table).
     pub fn is_banned(&self, addr: &SocketAddr, now: Instant) -> bool {
-        if let Some(entry) = self.bans.get(&addr.ip()) {
+        if let Some(entry) = self.bans.get(&crate::peer::canonical_ip(addr.ip())) {
             return now < entry.until;
         }
         false
@@ -781,10 +781,17 @@ impl PeerManager {
         }
     }
 
-    /// Restore a ban from disk. Idempotent — replaces any existing entry
-    /// for the same IP. Does not write back through to the book.
+    /// Restore a ban from disk without writing back. Mapped and native IPv4
+    /// records share one identity; preserve the strongest expiry and count if
+    /// both representations were persisted by an older node.
     pub fn restore_ban(&mut self, ip: IpAddr, until: Instant, count: u32) {
-        self.bans.insert(ip, BanEntry { until, count });
+        self.bans
+            .entry(crate::peer::canonical_ip(ip))
+            .and_modify(|entry| {
+                entry.until = entry.until.max(until);
+                entry.count = entry.count.max(count);
+            })
+            .or_insert(BanEntry { until, count });
     }
 
     /// Record a dial failure against a known address. Increments the
@@ -1080,30 +1087,33 @@ impl PeerManager {
         let ip_count = self
             .peers
             .values()
-            .filter(|p| p.addr.ip() == addr.ip())
+            .filter(|p| {
+                crate::peer::canonical_ip(p.addr.ip()) == crate::peer::canonical_ip(addr.ip())
+            })
             .count();
         if ip_count >= self.limits.per_ip_limit {
             return Err(ConnectError::PerIpLimitReached);
         }
-        // Per-subnet limit (IPv4 /16)
-        if let IpAddr::V4(ip) = addr.ip() {
-            let subnet = [ip.octets()[0], ip.octets()[1]];
-            let subnet_count = self
-                .peers
-                .values()
-                .filter(|p| p.subnet() == Some(subnet))
-                .count();
-            if subnet_count >= self.limits.per_subnet_limit {
-                return Err(ConnectError::PerSubnetLimitReached);
-            }
+        // Pending handshakes and both connection directions count against the
+        // same IPv4 /16 or IPv6 /48 group budget.
+        let group = limits::network_group(addr.ip());
+        let group_count = self
+            .peers
+            .values()
+            .filter(|p| limits::network_group(p.addr.ip()) == group)
+            .count();
+        if group_count >= self.limits.per_subnet_limit {
+            return Err(ConnectError::PerSubnetLimitReached);
         }
         Ok(())
     }
 
     /// Record a ban in the ban list (separate from peer table).
     fn record_ban(&mut self, ip: IpAddr, now: Instant, permanent: bool) {
+        let ip = crate::peer::canonical_ip(ip);
         // Bans are IP-wide, including other ports and pending handshakes.
-        self.peers.retain(|addr, _| addr.ip() != ip);
+        self.peers
+            .retain(|addr, _| crate::peer::canonical_ip(addr.ip()) != ip);
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);
         let duration = if permanent {
             Duration::from_secs(365 * 24 * 60 * 60)

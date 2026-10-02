@@ -68,6 +68,18 @@ pub const SYNC_V2_MIN_VERSION: Version = Version {
 /// Unique peer identifier (socket address).
 pub type PeerId = SocketAddr;
 
+/// Treat an IPv4-mapped IPv6 socket as the same host as its IPv4 form when
+/// enforcing address budgets. Native IPv6 addresses retain their identity.
+pub(crate) fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Inbound,
@@ -497,9 +509,9 @@ impl PeerInfo {
         )
     }
 
-    /// IPv4 /16 subnet (first 2 octets). Returns None for non-IPv4.
+    /// IPv4 /16 subnet, including IPv4-mapped sockets. Native IPv6 returns None.
     pub fn subnet(&self) -> Option<[u8; 2]> {
-        match self.addr.ip() {
+        match canonical_ip(self.addr.ip()) {
             std::net::IpAddr::V4(ip) => {
                 let octets = ip.octets();
                 Some([octets[0], octets[1]])

@@ -164,6 +164,7 @@ impl ReadBudget {
     /// Claim `ip`'s single slot entitlement, waiting — holding nothing —
     /// until any earlier large frame from the same address finishes.
     async fn claim_ip(&self, ip: IpAddr) -> IpClaim {
+        let ip = crate::peer::canonical_ip(ip);
         loop {
             // Register for the wakeup BEFORE looking, or a release
             // between the check and the wait would be missed.
@@ -645,6 +646,27 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mapped_and_native_ipv4_share_one_reader_claim() {
+        let budget = super::ReadBudget::new(super::PER_READER_MAX);
+        let native = std::net::Ipv4Addr::new(100, 200, 1, 1);
+        let held = budget.claim_ip(native.to_ipv6_mapped().into()).await;
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            budget.claim_ip(native.into()),
+        )
+        .await
+        .is_err());
+        drop(held);
+        let released = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            budget.claim_ip(native.into()),
+        )
+        .await
+        .expect("dropping the mapped claim releases the native address");
+        drop(released);
+    }
+
     use super::*;
     use crate::framing::{serialize_frame, MAGIC_LENGTH, MAINNET_MAGIC};
     use std::sync::atomic::{AtomicBool, Ordering};

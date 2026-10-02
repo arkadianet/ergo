@@ -209,6 +209,132 @@ fn per_subnet_limit_enforced() {
 }
 
 #[test]
+fn ipv6_group_caps_mixed_directions_and_handshake_slots() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let v6 = |ip: &str| SocketAddr::new(ip.parse().unwrap(), 9030);
+    let first = v6("2001:4860:1234:1::1");
+    mgr.register_inbound(first, now).unwrap();
+    mgr.mark_tcp_connected(&first);
+    mgr.complete_handshake(&first, spec(), None, now).unwrap();
+    mgr.register_outbound(v6("2001:4860:1234:2::2"), now)
+        .unwrap();
+    mgr.register_inbound(v6("2001:4860:1234:ffff::3"), now)
+        .unwrap();
+    let fourth = v6("2001:4860:1234:3::4");
+    assert_eq!(
+        mgr.register_inbound(fourth, now),
+        Err(ConnectError::PerSubnetLimitReached)
+    );
+    assert_eq!(
+        mgr.register_outbound(fourth, now),
+        Err(ConnectError::PerSubnetLimitReached)
+    );
+    mgr.register_outbound(v6("2001:4860:1235::1"), now).unwrap();
+    mgr.disconnect(&first);
+    mgr.register_inbound(fourth, now).unwrap();
+}
+
+#[test]
+fn ipv6_per_ip_cap_counts_other_ports_after_handshake() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let first: SocketAddr = "[2001:4860:1234::1]:9030".parse().unwrap();
+    mgr.register_outbound(first, now).unwrap();
+    mgr.mark_tcp_connected(&first);
+    mgr.complete_handshake(&first, spec(), None, now).unwrap();
+    let second = SocketAddr::new(first.ip(), 9031);
+    assert_eq!(
+        mgr.register_inbound(second, now),
+        Err(ConnectError::PerIpLimitReached)
+    );
+}
+
+#[test]
+fn ipv4_mapped_and_native_forms_share_ip_and_group_limits() {
+    let now = Instant::now();
+    let native = addr(100, 200, 1, 1, 9030);
+    let mapped = SocketAddr::new(Ipv4Addr::new(100, 200, 1, 1).to_ipv6_mapped().into(), 9031);
+    for (first, second) in [(native, mapped), (mapped, native)] {
+        let mut mgr = PeerManager::new(1);
+        mgr.register_outbound(first, now).unwrap();
+        assert_eq!(
+            mgr.register_inbound(second, now),
+            Err(ConnectError::PerIpLimitReached)
+        );
+    }
+    let mut mgr = PeerManager::new(1);
+    mgr.register_outbound(mapped, now).unwrap();
+    mgr.register_inbound(addr(100, 200, 2, 2, 9030), now)
+        .unwrap();
+    mgr.register_outbound(addr(100, 200, 3, 3, 9030), now)
+        .unwrap();
+    let fourth = SocketAddr::new(Ipv4Addr::new(100, 200, 4, 4).to_ipv6_mapped().into(), 9030);
+    assert_eq!(
+        mgr.register_inbound(fourth, now),
+        Err(ConnectError::PerSubnetLimitReached)
+    );
+}
+
+#[test]
+fn ipv6_saturated_group_is_filtered_before_dial() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    for suffix in 1..=3 {
+        let peer: SocketAddr = format!("[2001:4860:1234:{suffix}::1]:9030")
+            .parse()
+            .unwrap();
+        mgr.register_outbound(peer, now).unwrap();
+    }
+    let fourth: SocketAddr = "[2001:4860:1234:4::1]:9030".parse().unwrap();
+    let diverse: SocketAddr = "[2001:4860:1235::1]:9030".parse().unwrap();
+    mgr.add_known_address(fourth, PeerOrigin::Seed);
+    mgr.add_known_address(diverse, PeerOrigin::Seed);
+    assert_eq!(mgr.addresses_to_connect(now, 10), vec![diverse]);
+}
+
+#[test]
+fn restored_mapped_bans_preserve_strongest_native_identity() {
+    let mut mgr = PeerManager::new(1);
+    let now = Instant::now();
+    let native = addr(100, 200, 1, 1, 9030);
+    let mapped = SocketAddr::new(Ipv4Addr::new(100, 200, 1, 1).to_ipv6_mapped().into(), 9031);
+    mgr.restore_ban(mapped.ip(), now + Duration::from_secs(100), 3);
+    mgr.restore_ban(native.ip(), now + Duration::from_secs(10), 1);
+    for peer in [native, mapped] {
+        assert!(mgr.is_banned(&peer, now + Duration::from_secs(50)));
+        assert_eq!(mgr.register_inbound(peer, now), Err(ConnectError::Banned));
+    }
+    assert_eq!(mgr.currently_banned_ips(now), vec![native.ip()]);
+}
+
+#[test]
+fn version_rejection_bans_mapped_and_native_sibling_connections() {
+    let mut mgr = PeerManager::new_with_limits(
+        1,
+        PeerLimits {
+            per_ip_limit: 4,
+            ..Default::default()
+        },
+    );
+    let now = Instant::now();
+    let native = addr(100, 200, 1, 1, 9030);
+    let mapped = SocketAddr::new(Ipv4Addr::new(100, 200, 1, 1).to_ipv6_mapped().into(), 9031);
+    for peer in [native, mapped] {
+        mgr.register_inbound(peer, now).unwrap();
+        mgr.mark_tcp_connected(&peer);
+    }
+    let old = PeerSpec {
+        version: crate::handshake::Version::INITIAL,
+        ..spec()
+    };
+    assert!(mgr.complete_handshake(&mapped, old, None, now).is_err());
+    assert_eq!(mgr.peer_count(), 0);
+    assert!(mgr.is_banned(&native, now));
+    assert!(mgr.is_banned(&mapped, now));
+}
+
+#[test]
 fn max_connections_enforced() {
     let mut mgr = PeerManager::new(1);
     let now = Instant::now();
