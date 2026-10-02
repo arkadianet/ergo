@@ -1172,7 +1172,7 @@ impl PeerManager {
     /// Expired bans are already unenforced (`is_banned` / `currently_banned_ips`
     /// compare against `until`), so this is pure hygiene: without it, entries
     /// linger in memory until restart and their redb rows forever. Cadence is
-    /// gated internally to [`BAN_SWEEP_INTERVAL`] — the first call runs
+    /// gated internally to `BAN_SWEEP_INTERVAL` — the first call runs
     /// immediately, later calls between sweeps are cheap no-ops. Returns the
     /// number of entries removed.
     pub fn sweep_expired_bans(&mut self, now: Instant) -> usize {

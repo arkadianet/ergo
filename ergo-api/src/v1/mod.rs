@@ -3,16 +3,16 @@
 //! Four pieces of infrastructure every v1 endpoint depends on, built ONCE
 //! here:
 //!
-//! * [`error`] — the nested error envelope `{error:{reason,message,detail}}`
-//!   and the canonical [`error::Reason`] enum with its status mapping.
-//! * [`cursor`] — the one opaque, versioned cursor codec + `page` builder.
-//! * [`governor`] — the per-IP token-bucket rate/cost governor with per-route-class
+//! * [`crate::v1::error`] — the nested error envelope `{error:{reason,message,detail}}`
+//!   and the canonical [`crate::v1::error::Reason`] enum with its status mapping.
+//! * [`crate::v1::cursor`] — the one opaque, versioned cursor codec + `page` builder.
+//! * [`crate::v1::governor`] — the per-IP token-bucket rate/cost governor with per-route-class
 //!   weights, loopback-exempt.
-//! * [`auth`] — the T0/T1/T2 tier split reusing the existing [`crate::auth`]
+//! * [`crate::v1::auth`] — the T0/T1/T2 tier split reusing the existing [`crate::auth`]
 //!   api-key verification, plus the boot-warn posture check.
 //!
-//! This module is pure infrastructure; every v1 route group ([`routes`],
-//! [`accounts`], [`operator`], [`script`], [`webhooks`]) consumes it.
+//! This module is pure infrastructure; every v1 route group ([`crate::v1::routes`],
+//! [`crate::v1::accounts`], [`crate::v1::operator`], [`crate::v1::script`], [`crate::v1::webhooks`]) consumes it.
 //! Re-exports below are the stable surface those groups import.
 
 pub mod accounts;
@@ -166,8 +166,8 @@ use std::net::{IpAddr, SocketAddr};
 ///
 /// Returns `None` when connect-info is absent (e.g. a test harness, or a
 /// server not yet wired for connect-info). Callers decide the fail-safe:
-/// [`governor`] applies a shared "unknown" bucket (never a blanket exemption)
-/// and [`auth`] treats an unknown IP as non-loopback.
+/// [`crate::v1::governor`] applies a shared "unknown" bucket (never a blanket exemption)
+/// and [`crate::v1::auth`] treats an unknown IP as non-loopback.
 ///
 /// `X-Forwarded-For` is deliberately NOT trusted here — it is client-spoofable
 /// and the loopback exemption is a security boundary. Operators terminating v1
@@ -179,7 +179,7 @@ pub(crate) fn client_ip<B>(req: &Request<B>) -> Option<IpAddr> {
 }
 
 /// Whether `req` should be treated as **trusted loopback** for privilege
-/// purposes — the [`governor`]'s loopback exemption and the [`auth`] Admin
+/// purposes — the [`crate::v1::governor`]'s loopback exemption and the [`crate::v1::auth`] Admin
 /// tier's loopback-preferred check.
 ///
 /// Trust is derived ONLY from the real peer socket ([`client_ip`]). When

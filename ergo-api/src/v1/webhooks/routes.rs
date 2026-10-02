@@ -1,6 +1,6 @@
 //! `webhooks/*` — the T1 (operator) management surface. Registration is an
 //! outbound-request lever, so every endpoint is gated by
-//! [`require_tier`](crate::v1::auth::require_tier) at `Tier::Operator` — the
+//! [`require_tier`] at `Tier::Operator` — the
 //! same api-key gate as `/wallet/*` and `POST /votes`.
 //!
 //! Handlers consume the shared G2 primitives (error envelope + [`Reason`],

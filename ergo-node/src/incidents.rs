@@ -11,7 +11,7 @@
 //! v1 scope notes (documented deviations from the design doc): snapshots
 //! are plain `.json`, not gzip (avoids a new dependency); the manual
 //! operator endpoint is deferred. Retention keeps the newest
-//! [`RETAIN`] files.
+//! `RETAIN` files.
 
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};

@@ -13,12 +13,12 @@
 //! * [`engine`] — [`WebhookEngine`], the transport-free registry, delivery-log,
 //!   and retry/backoff/dedupe/auto-disable state machine (clock-injected, fully
 //!   unit-testable).
-//! * [`worker`] — the [`WebhookSink`] transport seam + the [`RealtimeBus`]
+//! * [`worker`] — the [`WebhookSink`] transport seam + the [`crate::v1::realtime::RealtimeBus`]
 //!   subscriber loop that drives it.
 //! * [`routes`] — the T1 axum handlers + [`webhooks_router`].
 //!
 //! **Reuse, not reinvention.** Webhooks are an *internal subscriber* to the same
-//! [`RealtimeBus`] the WS surface uses: one event source, one global `seq`, one
+//! [`crate::v1::realtime::RealtimeBus`] the WS surface uses: one event source, one global `seq`, one
 //! channel vocabulary ([`parse_channel`](crate::v1::realtime::parse_channel)),
 //! the same `channel_unavailable` liveness gate for not-yet-live classes.
 //!
