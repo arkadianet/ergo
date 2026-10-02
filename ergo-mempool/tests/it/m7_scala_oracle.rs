@@ -336,10 +336,10 @@ fn scala_pending_tx_oracle() {
     let txs = pending
         .as_array()
         .expect("expected array from /transactions/unconfirmed");
-    if txs.is_empty() {
-        eprintln!("[m7-oracle] no pending txs — skip");
-        return;
-    }
+    assert!(
+        !txs.is_empty(),
+        "live Scala pending-transaction oracle requires a nonempty mempool"
+    );
 
     // ── Fetch tip header for TransactionContext ──
     let headers = curl_get(&node_url, "/blocks/lastHeaders/1");
