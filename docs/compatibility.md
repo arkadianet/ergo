@@ -177,7 +177,8 @@ Windows on every push and pull request; a `difftest` job runs the
 coverage gate) on Linux on every push; a nightly scheduled workflow runs
 longer structured and corpus-mutation campaigns (2,000,000 iterations each)
 plus bounded `cargo-fuzz` / libFuzzer / ASan passes on nightly Rust across
-six surfaces; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
+six surfaces; a nightly JVM consensus differential campaign with rotating,
+reproducible seeds and preserved oracle transcripts; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
 and `cargo-machete`. See
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
 [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
