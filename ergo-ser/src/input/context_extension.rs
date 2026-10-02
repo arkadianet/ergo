@@ -43,6 +43,9 @@ impl ContextExtension {
     }
 }
 
+/// Scala's signed count byte permits at most 127 context variables.
+const MAX_CONTEXT_EXTENSION_ENTRIES: usize = i8::MAX as usize;
+
 /// Serialize a context extension as a raw `u8` count followed by
 /// `key + serialized_constant` for each entry.
 ///
@@ -68,14 +71,11 @@ pub fn write_context_extension(
     w: &mut VlqWriter,
     ext: &ContextExtension,
 ) -> Result<(), WriteError> {
-    // Scala writes the entry count as a single unsigned byte; a
-    // ContextExtension with >255 entries would silently wrap on
-    // `as u8`. Surface as a structured error so REST/JSON callers
-    // (decode_context_extension_with_mode) see a recoverable failure
-    // instead of a panic.
-    if ext.values.len() > u8::MAX as usize {
+    // ContextExtension.serializer.serialize rejects sizes above Byte.MaxValue
+    // before writing anything. Share the bound with both reader entry points.
+    if ext.values.len() > MAX_CONTEXT_EXTENSION_ENTRIES {
         return Err(WriteError::InvalidData(format!(
-            "ContextExtension entry count too large for Scala wire format: {} (max 255)",
+            "ContextExtension entry count too large for Scala wire format: {} (max {MAX_CONTEXT_EXTENSION_ENTRIES})",
             ext.values.len()
         )));
     }
@@ -132,7 +132,7 @@ pub fn write_context_extension(
 /// exactly as before.
 fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
     let raw = r.get_u8()?;
-    if raw > 0x7f {
+    if usize::from(raw) > MAX_CONTEXT_EXTENSION_ENTRIES {
         return Err(ReadError::InvalidData(format!(
             "negative context-extension value count: {} (Scala reads the count as a signed byte and rejects the high bit)",
             raw as i8
@@ -159,7 +159,7 @@ fn read_extension_count(r: &mut VlqReader) -> Result<usize, ReadError> {
 /// accepting any `u8` key; only the read side rejects.
 fn read_extension_key(r: &mut VlqReader) -> Result<u8, ReadError> {
     let raw = r.get_u8()?;
-    if raw > 0x7f {
+    if usize::from(raw) > MAX_CONTEXT_EXTENSION_ENTRIES {
         return Err(ReadError::InvalidData(format!(
             "negative context-extension variable id: {} (Scala reads the id as a signed byte and rejects a negative one)",
             raw as i8
@@ -762,17 +762,50 @@ mod tests {
         assert!(read_context_extension(&mut r).is_err());
     }
 
+    #[test]
+    fn context_extension_writer_and_constructor_match_scala_count_boundary() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/scala/context_extension_count_boundary.json"
+        ))
+        .unwrap();
+        for case in oracle["cases"].as_array().unwrap() {
+            let count = case["count"].as_u64().unwrap() as usize;
+            let extension = ContextExtension {
+                values: (0..count)
+                    .map(|key| (key as u8, (SigmaType::SInt, SigmaValue::Int(0))))
+                    .collect(),
+            };
+            let mut writer = VlqWriter::new();
+            writer.put_u8(0x42);
+            let result = write_context_extension(&mut writer, &extension);
+            let proof = crate::input::SpendingProof::new(Vec::new(), extension);
+            if case["verdict"] == "ACCEPT" {
+                result.unwrap();
+                let expected = hex::decode(case["hex"].as_str().unwrap()).unwrap();
+                assert_eq!(&writer.result()[1..], expected, "count {count}");
+                assert_eq!(proof.unwrap().extension_bytes(), expected, "count {count}");
+            } else {
+                assert!(result.is_err(), "Scala rejects count {count}");
+                assert!(proof.is_err(), "constructor must reject count {count}");
+                assert_eq!(
+                    writer.result(),
+                    [0x42],
+                    "count rejection must not write bytes"
+                );
+            }
+        }
+    }
+
     // ----- error paths -----
 
     #[test]
-    fn write_context_extension_above_255_returns_invalid_data() {
-        // Scala writes the entry count as a single unsigned byte
-        // (cap 255). REST callers can construct ContextExtension
+    fn write_context_extension_above_127_returns_invalid_data() {
+        // Scala refuses counts above Byte.MaxValue. REST callers can construct ContextExtension
         // directly via the public `values` field; the writer must
         // surface this as `WriteError`, not panic.
         //
         // 256 distinct u8 keys exhausts the keyspace exactly — already
-        // one past the cap. IndexMap dedupes on key, so 257 is
+        // past the cap. IndexMap dedupes on key, so 257 is
         // unreachable, but 256 suffices to trigger the bound.
         let values: indexmap::IndexMap<u8, (SigmaType, SigmaValue)> = (0u16..=255)
             .map(|k| (k as u8, (SigmaType::SInt, SigmaValue::Int(k as i32))))
@@ -787,7 +820,7 @@ mod tests {
             "message should name the count, got: {msg}"
         );
         assert!(
-            msg.contains("255"),
+            msg.contains("127"),
             "message should name the cap, got: {msg}"
         );
     }
@@ -1151,17 +1184,11 @@ mod tests {
         // ("Negative amount of context extension values: -128"). Rust used to
         // accept it (get_u8() -> 128, read 128 entries). Post-fix Rust must
         // reject AT the count byte, before reading any entry.
-        let mut ext = ContextExtension::empty();
+        // Deliberately malformed wire data must not use the valid writer.
+        let mut bytes = vec![0x80];
         for key in 0u8..128 {
-            ext.values
-                .insert(key, (SigmaType::SInt, SigmaValue::Int(key as i32)));
+            bytes.extend_from_slice(&[key, 0x04, 0x00]);
         }
-        assert_eq!(ext.values.len(), 128, "test setup: 128 entries");
-        let bytes = serialize_ext(&ext);
-        assert_eq!(
-            bytes[0], 0x80,
-            "count byte must be 128 (0x80, high bit set)"
-        );
         let mut r = VlqReader::new(&bytes);
         let err = read_context_extension(&mut r).unwrap_err();
         match &err {
@@ -1191,14 +1218,10 @@ mod tests {
         let entries = split_context_extension_bytes(&bytes127).unwrap();
         assert_eq!(entries.len(), 127, "127 must split cleanly");
 
-        let mut ext128 = ContextExtension::empty();
+        let mut bytes128 = vec![0x80];
         for key in 0u8..128 {
-            ext128
-                .values
-                .insert(key, (SigmaType::SInt, SigmaValue::Int(0)));
+            bytes128.extend_from_slice(&[key, 0x04, 0x00]);
         }
-        let bytes128 = serialize_ext(&ext128);
-        assert_eq!(bytes128[0], 0x80);
         let err = split_context_extension_bytes(&bytes128).unwrap_err();
         match &err {
             ReadError::InvalidData(msg) => assert!(

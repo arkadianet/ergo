@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { syncLayers } from '../js/sync-rings.js';
 
-const ready = { reachable: true, status: { sync_state: 'at_tip', best_full_block_height: 100, best_header_height: 100 }, sync: { headers_chain_synced: true }, indexer: { status: 'caughtUp', indexedHeight: 100, fullHeight: 100 } };
+const ready = { reachable: true, status: { sync_state: 'at_tip', best_full_block_height: 100, best_header_height: 100 }, sync: { headers_chain_synced: true }, indexerHealth: { status: 'caughtUp' }, indexer: { status: 'caughtUp', indexedHeight: 100, fullHeight: 100 } };
 
 test('the three bands only form a ready ring when all stages are ready', () => {
   assert.deepEqual(syncLayers(ready).map((r) => r.state), ['done', 'done', 'done']);
@@ -44,4 +44,10 @@ test('the block ring recovers only after applied blocks pass the rejection heigh
   assert.equal(syncLayers({ ...ready, status })[1].state, 'done');
   assert.equal(syncLayers({ ...ready, status: { ...status, apply_wedged: true } })[1].state, 'error');
   assert.equal(syncLayers({ ...ready, status, reachable: false })[1].state, 'stale');
+});
+
+test('a failed health read leaves the caught-up search ring unavailable', () => {
+  const index = syncLayers({ ...ready, indexerHealth: null })[2];
+  assert.equal(index.state, 'unknown');
+  assert.equal(index.text, 'Unavailable');
 });

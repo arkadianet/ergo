@@ -179,7 +179,12 @@ async fn render_box_page(
     cursor: Option<&str>,
     sort: Option<&str>,
     decode: bool,
-    fetch: impl FnOnce(IdxPage, SortDir) -> Vec<IndexedErgoBox> + Send + 'static,
+    fetch: impl FnOnce(
+            IdxPage,
+            SortDir,
+        ) -> Result<Vec<IndexedErgoBox>, ergo_indexer_types::IndexerReadError>
+        + Send
+        + 'static,
 ) -> Response {
     let dir = match parse_sort(sort) {
         Ok(d) => d,
@@ -195,13 +200,16 @@ async fn render_box_page(
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let rows = fetch(
+            let rows = match fetch(
                 IdxPage {
                     offset: start,
                     limit: limit + 1,
                 },
                 dir,
-            );
+            ) {
+                Ok(rows) => rows,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             match project_boxes(&state, rows, decode) {
                 Ok(items) => {
                     let (items, page) = offset_page(items, start, limit);
@@ -531,7 +539,7 @@ pub async fn boxes_unspent_by_address(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
+        move |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
         move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
     .await
@@ -620,7 +628,7 @@ pub async fn boxes_unspent_by_ergo_tree(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| Ok(idx.address_unspent_paged(&tree_hash, page, dir)),
+        move |page, dir| idx.address_unspent_paged(&tree_hash, page, dir),
         move |excl| pool_unspent_for_tree(mempool.as_ref(), &tree_hash, excl),
     )
     .await
@@ -808,7 +816,7 @@ pub async fn boxes_unspent_by_token(
     render_unspent_page(
         &state,
         &q,
-        move |page, dir| Ok(idx.token_unspent_paged(&tid, page, dir)),
+        move |page, dir| idx.token_unspent_paged(&tid, page, dir),
         move |excl| pool_unspent_for_token(mempool.as_ref(), &tid, excl),
     )
     .await
@@ -849,7 +857,10 @@ pub async fn box_range(State(state): State<V1State>, V1Query(q): V1Query<RangeQu
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let boxes = idx.boxes_by_global_range(lo, hi);
+            let boxes = match idx.boxes_by_global_range(lo, hi) {
+                Ok(boxes) => boxes,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             let rows: Result<Vec<(String, u64)>, String> = boxes
                 .iter()
                 .map(|b| {

@@ -29,6 +29,7 @@
 //! use `StubIndexer` + `StubChain` so we can inject the fixture without
 //! a real `IndexerStore`.
 
+use ergo_indexer_types::IndexerReadError;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -116,7 +117,8 @@ async fn tx_by_index_503_indexer_halted_pins_envelope() {
 
 #[tokio::test]
 async fn tx_by_id_404_when_caught_up_and_record_absent() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, body) = json_get(app, &format!("/blockchain/transaction/byId/{HEX_64_AA}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], 404);
@@ -126,7 +128,8 @@ async fn tx_by_id_404_when_caught_up_and_record_absent() {
 
 #[tokio::test]
 async fn tx_by_index_404_when_caught_up_and_record_absent() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, body) = json_get(app, "/blockchain/transaction/byIndex/123456789").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "not-found");
@@ -137,7 +140,8 @@ async fn tx_by_index_404_when_caught_up_and_record_absent() {
 
 #[tokio::test]
 async fn tx_by_id_404_on_malformed_hex_short() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, body) = json_get(app, "/blockchain/transaction/byId/aabbcc").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "not-found");
@@ -145,7 +149,8 @@ async fn tx_by_id_404_on_malformed_hex_short() {
 
 #[tokio::test]
 async fn tx_by_id_404_on_malformed_hex_nonhex_chars() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let bad = format!("z{}", &HEX_64_AA[1..]);
     let (status, _) = json_get(app, &format!("/blockchain/transaction/byId/{bad}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -153,7 +158,8 @@ async fn tx_by_id_404_on_malformed_hex_nonhex_chars() {
 
 #[tokio::test]
 async fn tx_by_index_404_on_negative_value() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, body) = json_get(app, "/blockchain/transaction/byIndex/-1").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "not-found");
@@ -235,10 +241,11 @@ async fn tx_by_id_500_when_chain_header_missing_at_indexed_height() {
 
 #[tokio::test]
 async fn tx_detail_404_when_absent_from_index_and_pool() {
+    let (_directory, indexer) = caught_up_handle();
     // No indexed tx and no pool overlay (the no-mempool `router` wires
     // NoopMempoolView, so `pool_tx_detail` returns None) → the resolved
     // detail endpoint 404s with the canonical not-found envelope.
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, body) = json_get(app, &format!("/api/v1/transactions/{HEX_64_AA}/detail")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "not-found");
@@ -246,7 +253,8 @@ async fn tx_detail_404_when_absent_from_index_and_pool() {
 
 #[tokio::test]
 async fn tx_detail_404_on_malformed_hex() {
-    let app = build_app(caught_up_handle(), Some(empty_chain()));
+    let (_directory, indexer) = caught_up_handle();
+    let app = build_app(indexer.clone(), Some(empty_chain()));
     let (status, _) = json_get(app, "/api/v1/transactions/aabbcc/detail").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -281,10 +289,13 @@ fn syncing_handle(indexed_height: u64) -> IndexerHandle {
     IndexerHandle::syncing(indexed_height)
 }
 
-fn caught_up_handle() -> IndexerHandle {
-    let h = IndexerHandle::syncing(700_000);
-    h.set_status(IndexerStatus::CaughtUp);
-    h
+fn caught_up_handle() -> (tempfile::TempDir, IndexerHandle) {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, _) =
+        ergo_indexer::IndexerStore::open(&directory.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 700_000);
+    handle.set_status(IndexerStatus::CaughtUp);
+    (directory, handle)
 }
 
 fn fixture_tx(height: i32) -> IndexedErgoTransaction {
@@ -360,102 +371,128 @@ impl IndexerQuery for StubIndexer {
         self.status.clone()
     }
 
-    fn box_by_id(&self, _box_id: &BoxId) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_id(&self, _box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
-        None
+    fn box_by_global_index(&self, _n: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn boxes_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-
-    fn tx_by_id(&self, tx_id: &TxId) -> Option<IndexedTxDto> {
-        if tx_id == &self.tx.id {
-            Some(self.tx.clone())
-        } else {
-            None
-        }
-    }
-    fn tx_by_global_index(&self, n: u64) -> Option<IndexedTxDto> {
-        if n as i64 == self.tx.global_index {
-            Some(self.tx.clone())
-        } else {
-            None
-        }
-    }
-    fn txs_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
+    fn boxes_by_global_range(
+        &self,
+        _lo: u64,
+        _hi: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
 
-    fn address_balance(&self, _tree_hash: &TreeHash) -> Option<BalanceDto> {
-        None
+    fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok({
+            if tx_id == &self.tx.id {
+                Some(self.tx.clone())
+            } else {
+                None
+            }
+        })
+    }
+    fn tx_by_global_index(&self, n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok({
+            if n as i64 == self.tx.global_index {
+                Some(self.tx.clone())
+            } else {
+                None
+            }
+        })
+    }
+    fn txs_by_global_range(
+        &self,
+        _lo: u64,
+        _hi: u64,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
+    }
+
+    fn address_balance(
+        &self,
+        _tree_hash: &TreeHash,
+    ) -> Result<Option<BalanceDto>, IndexerReadError> {
+        Ok(None)
     }
     fn address_txs_paged(
         &self,
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedTxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
     fn address_boxes_paged(
         &self,
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
     fn address_unspent_paged(
         &self,
         _tree_hash: &TreeHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn address_total_txs(&self, _tree_hash: &TreeHash) -> u64 {
-        0
+    fn address_total_txs(&self, _tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
-    fn address_total_boxes(&self, _tree_hash: &TreeHash) -> u64 {
-        0
+    fn address_total_boxes(&self, _tree_hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn template_boxes_paged(&self, _template_hash: &TemplateHash, _p: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn template_boxes_paged(
+        &self,
+        _template_hash: &TemplateHash,
+        _p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
     fn template_unspent_paged(
         &self,
         _template_hash: &TemplateHash,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn template_total_boxes(&self, _template_hash: &TemplateHash) -> u64 {
-        0
+    fn template_total_boxes(&self, _template_hash: &TemplateHash) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 
-    fn token_by_id(&self, _token_id: &TokenId) -> Option<IndexedTokenDto> {
-        None
+    fn token_by_id(
+        &self,
+        _token_id: &TokenId,
+    ) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        Ok(None)
     }
-    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
-        Vec::new()
+    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_boxes_paged(&self, _token_id: &TokenId, _p: Page) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    fn token_boxes_paged(
+        &self,
+        _token_id: &TokenId,
+        _p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
     fn token_unspent_paged(
         &self,
         _token_id: &TokenId,
         _p: Page,
         _dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        Vec::new()
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(Vec::new())
     }
-    fn token_total_boxes(&self, _token_id: &TokenId) -> u64 {
-        0
+    fn token_total_boxes(&self, _token_id: &TokenId) -> Result<u64, IndexerReadError> {
+        Ok(0)
     }
 }
 
@@ -679,7 +716,7 @@ impl NodeReadState for StubReadState {
 
 // ---------- /api/v1/transactions/{id}/detail — UNCONFIRMED (pool) -------
 //
-// The unconfirmed path: the indexer misses (store-less `CaughtUp` handle),
+// The unconfirmed path: the indexer misses (a real empty `CaughtUp` store),
 // so the handler resolves the tx from the mempool overlay via
 // `pool_tx_detail`. Each spent input resolves against the confirmed UTXO
 // set first, then the same-snapshot pool-output overlay, else null; output
@@ -768,6 +805,7 @@ fn unconfirmed_input(box_id_fill: u8) -> Input {
 
 #[tokio::test]
 async fn tx_detail_200_unconfirmed_resolves_pool_overlay_and_nulls_unknown() {
+    let (_directory, indexer) = caught_up_handle();
     // Pooled tx: input A (0xA1) spends a pool-created box resolvable via the
     // overlay; input B (0xB2) spends a box known to neither the index nor
     // the pool (must null). One output carries a token.
@@ -801,7 +839,7 @@ async fn tx_detail_200_unconfirmed_resolves_pool_overlay_and_nulls_unknown() {
         bytes,
         pool_outputs: Arc::new(overlay),
     });
-    let app = build_app_with_mempool(caught_up_handle(), mempool);
+    let app = build_app_with_mempool(indexer.clone(), mempool);
 
     let id_hex = hex::encode(tx_id.as_bytes());
     let (status, body) = json_get(app, &format!("/api/v1/transactions/{id_hex}/detail")).await;
@@ -832,6 +870,7 @@ async fn tx_detail_200_unconfirmed_resolves_pool_overlay_and_nulls_unknown() {
 
 #[tokio::test]
 async fn tx_detail_unconfirmed_404_for_non_matching_tx_id() {
+    let (_directory, indexer) = caught_up_handle();
     // `pool_tx_detail` returns None for a different tx_id; with the indexer
     // also missing, the handler falls through to the canonical not-found.
     let tx = Transaction {
@@ -848,7 +887,7 @@ async fn tx_detail_unconfirmed_404_for_non_matching_tx_id() {
         bytes,
         pool_outputs: Arc::new(HashMap::new()),
     });
-    let app = build_app_with_mempool(caught_up_handle(), mempool);
+    let app = build_app_with_mempool(indexer.clone(), mempool);
 
     // Query a different id than the stub holds.
     let (status, body) = json_get(app, &format!("/api/v1/transactions/{HEX_64_AA}/detail")).await;

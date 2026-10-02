@@ -184,11 +184,13 @@ pub async fn indexed_height_handler(State(state): State<BlockchainState>) -> Res
 // /api/v1/indexer/status — operator health surface
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/indexer/status`. Always 200; never gated (like
+/// `GET /api/v1/indexer/status`. Never gated (like
 /// `indexedHeight`, this must keep answering while the index is syncing,
 /// repairing, or halted — that is exactly when the operator needs it).
 /// `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
-/// the self-repair markers and totals live here instead.
+/// the self-repair markers and totals live here instead. Failed database
+/// snapshots or previously observed read corruption return 500. Offline
+/// syncing/halted handles still report their explicit status.
 ///
 /// Mounted only when an indexer handle is plumbed — on indexer-less wiring
 /// the route 404s, which the UI reads as "extra-index disabled".
@@ -203,6 +205,7 @@ pub async fn indexed_height_handler(State(state): State<BlockchainState>) -> Res
 Conditional: mounted only when the node is wired with an extra-index; 404 means \
 the index is disabled.",
          body = crate::types::ApiIndexerStatus, content_type = "application/json"),
+        (status = 500, description = "Indexer health snapshot failed or read corruption was observed"),
     ),
 )]
 pub async fn indexer_status_handler(State(state): State<BlockchainState>) -> Response {
@@ -211,7 +214,10 @@ pub async fn indexer_status_handler(State(state): State<BlockchainState>) -> Res
         IndexerStatus::Halted(reason) => Some(reason.as_kebab_case().to_string()),
         _ => None,
     };
-    let health = state.indexer.health();
+    let health = match state.indexer.health() {
+        Ok(health) => health,
+        Err(error) => return internal_error(&format!("indexer health read failed: {error}")),
+    };
     let body = crate::types::ApiIndexerStatus {
         status: match &status {
             IndexerStatus::Syncing => "syncing".to_string(),

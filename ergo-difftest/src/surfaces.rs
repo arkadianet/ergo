@@ -1747,7 +1747,7 @@ mod tests {
             parsed.ergo_tree_bytes().to_vec(),
             parsed.creation_height,
             parsed.tokens.clone(),
-            parsed.additional_registers.clone(),
+            parsed.additional_registers().clone(),
             parsed.register_bytes().to_vec(),
         )
         .unwrap();

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { blockRejectionState, hasActiveNodeIssue, nodeGuidance } from '../js/node-guidance.js';
 
-const ready = { reachable: true, status: { sync_state: 'at_tip', peer_count: 10 }, indexer: { status: 'caughtUp' }, identity: { extra_index_enabled: true } };
+const ready = { reachable: true, status: { sync_state: 'at_tip', peer_count: 10 }, indexerHealth: { status: 'caughtUp' }, indexer: { status: 'caughtUp' }, identity: { extra_index_enabled: true } };
 
 test('block sync and search readiness are separate', () => {
   assert.equal(nodeGuidance(ready).title, 'Ready to explore');
@@ -76,4 +76,10 @@ test('historical rejection never hides a current fault or stale connection', () 
   assert.equal(nodeGuidance({ ...ready, status: { ...advanced, sync_state: 'stalled' } }).title, 'Investigate the sync stall');
   assert.equal(nodeGuidance({ ...ready, status: { ...advanced, peer_count: 0 } }).title, 'Restore network connectivity');
   assert.equal(nodeGuidance({ ...ready, status: advanced, indexer: { status: 'halted' } }).tone, 'error');
+});
+
+test('a failed health read cannot inherit readiness from cached indexed height', () => {
+  const guidance = nodeGuidance({ ...ready, indexerHealth: null });
+  assert.equal(guidance.title, 'Search availability is unconfirmed');
+  assert.notEqual(guidance.tone, 'ok');
 });

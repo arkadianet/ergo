@@ -61,10 +61,21 @@ fn render_txs_by_address(state: &BlockchainState, address: &str, q: PagedQuery) 
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
-    let txs = state
+    let txs = match state
         .indexer
-        .address_txs_paged(&tree_hash, page, SortDir::Desc);
-    let total = state.indexer.address_total_txs(&tree_hash) as i64;
+        .address_txs_paged(&tree_hash, page, SortDir::Desc)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.address_total_txs(&tree_hash) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    } as i64;
     let items = match txs
         .iter()
         .map(|tx| build_indexed_tx_response(state, tx))
@@ -85,10 +96,21 @@ fn render_boxes_by_address(state: &BlockchainState, address: &str, q: PagedQuery
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
-    let boxes = state
+    let boxes = match state
         .indexer
-        .address_boxes_paged(&tree_hash, page, SortDir::Desc);
-    let total = state.indexer.address_total_boxes(&tree_hash) as i64;
+        .address_boxes_paged(&tree_hash, page, SortDir::Desc)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.address_total_boxes(&tree_hash) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    } as i64;
     let items = match boxes
         .iter()
         .map(|b| build_indexed_box_response(state.network, b))

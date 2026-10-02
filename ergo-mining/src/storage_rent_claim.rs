@@ -203,7 +203,7 @@ pub fn build_rent_claim(
                 b.candidate.ergo_tree_bytes().to_vec(),
                 current_height,
                 b.candidate.tokens.clone(),
-                b.candidate.additional_registers.clone(),
+                b.candidate.additional_registers().clone(),
                 b.candidate.register_bytes().to_vec(),
             );
             // The recreated output must clear the validator's box rules:

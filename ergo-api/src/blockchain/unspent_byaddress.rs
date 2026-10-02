@@ -87,7 +87,12 @@ fn render_unspent_by_address(
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
-    let mut confirmed = state.indexer.address_unspent_paged(&tree_hash, page, dir);
+    let mut confirmed = match state.indexer.address_unspent_paged(&tree_hash, page, dir) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     if exclude_mempool_spent {
         // `Segment.scala:265` filters confirmed unspent by
         // `spentBoxesIdsInMempool`. The same filter set is reused for

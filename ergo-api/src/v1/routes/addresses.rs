@@ -89,7 +89,7 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
         .clone()
         .run(ReadLane::Point, move || {
             let confirmed = match idx.address_balance(&tree_hash) {
-                Some(dto) => V1BalanceEntry {
+                Ok(Some(dto)) => V1BalanceEntry {
                     value: dto.nano_ergs.to_string(),
                     assets: dto
                         .tokens
@@ -100,10 +100,11 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
                         })
                         .collect(),
                 },
-                None => V1BalanceEntry {
+                Ok(None) => V1BalanceEntry {
                     value: "0".to_string(),
                     assets: Vec::new(),
                 },
+                Err(error) => return super::indexer_read_failed(error),
             };
             let unconfirmed = balance_entry_from_info(unconfirmed_balance_for_tree(
                 state.mempool.as_ref(),
@@ -167,14 +168,17 @@ pub async fn transactions(
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let txs = idx.address_txs_paged(
+            let txs = match idx.address_txs_paged(
                 &tree_hash,
                 IdxPage {
                     offset: start,
                     limit: limit + 1,
                 },
                 dir,
-            );
+            ) {
+                Ok(value) => value,
+                Err(error) => return crate::v1::routes::indexer_read_failed(error),
+            };
             // Building tx summaries resolves inputs via the chain reader — but only when
             // there ARE txs; an empty result is authoritative from the index and needs
             // no chain. Guard the non-empty case so a missing reader is an honest

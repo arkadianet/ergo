@@ -19,7 +19,7 @@
 - `src/rollback.rs` — exact inverse of apply, walking the block's txs in reverse. Restores meta from the `UndoEntry` snapshot; pops/unflips segment entries; deletes token records whose creating mint was in the rolled-back block.
 - `src/rebuild.rs` — chain-free rebuild of the derived secondary (template/token) box-segment indexes from the intact primary tables (`NUMERIC_BOX` + `INDEXED_BOX`). Triggered when a tolerated `SegmentEntryMissing` drift stamps a sticky repair marker in `INDEXER_META`. Phase 0 wipes template/token box-segment heads and their spill rows; Phase 1 replays box history in `gi` order via `append_box_entry`/`flip_box_segment_entry`, reusing the exact apply machinery so rebuilt segments are byte-identical to a fresh linear index. Both phases commit per-chunk and checkpoint in `INDEXER_META` for crash-safety and resumability. Consensus is untouched. Exports `rebuild_secondary_indexes`.
 - `src/task.rs` — `IndexerTask` polling loop + the `IndexerChainSource` read trait + `IndexerPoll` step outcomes; self-repair gate (checks the sticky marker and drives `rebuild_secondary_indexes` before any forward-apply or rollback); bounded section-missing retry; reorg detection via header-id re-read.
-- `src/handle.rs` — `IndexerHandle`: the read-side `IndexerQuery` impl wired into `ergo-api`. Holds in-memory status + cached indexed-height mirror; paging/dereference helpers (`slice_paged`, `dereference_box`, `dereference_tx`).
+- `src/handle.rs` — `IndexerHandle`: the read-side `IndexerQuery` impl wired into `ergo-api`. Holds in-memory status + cached indexed-height mirror; paging/dereference helpers (`slice_paged`, `try_dereference_box`, `try_dereference_tx`).
 - `src/segment.rs` — `Segment` body type + wire codec (Scala `Segment.scala` parity); `SEGMENT_THRESHOLD = 512`.
 - `src/segment_buffer.rs` — head-buffer + spill mechanics: `append_box_entry`/`append_tx_entry`, `flip`/`unflip_box_segment_entry`, `pop_box_entry`/`pop_tx_entry`, `flush_staged_spills`. Drives both address and template/token segments.
 - `src/segment_id.rs` — pure derivations: `box_segment_id`/`tx_segment_id`, `tree_hash`/`tree_hash_from_bytes`, `token_unique_id`. All `[inherited]` byte-exact formulas — part of the public API surface.
@@ -72,3 +72,13 @@
 
 ## Notes for the architecture doc
 Two stale *source comments* in `src/store/mod.rs` (not README/docs claims): the `IndexerStore` doc at `:53-55` says apply/rollback are "layered on top via the `commit_apply_meta_only` / `commit_rollback_meta_only` helpers" — but `apply.rs`/`rollback.rs` inline their meta+undo+prune writes in their own write txn; those helpers are only used by integration tests. `begin_write`'s doc at `:591` references a `commit_block_txn` method that does not exist. Worth a cleanup pass, but outside the README/docs accuracy scope.
+
+Read errors propagate to API consumers. Page and global-range references are
+resolved in one redb snapshot; a missing referenced row fails the entire
+response. Global ranges are clipped to the snapshot's indexed counters.
+`IndexerHandle` retains the last observed read failure until reopened, and
+`health()` returns it rather than reporting healthy zero counters after an
+unrelated successful query. `/api/v1/indexer/status` returns HTTP 500 for
+failed snapshots or observed read corruption; cached indexed-height/status
+remain queryable. Storeless syncing/halted handles report their explicit
+offline status with unavailable counters represented as zero.

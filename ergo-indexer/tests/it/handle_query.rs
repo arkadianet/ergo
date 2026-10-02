@@ -122,7 +122,7 @@ fn box_by_id_returns_indexed_record() {
     let (handle, _tmp, genesis, _child) = setup_two_block_chain();
     let box_id = sealed_box_id(&genesis, 1);
 
-    let dto = handle.box_by_id(&box_id).expect("box exists");
+    let dto = handle.box_by_id(&box_id).unwrap().expect("box exists");
     assert_eq!(dto.box_data.candidate.value, 2_000_000);
     assert_eq!(dto.inclusion_height, 1);
     assert!(dto.spending_tx_id.is_none());
@@ -135,7 +135,10 @@ fn box_by_id_returns_spent_record_with_spending_fields_set() {
     let (handle, _tmp, genesis, child) = setup_two_block_chain();
     let spent_box = sealed_box_id(&genesis, 0);
 
-    let dto = handle.box_by_id(&spent_box).expect("spent box exists");
+    let dto = handle
+        .box_by_id(&spent_box)
+        .unwrap()
+        .expect("spent box exists");
     assert!(dto.is_spent());
     assert_eq!(dto.spending_height, Some(2));
     let child_tx_id = transaction_id(&child).unwrap();
@@ -148,7 +151,7 @@ fn box_by_id_returns_spent_record_with_spending_fields_set() {
 fn box_by_id_returns_none_for_unknown_id() {
     let (handle, _tmp, _genesis, _child) = setup_two_block_chain();
     let unknown = Digest32::from_bytes([0xFF; 32]);
-    assert!(handle.box_by_id(&unknown).is_none());
+    assert!(handle.box_by_id(&unknown).unwrap().is_none());
 }
 
 #[test]
@@ -156,28 +159,40 @@ fn box_by_global_index_round_trips_through_numeric_table() {
     let (handle, _tmp, genesis, _child) = setup_two_block_chain();
 
     // Output 0 of genesis was assigned global_index 0.
-    let dto0 = handle.box_by_global_index(0).expect("global_index 0");
+    let dto0 = handle
+        .box_by_global_index(0)
+        .unwrap()
+        .expect("global_index 0");
     assert_eq!(dto0.box_data.candidate.value, 1_000_000);
     assert_eq!(dto0.inclusion_height, 1);
 
     // Output 1 of genesis was assigned global_index 1.
-    let dto1 = handle.box_by_global_index(1).expect("global_index 1");
+    let dto1 = handle
+        .box_by_global_index(1)
+        .unwrap()
+        .expect("global_index 1");
     assert_eq!(dto1.box_data.candidate.value, 2_000_000);
 
     // Child tx's only output → global_index 2.
-    let dto2 = handle.box_by_global_index(2).expect("global_index 2");
+    let dto2 = handle
+        .box_by_global_index(2)
+        .unwrap()
+        .expect("global_index 2");
     assert_eq!(dto2.box_data.candidate.value, 900_000);
     let _ = genesis;
 
     // Cross-check with by-id resolution.
-    let by_id = handle.box_by_id(&dto1.box_data.box_id().unwrap()).unwrap();
+    let by_id = handle
+        .box_by_id(&dto1.box_data.box_id().unwrap())
+        .unwrap()
+        .unwrap();
     assert_eq!(by_id.global_index, dto1.global_index);
 }
 
 #[test]
 fn box_by_global_index_returns_none_for_unknown_n() {
     let (handle, _tmp, _g, _c) = setup_two_block_chain();
-    assert!(handle.box_by_global_index(999).is_none());
+    assert!(handle.box_by_global_index(999).unwrap().is_none());
 }
 
 #[test]
@@ -186,14 +201,20 @@ fn tx_by_id_returns_indexed_record() {
     let g_id = transaction_id(&genesis).unwrap();
     let c_id = transaction_id(&child).unwrap();
 
-    let g_dto = handle.tx_by_id(g_id.as_digest()).expect("genesis tx");
+    let g_dto = handle
+        .tx_by_id(g_id.as_digest())
+        .unwrap()
+        .expect("genesis tx");
     assert_eq!(g_dto.height, 1);
     assert_eq!(g_dto.global_index, 0);
     assert_eq!(g_dto.output_nums, vec![0, 1]);
     // genesis has no input lookup (height==1) so input_nums is empty.
     assert!(g_dto.input_nums.is_empty());
 
-    let c_dto = handle.tx_by_id(c_id.as_digest()).expect("child tx");
+    let c_dto = handle
+        .tx_by_id(c_id.as_digest())
+        .unwrap()
+        .expect("child tx");
     assert_eq!(c_dto.height, 2);
     assert_eq!(c_dto.global_index, 1);
     assert_eq!(c_dto.input_nums, vec![0]); // consumed genesis output 0 (global_index 0)
@@ -204,35 +225,35 @@ fn tx_by_id_returns_indexed_record() {
 fn tx_by_id_returns_none_for_unknown_id() {
     let (handle, _tmp, _g, _c) = setup_two_block_chain();
     let unknown = Digest32::from_bytes([0xFF; 32]);
-    assert!(handle.tx_by_id(&unknown).is_none());
+    assert!(handle.tx_by_id(&unknown).unwrap().is_none());
 }
 
 #[test]
 fn tx_by_global_index_round_trips_through_numeric_table() {
     let (handle, _tmp, genesis, child) = setup_two_block_chain();
 
-    let dto0 = handle.tx_by_global_index(0).expect("global tx 0");
+    let dto0 = handle.tx_by_global_index(0).unwrap().expect("global tx 0");
     assert_eq!(dto0.id, *transaction_id(&genesis).unwrap().as_digest());
-    let dto1 = handle.tx_by_global_index(1).expect("global tx 1");
+    let dto1 = handle.tx_by_global_index(1).unwrap().expect("global tx 1");
     assert_eq!(dto1.id, *transaction_id(&child).unwrap().as_digest());
 }
 
 #[test]
 fn tx_by_global_index_returns_none_for_unknown_n() {
     let (handle, _tmp, _g, _c) = setup_two_block_chain();
-    assert!(handle.tx_by_global_index(999).is_none());
+    assert!(handle.tx_by_global_index(999).unwrap().is_none());
 }
 
 #[test]
-fn halted_handle_returns_none_from_all_read_methods() {
+fn halted_handle_reports_unavailable_for_all_read_methods() {
     let h = IndexerHandle::halted(IndexerHaltReason::DbCorruption);
     let unknown_id = Digest32::from_bytes([0xAA; 32]);
     // Halted handles have no store attached — every read short-circuits
     // before opening any redb txn.
-    assert!(h.box_by_id(&unknown_id).is_none());
-    assert!(h.box_by_global_index(0).is_none());
-    assert!(h.tx_by_id(&unknown_id).is_none());
-    assert!(h.tx_by_global_index(0).is_none());
+    assert!(h.box_by_id(&unknown_id).is_err());
+    assert!(h.box_by_global_index(0).is_err());
+    assert!(h.tx_by_id(&unknown_id).is_err());
+    assert!(h.tx_by_global_index(0).is_err());
 }
 
 // `[inherited]` segment-filter quirk:
@@ -260,7 +281,10 @@ fn genesis_output_global_index_zero_is_invisible_to_unspent_address_query() {
     let tree_hash = blake2b256(tree_bytes);
 
     // Sanity: by-id resolution still finds the global_index = 0 box.
-    let by_id = handle.box_by_global_index(0).expect("global_index 0");
+    let by_id = handle
+        .box_by_global_index(0)
+        .unwrap()
+        .expect("global_index 0");
     assert_eq!(by_id.global_index, 0);
 
     // The unspent address query MUST omit the global_index = 0 entry
@@ -270,7 +294,9 @@ fn genesis_output_global_index_zero_is_invisible_to_unspent_address_query() {
         offset: 0,
         limit: 100,
     };
-    let unspent = handle.address_unspent_paged(&tree_hash, page, SortDir::Asc);
+    let unspent = handle
+        .address_unspent_paged(&tree_hash, page, SortDir::Asc)
+        .unwrap();
     assert!(
         !unspent.iter().any(|b| b.global_index == 0),
         "[inherited] quirk: genesis global_index=0 must be invisible to \
@@ -281,4 +307,26 @@ fn genesis_output_global_index_zero_is_invisible_to_unspent_address_query() {
         unspent.iter().any(|b| b.global_index == 1),
         "non-zero unspent output (global_index=1) must still be visible"
     );
+}
+
+// ----- bounded global range reads -----
+
+#[test]
+fn global_ranges_use_indexed_bounds_and_preserve_order() {
+    let (handle, _temporary, _genesis, _child) = setup_two_block_chain();
+    let boxes = handle.boxes_by_global_range(0, u64::MAX).unwrap();
+    assert_eq!(
+        boxes.iter().map(|b| b.global_index).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    let transactions = handle.txs_by_global_range(0, u64::MAX).unwrap();
+    assert_eq!(
+        transactions
+            .iter()
+            .map(|tx| tx.global_index)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(handle.boxes_by_global_range(3, 100).unwrap().is_empty());
+    assert!(handle.txs_by_global_range(2, 100).unwrap().is_empty());
 }

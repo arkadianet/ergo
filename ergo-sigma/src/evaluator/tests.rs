@@ -12908,7 +12908,7 @@ fn extract_bytes_with_no_ref_canonicalizes_register_ge() {
         registers: [
             ergo_box
                 .candidate
-                .additional_registers
+                .additional_registers()
                 .get(ergo_ser::register::RegisterId::R4)
                 .cloned(),
             None,

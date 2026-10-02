@@ -49,3 +49,9 @@
 - `BalanceDto.tokens` ordering is consensus-observable parity: order-preserving first-touch insertion to diff byte-for-byte against Scala `BalanceInfo.tokens` (`src/query.rs:225-228`).
 - `IndexedTokenDto.emission_amount` is `i64` to match Scala's signed `Long` JSON shape even though the persisted record is `u64`; the projection casts via `as i64` (loss-free for realistic emissions) (`src/query.rs:245-248`).
 - `PROTOCOL_GENESIS_BOX_IDS_MAINNET` is a closed 3-ID whitelist matching `test-vectors/mainnet/genesis_boxes.json`; only these IDs' first spends are absorbed silently, every other unknown input keeps `InputMissing` terminal (`src/protocol_genesis.rs:9-20`).
+
+Database query methods in `IndexerQuery` return `Result`: successful missing
+point reads use `Ok(None)`, missing owners use empty pages or zero totals,
+and unavailable/corrupt storage uses `Err(IndexerReadError)`. The `try_*`
+aliases forward the same result; they do not adapt an infallible query.
+Cached `status()` and `indexed_height()` remain available without storage.

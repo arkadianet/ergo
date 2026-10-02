@@ -723,6 +723,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "rand 0.8.6",
+ "redb",
  "reqwest",
  "serde",
  "serde_json",
