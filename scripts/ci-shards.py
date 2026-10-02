@@ -129,7 +129,8 @@ def main():
     if args.shards != len(groups) or not 1 <= args.shard <= len(groups):
         parser.error("matrix shard count/index does not match configured crate groups")
     metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], text=True,
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        text=True, encoding="utf-8",
     ))
     member_ids = set(metadata["workspace_members"])
     members = {p["name"]: test_targets(p) for p in metadata["packages"] if p["id"] in member_ids}

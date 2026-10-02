@@ -27,7 +27,7 @@ class ReleaseProvenance(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        (self.root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.11.0"\n')
+        (self.root / "Cargo.toml").write_text('# UTF-8 fixture: 𝐀\n[workspace.package]\nversion = "0.11.0"\n', encoding="utf-8")
         self.git("init", "-q")
         self.git("config", "user.name", "release test")
         self.git("config", "user.email", "release-test@example.invalid")
@@ -35,7 +35,7 @@ class ReleaseProvenance(unittest.TestCase):
         self.git("commit", "-qm", "release fixture")
 
     def git(self, *args):
-        return subprocess.check_output(["git", *args], cwd=self.root, text=True).strip()
+        return subprocess.check_output(["git", *args], cwd=self.root, text=True, encoding="utf-8").strip()
 
     def test_lightweight_and_annotated_tags_resolve_same_commit(self):
         for annotated in (False, True):
@@ -85,19 +85,20 @@ class EngineeringPolicy(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / ".github/workflows").mkdir(parents=True)
         (self.root / "member").mkdir()
-        (self.root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n')
+        (self.root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
         shutil.copy2(policy.ROOT / ".github/ci-tools.toml", self.root / ".github/ci-tools.toml")
-        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["member"]\n[workspace.package]\nrust-version = "1.95.0"\n')
-        (self.root / "member/Cargo.toml").write_text('[package]\nrust-version.workspace = true\n[lints]\nworkspace = true\n')
+        (self.root / "Cargo.toml").write_text('# UTF-8 fixture: 𝐀\n[workspace]\nmembers = ["member"]\n[workspace.package]\nrust-version = "1.95.0"\n', encoding="utf-8")
+        (self.root / "member/Cargo.toml").write_text('[package]\nrust-version.workspace = true\n[lints]\nworkspace = true\n', encoding="utf-8")
         self.workflow = self.root / ".github/workflows/test.yml"
-        self.workflow.write_text(f'uses: actions/checkout@{"a" * 40}\nrun: cargo test --locked --workspace\n')
+        self.workflow.write_text(f'# UTF-8 fixture: 𝐀\nuses: actions/checkout@{"a" * 40}\nrun: cargo test --locked --workspace\n', encoding="utf-8")
 
     def test_repository_policy_passes(self):
         policy.check_policy()
+        policy.check_policy(self.root)
 
     def test_manifest_compiler_drift_is_rejected(self):
         path = self.root / "Cargo.toml"
-        path.write_text(path.read_text().replace("1.95.0", "1.94.0"))
+        path.write_text(path.read_text(encoding="utf-8").replace("1.95.0", "1.94.0"), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "rust-version"):
             policy.check_policy(self.root)
 
@@ -105,7 +106,7 @@ class EngineeringPolicy(unittest.TestCase):
         for value in ('[package]\nrust-version = "1.95.0"\n[lints]\nworkspace = true\n',
                       '[package]\nrust-version.workspace = true\n'):
             with self.subTest(value=value):
-                (self.root / "member/Cargo.toml").write_text(value)
+                (self.root / "member/Cargo.toml").write_text(value, encoding="utf-8")
                 with self.assertRaises(ValueError):
                     policy.check_policy(self.root)
 
@@ -114,24 +115,24 @@ class EngineeringPolicy(unittest.TestCase):
                      'run: cargo nextest run --workspace\n',
                      'run: cargo install cargo-audit --locked\n'):
             with self.subTest(text=text):
-                self.workflow.write_text(text)
+                self.workflow.write_text(text, encoding="utf-8")
                 with self.assertRaises(ValueError):
                     policy.check_policy(self.root)
 
     def test_unsupported_cargo_fuzz_lock_flag_is_rejected(self):
         for toolchain in ('nightly', '${{ steps.rust.outputs.nightly }}'):
             with self.subTest(toolchain=toolchain):
-                self.workflow.write_text(f'run: cargo +{toolchain} fuzz run bounded_evaluator --locked -- -runs=1\n')
+                self.workflow.write_text(f'run: cargo +{toolchain} fuzz run bounded_evaluator --locked -- -runs=1\n', encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "cargo-fuzz has no --locked"):
                     policy.check_policy(self.root)
 
     def test_separate_fuzz_workspace_requires_a_lockfile(self):
         fuzz = self.root / "ergo-difftest/fuzz"
         fuzz.mkdir(parents=True)
-        (fuzz / "Cargo.toml").write_text('[workspace]\n')
+        (fuzz / "Cargo.toml").write_text('[workspace]\n', encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "own committed Cargo.lock"):
             policy.check_policy(self.root)
-        (fuzz / "Cargo.lock").write_text('version = 4\n')
+        (fuzz / "Cargo.lock").write_text('version = 4\n', encoding="utf-8")
         policy.check_policy(self.root)
 
     def test_smoke_overrides_preserve_other_config_sections(self):

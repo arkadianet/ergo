@@ -40,11 +40,11 @@ def validate_tag(tag, version):
 
 
 def git(*args, root=ROOT):
-    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+    return subprocess.check_output(["git", *args], cwd=root, text=True, encoding="utf-8").strip()
 
 
 def resolve(tag, root=ROOT):
-    version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
     validate_tag(tag, version)
     sha = git("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}", root=root)
     if sha != git("rev-parse", "HEAD", root=root):
@@ -93,7 +93,7 @@ def request_api(port, path, *, key=None):
     # A CI host's proxy configuration must not turn a loopback smoke into a network request.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=2) as response:
-        body = response.read().decode()
+        body = response.read().decode("utf-8")
         return body if key is not None else json.loads(body)
 
 
@@ -101,7 +101,7 @@ def smoke_node(binary, config_template, work):
     api_port = free_port()
     peer_port = free_port()
     key = secrets.token_hex(32)
-    config = config_template.read_text()
+    config = config_template.read_text(encoding="utf-8")
     config = configure_section(config, "peers", {
         "known": f'["127.0.0.1:{peer_port}"]', "bind_addr": '""',
         "target_outbound": "1", "max_connections": "1", "max_inbound": "0",
@@ -120,7 +120,7 @@ def smoke_node(binary, config_template, work):
     })
     config = configure_section(config, "mining", {"enabled": "false"})
     config_path = work / "smoke.toml"
-    config_path.write_text(config)
+    config_path.write_text(config, encoding="utf-8")
     # Devnet has no public seeds. CLI precedence also tests the packaged config's
     # documented override path without creating state under the archive directory.
     command = [str(binary), "--config", str(config_path), "--network", "devnet",
@@ -153,7 +153,7 @@ def smoke_node(binary, config_template, work):
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=10)
-                raise RuntimeError(f"{error}\n{log_path.read_text(errors='replace')[-8000:]}") from error
+                raise RuntimeError(f"{error}\n{log_path.read_text(encoding='utf-8', errors='replace')[-8000:]}") from error
     if not (work / "data" / "state.redb").is_file():
         raise RuntimeError("offline boot did not create its state database")
 
@@ -161,7 +161,7 @@ def smoke_node(binary, config_template, work):
 def checksum(path):
     with path.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n")
+    path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
     return digest
 
 
@@ -225,7 +225,7 @@ def package(target, binaries, output, *, root=ROOT):
     if target not in TARGETS:
         raise ValueError("unsupported release target")
     output.mkdir(parents=True, exist_ok=True)
-    version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+    version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
     manifest = {"target": target, "version": version, "sha": git("rev-parse", "HEAD", root=root), "sha256": {}}
     extension = ".exe" if target.endswith("windows-msvc") else ""
     with tempfile.TemporaryDirectory(prefix="ergo-release-") as directory:
@@ -271,7 +271,8 @@ def package(target, binaries, output, *, root=ROOT):
                     bundle.extractall(extracted, filter="data")
             binary = extracted / (name + extension)
             for flag in ("--help", "--version"):
-                result = subprocess.run([str(binary), flag], check=True, capture_output=True, text=True, timeout=20)
+                result = subprocess.run([str(binary), flag], check=True, capture_output=True,
+                                        text=True, encoding="utf-8", timeout=20)
                 if flag == "--version" and result.stdout.strip() != f"{name} {version}":
                     raise RuntimeError(f"unexpected version: {result.stdout.strip()}")
             if name == "ergo-node":
@@ -280,7 +281,7 @@ def package(target, binaries, output, *, root=ROOT):
                 smoke_node(binary, extracted / "config/ergo-node.toml", smoke_work)
             for path in (artifact, archive):
                 manifest["sha256"][path.name] = checksum(path)
-    (output / f"release-{target}.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (output / f"release-{target}.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"packaged {target}: version/help, extracted archive, offline boot/reopen/shutdown passed")
 
 

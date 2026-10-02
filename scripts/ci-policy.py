@@ -12,8 +12,8 @@ CARGO_COMMAND = r"\bcargo\s+(?:\+(?:\$\{\{.*?\}\}|\S+)\s+)?"
 
 
 def read_versions(root=ROOT):
-    toolchain = tomllib.loads((root / "rust-toolchain.toml").read_text())["toolchain"]
-    config = tomllib.loads((root / ".github/ci-tools.toml").read_text())
+    toolchain = tomllib.loads((root / "rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]
+    config = tomllib.loads((root / ".github/ci-tools.toml").read_text(encoding="utf-8"))
     versions = config["tools"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", toolchain["channel"]):
         raise ValueError("stable Rust must name an exact release")
@@ -27,7 +27,7 @@ def read_versions(root=ROOT):
 
 def check_policy(root=ROOT):
     versions = read_versions(root)
-    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     workspace = manifest["workspace"]
     fuzz_manifest = root / "ergo-difftest/fuzz/Cargo.toml"
     if fuzz_manifest.exists() and not fuzz_manifest.with_name("Cargo.lock").is_file():
@@ -35,7 +35,7 @@ def check_policy(root=ROOT):
     if workspace["package"].get("rust-version") != versions["channel"]:
         raise ValueError("workspace rust-version must match rust-toolchain.toml")
     for member in workspace["members"]:
-        package = tomllib.loads((root / member / "Cargo.toml").read_text())
+        package = tomllib.loads((root / member / "Cargo.toml").read_text(encoding="utf-8"))
         if package["package"].get("rust-version") != {"workspace": True}:
             raise ValueError(f"{member} must inherit rust-version")
         if package.get("lints") != {"workspace": True}:
@@ -43,7 +43,7 @@ def check_policy(root=ROOT):
     paths = list((root / ".github/workflows").glob("*.yml"))
     paths += list((root / ".github/actions").glob("*/action.yml"))
     for path in paths:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for action in re.findall(r"\buses:\s*([^\s#]+)", text):
             if action.startswith("./"):
                 continue
