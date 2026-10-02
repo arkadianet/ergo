@@ -12,7 +12,8 @@ It pins the historical encrypted-stream field split, absent cipher
 algorithm/mode fields, a null legacy flag, the modern EIP-3 address and the
 pre-1627 leading-zero derivation branch. Rust tests additionally remove the
 legacy flag to cover old imports. They do not derive expected bytes using
-the Rust implementation.
+the Rust implementation. The fixture includes every private-key/chain-code
+intermediate along the legacy EIP-3 path, including its stripped leading zero.
 
 Install Java 17, sbt and scala-cli. Publish the reference wallet first because
 `ergo-wallet` 6.0.6 is not on Maven Central:
@@ -42,3 +43,15 @@ scala-cli run scripts/jvm_wallet_oracle/WalletOracle.scala --server=false --jvm 
 
 Both checks run in the `Scala wallet interoperability` PR job. Feature-gated
 multi-signature and proving consistency targets also run explicitly in CI.
+
+## Deferred selection oracle
+
+The remaining ignored wallet oracle is the compact box-selection scaffold.
+Its owner is the wallet crate maintainers; its external source is Scala
+`DefaultBoxSelector` / `ReplaceCompactCollectBoxSelector` and their specs in
+the pinned reference wallet. Completion requires deterministic candidates,
+ERG/token targets and Scala-selected inputs/change for exact, insufficient,
+replacement and compaction cases, then an enabled integration test. The Rust
+compact selector currently delegates to its default selector; it does not
+claim the reference compaction policy. Existing local selection tests prove
+the implemented policy's invariants, not Scala compaction parity.
