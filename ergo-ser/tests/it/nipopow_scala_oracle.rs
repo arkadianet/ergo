@@ -22,8 +22,8 @@ const CAPTURE_PATH: &str = "../test-vectors/mainnet/nipopow_proof_capture.bin";
 #[test]
 fn captured_scala_proof_roundtrips_byte_identical() {
     let path = Path::new(CAPTURE_PATH);
-    let proof_bytes = std::fs::read(path)
-        .expect("required committed Scala proof capture is readable");
+    let proof_bytes =
+        std::fs::read(path).expect("required committed Scala proof capture is readable");
     let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&proof_bytes)
         .expect("captured Scala proof deserializes");
 
