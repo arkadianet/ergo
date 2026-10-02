@@ -41,19 +41,17 @@ pub use whole::{
 /// ([`ErgoBoxCandidate::serialized_ergo_tree_bytes`]), which is the same bytes
 /// for every canonically encoded tree.
 ///
-/// # Standalone parsing limitation
+/// # Parsing and retained bytes
 ///
-/// `read_ergo_box` / `read_ergo_box_candidate` can only locate the tree/body
-/// boundary when the ErgoTree header has the size flag set. Non-size-delimited
-/// trees (legal on mainnet, common in early blocks) require the caller to
-/// supply the tree bytes externally — see `parse_ergo_box_bytes`. Transaction-
-/// mode parsing (`read_ergo_box_candidate_indexed`) does not have this
-/// limitation because the token table and field ordering provide the boundary.
+/// Standalone and transaction readers locate non-size-delimited tree boundaries
+/// by parsing the opcode expression. Size-delimited trees also support Scala's
+/// opaque soft-fork representation. [`parse_ergo_box_bytes`] additionally checks
+/// that supplied proposition bytes agree with the bytes in the complete box.
 ///
-/// Removing this limitation requires opcode-level expression parsing to
-/// discover where the tree body ends. Until then, standalone raw-bytes box
-/// parsing (UTXO snapshots, API responses) must use `parse_ergo_box_bytes`
-/// for boxes with non-size-delimited trees.
+/// Received proposition bytes and canonical serialization can differ; use the
+/// documented accessors for the required identity rather than treating them as
+/// interchangeable. Registers retain the evaluated-value forms needed for
+/// canonical box serialization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErgoBoxCandidate {
     /// Box value in nanoErg.

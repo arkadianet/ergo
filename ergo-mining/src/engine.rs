@@ -13,7 +13,7 @@
 //! storage-rent-eligible boxes against that snapshot via the injected
 //! `resolve_rent` closure (the eligible-id list itself comes from the
 //! indexer's eventually-consistent extra-index), runs the unchanged
-//! [`generate_candidate`]
+//! [`crate::candidate::generate_candidate`]
 //! against the snapshot, and CAS-publishes the result into the served cache
 //! only if the live tip still matches the parent it built against. A reorg
 //! or tip advance during the build wastes the work, never serves a
@@ -221,7 +221,7 @@ pub(crate) fn should_publish(best_tip: &BestTip, built_parent: &[u8; 32]) -> boo
 /// ergo-mining free of any ergo-indexer dependency.
 ///
 /// Consensus-safety: the snapshot is one redb read transaction; the build
-/// runs the unchanged [`generate_candidate`] against it (byte-identical to
+/// runs the unchanged [`crate::candidate::generate_candidate`] against it (byte-identical to
 /// an on-loop build for the same parent + tx-set, per the `ergo-state`
 /// parity tests); and the result is only served if the live tip still
 /// matches — so a reorg during the build wastes work rather than serving a

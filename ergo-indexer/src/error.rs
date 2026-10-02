@@ -388,7 +388,7 @@ impl IndexerError {
     /// error) OR a filesystem I/O failure preparing the indexer DB
     /// directory (`FsIo` — `create_dir_all`/`remove_file`/similar) — the
     /// scope `ergo_node_storage_errors_total` covers (issue #281).
-    /// Deliberately narrower than [`halt_reason`]'s `DbCorruption` bucket:
+    /// Deliberately narrower than [`Self::halt_reason`]'s `DbCorruption` bucket:
     /// that bucket also covers logical/consistency faults (row decode
     /// mismatches, missing boxes, segment topology errors) that are not
     /// "a redb/persist error was surfaced" in the operator sense —

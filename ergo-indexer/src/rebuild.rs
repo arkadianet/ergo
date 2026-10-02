@@ -4,8 +4,8 @@
 //! Motivation: a `SegmentEntryMissing` drift (an ancient box whose `+gi`
 //! creation entry is absent from the shared template segment) is tolerated at
 //! apply time (the indexer degrades-not-halts and sets a sticky repair marker;
-//! see [`crate::segment_buffer::tolerate_secondary_drift`] and
-//! [`crate::store::meta`]). This module RESTORES full correctness without a
+//! see `crate::segment_buffer::tolerate_secondary_drift` and
+//! `crate::store::meta`). This module RESTORES full correctness without a
 //! full chain reindex: the secondary segments are a pure projection of the
 //! primary box table, which retains every box (spends UPDATE the row, they are
 //! never deleted), so they can be re-derived by replaying the apply append/flip
@@ -67,7 +67,7 @@ const WIPE_PARENT_CHUNK: usize = 20_000;
 /// call whenever [`IndexerStore::secondary_repair_pending`] is true.
 ///
 /// Self-arming: the FIRST committed action is to set the sticky repair marker if
-/// it is not already set (see [`ensure_repair_marker_armed`]). The apply-time
+/// it is not already set (see `ensure_repair_marker_armed`). The apply-time
 /// degrade path always sets the marker before this runs, but this function is
 /// also a public, destructive entrypoint — arming up front makes a direct/manual
 /// invocation crash-safe too (a crash mid-rebuild leaves the marker set, so the

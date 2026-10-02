@@ -456,7 +456,7 @@ fn extension_value_to_expr(tpe: &SigmaType, val: &SigmaValue) -> Result<Expr, Wr
 /// v6 activation. It throws for any value whose type IS or CONTAINS
 /// (recursing tuple items / collection element) `SOption`, `SHeader`,
 /// or `SUnsignedBigInt`. We apply the identical predicate
-/// ([`crate::register::type_has_v6_only_type`], the same one the
+/// (`crate::register::type_has_v6_only_type`, the same one the
 /// register reader uses) here, returning the same rejection class the
 /// register path returns.
 ///
