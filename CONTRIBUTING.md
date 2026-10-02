@@ -110,7 +110,7 @@ from the repository root:
 scripts/fetch-l4-inputs.sh
 cargo nextest run --locked -p ergo-validation --features diagnostics \
   --run-ignored only \
-  -E 'test(/cost_parity_(stratified_ranges|required_selection)_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)'
+  -E 'test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)'
 ```
 
 Other manual obligations are separate from that pinned replay:
