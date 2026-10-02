@@ -510,6 +510,21 @@ impl NodeConfig {
         let sync_interval_stable = std::time::Duration::from_secs(sync_interval_stable_secs);
 
         let cache_bytes = cli.cache_bytes.or(toml_cfg.store.cache_bytes);
+        let defaults = super::RedbCacheBudgets::default();
+        let redb_cache_budgets = super::RedbCacheBudgets {
+            state: toml_cfg
+                .store
+                .state_redb_cache_bytes
+                .unwrap_or(defaults.state),
+            indexer: toml_cfg
+                .store
+                .indexer_redb_cache_bytes
+                .unwrap_or(defaults.indexer),
+            peers: toml_cfg
+                .store
+                .peers_redb_cache_bytes
+                .unwrap_or(defaults.peers),
+        };
 
         // Checkpoint resolution priority: CLI > TOML > network default.
         // Either source may override only the height (in which case
@@ -1117,6 +1132,7 @@ impl NodeConfig {
             sync_interval,
             sync_interval_stable,
             cache_bytes,
+            redb_cache_budgets,
             script_validation_checkpoint,
             header_checkpoint,
             genesis_id,

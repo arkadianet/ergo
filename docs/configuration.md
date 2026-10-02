@@ -111,6 +111,22 @@ the fast clean-database boot path.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `cache_bytes` | usize | 1 GiB (`1073741824`) | AVL arena clean-node LRU budget, in bytes. CLI flag `--cache-bytes` overrides this. Dirty/pinned nodes and redb's per-database caches are separate; this is not a process RSS limit. |
+| `state_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `state.redb`, including digest mode. Independent of `cache_bytes`; zero disables this cache. |
+| `indexer_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for the optional indexer database. Used on creation, resume and schema rebuild. |
+| `peers_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `peers.redb`, including replacement after corruption. |
+
+Defaults preserve the previous per-database budgets. Each redb budget covers
+its read/write page caches (approximately 90%/10%); it is neither a resident
+memory measurement nor a process-wide hard limit. Startup logs report the
+requested budgets. `ERGO_MEM_CSV` samples append the effective per-database
+budgets, cumulative active eviction counters, and unpersisted pinned AVL bytes.
+An unavailable peer/indexer database reports zero budget; zero evictions can
+mean no pressure. Choose a new CSV path when upgrading its column schema.
+
+For a constrained comparison, an AVL/state/indexer/peer cache allocation of
+16/16/16/1 MiB is a starting experiment, not an optimal mainnet profile. Replay
+the same owned snapshot and interval with identical validation and persistence
+settings, verifying final roots and reopen before comparing throughput and RSS.
 
 Start with the 1 GiB default for full-mainnet replay, then compare the same
 height interval and validation settings before changing it. The

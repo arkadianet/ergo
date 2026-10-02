@@ -324,6 +324,17 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         }
         launch_parameters.max_block_cost = cap as i32;
     }
+    info!(
+        state_redb_cache_bytes = config.redb_cache_budgets.state,
+        indexer_redb_cache_bytes = if config.indexer_config.enabled {
+            config.redb_cache_budgets.indexer
+        } else {
+            0
+        },
+        peers_redb_cache_bytes = config.redb_cache_budgets.peers,
+        "redb page-cache budgets; cache eviction metrics enabled",
+    );
+
     let is_mode_5 = crate::config::is_canonical_mode_5_combo(
         config.state_type,
         config.verify_transactions,
@@ -331,11 +342,12 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         config.utxo_bootstrap,
     );
     if is_mode_5 {
-        let mut store = ergo_state::DigestStateStore::open(
+        let mut store = ergo_state::DigestStateStore::open_with_redb_cache(
             &db_path,
             launch_parameters,
             config.chain_spec.voting,
             ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network).state_digest,
+            config.redb_cache_budgets.state,
         )
         .map_err(|e| {
             report_boot_storage_failure(&db_path, "open_digest_state", &e);
@@ -370,9 +382,10 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         .await;
     }
 
-    let mut store = StateStore::open_with_cache_launch_voting(
+    let mut store = StateStore::open_with_cache_budgets_launch_voting(
         &db_path,
         cache_bytes,
+        config.redb_cache_budgets.state,
         launch_parameters,
         config.chain_spec.voting,
     )
@@ -420,15 +433,6 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         state_type = config.state_type.as_str(),
         avl_arena_cache_mb = cache_bytes / (1024 * 1024),
         "opened store",
-    );
-    // Observability note: redb cache config is implicit in 2.6.3 — the
-    // `Database::builder()` call in `ergo-state::store` does not invoke
-    // `set_cache_size`, so each redb DB falls back to the library default
-    // (1 GiB per redb 2.6.3 `Builder::new`, ~90% read / ~10% write split).
-    // Log this honestly so operators don't read the AVL arena MB above as
-    // the total state-subsystem cache budget.
-    info!(
-        "redb cache: default/unset (1 GiB per DB, redb 2.6.3); cache_metrics feature disabled (evictions counter inactive)",
     );
     info!(
         height = store.height(),

@@ -139,6 +139,7 @@ pub(crate) const EMPTY_AVL_DIGEST: [u8; 33] = [0u8; 33];
 #[derive(Debug)]
 pub struct DigestStateStore {
     db: Arc<Database>,
+    redb_cache_bytes: usize,
     db_path: PathBuf,
     root_digest: [u8; 33],
     chain_state: ChainStateMeta,

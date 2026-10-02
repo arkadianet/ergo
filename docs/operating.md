@@ -769,10 +769,15 @@ followed by a climb on the new chain. A reorg approaching the ~200-block
 rollback window is unusual — investigate peer quality before assuming a
 node-side fault.
 
-**Memory.** Each redb database falls back to its own ~1 GiB page cache by
+**Memory.** Each redb database uses its own 1 GiB page-cache budget by
 default, and that is separate from the AVL arena budget logged at startup.
 When budgeting memory, account for `state.redb` plus, when enabled,
 `indexer.redb` and `peers.redb`. `[store] cache_bytes` (or `--cache-bytes`)
-tunes the AVL arena cache. For IBD memory profiling, setting
+tunes the AVL arena cache. Set `[store] state_redb_cache_bytes`,
+`indexer_redb_cache_bytes` and `peers_redb_cache_bytes` independently to tune
+redb page caches; defaults preserve 1 GiB each. These limits exclude dirty and
+pinned nodes, queues and mining graphs, so their sum does not bound process RSS.
+Startup logs and CSV samples expose budgets, and per-database eviction counters
+are enabled. For IBD memory profiling, setting
 `ERGO_MEM_CSV=<path>` makes the node append a per-tick memory sample to a
 CSV.

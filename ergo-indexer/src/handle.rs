@@ -91,12 +91,21 @@ impl IndexerHandle {
     /// to the caller (the node-startup wiring) which then spawns the
     /// task against the same store.
     pub fn boot(config: &IndexerConfig, datadir: &Path) -> Option<Self> {
+        Self::boot_with_cache(config, datadir, ergo_state::DEFAULT_REDB_CACHE_BYTES)
+    }
+
+    /// Boot the optional indexer with a separate redb page-cache budget.
+    pub fn boot_with_cache(
+        config: &IndexerConfig,
+        datadir: &Path,
+        cache_bytes: usize,
+    ) -> Option<Self> {
         if !config.enabled {
             return None;
         }
 
         let path = datadir.join(&config.db_filename);
-        match IndexerStore::open(&path) {
+        match IndexerStore::open_with_cache(&path, cache_bytes) {
             Ok((mut store, _outcome)) => {
                 store.set_rollback_window(config.rollback_window);
                 let meta = match store.read_meta() {

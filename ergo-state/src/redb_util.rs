@@ -70,6 +70,9 @@ pub(crate) fn test_durability(db: &Database, requested: redb::Durability) -> red
     }
 }
 
+/// Preserve redb 2.6.3's default per-database page-cache budget.
+pub const DEFAULT_REDB_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Open (or create) a redb database at `path`, emitting structured
 /// `redb_repair_*` events whenever the post-unclean-shutdown repair
 /// walk runs.
@@ -97,12 +100,23 @@ pub fn open_with_repair_logging(
     path: &Path,
     db_name: &'static str,
 ) -> Result<Database, DatabaseError> {
+    open_with_repair_logging_and_cache(path, db_name, DEFAULT_REDB_CACHE_BYTES)
+}
+
+/// Open with an explicit redb page-cache budget, independently of AVL caching.
+#[allow(clippy::result_large_err)] // redb's DatabaseError shape is fixed upstream
+pub fn open_with_repair_logging_and_cache(
+    path: &Path,
+    db_name: &'static str,
+    cache_bytes: usize,
+) -> Result<Database, DatabaseError> {
     let repair_started = Arc::new(AtomicBool::new(false));
     let cb_started = repair_started.clone();
     let cb_path = path.display().to_string();
 
     let t0 = Instant::now();
     let db = Database::builder()
+        .set_cache_size(cache_bytes)
         .set_repair_callback(move |session| {
             let was_started = cb_started.swap(true, Ordering::SeqCst);
             let pct = session.progress() * 100.0;
@@ -154,6 +168,41 @@ mod tests {
     // (not built here). This test is a regression catcher for "did
     // someone break the helper signature or wiring", which is what
     // 80+ call sites depend on.
+
+    #[test]
+    fn explicit_zero_cache_evicts_pages_and_preserves_reopened_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.redb");
+        let table: TableDefinition<u64, &[u8]> = TableDefinition::new("cache_test");
+        {
+            let db = open_with_repair_logging_and_cache(&path, "test", 0).unwrap();
+            let tx = begin_write_qr(&db).unwrap();
+            {
+                let mut rows = tx.open_table(table).unwrap();
+                for key in 0..64u64 {
+                    rows.insert(key, vec![key as u8; 8192].as_slice()).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            for _ in 0..2 {
+                let read = db.begin_read().unwrap();
+                let rows = read.open_table(table).unwrap();
+                for key in 0..64u64 {
+                    assert_eq!(rows.get(key).unwrap().unwrap().value()[0], key as u8);
+                }
+            }
+            assert!(
+                db.cache_stats().evictions() > 0,
+                "cache_metrics must be active for standalone state builds"
+            );
+        }
+        let db = open_with_repair_logging_and_cache(&path, "test", 1024 * 1024).unwrap();
+        let read = db.begin_read().unwrap();
+        let rows = read.open_table(table).unwrap();
+        for key in 0..64u64 {
+            assert_eq!(rows.get(key).unwrap().unwrap().value().len(), 8192);
+        }
+    }
 
     // ----- happy path -----
 

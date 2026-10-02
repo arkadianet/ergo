@@ -311,6 +311,9 @@ pub(super) struct TomlStore {
     /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. Override
     /// `StateStore::DEFAULT_CACHE_BYTES`.
     pub(super) cache_bytes: Option<usize>,
+    pub(super) state_redb_cache_bytes: Option<usize>,
+    pub(super) indexer_redb_cache_bytes: Option<usize>,
+    pub(super) peers_redb_cache_bytes: Option<usize>,
 }
 
 #[derive(serde::Deserialize, Default, Debug)]

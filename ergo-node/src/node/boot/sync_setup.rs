@@ -358,7 +358,11 @@ pub(super) fn setup(
     // spawned. `indexer_task_handle` is `Some` only when a task is live.
     let indexer_cancel = Arc::new(AtomicBool::new(false));
     let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<IndexerWorker>) =
-        match IndexerHandle::boot(&config.indexer_config, &config.data_dir) {
+        match IndexerHandle::boot_with_cache(
+            &config.indexer_config,
+            &config.data_dir,
+            config.redb_cache_budgets.indexer,
+        ) {
             Some(handle) if handle.store().is_some() => {
                 info!(
                     poll_idle_ms = config.indexer_config.poll_idle_ms,

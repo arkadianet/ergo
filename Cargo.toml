@@ -88,7 +88,7 @@ zeroize    = { version = "1", features = ["derive"] }
 rpassword  = "7"
 
 # Storage / data structures
-redb              = "2"
+redb              = { version = "2", features = ["cache_metrics"] }
 ergo_avltree_rust = "0.1.1"
 lru               = "0.18"
 crossbeam-channel = "0.5"

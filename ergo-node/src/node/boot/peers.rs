@@ -23,7 +23,10 @@ pub(super) fn setup(config: &NodeConfig) -> (i64, PeerManager) {
     // which addresses the routability filter admits.
     peer_manager.set_allow_local(config.allow_local);
 
-    match AddressBook::open(&config.data_dir) {
+    match AddressBook::open_at_with_cache(
+        &config.data_dir.join("peers.redb"),
+        config.redb_cache_budgets.peers,
+    ) {
         Ok(book) => {
             let book = std::sync::Arc::new(book);
             match book.load_all(config.allow_local) {

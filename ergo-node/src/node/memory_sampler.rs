@@ -36,10 +36,8 @@ pub(super) fn sample_memory(
     let chain = state.store.chain_state_meta();
     let bh = chain.best_header_height;
     let bf = chain.best_full_block_height;
-    // The arena/batch/redb metrics below are UTXO-arena counters with no
-    // digest-backend analogue. A digest node still emits a row to keep the
-    // CSV schema stable across runs; those columns read 0.
-    let utxo = state.store.as_utxo();
+    // Digest nodes expose their own redb gauges while their absent AVL
+    // arena and persist-batch columns remain zero.
     let sync_phase = if bh == 0 {
         "Bootstrap"
     } else if bf < bh {
@@ -67,9 +65,18 @@ pub(super) fn sample_memory(
             None => (0, 0, "Disabled", 0),
         };
 
-    // One snapshot of the store's instrumentation gauges; all-zero when
-    // there is no UTXO arena (digest mode), which keeps the CSV shape stable.
-    let sm = utxo.map(|u| u.metrics()).unwrap_or_default();
+    // One snapshot of the selected backend's instrumentation gauges.
+    let sm = match &state.store {
+        ergo_state::StateBackendKind::Utxo(s) => s.metrics(),
+        ergo_state::StateBackendKind::Digest(s) => s.metrics(),
+    };
+    let (peers_cache_bytes, peers_evictions) = state.peer_manager.address_book_cache_metrics();
+    let indexer_cache_bytes = state
+        .indexer_handle
+        .as_ref()
+        .and_then(|h| h.store())
+        .map(|s| s.redb_cache_capacity_bytes())
+        .unwrap_or(0);
 
     let sample = crate::mem_csv::MemSample {
         ts_ms: crate::mem_csv::now_ms(),
@@ -98,13 +105,13 @@ pub(super) fn sample_memory(
         mempool_bytes: state.mempool.total_bytes() as u64,
         peer_count: state.peer_manager.peer_count() as u64,
         known_addresses_len: state.peer_manager.known_addresses_len() as u64,
-        // ergo-state and ergo-p2p don't enable redb's `cache_metrics`
-        // feature, so their `cache_stats().evictions()` returns 0. The
-        // column is kept for wire-shape parity; only the indexer column
-        // surfaces real numbers today.
         redb_state_evictions: sm.redb_cache_evictions,
         redb_indexer_evictions,
-        redb_addrbook_evictions: 0,
+        redb_addrbook_evictions: peers_evictions,
+        redb_state_capacity_bytes: sm.redb_cache_capacity_bytes as u64,
+        redb_indexer_capacity_bytes: indexer_cache_bytes as u64,
+        redb_addrbook_capacity_bytes: peers_cache_bytes as u64,
+        avl_unpersisted_pinned_bytes: sm.arena_unpersisted_pinned_bytes as u64,
         indexer_indexed_height,
         indexer_lag,
         indexer_status,
