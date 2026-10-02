@@ -69,10 +69,10 @@ proof, live-mainnet performance or perfection.
 
 ## Delivery and verification
 
-The delivery table is completed after each isolated layer passes its gates and
-its draft PR is opened. The PR base defines the file count, rather than `main`
-for every layer. More than 400 unique paths require at least five PRs under the
-requested limit; this stack uses five.
+All five draft PRs are open. The delivery table records the completed local
+gates; hosted CI is verified separately on the corrected stack. The PR base defines the file count, rather than `main`
+for every layer. The complete stack changes 440 unique paths, requiring at least five PRs under
+the requested limit; this stack uses five.
 
 | Order | Scope | Draft PR | Changed paths | Checks |
 | --- | --- | --- | ---: | --- |
@@ -80,7 +80,7 @@ requested limit; this stack uses five.
 | 2 | Runtime/API | [#482](https://github.com/arkadianet/ergo/pull/482) | 99 | Format/Clippy; 7,796 workspace tests passed, 97 ignored |
 | 3 | Query/codec contracts | [#483](https://github.com/arkadianet/ergo/pull/483) | 93 | Format/Clippy; 7,801 workspace tests passed, 97 ignored |
 | 4 | Compiler/evaluator | [#484](https://github.com/arkadianet/ergo/pull/484) | 99 | Format/Clippy; 7,820 workspace tests passed, 97 ignored |
-| 5 | Engineering/release | Pending | 100 | 7,821 default / 7,882 all-feature tests passed; final follow-up checks passed |
+| 5 | Engineering/release | [#485](https://github.com/arkadianet/ergo/pull/485) | 100 | 7,821 default / 7,882 all-feature tests passed; final follow-up checks passed |
 
 All five layers passed their required local gates. Hosted CI is
 separate and may still be running. Layer 1 additionally passed 249 wallet
