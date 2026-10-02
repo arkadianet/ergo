@@ -5,13 +5,51 @@ use crate::error::WriteError;
 use ergo_primitives::writer::VlqWriter;
 
 use super::{
-    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, OPTION_CODE, OPTION_COLL_CODE, PAIR1_CODE,
-    PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE, SGLOBAL_CODE,
-    SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE, TUPLE_CODE,
+    SigmaType, COLL_CODE, COLL_COLL_CODE, FUNC_CODE, MAX_TYPE_DEPTH, OPTION_CODE, OPTION_COLL_CODE,
+    PAIR1_CODE, PAIR2_CODE, PAIR_SYM_CODE, SANY_CODE, SAVL_TREE_CODE, SBOX_CODE, SCONTEXT_CODE,
+    SGLOBAL_CODE, SHEADER_CODE, SPREHEADER_CODE, SSTRING_CODE, STYPEVAR_CODE, SUNIT_CODE,
+    TUPLE_CODE,
 };
 
-/// Serialize a Sigma type descriptor.
+/// Pending work in wire order, stored in reverse on the heap stack.
+/// Slices keep wide tuples/domains from adding one stack entry per child.
+enum Work<'a> {
+    Type(&'a SigmaType, usize),
+    Types(&'a [SigmaType], usize),
+    Byte(u8),
+}
+
+/// Serialize a Sigma type descriptor without recursing on the native stack.
+/// Depth is checked at the same visits as the recursive writer, including
+/// its compressed terminal forms, so reader-accepted types remain writable.
 pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
+    let mut stack = vec![Work::Type(t, 0)];
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Type(t, depth) => write_one(w, t, depth, &mut stack)?,
+            Work::Types(types, depth) => {
+                if let Some((first, rest)) = types.split_first() {
+                    stack.push(Work::Types(rest, depth));
+                    stack.push(Work::Type(first, depth));
+                }
+            }
+            Work::Byte(byte) => w.put_u8(byte),
+        }
+    }
+    Ok(())
+}
+
+fn write_one<'a>(
+    w: &mut VlqWriter,
+    t: &'a SigmaType,
+    depth: usize,
+    stack: &mut Vec<Work<'a>>,
+) -> Result<(), WriteError> {
+    if depth > MAX_TYPE_DEPTH {
+        return Err(WriteError::InvalidData(format!(
+            "type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})"
+        )));
+    }
     match t {
         // Primitives: single byte = type code
         SigmaType::SBoolean => w.put_u8(1),
@@ -73,14 +111,14 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
         SigmaType::SGlobal => w.put_u8(SGLOBAL_CODE),
 
         // Coll[T] — constrId 1, or Coll[Coll[T]] — constrId 2
-        SigmaType::SColl(elem) => write_coll(w, elem)?,
+        SigmaType::SColl(elem) => write_coll(w, elem, depth, stack),
 
         // Option[T] — constrId 3, or Option[Coll[T]] — constrId 4
-        SigmaType::SOption(elem) => write_option(w, elem)?,
+        SigmaType::SOption(elem) => write_option(w, elem, depth, stack),
 
         // Tuples: pairs (constrId 5/6/7), triples (constrId 6 primId=0),
         // quads (constrId 7 primId=0), and general (TUPLE_CODE for 5+)
-        SigmaType::STuple(elems) => write_tuple(w, elems)?,
+        SigmaType::STuple(elems) => write_tuple(w, elems, depth, stack)?,
 
         // SFunc: FUNC_CODE + 1-byte domain count + domain types + range
         // type + 1-byte tpeParams count + STypeVar idents. Counts are
@@ -115,20 +153,16 @@ pub fn write_type(w: &mut VlqWriter, t: &SigmaType) -> Result<(), WriteError> {
             }
             w.put_u8(FUNC_CODE);
             w.put_u8(t_dom.len() as u8);
-            for d in t_dom {
-                write_type(w, d)?;
-            }
-            write_type(w, t_range)?;
-            w.put_u8(tpe_params.len() as u8);
-            for p in tpe_params {
-                write_type(w, p)?;
-            }
+            stack.push(Work::Types(tpe_params, depth + 1));
+            stack.push(Work::Byte(tpe_params.len() as u8));
+            stack.push(Work::Type(t_range, depth + 1));
+            stack.push(Work::Types(t_dom, depth + 1));
         }
     }
     Ok(())
 }
 
-fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
+fn write_coll<'a>(w: &mut VlqWriter, elem: &'a SigmaType, depth: usize, stack: &mut Vec<Work<'a>>) {
     // Coll[Coll[embeddable]] has a compressed single-byte form (constrId 2,
     // 0x18 + the embeddable code). This optimization applies ONLY when the
     // innermost element is embeddable; Coll[Coll[non-embeddable]] uses the
@@ -138,22 +172,26 @@ fn write_coll(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
     if let SigmaType::SColl(inner) = elem {
         if let Some(code) = inner.embeddable_code() {
             w.put_u8(COLL_COLL_CODE + code);
-            return Ok(());
+            return;
         }
         // else: fall through to the general Coll[elem] path below, which
-        // writes COLL_CODE then recurses into `elem` (the inner Coll).
+        // writes COLL_CODE then schedules `elem` (the inner Coll).
     }
     // Coll[T] — constrId 1
     if let Some(code) = elem.embeddable_code() {
         w.put_u8(COLL_CODE + code);
     } else {
         w.put_u8(COLL_CODE);
-        write_type(w, elem)?;
+        stack.push(Work::Type(elem, depth + 1));
     }
-    Ok(())
 }
 
-fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
+fn write_option<'a>(
+    w: &mut VlqWriter,
+    elem: &'a SigmaType,
+    depth: usize,
+    stack: &mut Vec<Work<'a>>,
+) {
     // Option[Coll[embeddable]] has a compressed single-byte form (constrId 4,
     // OPTION_COLL_CODE + the embeddable code). This applies ONLY when the
     // collection's element is embeddable; Option[Coll[non-embeddable]] uses
@@ -167,22 +205,26 @@ fn write_option(w: &mut VlqWriter, elem: &SigmaType) -> Result<(), WriteError> {
         if let Some(code) = inner.embeddable_code() {
             // Option[Coll[embeddable]] — single byte
             w.put_u8(OPTION_COLL_CODE + code);
-            return Ok(());
+            return;
         }
         // else: fall through to the general Option[T] path below, which writes
-        // OPTION_CODE then recurses into `elem` (the whole Coll).
+        // OPTION_CODE then schedules `elem` (the whole Coll).
     }
     // Option[T] — constrId 3
     if let Some(code) = elem.embeddable_code() {
         w.put_u8(OPTION_CODE + code);
     } else {
         w.put_u8(OPTION_CODE);
-        write_type(w, elem)?;
+        stack.push(Work::Type(elem, depth + 1));
     }
-    Ok(())
 }
 
-fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError> {
+fn write_tuple<'a>(
+    w: &mut VlqWriter,
+    elems: &'a [SigmaType],
+    depth: usize,
+    stack: &mut Vec<Work<'a>>,
+) -> Result<(), WriteError> {
     match elems.len() {
         0 | 1 => {
             // Deliberate read/write asymmetry, matching Scala exactly: the
@@ -198,20 +240,16 @@ fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError>
                 elems.len()
             )));
         }
-        2 => write_pair(w, &elems[0], &elems[1])?,
+        2 => write_pair(w, &elems[0], &elems[1], depth, stack),
         3 => {
             // Triple: constrId 6, primId 0 => byte 72, then 3 types
             w.put_u8(PAIR2_CODE);
-            for elem in elems {
-                write_type(w, elem)?;
-            }
+            stack.push(Work::Types(elems, depth + 1));
         }
         4 => {
             // Quad: constrId 7, primId 0 => byte 84, then 4 types
             w.put_u8(PAIR_SYM_CODE);
-            for elem in elems {
-                write_type(w, elem)?;
-            }
+            stack.push(Work::Types(elems, depth + 1));
         }
         n => {
             // General tuple (5+): sentinel byte, 1-byte count, then each type.
@@ -225,40 +263,50 @@ fn write_tuple(w: &mut VlqWriter, elems: &[SigmaType]) -> Result<(), WriteError>
             }
             w.put_u8(TUPLE_CODE);
             w.put_u8(n as u8);
-            for elem in elems {
-                write_type(w, elem)?;
-            }
+            stack.push(Work::Types(elems, depth + 1));
         }
     }
     Ok(())
 }
 
-fn write_pair(w: &mut VlqWriter, t1: &SigmaType, t2: &SigmaType) -> Result<(), WriteError> {
+fn write_pair<'a>(
+    w: &mut VlqWriter,
+    t1: &'a SigmaType,
+    t2: &'a SigmaType,
+    depth: usize,
+    stack: &mut Vec<Work<'a>>,
+) {
     // Symmetric pair: both elements are the same embeddable type — constrId 7
-    if t1 == t2 {
-        if let Some(code) = t1.embeddable_code() {
-            w.put_u8(PAIR_SYM_CODE + code);
-            return Ok(());
+    let codes = (t1.embeddable_code(), t2.embeddable_code());
+    if let (Some(a), Some(b)) = codes {
+        if a == b {
+            w.put_u8(PAIR_SYM_CODE + a);
+            return;
         }
     }
     // First element embeddable — constrId 5
-    if let Some(code) = t1.embeddable_code() {
+    if let Some(code) = codes.0 {
         w.put_u8(PAIR1_CODE + code);
-        write_type(w, t2)?;
-        return Ok(());
+        stack.push(Work::Type(t2, depth + 1));
+        return;
     }
     // Second element embeddable — constrId 6
-    if let Some(code) = t2.embeddable_code() {
+    if let Some(code) = codes.1 {
         w.put_u8(PAIR2_CODE + code);
-        write_type(w, t1)?;
-        return Ok(());
+        stack.push(Work::Type(t1, depth + 1));
+        return;
     }
     // Neither element embeddable — constrId 5, primId 0 (general pair)
     w.put_u8(PAIR1_CODE);
-    write_type(w, t1)?;
-    write_type(w, t2)?;
-    Ok(())
+    stack.push(Work::Type(t2, depth + 1));
+    stack.push(Work::Type(t1, depth + 1));
 }
+
+// The pre-change writer is copied verbatim from dba00a73, without its tests.
+#[cfg(test)]
+#[rustfmt::skip]
+#[path = "../../tests/support/sigma_type_recursive_writer.rs"]
+mod recursive_reference;
 
 #[cfg(test)]
 mod tests {
@@ -280,6 +328,230 @@ mod tests {
         let decoded = read_type(&mut r).unwrap();
         assert!(r.is_empty(), "leftover bytes after decoding {t:?}");
         assert_eq!(&decoded, t);
+    }
+
+    // Deep checks use an ordinary fuzz-sized stack and compare canonical
+    // bytes instead of invoking recursive Eq/Debug on the resulting types.
+    fn on_8mib_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn nested_coll(depth: usize, leaf: SigmaType) -> SigmaType {
+        (0..depth).fold(leaf, |t, _| SigmaType::SColl(Box::new(t)))
+    }
+
+    fn deep_wire(shape: u8, depth: usize) -> Vec<u8> {
+        let mut bytes = match shape {
+            0 => vec![COLL_CODE; depth],
+            1 => vec![COLL_COLL_CODE; depth / 2],
+            2 => vec![OPTION_CODE; depth],
+            3 => vec![OPTION_COLL_CODE; depth / 2],
+            4 => vec![PAIR1_CODE; depth],
+            5 => [TUPLE_CODE, 2].repeat(depth),
+            6 => [FUNC_CODE, 1].repeat(depth),
+            7 => [FUNC_CODE, 0].repeat(depth),
+            _ => unreachable!(),
+        };
+        bytes.push(match shape {
+            0..=3 => COLL_CODE + 2,
+            _ => SBOX_CODE,
+        });
+        match shape {
+            4 | 5 => bytes.extend(vec![SBOX_CODE; depth]),
+            6 => bytes.extend([SBOX_CODE, 0].repeat(depth)),
+            7 => bytes.extend(vec![0; depth]),
+            _ => (),
+        }
+        bytes
+    }
+
+    #[test]
+    fn write_type_reader_max_depth_on_8mib_stack() {
+        on_8mib_stack(|| {
+            for shape in 0..=7 {
+                let bytes = deep_wire(shape, MAX_TYPE_DEPTH);
+                let mut r = VlqReader::new(&bytes);
+                let parsed = read_type(&mut r).expect("reader must accept its depth boundary");
+                assert!(r.is_empty());
+                let canonical = encode(&parsed);
+                let mut r = VlqReader::new(&canonical);
+                let decoded = read_type(&mut r).expect("writer output must round-trip");
+                assert!(r.is_empty());
+                assert_eq!(encode(&decoded), canonical, "shape {shape}");
+                // Exercise ordinary Drop as well as the writer.
+                drop(decoded);
+                drop(parsed);
+            }
+            // A compressed terminal can contain two constructors at depth MAX.
+            let mut bytes = vec![COLL_CODE; MAX_TYPE_DEPTH];
+            bytes.push(COLL_COLL_CODE + 2);
+            let parsed = read_type(&mut VlqReader::new(&bytes)).unwrap();
+            assert_eq!(encode(&parsed), bytes);
+        });
+    }
+
+    #[test]
+    fn write_type_past_max_depth_on_8mib_stack() {
+        on_8mib_stack(|| {
+            for t in [
+                nested_coll(MAX_TYPE_DEPTH + 1, SigmaType::SBox),
+                nested_coll(MAX_TYPE_DEPTH + 3, SigmaType::SByte),
+                // Equal compound children used to invoke unbounded derived Eq
+                // before the writer could reach its depth guard.
+                SigmaType::STuple(vec![
+                    nested_coll(MAX_TYPE_DEPTH + 4_000, SigmaType::SByte),
+                    nested_coll(MAX_TYPE_DEPTH + 4_000, SigmaType::SByte),
+                ]),
+            ] {
+                let err = write_err(&t);
+                assert!(matches!(err, WriteError::InvalidData(msg)
+                    if msg == format!("type recursion depth exceeds maximum ({MAX_TYPE_DEPTH})")));
+            }
+            // Pin compressed prefixes against the reader's refusal too.
+            for shape in 0..=7 {
+                let bytes = deep_wire(shape, MAX_TYPE_DEPTH + 2);
+                assert!(read_type(&mut VlqReader::new(&bytes)).is_err());
+            }
+        });
+    }
+
+    use proptest::prelude::*;
+
+    fn arbitrary_type() -> BoxedStrategy<SigmaType> {
+        let leaf = prop_oneof![
+            (1u8..=9).prop_map(|code| super::super::prim_from_code(code, 3).unwrap()),
+            proptest::sample::select(vec![
+                SigmaType::SAny,
+                SigmaType::SUnit,
+                SigmaType::SBox,
+                SigmaType::SAvlTree,
+                SigmaType::SContext,
+                SigmaType::SString,
+                SigmaType::SHeader,
+                SigmaType::SPreHeader,
+                SigmaType::SGlobal,
+            ]),
+            "[A-Za-z0-9]{0,32}".prop_map(SigmaType::STypeVar),
+        ];
+        leaf.prop_recursive(6, 256, 6, |inner| {
+            prop_oneof![
+                inner.clone().prop_map(|t| SigmaType::SColl(Box::new(t))),
+                inner.clone().prop_map(|t| SigmaType::SOption(Box::new(t))),
+                proptest::collection::vec(inner.clone(), 2..=8).prop_map(SigmaType::STuple),
+                (
+                    proptest::collection::vec(inner.clone(), 0..=4),
+                    inner,
+                    proptest::collection::vec("[A-Z]{1,4}", 0..=4)
+                )
+                    .prop_map(|(t_dom, range, params)| SigmaType::SFunc {
+                        t_dom,
+                        t_range: Box::new(range),
+                        tpe_params: params.into_iter().map(SigmaType::STypeVar).collect(),
+                    }),
+            ]
+        })
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn iterative_bytes_match_recursive_writer(
+            mut t in arbitrary_type(),
+            wrappers in proptest::collection::vec(0u8..=7, 0..=384),
+        ) {
+            // Deep but narrow random spines supplement the branching trees.
+            for wrapper in wrappers {
+                t = match wrapper {
+                    0 => SigmaType::SColl(Box::new(t)),
+                    1 => SigmaType::SOption(Box::new(t)),
+                    2 => SigmaType::STuple(vec![SigmaType::SInt, t]),
+                    3 => SigmaType::STuple(vec![t, SigmaType::SLong]),
+                    4 => SigmaType::STuple(vec![SigmaType::SBox, t]),
+                    5 => SigmaType::STuple(vec![t, SigmaType::SUnit, SigmaType::SByte]),
+                    6 => SigmaType::SFunc {
+                        t_dom: vec![t], t_range: Box::new(SigmaType::SUnit),
+                        tpe_params: vec![SigmaType::STypeVar("T".into())],
+                    },
+                    _ => SigmaType::SFunc {
+                        t_dom: vec![], t_range: Box::new(t), tpe_params: vec![],
+                    },
+                };
+            }
+            let bytes = encode(&t);
+            let mut reference = VlqWriter::new();
+            recursive_reference::write_type(&mut reference, &t).unwrap();
+            let reference = reference.result();
+            prop_assert_eq!(&bytes, &reference);
+            for wire in [&bytes, &reference] {
+                let mut r = VlqReader::new(wire);
+                let parsed = read_type(&mut r).unwrap();
+                prop_assert!(r.is_empty());
+                prop_assert_eq!(&parsed, &t);
+            }
+        }
+    }
+
+    #[test]
+    fn all_compressed_forms_have_identical_bytes() {
+        for code in 1..=9 {
+            let prim = super::super::prim_from_code(code, 3).unwrap();
+            let cases = [
+                (
+                    SigmaType::SColl(Box::new(prim.clone())),
+                    vec![COLL_CODE + code],
+                ),
+                (
+                    SigmaType::SColl(Box::new(SigmaType::SColl(Box::new(prim.clone())))),
+                    vec![COLL_COLL_CODE + code],
+                ),
+                (
+                    SigmaType::SOption(Box::new(prim.clone())),
+                    vec![OPTION_CODE + code],
+                ),
+                (
+                    SigmaType::SOption(Box::new(SigmaType::SColl(Box::new(prim.clone())))),
+                    vec![OPTION_COLL_CODE + code],
+                ),
+                (
+                    SigmaType::STuple(vec![prim.clone(), SigmaType::SBox]),
+                    vec![PAIR1_CODE + code, SBOX_CODE],
+                ),
+                (
+                    SigmaType::STuple(vec![SigmaType::SBox, prim.clone()]),
+                    vec![PAIR2_CODE + code, SBOX_CODE],
+                ),
+                (
+                    SigmaType::STuple(vec![prim.clone(), prim]),
+                    vec![PAIR_SYM_CODE + code],
+                ),
+            ];
+            for (t, expected) in cases {
+                assert_eq!(encode(&t), expected);
+                let mut w = VlqWriter::new();
+                recursive_reference::write_type(&mut w, &t).unwrap();
+                assert_eq!(w.result(), expected);
+                roundtrip(&t);
+            }
+            for second in 1..=9 {
+                let t = SigmaType::STuple(vec![
+                    super::super::prim_from_code(code, 3).unwrap(),
+                    super::super::prim_from_code(second, 3).unwrap(),
+                ]);
+                let expected = if code == second {
+                    vec![PAIR_SYM_CODE + code]
+                } else {
+                    vec![PAIR1_CODE + code, second]
+                };
+                assert_eq!(encode(&t), expected);
+                roundtrip(&t);
+            }
+        }
     }
 
     // ----- canonical-form checks -----
