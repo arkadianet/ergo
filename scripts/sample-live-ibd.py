@@ -101,13 +101,30 @@ def main():
     duration = rows[-1]['elapsed_seconds'] - rows[0]['elapsed_seconds']
     if duration <= 0:
         raise RuntimeError('observation needs at least two distinct samples')
-    blocks = rows[-1]['full_height'] - rows[0]['full_height']
-    if blocks < 0 or any(b['full_height'] < a['full_height'] for a, b in zip(rows, rows[1:])):
+    height_rows = [row for row in rows if row['full_height'] is not None]
+    first_height = height_rows[0]['full_height'] if height_rows else None
+    last_height = height_rows[-1]['full_height'] if height_rows else None
+    blocks = last_height - first_height if height_rows else 0
+    if blocks < 0 or any(
+            a['full_height'] is not None and b['full_height'] is not None and
+            (b['full_height'] < a['full_height'] or
+             (b['full_height'] == a['full_height'] and b['state_root'] != a['state_root']))
+            for a, b in zip(rows, rows[1:])):
         raise RuntimeError('reorg in interval: do not report forward IBD throughput')
+    throughput_duration = (height_rows[-1]['elapsed_seconds'] - height_rows[0]['elapsed_seconds']
+                           if height_rows else None)
+    blocks_per_second = None
+    throughput_status = 'no usable height samples'
+    if height_rows:
+        throughput_status = 'need at least two distinct usable height samples'
+        if throughput_duration > 0:
+            blocks_per_second = blocks / throughput_duration
+            throughput_status = 'available'
     summary = {'executable_sha256': executable_sha, 'pid': args.pid, 'sample_count': len(rows),
                'started_utc': rows[0]['timestamp_utc'], 'ended_utc': rows[-1]['timestamp_utc'],
-               'start_height': rows[0]['full_height'], 'end_height': rows[-1]['full_height'],
-               'duration_seconds': duration, 'blocks_per_second': blocks / duration,
+               'start_height': first_height, 'end_height': last_height,
+               'duration_seconds': duration, 'blocks_per_second': blocks_per_second,
+               'throughput_duration_seconds': throughput_duration, 'throughput_status': throughput_status,
                'rss_sampled_peak_kib': max(row['resident_kib']['VmRSS'] for row in rows),
                'rss_first_kib': rows[0]['resident_kib']['VmRSS'], 'rss_last_kib': rows[-1]['resident_kib']['VmRSS'],
                'anon_first_kib': rows[0]['resident_kib']['RssAnon'], 'anon_last_kib': rows[-1]['resident_kib']['RssAnon'],
