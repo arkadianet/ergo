@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -141,6 +142,78 @@ class EngineeringPolicy(unittest.TestCase):
         self.assertNotIn('"old"', result)
         result = release.configure_section(result, "api.security", {"api_key_hash": '"hash"'})
         self.assertIn('[api.security]\napi_key_hash = "hash"', result)
+
+
+class PackagedDocumentation(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.stage = Path(self.temp.name)
+        self.sha = "b" * 40
+        for name in ("README.md", "SECURITY.md", "ARCHITECTURE.md", "CHANGELOG.md",
+                     "rust-toolchain.toml", *(f"docs/{doc}" for doc in release.DOCS),
+                     "config/ergo-node.toml", "config/ergo-node.toml.example"):
+            destination = self.stage / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if name == "README.md":
+                source = release.ROOT / "docs/release-quickstart.md"
+            elif name.startswith("config/"):
+                source = release.ROOT / "ergo-node" / destination.name
+            else:
+                source = release.ROOT / name
+            shutil.copy2(source, destination)
+
+    def format(self, document, *, extension=""):
+        return release.packaged_document((self.stage / document).read_text(encoding="utf-8"), document,
+                                         self.stage, self.sha, extension=extension)
+
+    def test_operator_quickstart_uses_archive_contents_on_unix_and_windows(self):
+        for extension in ("", ".exe"):
+            with self.subTest(extension=extension):
+                content = self.format("docs/operating.md", extension=extension)
+                self.assertIn(f"./ergo-node{extension} --version", content)
+                self.assertIn(f"./ergo-node{extension} --help", content)
+                self.assertIn("cp config/ergo-node.toml ./ergo-node.toml", content)
+                self.assertIn(f"./ergo-node{extension} --config ./ergo-node.toml --data-dir ../ergo-data", content)
+                self.assertNotIn("cargo build", content)
+                self.assertNotIn("./target/release/ergo-node", content)
+                self.assertIn("## State modes and how to choose", content)
+                readme = self.format("README.md", extension=extension)
+                self.assertIn(f"./ergo-node{extension} --config", readme)
+                self.assertIn(f"./ergo-wallet{extension} --help", readme)
+
+    def test_bundled_links_stay_local_and_source_links_use_exact_revision(self):
+        content = self.format("docs/operating.md")
+        self.assertIn("](configuration.md#apiscript)", content)
+        self.assertIn("](../config/ergo-node.toml.example)", content)
+        for path in ("docs/events.md", "docs/operating-mode-evidence.md", "README.md#running"):
+            self.assertIn(f"](https://github.com/arkadianet/ergo/blob/{self.sha}/{path})", content)
+        self.assertIn(f"](https://github.com/arkadianet/ergo/tree/{self.sha}/ergo-node/src/config/)", content)
+        self.assertNotIn("github.com/arkadianet/ergo/tree/main/", content)
+        readme = self.format("README.md")
+        self.assertIn("](docs/configuration.md#apisecurity)", readme)
+        self.assertIn("](docs/operating.md)", readme)
+
+    def test_every_packaged_relative_document_link_has_an_archive_target(self):
+        for document in self.stage.rglob("*.md"):
+            name = document.relative_to(self.stage).as_posix()
+            content = self.format(name)
+            prose = re.sub(r"```.*?```|`[^`\n]*`", "", content, flags=re.DOTALL)
+            for link in re.findall(r"\]\(([^)\s]+)\)", prose):
+                path = link.split("#", 1)[0]
+                if not path or ":" in path:
+                    continue
+                with self.subTest(document=name, link=link):
+                    self.assertTrue((document.parent / path).exists())
+
+    def test_code_examples_are_not_interpreted_as_document_links(self):
+        content = '`getVar[T](expr)`\n```rust\ngetVar[T](expr)\n```\n'
+        self.assertEqual(release.packaged_document(content, "CHANGELOG.md", self.stage, self.sha), content)
+
+    def test_missing_source_reference_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "missing source link target"):
+            release.packaged_document("[missing](no-such-evidence.md)", "docs/operating-mode-evidence.md",
+                                      self.stage, self.sha)
 
 
 if __name__ == "__main__":

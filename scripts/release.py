@@ -5,7 +5,8 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import secrets
 import shutil
@@ -16,6 +17,7 @@ import tempfile
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -163,6 +165,62 @@ def checksum(path):
     return digest
 
 
+def packaged_document(content, document, stage, source_sha, *, extension="", root=ROOT):
+    """Adapt archive commands and keep omitted source references revision-pinned."""
+    if document == "docs/operating.md":
+        quickstart = f"""## Quick start
+
+Extract the node archive into its own directory. Review the bundled
+[`config/ergo-node.toml`](../config/ergo-node.toml) and the commented
+[`config/ergo-node.toml.example`](../config/ergo-node.toml.example), then
+copy the config, edit it and start the packaged binary. Keep the data
+directory outside the extracted archive so upgrades do not replace it.
+
+```sh
+./ergo-node{extension} --version
+./ergo-node{extension} --help
+cp config/ergo-node.toml ./ergo-node.toml
+./ergo-node{extension} --config ./ergo-node.toml --data-dir ../ergo-data
+```
+
+"""
+        content, count = re.subn(r"## Quick start\n.*?(?=The config path is optional\.)",
+                                lambda _: quickstart, content, count=1, flags=re.DOTALL)
+        if count != 1:
+            raise ValueError("operating quick start changed; update the archive adaptation")
+        content = content.replace("in the README for the cargo one-shot form",
+                                  "in the source README for the cargo one-shot form")
+    elif document == "README.md":
+        content = content.replace("./ergo-node --config", f"./ergo-node{extension} --config")
+        content = content.replace("Use `ergo-wallet --help`", f"Use `./ergo-wallet{extension} --help`")
+    content = content.replace("../ergo-node/ergo-node.toml", "../config/ergo-node.toml")
+
+    def rewrite_link(match):
+        if match.group("code") is not None:
+            return match.group(0)
+        link = urllib.parse.urlsplit(match.group("target"))
+        if link.scheme or link.netloc or not link.path:
+            return match.group(0)
+        relative = PurePosixPath(posixpath.normpath(posixpath.join(
+            str(PurePosixPath(document).parent), urllib.parse.unquote(link.path))))
+        # The archive README is a quick start; source documents link to the
+        # repository README's build/status sections, not that replacement.
+        if relative.as_posix() != "README.md" and stage.joinpath(*relative.parts).exists():
+            return match.group(0)
+        source = root.joinpath(*relative.parts)
+        if relative.is_absolute() or ".." in relative.parts or not source.exists():
+            raise ValueError(f"{document}: missing source link target: {link.path}")
+        kind = "tree" if source.is_dir() else "blob"
+        path = f"/arkadianet/ergo/{kind}/{source_sha}/{urllib.parse.quote(relative.as_posix())}"
+        if source.is_dir():
+            path += "/"
+        target = urllib.parse.urlunsplit(("https", "github.com", path, link.query, link.fragment))
+        return f"]({target})"
+
+    return re.sub(r"(?P<code>```.*?```|`[^`\n]*`)|\]\((?P<target>[^)\s]+)\)",
+                  rewrite_link, content, flags=re.DOTALL)
+
+
 def package(target, binaries, output, *, root=ROOT):
     if target not in TARGETS:
         raise ValueError("unsupported release target")
@@ -181,13 +239,14 @@ def package(target, binaries, output, *, root=ROOT):
                 shutil.copy2(root / file, stage / file)
             (stage / "docs").mkdir()
             for doc in DOCS:
-                content = (root / "docs" / doc).read_text()
-                content = content.replace("../ergo-node/ergo-node.toml", "../config/ergo-node.toml")
-                content = content.replace("../ergo-node/src/config/", "https://github.com/arkadianet/ergo/tree/main/ergo-node/src/config/")
-                (stage / "docs" / doc).write_text(content)
+                shutil.copy2(root / "docs" / doc, stage / "docs" / doc)
             (stage / "config").mkdir()
             for config in ("ergo-node.toml", "ergo-node.toml.example"):
                 shutil.copy2(root / "ergo-node" / config, stage / "config" / config)
+            for document in stage.rglob("*.md"):
+                document.write_text(packaged_document(
+                    document.read_text(encoding="utf-8"), document.relative_to(stage).as_posix(),
+                    stage, manifest["sha"], extension=extension, root=root), encoding="utf-8")
             artifact = output / f"{name}-{target}{extension}"
             shutil.copy2(stage / (name + extension), artifact)
             archive = output / f"{name}-{target}{'.zip' if extension else '.tar.gz'}"
