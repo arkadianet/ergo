@@ -87,13 +87,52 @@ Two surfaces need explicit feature flags to compile and run; the default
 cargo test --locked -p ergo-sigma --features cost-trace --test it cost_trace_smoke
 cargo test --locked -p ergo-sigma --features cost-trace --test it traced_untraced_parity
 
-# Diagnostics-feature triage tests. CI compiles these only (--no-run) because
-# they need external state (mainnet captures, captured block JSON, a running
-# Scala node). Run them locally only if you have that state.
+# Diagnostics compile-check. External reports and live oracles also have
+# explicit #[ignore] markers, so enabling their features never silently
+# probes operator state or converts missing captures into passing evidence.
 cargo test --locked --no-run -p ergo-validation --features diagnostics
 cargo test --locked --no-run -p ergo-mempool    --features diagnostics
 cargo test --locked --no-run -p ergo-ser        --features diagnostics
 ```
+
+`cargo test --locked --workspace --all-features` runs the hermetic feature
+coverage too. It leaves external/manual tests ignored. Run an individual manual
+test with `--ignored --nocapture` only after supplying its documented inputs;
+missing or unsuitable required inputs fail that invocation. Ignore markers are
+per test: the committed block-836113, both Scala NiPoPoW captures and cost fixtures continue
+to run normally.
+
+The cost-ledger workflow fetches the hash-pinned L4 input release and explicitly
+runs its two replay tests and input-hash test. Reproduce that external obligation
+from the repository root:
+
+```bash
+scripts/fetch-l4-inputs.sh
+cargo nextest run --locked -p ergo-validation --features diagnostics \
+  --run-ignored only \
+  -E 'test(/cost_parity_(stratified_ranges|required_selection)_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)'
+```
+
+Other manual obligations are separate from that pinned replay:
+
+| Harness | Required inputs and invocation |
+|---|---|
+| `ergo-validation/tests/diagnose_block_{303967,555672,836113}.rs` | Scala `/blocks/{blockId}/transactions` captures at `/tmp/block_<height>_txs.json`. Run `cargo test --locked -p ergo-validation --features diagnostics --test diagnose_block_<height> -- --ignored --nocapture`. |
+| `eval_error_triage` | At least one of the listed extracted transaction ranges and covering header JSON files. Run `cargo test --locked -p ergo-validation --features diagnostics --test eval_error_triage -- --ignored --nocapture`. It reports available ranges; it does not certify missing ranges. |
+| `parity_triage` | Extracted 889000–890000 or 1500000–1501000 transactions, covering headers and JVM costs. Run `cargo test --locked -p ergo-validation --features diagnostics --test parity_triage -- --ignored --nocapture`. |
+| `trace_emission_700000`, `trace_mismatch_889k` | Exact transaction/header/cost filenames and commands appear in each test module. Run the named `--test` with its feature and `--ignored --nocapture`. |
+| `ergo-ser::triage_roundtrip_failures` | Locally available transaction captures. Run `cargo test --locked -p ergo-ser --features diagnostics --test it triage_roundtrip_failures -- --ignored --nocapture`; this is a diagnostic report of divergences. |
+| `ergo-mempool::mempool_admits_mainnet_corpus_1761k` | Re-extracted `transactions`, `headers` and `input_boxes` JSON for 1761000–1762000. Run `cargo test --locked -p ergo-mempool --test it mempool_admits_mainnet_corpus_1761k -- --ignored --nocapture`. |
+| `ergo-mempool::scala_pending_tx_oracle` | Live Scala node configured by `NODE_URL`, with nonempty pending transactions; see the module for capture requirements. Run `cargo test --locked -p ergo-mempool --features diagnostics --test it scala_pending_tx_oracle -- --ignored --nocapture`. |
+| `ergo-state::popow_prove_mainnet` | Stopped Mode 1 mainnet archive (or offline copy), Dense headers, height ≥100 and historical extensions. Run `ERGO_MAINNET_DATA_DIR=/path/to/archive cargo test --locked -p ergo-state --test it popow_prove_mainnet -- --ignored --nocapture --test-threads=1`. |
+
+Use the extraction scripts in `test-vectors/scripts/` with a Scala node,
+`curl`, `jq` and the script's JVM tooling. For example,
+`extract_transactions.sh <start> <end> <output_file>` and
+`extract_headers.sh <start> <end> <output_file>` produce the archival range
+inputs. Manual benchmark, broad-corpus and live-JVM tests carry their own
+prerequisites; the default/all-features gates do not claim those obligations
+were executed.
 
 ### Differential testing
 

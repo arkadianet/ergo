@@ -27,7 +27,8 @@ reproducibly and far deeper (to tip), as a scheduled/pre-release job.
 The 6 bulk files were extracted into the fuzz seed corpus first; the two deep tests
 were removed (superseded by the replay driver + the retained short seed +
 dedicated hermetic rule tests). Ignored diagnostics (`m7_mainnet_corpus`) now
-skip-if-missing and re-run after re-extraction. Committed mainnet: 101 MB → 20 MB.
+run explicitly after re-extraction and fail if a required capture is missing.
+Committed mainnet: 101 MB → 20 MB.
 
 ## Retired earlier — genuine dead weight, zero consumers
 `input_boxes_205000_205200.json` (2.1 MB), `ergotrees_700000_700200.json` (0.6 MB),

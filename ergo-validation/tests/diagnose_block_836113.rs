@@ -18,6 +18,11 @@
 //!    second variant pins the block-section path against the same
 //!    Merkle invariant.
 
+//!
+//! Run the capture diagnostic explicitly with `cargo test --locked
+//! -p ergo-validation --features diagnostics --test diagnose_block_836113
+//! -- --ignored --nocapture`. Missing captures fail this manual invocation.
+
 use ergo_crypto::autolykos::common::blake2b256;
 use ergo_crypto::merkle::transactions_root;
 use ergo_primitives::reader::VlqReader;
@@ -31,21 +36,16 @@ use ergo_ser::transaction::{bytes_to_sign, transaction_id};
 
 #[cfg(feature = "diagnostics")]
 #[test]
+#[ignore = "manual diagnostic; requires Scala REST capture /tmp/block_836113_txs.json"]
 fn diff_per_tx_ids_for_block_836113() {
-    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
-    // fail, when it is absent so feature-enabled CI runs stay green.
-    let raw = match std::fs::read_to_string("/tmp/block_836113_txs.json") {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: capture file /tmp/block_836113_txs.json absent");
-            return;
-        }
-        Err(error) => panic!("reading capture /tmp/block_836113_txs.json: {error}"),
-    };
+    let raw = std::fs::read_to_string("/tmp/block_836113_txs.json").expect(
+        "capture Scala /blocks/{blockId}/transactions into /tmp/block_836113_txs.json first",
+    );
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let txs_json = value["transactions"]
         .as_array()
         .expect("transactions array");
+    assert!(!txs_json.is_empty(), "capture has no transactions");
     eprintln!("block 836113: {} txs in JSON", txs_json.len());
 
     let mut mismatches: Vec<(usize, String, String)> = Vec::new();
