@@ -225,9 +225,11 @@ Be aware of these before depending on the node.
   the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
   boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
   rejects the later proof and preserves state
-  (`ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot
-  installation through real header catch-up inside `run_inner` and a live
-  multi-peer soak remain outstanding.
+  (`ergo-node/tests/it/mode4_acceptance.rs`). A three-peer acceptance test now drives snapshot discovery parked above
+  a NiPoPoW tip through real P2P header catch-up, snapshot installation, full
+  validation of the next mainnet block, and restart
+  (`ergo-node/tests/it/mode4_catchup.rs`). Long-running live multi-peer soak
+  coverage remains outstanding.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
   and AD-proof apply seam exist; the node boots, survives the handshake,
   sync-info, and API seams, and syncs headers from live peers (the
