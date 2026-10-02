@@ -92,7 +92,9 @@ Clippy with warnings denied, and Rust formatting. Included fragments are checked
 from the layer that introduces them. The complete stack additionally runs strict
 all-feature Rustdoc, all-feature tests, cost-trace and wallet proving targets,
 CI/release policy checks, browser model tests, dependency checks and a Linux
-archive smoke. Existing intentional ignores are reported, not counted as passes.
+archive smoke. Existing intentional ignores are reported, not counted as passes. Hosted Scala
+wallet interoperability has passed; a Windows persistence test exposed a
+notification/commit assertion race and is being corrected before final delivery.
 Recorded measurements and oracle provenance are linked from
 [resource safety](perf/resource-safety-profile.md),
 [wallet remediation](audit-remediation-storage-wallet.md), and
@@ -105,6 +107,9 @@ Recorded measurements and oracle provenance are linked from
 - [ ] R05: Complete a live Mode 3 activation campaign and a long Mode 4 soak.
 - [ ] R05: Broaden Mode 5 cold-open/replay coverage using a closed, separately
   owned historical snapshot; the early-mainnet smoke is insufficient.
+- [ ] Obtain external full-block cost fixtures at v2/EIP-37 activation. Empty
+  placeholder tests are removed; existing boundary tests do not establish these
+  missing full-context oracle comparisons.
 - [ ] Run streamed archival replay with an available `REPLAY_NODE_URL` and the
   explicitly manual live-Scala/capture diagnostics on their required datasets.
 - [ ] Execute the native macOS, Windows and musl release archive smoke in CI;
@@ -115,7 +120,10 @@ The final bounded-evaluator ASan campaign used seed `20261003`, pinned
 `cargo-fuzz 0.13.1` and `nightly-2026-09-30`: 9,163 executions in 31 seconds,
 480 MiB peak RSS, no findings and no lockfile drift. Earlier source-compiler
 and evaluator campaigns completed 191,677 and 16,219 executions respectively.
-These bounded campaigns do not replace scheduled long runs.
+These bounded campaigns do not replace scheduled long runs. The measured
+replay source [`5a67cd65`](https://github.com/arkadianet/ergo/commit/5a67cd6580cae9f1682f08636d21b74998b189da)
+is retained on `codex/audit-integration` for reproduction independently of the
+repacked PR history.
 
 Cooperative distributed multisig orchestration and the compact-selector external
 oracle are deliberately deferred features in the compatibility inventory.
