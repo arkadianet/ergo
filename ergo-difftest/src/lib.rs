@@ -23,6 +23,7 @@ pub mod gen;
 pub mod generate;
 pub mod methodcall;
 pub mod minimize;
+pub mod network_fuzz;
 pub mod oracle;
 pub mod regressions;
 pub mod rng;

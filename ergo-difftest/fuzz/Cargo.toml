@@ -60,3 +60,21 @@ name = "sigma_expr"
 path = "fuzz_targets/sigma_expr.rs"
 test = false
 doc  = false
+
+[[bin]]
+name = "p2p_frame"
+path = "fuzz_targets/p2p_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_handshake"
+path = "fuzz_targets/p2p_handshake.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_message"
+path = "fuzz_targets/p2p_message.rs"
+test = false
+doc = false

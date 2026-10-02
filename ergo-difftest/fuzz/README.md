@@ -63,6 +63,24 @@ libFuzzer and the input is saved to `artifacts/<target>/`. The `fuzz.rs`
 module is covered by the stable CI gate via unit tests, so coverage-guided
 mutation adds real signal on top of an already-validated invariant.
 
+The P2P targets use `ergo-difftest/src/network_fuzz.rs`, also compiled and tested
+on stable, against the production `ergo-p2p` codecs:
+
+- `p2p_frame` checks both network magics, signed lengths, checksums, consumed
+  boundaries and selected fragmented prefixes. It also wraps arbitrary payloads
+  in a valid checksum to reach message decoders.
+- `p2p_handshake` exercises strings, declared addresses, signed feature counts,
+  unknown features and the production handshake size limit.
+- `p2p_message` interprets the first input byte as a message code and checks the
+  canonical fixed point of accepted inventory, modifiers, peers, sync, snapshot
+  and NiPoPoW payloads. Unknown codes and malformed payloads are clean outcomes.
+
+Frame/message inputs are bounded to 1 MiB of supplied bytes, while declared
+lengths are unrestricted. Handshake inputs retain one byte beyond the production
+cap to exercise oversized admission. These are codec and framing checks, not TCP
+timing, consensus acceptance or Scala verdict claims. They do not change the
+consensus structured campaign's vocabulary or coverage denominator.
+
 ## Corpus
 
 `corpus/<surface>/` contains small curated seed files:
@@ -75,6 +93,14 @@ mutation adds real signal on top of an already-validated invariant.
 | `header`            | One real mainnet v1 header (height 1)            |
 | `transaction`       | First genesis-era transaction                    |
 | `ergo_box_candidate`| One mainnet box candidate                        |
+| `p2p_frame`         | Scala framing vectors, negative/maximal declared lengths |
+| `p2p_handshake`     | Minimal synthetic handshake and negative feature count |
+| `p2p_message`       | Scala payload vectors and synthetic seeds for every registered code |
+
+P2P files named `scala-*` are decoded from the existing external vectors under
+`test-vectors/ergo-p2p/`; their provenance is retained in that directory's
+`PROVISIONING.md`. Files named `synthetic-*` and the minimal handshake are mutation
+seeds, not independent consensus oracles.
 
 The nightly scheduled CI job (`fuzz.yml`) runs a long campaign and may grow
 this corpus. Growing/pruning the corpus is manual; commit curated inputs that
@@ -106,7 +132,7 @@ finds new bugs over time without blocking PRs.
 ## CI: cargo-fuzz (nightly)
 
 The `cargo-fuzz-nightly` job in `.github/workflows/fuzz.yml` builds and runs
-all 6 targets on a real nightly toolchain — a `fail-fast: false` matrix, one
+all consensus and P2P targets on a real nightly toolchain — a `fail-fast: false` matrix, one
 job per target, each capped at `-max_total_time=600` (10 minutes) seeded
 from the committed `corpus/<target>/`. `ci.yml` (the PR gate) is untouched
 and stays stable-only; this job runs only on the nightly cron (02:00 UTC)
