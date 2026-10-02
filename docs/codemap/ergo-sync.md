@@ -10,7 +10,6 @@ consumes those actions — validating + persisting headers and blocks against
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-crypto, ergo-validation, ergo-state, ergo-p2p
 **Depended on by:** (see codemap index) — only `ergo-node`
-**Approx LOC:** ~8,550 (production `.rs`, excluding `tests.rs` integration files)
 
 ## Start here
 - `src/lib.rs` — the module map docstring; orients the four core modules (coordinator / executor / header_proc / block_proc).
@@ -23,9 +22,9 @@ consumes those actions — validating + persisting headers and blocks against
 - `src/coordinator/mod.rs` — pure, I/O-free decision engine. Owns `DeliveryTracker` / `AssemblyTracker` / `SyncState` bookkeeping, request scheduling (per-peer caps, bucketed multi-peer distribution, HOL hedging, timeout/disconnect re-requests), fork-choice classification, and the `ChainView` trait + its production impls. Also hosts the standalone `verify_section_modifier_id` parity check used by the ergo-node messaging layer.
 - `src/executor/mod.rs` — stateful action consumer + pipeline driver. Owns `ProtocolParams`, the rolling header caches (`last_headers`, `block_context_headers`, in-memory `header_index`), the orphan-header buffer, and startup hydration/recovery. Runs the single-header and rayon-batched header paths, the sequential block-apply drain, and full-chain reorg/rollback.
 - `src/header_proc.rs` — two-phase header processing: parallel parse + PoW (`pre_validate_header` → `PreValidatedHeader`) then sequential chain-linkage + difficulty + persist (`finalize_header`). `process_header_cfg` is the combined single-shot path.
-- `src/block_proc.rs` — full-block pipeline: load header+sections, deserialize, build `BlockValidationContext`, run `validate_full_block_parallel`, apply to state. `process_block` dispatches to UTXO (`process_block_utxo`, `block_proc/utxo.rs`) and digest (`process_block_digest`) backends; also runs the epoch-boundary voting recompute on extension blocks. UTXO blocks regenerate ADProofs locally and insert generated sections only inside the 114,688-block suffix window measured from the best known header (this adds no eviction of previously stored proofs); digest blocks require the shipped section.
+- `src/block_proc/mod.rs` — full-block pipeline: load header+sections, deserialize, build `BlockValidationContext`, run `validate_full_block_parallel`, apply to state. `process_block` dispatches to UTXO (`process_block_utxo`, `block_proc/utxo.rs`) and digest (`process_block_digest`) backends; also runs the epoch-boundary voting recompute on extension blocks. UTXO blocks regenerate ADProofs locally and insert generated sections only inside the 114,688-block suffix window measured from the best known header (this adds no eviction of previously stored proofs); digest blocks require the shipped section.
 - `src/popow_bootstrap.rs` — NiPoPoW bootstrap consume-side reducer (`PopowBootstrap`): tracks per-peer proof requests, feeds inbound proofs to `NipopowVerifier`, reports quorum + best proof, terminal after `mark_applied`. Active only on a fresh store with `nipopow_bootstrap = true`.
-- `src/snapshot_bootstrap.rs` — Mode 2 (UTXO-snapshot) discovery + chunk-assembly reducers. `SnapshotBootstrap` applies Scala's quorum manifest selection; `ChunkAssembly` tracks per-subtree chunk requests/timeouts; `verify_manifest_against_state_root` is the trust check against the header's committed `state_root`.
+- `src/snapshot_bootstrap/mod.rs` — Mode 2 (UTXO-snapshot) discovery + chunk-assembly reducers. `SnapshotBootstrap` applies Scala's quorum manifest selection; `ChunkAssembly` tracks per-subtree chunk requests/timeouts; `verify_manifest_against_state_root` is the trust check against the header's committed `state_root`.
 - `src/perf.rs` — per-tick header/block pipeline counters (`HeaderPerfCounters`, `BlockPerfCounters`) drained by the node heartbeat. Telemetry only.
 
 ## Key types, traits & functions
@@ -48,10 +47,10 @@ consumes those actions — validating + persisting headers and blocks against
 - `PreValidatedHeader` (struct) — PoW-checked-but-not-linked header carrying an unforgeable `PowCheckedHeader` proof so finalize never re-pays PoW — `src/header_proc.rs:97`
 - `ProcessedHeader` (struct) — finalize result: id/height/parent, `is_new_best`, section roots, parsed header + `CheckedHeader` proof — `src/header_proc.rs:60`
 - `finalize_header` / `pre_validate_header` / `process_header_cfg` (fn) — the two-phase header pipeline + combined single-shot path — `src/header_proc.rs:173` / `:151` / `:214`
-- `process_block` (fn) + `ProcessedBlock` (struct) — full-block validate+apply dispatcher (UTXO/digest backends) — `src/block_proc.rs:294` / `:182`
-- `HeaderProcessError` / `BlockProcessError` (enum) — pipeline errors; note retryable `ParentNotFound` / `EpochContextIncomplete` (orphan-buffer, no penalty) vs definitive `Invalid` — `src/header_proc.rs:26` / `src/block_proc.rs:110`
+- `process_block` (fn) + `ProcessedBlock` (struct) — full-block validate+apply dispatcher (UTXO/digest backends) — `src/block_proc/mod.rs:294` / `:182`
+- `HeaderProcessError` / `BlockProcessError` (enum) — pipeline errors; note retryable `ParentNotFound` / `EpochContextIncomplete` (orphan-buffer, no penalty) vs definitive `Invalid` — `src/header_proc.rs:26` / `src/block_proc/mod.rs:110`
 - `PopowBootstrap` (struct) + `PopowBootstrapState` (enum) — NiPoPoW bootstrap reducer — `src/popow_bootstrap.rs:52` / `:35`
-- `SnapshotBootstrap` / `ChunkAssembly` (struct) + `verify_manifest_against_state_root` (fn) — Mode 2 UTXO-snapshot discovery, chunk assembly, manifest trust check — `src/snapshot_bootstrap.rs:165` / `:242` / `:101`
+- `SnapshotBootstrap` / `ChunkAssembly` (struct) + `verify_manifest_against_state_root` (fn) — Mode 2 UTXO-snapshot discovery, chunk assembly, manifest trust check — `src/snapshot_bootstrap/mod.rs:165` / `:242` / `:101`
 
 ## Invariants & contracts
 - **Coordinator purity:** `SyncCoordinator` performs no I/O and no async — every effect is an emitted `Action`. This is the testability + determinism contract the whole crate rests on (`src/coordinator/mod.rs:1-5`).
@@ -73,5 +72,5 @@ consumes those actions — validating + persisting headers and blocks against
   [`../utxo-proof-validation.md`](../utxo-proof-validation.md)).
 - **Mode gating (headers-only / mid-bootstrap):** `should_skip_block_sections()` (Mode 6 permanent + Mode 2 transient) suppresses section Inv handling, section persistence, pending-block registration, and block apply at every layer — perimeter (`on_inv`), receive (`on_modifier_received`), schedule (`on_header_validated`), and apply (`try_apply_next_blocks`) — defense-in-depth (`src/coordinator/mod.rs:347`, `:771`, `:974`, `src/executor/mod.rs:1309`).
 - **Prune-sentinel request gate (Mode 3):** when `prune_sentinel() > 0`, sub-sentinel sections are fail-CLOSED — never requested (would be evicted on apply / refused on serve); inert for archive / Mode 6 / pre-eviction stores (`src/coordinator/mod.rs:1050`, `:1431`).
-- **Snapshot manifest trust:** a peer-advertised `manifest_id` is accepted only if it equals the first 32 bytes of the canonical header's committed `state_root` at the snapshot height; quorum = highest height where `>= MIN_MANIFEST_VOTES (3)` peers agree (`src/snapshot_bootstrap.rs:80-121`).
+- **Snapshot manifest trust:** a peer-advertised `manifest_id` is accepted only if it equals the first 32 bytes of the canonical header's committed `state_root` at the snapshot height; quorum = highest height where `>= MIN_MANIFEST_VOTES (3)` peers agree (`src/snapshot_bootstrap/mod.rs:80-121`).
 - **Startup integrity is fail-fast:** hydration treats a missing/corrupt persisted header row or a `HEADER_CHAIN_INDEX` coverage gap as fatal (`HydrationError` / `StartupError::IndexGap`) rather than silently truncating caches — the persisted header table is the source of truth after restart (`src/executor/mod.rs:55-116`, `:440`).

@@ -5,11 +5,18 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to validate for a release
+        type: string
+        required: false
+        default: ''
 
 # Iteration speed: a new push to the same branch cancels the superseded
 # run instead of queueing behind it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Least privilege: every job here only reads the repo (build/test/lint/audit).
@@ -61,7 +68,10 @@ jobs:
             shards: 4
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
 
       # Run 35522674758: Windows nextest spent ~34 minutes testing after
       # 11.5 minutes building. The 25 tests above 60s sum to 95 minutes on
@@ -89,12 +99,10 @@ jobs:
           Write-Host "TMP/TEMP -> $env:RUNNER_TEMP"
 
       # Toolchain is pinned via rust-toolchain.toml at the repo root.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
-          components: clippy, rustfmt
+      - uses: ./.github/actions/rust
+        id: rust
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           # Shards share dependency artifacts; each links its own crate group.
           key: ${{ matrix.os }}
@@ -102,12 +110,12 @@ jobs:
       # Cross-run compilation cache on top of rust-cache: rust-cache restores
       # dependency artifacts, sccache also caches *workspace* crates whose
       # sources changed — the common case for PR iterations.
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      # NOTE: no separate `cargo check --all` step — clippy runs check
+      # NOTE: no separate `cargo check --locked --all` step — clippy runs check
       # under the hood, so a standalone check pass is pure duplicate work.
 
       # Default-feature linting here; the full --all-features lint runs once
@@ -115,11 +123,13 @@ jobs:
       # --all-features materially grows the dependency graph per leg).
       # Shard 1 still covers cfg(windows)-specific lints; macOS also lints
       # once, on the last (lightest) shard. Ubuntu remains a single unsharded leg.
-      - name: cargo clippy
+      - name: cargo clippy --locked
         if: (runner.os != 'Windows' || matrix.shard == matrix.shards) && (runner.os != 'macOS' || matrix.shard == matrix.shards)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cargo-nextest@${{ steps.rust.outputs.nextest }}
 
       # The guard and nextest read the same crate groups. A new workspace
       # member or split test target fails every shard until assigned; duplicates fail.
@@ -129,11 +139,11 @@ jobs:
 
       # nextest: per-test processes with better parallelism; skips doctests,
       # which the ubuntu leg below covers explicitly so coverage is retained.
-      - name: cargo nextest run
+      - name: cargo nextest run --locked
         if: runner.os == 'Linux'
-        run: cargo nextest run --workspace
+        run: cargo nextest run --locked --workspace
 
-      - name: cargo nextest run (macOS shard)
+      - name: cargo nextest run --locked (macOS shard)
         if: runner.os == 'macOS'
         run: python scripts/ci-shards.py --os macOS --shard ${{ matrix.shard }} --shards ${{ matrix.shards }} --run
 
@@ -142,11 +152,11 @@ jobs:
       # those waits. Crate groups avoid linking other shards' test binaries.
       # Four Windows groups predict 8.25–8.6 min including job overhead;
       # node lib/it build separately. See scripts/ci-shards.py for assumptions.
-      - name: cargo nextest run (Windows shard)
+      - name: cargo nextest run --locked (Windows shard)
         if: runner.os == 'Windows'
         run: python scripts/ci-shards.py --os Windows --shard ${{ matrix.shard }} --shards ${{ matrix.shards }} --run
 
-      # `cargo nextest run` above does not build with --features cost-trace,
+      # `cargo nextest run --locked` above does not build with --features cost-trace,
       # so the feature-gated recording sites in `ergo-sigma` do not get
       # exercised. This step compiles and runs the two integration tests
       # that DO exercise the feature (`cost_trace_smoke` covers OP/Method
@@ -155,14 +165,14 @@ jobs:
       # Coverage is narrow but enough to catch the common regression class
       # — a feature-gated `cost_trace::record(...)` site referencing the
       # wrong identifier and breaking the build under the feature.
-      - name: cargo test (cost-trace feature)
-        run: cargo test -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
+      - name: cargo test --locked (cost-trace feature)
+        run: cargo test --locked -p ergo-sigma --features cost-trace --test it -- cost_trace_smoke traced_untraced_parity
 
       # Doctest coverage lives on the fastest runner only — every other leg
       # already exercises the same crates via nextest above.
       - name: doc tests (ubuntu only)
         if: runner.os == 'Linux'
-        run: cargo test --all --doc
+        run: cargo test --locked --all --doc
 
       - name: Wallet proving feature tests (ubuntu only)
         if: runner.os == 'Linux'
@@ -237,30 +247,33 @@ jobs:
     name: clippy (--all-features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: 1.95.0
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: clippy-all-features
-      - name: cargo clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: cargo clippy --locked (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   audit:
     name: cargo-audit (security advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: audit
       - name: install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version ${{ steps.rust.outputs.audit }} --locked
       - name: cargo audit
         # --ignore RUSTSEC-2025-0141: bincode 1.x is unmaintained with no
         # patched version. It is used only for local wallet-state persistence
@@ -272,15 +285,17 @@ jobs:
     name: cargo-deny (licenses + duplicates + advisories)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: deny
       - name: install cargo-deny
-        run: cargo install cargo-deny --locked
+        run: cargo install cargo-deny --version ${{ steps.rust.outputs.deny }} --locked
       - name: cargo deny check
         run: cargo deny check
 
@@ -288,27 +303,31 @@ jobs:
     name: cargo-machete (unused dependencies)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: machete
       - name: install cargo-machete
-        run: cargo install cargo-machete --locked
+        run: cargo install cargo-machete --version ${{ steps.rust.outputs.machete }} --locked
       - name: cargo machete
         run: cargo machete
 
   diagnostics:
-    name: cargo build (diagnostics feature compile-check)
+    name: cargo build --locked (diagnostics feature compile-check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: diagnostics
       # The diagnostic-only integration tests (`diagnose_block_*`,
@@ -319,12 +338,12 @@ jobs:
       # captured `/tmp/block_*.json` files, a running Scala node) that
       # CI doesn't have. The compile guarantees the feature-gated
       # bodies stay valid — runtime execution stays operator-driven.
-      - name: cargo test --features diagnostics --no-run (ergo-validation)
-        run: cargo test --no-run -p ergo-validation --features diagnostics
-      - name: cargo test --features diagnostics --no-run (ergo-mempool)
-        run: cargo test --no-run -p ergo-mempool --features diagnostics
-      - name: cargo test --features diagnostics --no-run (ergo-ser)
-        run: cargo test --no-run -p ergo-ser --features diagnostics
+      - name: cargo test --locked --features diagnostics --no-run (ergo-validation)
+        run: cargo test --locked --no-run -p ergo-validation --features diagnostics
+      - name: cargo test --locked --features diagnostics --no-run (ergo-mempool)
+        run: cargo test --locked --no-run -p ergo-mempool --features diagnostics
+      - name: cargo test --locked --features diagnostics --no-run (ergo-ser)
+        run: cargo test --locked --no-run -p ergo-ser --features diagnostics
 
   difftest:
     name: difftest (structured hermetic campaign + coverage gate)
@@ -332,25 +351,25 @@ jobs:
     # Fail fast if the structured campaign hangs rather than burning the runner.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
+      - uses: ./.github/actions/rust
+        id: rust
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: difftest
 
       # Build in release mode so 50 000 iters stays under 2 minutes.
-      - name: cargo build (release)
-        run: cargo build --release -p ergo-difftest
+      - name: cargo build --locked (release)
+        run: cargo build --locked --release -p ergo-difftest
 
       # Unit tests for fuzz_one (stable, no nightly required).
-      - name: cargo test -p ergo-difftest
-        run: cargo test -p ergo-difftest
+      - name: cargo test --locked -p ergo-difftest
+        run: cargo test --locked -p ergo-difftest
 
       # Structured campaign: structure-aware generators + fixed-point invariant
       # + coverage gate. Exit non-zero on any invariant violation (Bug) OR if the
@@ -365,5 +384,34 @@ jobs:
       # need scala-cli + a live Scala node and are run manually by the operator.
       - name: run structured campaign (50 000 iters, min-coverage 0.80)
         run: |
-          cargo run --release -p ergo-difftest -- \
+          cargo run --locked --release -p ergo-difftest -- \
             --structured --iters 50000 --min-coverage 0.80
+
+  documentation:
+    name: Strict public Rustdoc and engineering policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: documentation
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ steps.rust.outputs.node }}
+      - name: Browser model regressions
+        run: node --experimental-default-type=module --test ergo-api/web/tests/*.test.mjs
+      - name: Voting model regression
+        run: node scripts/test-voting-ui.cjs
+      - name: Shared compiler, lint, action and lockfile policy
+        run: python scripts/ci-policy.py
+      - name: Engineering policy and release helper tests
+        run: python -m unittest discover -s scripts -p 'test_release*.py'
+      - name: Strict public documentation (all features)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps

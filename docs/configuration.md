@@ -41,7 +41,7 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[api.script]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]`, `[api]`, `[api.security]`, `[api.script]`, `[api.peer_details]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[mining]` |
 
 ## Top-level keys
 
@@ -58,14 +58,17 @@ section rejects typos:
 | `node_name` | string | `"ergo-rust-node"` | Node name advertised in the handshake. |
 | `blocks_to_keep` | i32 | `-1` | Pruning suffix length. `-1` = full archive (keep every block). `N > 0` = retain a pruned suffix of `N` blocks. `0` is reserved for the headers-only combo (see below). Values below `-1` are rejected. A positive `N` must be at least the rollback-window floor (`keep_versions + SAFETY_MARGIN`); a smaller value is rejected because a reorg could otherwise need evicted block sections. |
 | `keep_versions` | u32 | `200` | Undo-retention window = the deepest chain reorg the node can serve (Scala `keepVersions` parity — same default). Raising it lets the node follow deeper best-chain reorgs at a linear undo-log disk cost; the same value is wired into the extra-index store so the indexer can follow any reorg the state performs. `0` is rejected (a store that can never roll back would wedge on any reorg). Prospective only: undo entries already pruned under a smaller window stay gone, so a raise takes full effect `keep_versions` blocks later. If the best-header chain ever forks deeper than this window, the node cannot reorg onto it and reports a terminal `sync_wedged` state (`/health` = `wedged`, HTTP 503) — the only recovery is a resync. |
-| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` is accepted only in the headers-only combo below; any other digest configuration is rejected at load. |
+| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` supports the digest-verifier and headers-only combinations below. |
 | `verify_transactions` | bool | `true` | When `false`, the node syncs headers only and downloads no block sections. Requires `state_type = "digest"` (Scala rule R1) and is accepted only in the headers-only combo below. |
 
-**Headers-only combo.** The only currently-bootable non-UTXO
-configuration is `state_type = "digest"` + `verify_transactions = false`
-+ `blocks_to_keep = 0` + `utxo_bootstrap = false` (this mirrors Scala
-`application.conf`). Other digest or `blocks_to_keep = 0` combinations
-are rejected with an explicit error so the conflicting key is obvious.
+**Digest combinations.** Mode 5 verifies full blocks with AD proofs:
+`state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`,
+`utxo_bootstrap = false`, `nipopow_bootstrap = false`. Mode 6 verifies headers
+only: `state_type = "digest"`, `verify_transactions = false`,
+`blocks_to_keep = 0`, `utxo_bootstrap = false`. Other digest combinations are
+rejected. Both modes reject mining and the extra-index because they keep no
+UTXO box store. Mode-specific compatibility limits remain in
+[`compatibility.md`](compatibility.md).
 
 ### `[node.utxo]`
 
@@ -257,6 +260,26 @@ to retries and cannot be bypassed by alternate routing.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
+
+### `[api.script]`
+
+Native script endpoints under `/api/v1/script/*` use this policy. It does not
+change authentication on the Scala-compatible `/script/p2sAddress` and
+`/script/p2shAddress` routes.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `require_api_key` | bool | `false` | Require a configured API credential for all seven native script endpoints. When enabled without a configured hash, those endpoints fail closed. |
+| `max_cost` | u64 | `8001091` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. |
+
+Compilation and reduction use a per-node compute pool with two running jobs,
+eight waiting jobs, a two-second queue wait and a thirty-second response
+deadline. Scala-compatible P2S/P2SH compilation shares that pool. Queue pressure
+returns HTTP 503 with `Retry-After: 1`. A response timeout or disconnected client
+does not stop an accepted blocking job: it retains its slot until execution
+finishes, and shutdown drains accepted jobs. Point and scan read lanes use
+sixteen/four running jobs and sixty-four/sixteen waiting jobs respectively.
+These resource limits are code defaults rather than TOML keys.
 
 ### Security notes for the API
 
@@ -548,8 +571,7 @@ checks and are enforced at load:
 - **R5** — `nipopow_bootstrap = true` requires a configured genesis id
   (cannot use `genesis_id = ""`).
 - The digest backend additionally rejects `[mining] enabled = true` and
-  `[indexer] enabled = true`, and `state_type = "digest"` boots only in
-  the headers-only combo.
+  `[indexer] enabled = true`, and requires one of the Mode 5 or Mode 6 combinations above.
 - `[mining] claim_storage_rent = true` requires `[indexer] enabled = true`
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the

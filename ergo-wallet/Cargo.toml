@@ -3,6 +3,7 @@ name        = "ergo-wallet"
 description = "Ergo HD wallet — BIP39 mnemonic, post-1627 BIP32 HD derivation, P2PK addresses, secret storage, sigma-proof production for transaction signing, and CLI tooling."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -73,3 +74,6 @@ required-features = ["test-utils"]
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

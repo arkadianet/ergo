@@ -34,7 +34,7 @@ first build). See the README [Building](../README.md#building) section for
 the full set of build commands.
 
 ```bash
-cargo build --release -p ergo-node
+cargo build --locked --release -p ergo-node
 ```
 
 Start from the operator config template
@@ -637,52 +637,45 @@ limits and attribution details.
 
 ## API security posture
 
-The default posture is **safe by default for a single-host operator**:
+The default API bind is loopback (`127.0.0.1:9099`). A non-loopback bind
+requires `[api] public_bind = true`; enabling it does not authenticate public
+reads or transaction submission. API credentials are optional. Without
+`[api.security] api_key_hash`, privileged routes fail closed while the dashboard
+and public reads remain available. Supplied hashes must be exactly 64 lowercase
+hex characters and are validated even when the API is disabled.
 
-- The API binds to loopback (`127.0.0.1:9099`) by default. A non-loopback
-  bind is **rejected at config-load** unless you also set
-  `[api] public_bind = true` — the node will not start otherwise.
-- `[api.security] api_key_hash` is **mandatory** whenever the API server is
-  enabled. It is the lowercase Base16 of `Blake2b256(secret)` and must be
-  exactly 64 lowercase hex characters; the node refuses to start with a
-  malformed or missing hash. The only way to omit it is `[api] disabled =
-  true`. Requests authenticate by sending the secret in the `api_key`
-  request header (lowercase, underscore — not `Authorization`, not
-  `X-Api-Key`); the node Blake2b-256-hashes it and compares against the
-  configured hash in constant time. A missing or wrong key returns `403`.
+Requests authenticate with the secret in the `api_key` header. The node compares
+its Blake2b-256 hash to the configured hash in constant time. Wallet/scan/native
+wallet routes, shutdown, peer connect, vote changes, direct block submission,
+mining and native operator/admin routes require their configured tier. See the
+[route inventory](configuration.md#security-notes-for-the-api) for the complete
+list. Read routes and transaction submission remain public. Native script routes
+can additionally require a credential with `[api.script] require_api_key = true`;
+this setting does not alter Scala-compatible script compilation authentication.
 
-What the `api_key` actually gates is **narrow, by design** (Scala parity):
-only the `/wallet/*` JSON subtree and `POST /node/shutdown` (and its
-`/api/v1/node/shutdown` alias) require the key. The gate covers those
-whole path prefixes — an unknown subpath under `/wallet/` or `/node/`
-still rejects on the key first, mirroring Scala's
-`pathPrefix(...) & withAuth`; every other unmatched path is a plain,
-ungated `404`. **Everything else is public**
-regardless of `public_bind` — including transaction submission
-(`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
-`POST /blocks`, `/mining/solution`, all reads, `/blockchain/*`,
-`/emission/*`, `/peers/*`, `/utils/*`, the dashboard, and `/metrics`.
+Before exposing the API, put public endpoints behind a firewall or reverse proxy
+with per-client rate limits and expose only the endpoints you intend. For a
+proxy terminating on loopback, set `[api] local_reverse_proxy = true` so proxy
+traffic loses the trusted-loopback exemption. Forwarded client-IP headers are
+not trusted; clients share the proxy peer IP's limits. The dashboard is public,
+and its wallet calls still require the operator's credential.
 
-**Before exposing the node beyond localhost:**
-
-- Setting `public_bind = true` removes the only guard against a non-loopback
-  bind, and it does so silently — there is no runtime warning. Do not treat
-  it as "now the node is secured for the public internet."
-- Because submission and read routes stay unauthenticated, put the node
-  behind a reverse proxy (or firewall) that adds authentication and rate
-  limiting on the public surface. Expose only what you intend to, and keep
-  `/metrics` and the submission routes off the open internet unless you have
-  fronted them.
-- The dashboard at `/` is intentionally public (it carries no secrets; the
-  Wallet section authenticates each `/wallet/*` call with the key you enter in
-  the browser), but the `/wallet/*` API it drives remains `api_key`-gated.
+Compilation and reduction have bounded running/waiting pools and response
+deadlines; accepted blocking jobs retain their slots until completion even if
+the client disconnects. Queue pressure returns HTTP 503 and `Retry-After: 1`.
+Resource defaults and native script cost policy are documented under
+[`[api.script]`](configuration.md#apiscript). Indexer query and health failures
+surface as errors rather than zero balances, empty pages or a healthy caught-up
+status. A detected indexer read fault remains latched until reopening the handle;
+inspect the underlying error and repair/rebuild the database before restarting.
 
 ## Graceful shutdown
 
-The node drains cleanly on SIGINT / SIGTERM / SIGHUP (Unix) or Ctrl+C
-(Windows), and on the API shutdown route. A graceful shutdown is what
-guarantees the final state commit lands and redb is closed cleanly, so the
-next start does not need a recovery pass.
+SIGINT / SIGTERM / SIGHUP (Unix), Ctrl+C (Windows), and the API shutdown
+route request a graceful drain. Successful completion joins state-owning work,
+performs the final durable flush and closes redb. Watch the process exit status
+and logs; a failed drain or flush is an error, and an accepted shutdown request
+alone does not establish durable completion.
 
 To trigger shutdown over the API:
 
@@ -696,11 +689,13 @@ returns `202` with the body `shutdown_requested` **immediately**; the actual
 drain proceeds asynchronously. Confirm completion by polling
 `GET /api/v1/health` until the connection refuses.
 
-The drain fires the action-loop shutdown signal (in-flight write handlers
-see a "shutting down" result rather than hanging), cancels the indexer and
-anchor-builder tasks with bounded waits, lets in-flight HTTP requests drain
-(also bounded), drops the persist pipeline (draining queued writes), and
-forces a final durable flush so redb sees a clean close.
+The drain fires the action-loop shutdown signal, stops indexer and anchor work,
+drains accepted API compute and tracked service tasks, drains the persistence
+pipeline and performs the final durable flush. Realtime, sampler and webhook
+services belong to the running node and are joined or aborted on shutdown;
+restarting a node in the same process creates fresh service state. A failed
+persistence batch is terminal for that worker, and later dependent writes are
+refused until recovery against committed state.
 
 Under a process supervisor (systemd, Docker), prefer sending SIGTERM and
 allowing a generous stop timeout so the bounded drains and the final flush
@@ -713,8 +708,8 @@ find the real problem.
 
 **Node refuses to start with a config error.** The whole config is validated
 at load. Common causes: a non-loopback `[api] bind` without
-`public_bind = true`; a missing or malformed `[api.security] api_key_hash`
-(must be 64 lowercase hex chars) while the API is enabled; an unsupported
+`public_bind = true`; a malformed `[api.security] api_key_hash`
+(must be 64 lowercase hex chars when provided); an unsupported
 mode combination (e.g. `verify_transactions = false` without
 `state_type = "digest"`, or `[indexer] enabled = true` alongside
 `utxo_bootstrap = true` or `blocks_to_keep >= 0`); an empty resolved peer

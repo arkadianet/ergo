@@ -11,7 +11,6 @@ same state root from a block's ADProofs instead of a box arena.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-chain-spec, ergo-crypto, ergo-validation, ergo-sigma
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~33,000 (src incl. substantial inline tests; ~26 of 43 files carry `#[cfg(test)]` blocks)
 
 ## Start here
 - `lib.rs` (`src/lib.rs:1`) — module map + re-export surface. Names the
@@ -66,7 +65,7 @@ same state root from a block's ADProofs instead of a box arena.
   `ergo-validation`.
 - `src/header_store.rs` — `HeaderSectionTables`: the header/section tables +
   buffered-write overlay shared by both backends.
-- `src/digest_store.rs` — `DigestStateStore`: Mode 5 persistence sibling to
+- `src/digest_store/mod.rs` — `DigestStateStore`: Mode 5 persistence sibling to
   `StateStore` (digest + chain-state history ledgers, no arena).
 - `src/digest_apply.rs` — `DigestProofVerifier`, `DigestApplyError`,
   `ResolvedBoxes`: verifies a block's ADProofs and derives the post-apply digest.
@@ -98,10 +97,10 @@ same state root from a block's ADProofs instead of a box arena.
 - `HeaderMeta` (struct) — persisted header row; `pow_validity` is the only persisted validity flag — `src/chain.rs:22`
 - `HeaderAvailability` (enum) — Dense vs PoPowSparse history mode — `src/chain.rs:135`
 - `ChainStoreReader` (struct) — lock-free read handle — `src/reader.rs:31`
-- `CommittedSnapshot` (struct) — single-txn committed view for off-loop builds — `src/store/snapshot.rs`
+- `CommittedSnapshot` (struct) — single-txn committed view for off-loop builds — `src/store/snapshot/mod.rs`
 - `StateBackend` / `ChainStateRead` / `HeaderSectionStore` / `BlockApply` (traits) — backend dispatch surface — `src/backend.rs:42`–`:158`
 - `StateBackendKind` (enum) — `Utxo` / `Digest` runtime dispatch — `src/backend.rs:299`
-- `DigestStateStore` (struct) — Mode 5 digest-verifier backend — `src/digest_store.rs:140`
+- `DigestStateStore` (struct) — Mode 5 digest-verifier backend — `src/digest_store/mod.rs:140`
 - `DigestProofVerifier` (struct) — ADProof-driven digest derivation — `src/digest_apply.rs:156`
 - `PersistPipeline` / `PersistResult` (struct/enum) — background commit batching — `src/persist.rs:284`, `:261`
 - `StateError` (enum) — crate-wide error; re-exported as `ergo_state::store::StateError` — `src/store/error.rs`

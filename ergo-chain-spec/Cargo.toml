@@ -3,6 +3,7 @@ name        = "ergo-chain-spec"
 description = "Network identity and chain parameters for Ergo: types, constants, and constructors only. No validation logic, no runtime services, no I/O."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish     = false
@@ -11,3 +12,6 @@ publish     = false
 ergo-primitives = { workspace = true }
 ergo-ser        = { workspace = true }
 hex             = { workspace = true }
+
+[lints]
+workspace = true

@@ -11,10 +11,9 @@ backed by a lock-free snapshot.
 ergo-crypto, ergo-validation, ergo-wallet, ergo-state, ergo-p2p, ergo-sync,
 ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 **Depended on by:** (see codemap index — top of the stack; nothing depends on it)
-**Approx LOC:** ~33,000 (src only, excluding tests)
 
 ## Start here
-- `node::boot::run_inner` (`src/node/boot.rs:185`) — the whole bring-up
+- `node::boot::run_inner` (`src/node/boot/mod.rs:185`) — the whole bring-up
   sequence: store/genesis/AVL, handshake + peer manager, sync executor +
   coordinator, indexer, wallet boot, API bind, mining wire-up, action-loop
   spawn. Returns the live `RunHandle`. `run` (`:65`) wraps it with signals.
@@ -24,7 +23,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `node::state::NodeState` (`src/node/state.rs:73`) — the runtime god-struct
   every loop handler mutates; reading its fields is the fastest map of what the
   node owns at runtime.
-- `snapshot::NodeSnapshot` (`src/snapshot.rs:44`) + `api_bridge` — the read
+- `snapshot::NodeSnapshot` (`src/snapshot/mod.rs:44`) + `api_bridge` — the read
   boundary: per-tick projection of node state into API DTOs, parked in an
   `ArcSwap`, served lock-free to the axum task.
 
@@ -37,7 +36,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   `toml_sections.rs` (raw TOML shapes), `load.rs` (precedence + all validation
   + Mode-3/5/6 activation gates), `resolved.rs` (`NodeConfig`/`StateType`/
   logging), `mod.rs` (canonical-mode predicates + `validate_supported`).
-- `src/node/boot.rs` — boot orchestration (start here).
+- `src/node/boot/mod.rs` — boot orchestration (start here).
 - `src/node/action_loop.rs` — the action loop body + `handle_mempool_tick`.
 - `src/node/state.rs` — `NodeState` + `PeerRegistry`/`PeerRuntime`.
 - `src/node/handle.rs` — `RunHandle`: shutdown ordering + task-leak-safe `Drop`.
@@ -53,7 +52,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `src/node/first_deliverer.rs` — bounded `header_id → FirstDeliverer`
   ring; records the first peer to deliver each validated header for miner
   attribution (served via mining UI and `GET /api/v1/mining/minerStats`).
-- `src/node/messaging.rs` — inbound per-frame `message::CODE_*` dispatcher
+- `src/node/messaging/mod.rs` — inbound per-frame `message::CODE_*` dispatcher
   (throttle → deserialize → coordinator/executor/mempool routing).
 - `src/node/admission.rs` — peer + API tx admission through `Mempool::process`;
   maps `MempoolAction`s to outer-loop `Action`s and shapes `SubmitError`.
@@ -68,7 +67,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   (`run_wallet_writer`), `WalletCommand` enum, `NodeWalletAdmin` (`WalletAdmin`
   impl), `ChainStateAccessor`, and the `WalletStateHook` chain-apply hook.
 - `src/node/heartbeat.rs` — per-tick operator stderr heartbeat (diagnostics).
-- `src/node/snapshot_emit.rs` / `snapshot_state.rs` — assemble `SnapshotParts`
+- `src/node/snapshot_emit/mod.rs` / `snapshot_state.rs` — assemble `SnapshotParts`
   from `NodeState`; Mode-2 snapshot-server cache state.
 - `src/node/tip_context.rs` / `sync_helpers.rs` / `util.rs` / `memory_sampler.rs`
   — admission tip context, anchor sync-info helpers, misc, mem sampling.
@@ -78,7 +77,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
   the load-bearing Scala-vs-Rust JSON byte-parity oracle tests.
 - `src/mining_bridge.rs` — `NodeMining` impl: `MiningRequest` channel bridge,
   work-message JSON projection, candidate longpoll.
-- `src/snapshot.rs` — `NodeSnapshot` DTO bundle, `SnapshotPublisher`,
+- `src/snapshot/mod.rs` — `NodeSnapshot` DTO bundle, `SnapshotPublisher`,
   `SnapshotHandle` (`Arc<ArcSwap<NodeSnapshot>>`), recent-blocks tip cache.
 - `src/peer_loop.rs` (+ `peer_loop/outbound.rs`) — per-peer dial/accept +
   read/write tasks; `PeerEvent` enum. The outbound channel is bounded
@@ -101,10 +100,10 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - `NodeState` (struct) — action-loop god-struct (store, sync, peers, mempool,
   snapshot, wallet hook, bootstrap state machines) — `src/node/state.rs:73`
 - `run` / `run_inner` (async fn) — production entry / handle-returning entry —
-  `src/node/boot.rs:65` / `:185`
+  `src/node/boot/mod.rs:65` / `:185`
 - `action_loop` (async fn) — the single-writer select loop — `src/node/action_loop.rs:41`
 - `NodeSnapshot` (struct) + `SnapshotPublisher` (struct) + `SnapshotHandle`
-  (type alias) — per-tick read projection — `src/snapshot.rs:44` / `:280` / `:276`
+  (type alias) — per-tick read projection — `src/snapshot/mod.rs:44` / `:280` / `:276`
 - `SnapshotReadState` / `SnapshotMempoolView` / `ShutdownAdmin` / `SubmitBridge`
   — the `ergo-api` trait impls + submission channel — `src/api_bridge.rs:58/469/125/558`
 - `MiningRequest` (enum) + `MINING_TIMEOUT`/`LONGPOLL_TIMEOUT` — mining bridge —
@@ -162,7 +161,7 @@ ergo-mempool, ergo-mining, ergo-indexer, ergo-api, ergo-rest-json, ergo-sigma
 - **Lock-free reads.** The API never blocks the action loop: reads load an
   `Arc<ArcSwap<NodeSnapshot>>` rebuilt once per sync tick; snapshot construction
   is bounded and the recent-blocks tail is cached by full-block tip id
-  (`src/snapshot.rs`, `src/node/snapshot_emit.rs`).
+  (`src/snapshot/mod.rs`, `src/node/snapshot_emit/mod.rs`).
 - **Background-task leak safety.** `RunHandle::Drop` signals + aborts every
   task it owns (action loop, API, inbound listener, indexer, anchor builder,
   mining engine) and fires latched-watch cancels so a forgotten `shutdown()`

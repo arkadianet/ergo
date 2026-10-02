@@ -3,6 +3,7 @@ name        = "ergo-mining"
 description = "Mining-side candidate assembly, solution acceptance, and external-miner integration for the Ergo Rust node. Builds consensus-correct block candidates against the committed UTXO tip; submits Autolykos v2 solutions through the existing block-apply path. External-miner-only; no internal CPU miner, no wallet."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -33,3 +34,6 @@ toml            = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

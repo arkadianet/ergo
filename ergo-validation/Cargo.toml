@@ -3,6 +3,7 @@ name        = "ergo-validation"
 description = "Stateless and state-dependent validation for Ergo blocks, headers, and transactions: structural / monetary / script / cost checks; voted-protocol-parameter recomputation, validation-rule status updates, and miner-vote tallies; canonical-form enforcement and Scala-parity error mapping."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -88,3 +89,6 @@ path = "tests/trace_mismatch_889k.rs"
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

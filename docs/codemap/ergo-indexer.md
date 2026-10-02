@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-state, ergo-indexer-types
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~7,250 non-test (~11,500 with tests)
 
 ## Start here
 - `apply::apply_block_with_scratch` (`src/apply.rs:117`) — the heart: how one block becomes box/tx/address/template/token rows in a single atomic redb txn. Read its module doc (`src/apply.rs:1-22`) first.

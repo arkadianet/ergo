@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index) — ergo-api, ergo-indexer
-**Approx LOC:** ~510 (src, incl. tests)
 
 ## Start here
 - `IndexerQuery` (trait) — `src/query.rs:31` — the entire confirmed-only reader contract; the 28-method surface the API mounts routes against. Read this first.

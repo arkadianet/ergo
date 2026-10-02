@@ -1,0 +1,12 @@
+# Exact CI tool versions. --locked alone only locks each Cargo tool's dependency
+# resolution; it does not select the tool version.
+[tools]
+audit = "0.22.2"
+deny = "0.20.2"
+machete = "0.9.2"
+nextest = "0.9.146"
+fuzz = "0.13.1"
+node = "22.15.0"
+
+[toolchains]
+fuzz = "nightly-2026-09-30"
