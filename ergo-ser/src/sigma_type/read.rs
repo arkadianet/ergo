@@ -12,8 +12,8 @@ use super::{
 
 /// Deserialize a Sigma type descriptor.
 ///
-/// Iterative: nesting is tracked on a heap stack of [`Frame`]s rather than the
-/// native stack, so a descriptor as deep as [`MAX_TYPE_DEPTH`] allows cannot
+/// Iterative: nesting is tracked on a heap stack of `Frame`s rather than the
+/// native stack, so a descriptor as deep as `MAX_TYPE_DEPTH` allows cannot
 /// overflow the reader. Items are read in exactly the order Scala's recursive
 /// `TypeSerializer.deserialize` reads them, and every error is raised at the
 /// same point of that order.

@@ -22,7 +22,7 @@
 
 use ergo_primitives::digest::blake2b256;
 
-/// Modifier type IDs for block sections [protocol].
+/// Modifier type IDs for block sections (protocol).
 pub const TYPE_HEADER: u8 = 101;
 pub const TYPE_BLOCK_TRANSACTIONS: u8 = 102;
 pub const TYPE_AD_PROOFS: u8 = 104;

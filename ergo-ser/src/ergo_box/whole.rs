@@ -1,6 +1,5 @@
 //! Whole-[`ErgoBox`] codec (standalone mode), `box_id` scratch helper, and
-//! the vector-assisted [`parse_ergo_box_bytes`] parser for boxes carrying
-//! non-size-delimited ErgoTrees.
+//! the vector-assisted [`parse_ergo_box_bytes`] consistency check.
 
 use ergo_primitives::digest::{blake2b256, Digest32, ModifierId};
 use ergo_primitives::reader::{ReadError, VlqReader};
@@ -24,9 +23,10 @@ pub fn write_ergo_box(w: &mut VlqWriter, b: &ErgoBox) -> Result<(), WriteError> 
 
 /// Read a full ErgoBox (standalone mode).
 ///
-/// Works correctly when the ErgoTree is size-delimited. For non-size-delimited
-/// trees, use `parse_ergo_box_bytes` (which requires the caller to supply the
-/// exact ErgoTree bytes so the parser can locate the tree/body boundary).
+/// Parses both size-delimited and non-size-delimited proposition trees, then
+/// consumes the box's transaction id and output index. A fresh top-level reader
+/// begins with an empty binding store. For a box accepted in an enclosing
+/// expression, use [`read_accepted_ergo_box`] to retain that reader's context.
 pub fn read_ergo_box(r: &mut VlqReader) -> Result<ErgoBox, ReadError> {
     // `ErgoBox.sigmaSerializer.parse` on a fresh reader starts with an empty
     // `valDefTypeStore`, so a `ValUse` its tree does not bind is a
@@ -82,14 +82,10 @@ pub fn box_id_with(w: &mut VlqWriter, b: &ErgoBox) -> Result<Digest32, WriteErro
     Ok(blake2b256(w.as_slice()))
 }
 
-/// Vector-assisted ErgoBox parser: requires the caller to supply the exact
-/// ErgoTree bytes so the parser can locate the tree/body boundary.
-///
-/// This is NOT an independent streaming parser. For non-size-delimited
-/// ErgoTrees, a true streaming parser would need opcode-level body
-/// parsing to discover the tree boundary; that's not implemented here.
-/// Size-delimited trees can be parsed independently via
-/// `read_ergo_box`.
+/// Parse a complete box and verify its proposition bytes against a separately
+/// supplied encoding. Rejects mismatched proposition bytes and trailing content
+/// after either the supplied tree or complete box. [`read_ergo_box`] is the
+/// streaming parser when no independent proposition-byte check is needed.
 pub fn parse_ergo_box_bytes(
     box_bytes: &[u8],
     ergo_tree_bytes: &[u8],

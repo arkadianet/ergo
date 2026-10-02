@@ -483,17 +483,17 @@ pub enum DecodeMode {
 
 /// Decode an `ergoTree` hex string into `(parsed, canonical_bytes)`.
 ///
-/// Always returns the INPUT bytes as the canonical Vec<u8>. We
+/// Always returns the INPUT bytes as the canonical `Vec<u8>`. We
 /// do NOT use `write_ergo_tree`'s re-emitted form because the
 /// serializer is lossy for some opcode encodings (live h=303967
 /// case: `1000d1ed8501` re-emitted as `1000d1ed01010100`,
 /// caused tx_id divergence).
 ///
 /// Live mainnet history caught:
-/// - Block 303967 / tx[1] / output[0]: ergoTree `1000d1ed8501`
+/// - Block 303967 / `tx[1]` / `output[0]`: ergoTree `1000d1ed8501`
 ///   re-emitted lossily as `1000d1ed01010100` → tx_id divergence
 ///   → Merkle root mismatch → IBD wedge. Fix: use input bytes.
-/// - Block 545684 / tx[1] / output[0]: ergoTree `cd07021a8e6f59fd4a`
+/// - Block 545684 / `tx[1]` / `output[0]`: ergoTree `cd07021a8e6f59fd4a`
 ///   (version=5 soft-fork, has_size=true). The pre-check
 ///   rejection blocked the on-chain decode path; `read_ergo_tree`
 ///   itself handles this fine via `unparsed_soft_fork_tree`. Fix:

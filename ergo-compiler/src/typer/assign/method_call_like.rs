@@ -483,7 +483,7 @@ pub(crate) fn mcl_string(
             // env-lifted SigmaProp (no real curve bytes, only a label) or a
             // ByteColl/LongColl RHS still folds in Scala via a JVM-runtime
             // `.toString` we cannot reproduce byte-exactly — REJECT rather than
-            // fold wrong bytes (see the lib.rs deviation ledger).  Falls through
+            // fold wrong bytes (see the compiler design ledger).  Falls through
             // to the Err.
         }
         // Non-constant RHS (Height/Select/EQ/ConcreteCollection/…), or a Constant

@@ -394,7 +394,7 @@ impl Default for MempoolConfig {
 }
 
 impl MempoolConfig {
-    /// Project the staging-related config fields into [`StagingCaps`].
+    /// Project the staging-related config fields into [`crate::staging::StagingCaps`].
     pub fn staging_caps(&self) -> crate::staging::StagingCaps {
         crate::staging::StagingCaps {
             max_count: self.staging_max_count,
