@@ -122,8 +122,18 @@ pub fn fuzz_delivery(data: &[u8]) {
                     .filter(|(_, owner)| now.duration_since(owner.at) > DELIVERY_TIMEOUT)
                     .map(|(id, _)| *id)
                     .collect();
-                let result = tracker
-                    .check_timeouts_gated(now, if arg & 0x80 == 0 { None } else { last_got });
+                let connectivity = if arg & 0x80 == 0 { None } else { last_got };
+                let result = tracker.check_timeouts_gated(now, connectivity);
+                for (peer, ids) in &result.retryable {
+                    assert!(!ids.is_empty());
+                    for id in ids {
+                        assert_eq!(
+                            owners.get(id).unwrap().peer,
+                            *peer,
+                            "timeout keeps peer attribution"
+                        );
+                    }
+                }
                 let actual: Vec<_> = result
                     .retryable
                     .iter()
@@ -137,7 +147,16 @@ pub fn fuzz_delivery(data: &[u8]) {
                 );
                 assert_eq!(actual.into_iter().collect::<BTreeSet<_>>(), expired);
                 assert!(result.exhausted.iter().all(|id| expired.contains(id)));
-                assert!(result.penalize.iter().all(|id| expired.contains(id)));
+                let hard: BTreeSet<_> = expired
+                    .iter()
+                    .filter(|id| connectivity.is_none_or(|last| owners[*id].at >= last))
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    result.penalize.into_iter().collect::<BTreeSet<_>>(),
+                    hard,
+                    "connectivity gates exactly the hard-timeout penalties"
+                );
                 for id in expired {
                     owners.remove(&id);
                 }
@@ -267,6 +286,21 @@ mod tests {
     }
 
     // ----- error paths -----
+
+    #[test]
+    fn timeout_buckets_keep_peer_identity_and_soft_and_hard_penalties() {
+        fuzz_delivery(
+            &[
+                [0, 0, 0, 0, 1],
+                [0, 1, 10, 0, 1],
+                [4, 0, 0, 0, 1],
+                [3, 1, 10, 0, 0],
+                [0, 2, 20, 0, 1],
+                [4, 0, 0, 0, 129],
+            ]
+            .concat(),
+        );
+    }
 
     #[test]
     fn arbitrary_bounded_instruction_streams_complete() {
