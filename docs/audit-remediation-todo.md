@@ -76,13 +76,13 @@ requested limit; this stack uses five.
 
 | Order | Scope | Draft PR | Changed paths | Checks |
 | --- | --- | --- | ---: | --- |
-| 1 | Persistence/wallet | [#481](https://github.com/arkadianet/ergo/pull/481) | 84 | Format/Clippy; 7,779 workspace tests passed, 97 ignored |
+| 1 | Persistence/wallet | [#481](https://github.com/arkadianet/ergo/pull/481) | 85 | Format/Clippy; 7,779 workspace tests passed, 97 ignored |
 | 2 | Runtime/API | [#482](https://github.com/arkadianet/ergo/pull/482) | 99 | Format/Clippy; 7,796 workspace tests passed, 97 ignored |
 | 3 | Query/codec contracts | [#483](https://github.com/arkadianet/ergo/pull/483) | 93 | Format/Clippy; 7,801 workspace tests passed, 97 ignored |
 | 4 | Compiler/evaluator | [#484](https://github.com/arkadianet/ergo/pull/484) | 99 | Format/Clippy; 7,820 workspace tests passed, 97 ignored |
-| 5 | Engineering/release | Pending | 100 | Final workspace suites running |
+| 5 | Engineering/release | Pending | 100 | 7,821 default / 7,882 all-feature tests passed; final follow-up checks passed |
 
-All four published layers passed their required local gates. Hosted CI is
+All five layers passed their required local gates. Hosted CI is
 separate and may still be running. Layer 1 additionally passed 249 wallet
 test-utils/proving tests (one intentional oracle ignore); layer 4 passed its
 cost-trace suite.
@@ -93,8 +93,22 @@ from the layer that introduces them. The complete stack additionally runs strict
 all-feature Rustdoc, all-feature tests, cost-trace and wallet proving targets,
 CI/release policy checks, browser model tests, dependency checks and a Linux
 archive smoke. Existing intentional ignores are reported, not counted as passes. Hosted Scala
-wallet interoperability has passed; a Windows persistence test exposed a
-notification/commit assertion race and is being corrected before final delivery.
+wallet interoperability has passed. A Windows persistence test exposed a
+notification/commit assertion race; the assertions now run after joining the
+worker and passed 100 concurrent repeated runs. The final state unit suite
+passed 395 tests (two intentional ignores), followed by strict Clippy/Rustdoc.
+Two empty ignored activation placeholders were removed and are tracked as
+missing evidence below; full-suite totals above precede that test-only cleanup.
+The complete-stack suites reported 100 default and 111 all-feature ignores
+before the two placeholder removals. Strict fetched cost-ledger evidence passed
+all three manual tests, including the 101,187-transaction required replay; the
+aggregate closure check validated 299 rows (274 CLOSED, 25 N-A). Raw normal
+and manual results are retained separately, and the strict merge rejects missing,
+failed or duplicate manual results. CI/release policy (13 tests), the ledger
+checker (16 tests), all 65 browser model tests, dependency checks and Linux GNU
+release archive smoke passed. The documented bincode unmaintained exception
+remains; no known vulnerabilities were reported.
+
 Recorded measurements and oracle provenance are linked from
 [resource safety](perf/resource-safety-profile.md),
 [wallet remediation](audit-remediation-storage-wallet.md), and
