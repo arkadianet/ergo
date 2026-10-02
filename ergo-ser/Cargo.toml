@@ -16,10 +16,10 @@ bs58            = { workspace = true }
 indexmap        = { workspace = true }
 
 [features]
-# Gates `tests/roundtrip_triage.rs`, a diagnostic harness for
-# investigating individual mainnet box bytes that fail round-trip.
-# Default `cargo test` does not compile it; the diagnostics CI lane
-# runs it for ad-hoc triage.
+# Gates `tests/it/roundtrip_triage.rs`, a manual diagnostic harness
+# investigating mainnet transaction round-trip divergence. It also
+# carries #[ignore], so --all-features remains hermetic. The diagnostics
+# CI lane compiles it; operators select it explicitly with --ignored.
 diagnostics = []
 
 [dev-dependencies]

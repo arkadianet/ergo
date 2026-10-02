@@ -10,23 +10,10 @@
 //! 4. Every PoPowHeader's interlinks_proof bytes parse as a valid
 //!    BatchMerkleProof.
 //!
-//! The fixture lives at
-//! `test-vectors/mainnet/nipopow_proof_capture.bin` (gitignored
-//! filename pattern — operators capture once per dev workstation;
-//! we may commit a curated version later if licensing/Scala-node
-//! provenance allows).
-//!
-//! Capture procedure:
-//! ```pwsh
-//! $env:ERGO_CAPTURE_NIPOPOW_PROOF = "test-vectors/mainnet/nipopow_proof_capture.bin"
-//! ./target/release/ergo-node.exe --config ergo-node/ergo-node.toml --data-dir ./ergo-data-capture
-//! # Wait ~2 seconds for the first BetterChain log line, then Ctrl+C.
-//! # The capture file is now populated.
-//! ```
-//!
-//! When the fixture is absent the test passes vacuously — CI does
-//! NOT require a capture, but a captured run on a developer
-//! workstation surfaces wire-format drift instantly.
+//! The captured wire fixture is committed at
+//! `test-vectors/mainnet/nipopow_proof_capture.bin`. Both tests in this
+//! module require their committed fixtures and run in the normal suite.
+//! A missing file fails instead of reporting vacuous oracle parity.
 
 use std::path::Path;
 
@@ -35,19 +22,8 @@ const CAPTURE_PATH: &str = "../test-vectors/mainnet/nipopow_proof_capture.bin";
 #[test]
 fn captured_scala_proof_roundtrips_byte_identical() {
     let path = Path::new(CAPTURE_PATH);
-    if !path.exists() {
-        // Vacuous pass: no operator capture available yet. The
-        // test surfaces nothing useful until a fixture is dropped
-        // in — but doesn't fail CI. Re-run after capturing per
-        // the docstring procedure.
-        eprintln!(
-            "[skipped] no Scala-oracle proof capture at {CAPTURE_PATH}; \
-             see test docstring for capture procedure"
-        );
-        return;
-    }
-
-    let proof_bytes = std::fs::read(path).expect("capture file readable");
+    let proof_bytes = std::fs::read(path)
+        .expect("required committed Scala proof capture is readable");
     let proof = ergo_ser::popow_proof::deserialize_nipopow_proof(&proof_bytes)
         .expect("captured Scala proof deserializes");
 
