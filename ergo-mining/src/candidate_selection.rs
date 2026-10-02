@@ -19,6 +19,9 @@
 //!   fails revalidation against the candidate's frozen context, or would exceed
 //!   the remaining block cost/size budget. Later fitting transactions retain
 //!   their priority order and can still fill the block.
+//!   This deliberately differs from Scala's `CandidateGenerator.collectTxs`,
+//!   which stops at the first limit overflow; filling later entries is mining
+//!   policy and does not change consensus validation.
 //! - Block cost is summed exactly as the validator does: each tx is
 //!   validated with its OWN fresh `CostAccumulator` (because `add` commits
 //!   before checking the limit, a shared accumulator would be polluted by
@@ -36,6 +39,7 @@ use ergo_ser::transaction::{read_transaction, transaction_id, Transaction};
 use ergo_validation::{
     validate_transaction_parsed, CheckedTransaction, CostAccumulator, JitCost, ProtocolParams,
     ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules, UtxoView,
+    INTERPRETER_INIT_COST,
 };
 
 use crate::error::{check_build_cancelled, MiningError};
@@ -234,9 +238,20 @@ pub fn select_user_txs_cancellable(
     })?;
 
     let mut sel = Selected::default();
+    // Every valid tx has at least one input and output, and scripts are on.
+    // Entry::cost is an observation at admission, not a lower bound: a changed
+    // context can take a cheaper script branch or change voted cost parameters.
+    let minimum_tx_cost = INTERPRETER_INIT_COST
+        .saturating_add(params.input_cost)
+        .saturating_add(params.output_cost);
 
     for entry in snapshot.iter() {
         check_build_cancelled(should_cancel)?;
+        let remaining_cost = cost_budget.saturating_sub(sel.total_cost);
+        if remaining_cost < minimum_tx_cost {
+            // No later valid transaction can fit, even with a cheaper script.
+            break;
+        }
         // A large priority entry must not block smaller independent entries.
         if sel.total_size.saturating_add(u64::from(entry.size_bytes)) > size_budget {
             continue;
@@ -254,6 +269,17 @@ pub fn select_user_txs_cancellable(
             Err(_) => continue,
         };
         check_build_cancelled(should_cancel)?;
+
+        // The structural part of compute_tx_init_cost is a candidate-context
+        // floor. Token access and script/proof costs can only add to it. Skip
+        // before UTXO resolution and validation, leaving later cheap txs eligible.
+        let structural_cost = INTERPRETER_INIT_COST
+            .saturating_add((tx.inputs.len() as u64).saturating_mul(params.input_cost))
+            .saturating_add((tx.data_inputs.len() as u64).saturating_mul(params.data_input_cost))
+            .saturating_add((tx.output_candidates.len() as u64).saturating_mul(params.output_cost));
+        if structural_cost > remaining_cost {
+            continue;
+        }
 
         // Resolve inputs/data-inputs against the evolving overlay. A None
         // means an input is already spent in-block or not yet available
@@ -279,6 +305,8 @@ pub fn select_user_txs_cancellable(
                     reemission: reemission_rules,
                 },
             };
+            #[cfg(test)]
+            tests::VALIDATION_CALLS.with(|calls| calls.set(calls.get() + 1));
             match validate_transaction_parsed(
                 tx,
                 &entry.bytes,
@@ -344,11 +372,78 @@ mod tests {
     use ergo_ser::ergo_box::{ErgoBox, ErgoBoxCandidate};
     use ergo_ser::ergo_tree::ErgoTree;
     use ergo_ser::input::{ContextExtension, DataInput, Input, SpendingProof};
-    use ergo_ser::opcode::Expr;
+    use ergo_ser::opcode::{Expr, IrNode, Payload};
     use ergo_ser::register::AdditionalRegisters;
     use ergo_ser::sigma_type::SigmaType;
     use ergo_ser::sigma_value::SigmaValue;
     use ergo_ser::transaction::write_transaction;
+
+    thread_local! {
+        pub(super) static VALIDATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Reproducible selection workload; run explicitly with --ignored --nocapture.
+    #[test]
+    #[ignore = "selection measurement"]
+    fn measure_cost_exhausted_snapshot() {
+        let boxes: Vec<_> = (0u64..1000)
+            .map(|index| {
+                let mut b = box_at(1_000_000_000, HEIGHT, 0);
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&index.to_be_bytes());
+                b.transaction_id = ModifierId::from_bytes(id);
+                b
+            })
+            .collect();
+        let utxo = MapUtxo::new(&boxes);
+        let entries: Vec<_> = boxes
+            .iter()
+            .map(|b| {
+                let tx = spend_tx(b, 1_000_000_000, HEIGHT);
+                let mut e = wire_entry(&tx, 0, 0);
+                e.tx_id = Digest32::from_bytes(*transaction_id(&tx).unwrap().as_bytes());
+                e
+            })
+            .collect();
+        let params = ProtocolParams::mainnet_default();
+        let probe = MempoolReadSnapshot::from_entries(vec![entries[0].clone()]);
+        let budget = select_user_txs(
+            &mut CandidateOverlay::new(&utxo),
+            &probe,
+            &ctx(),
+            &params,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap()
+        .total_cost
+            + 1;
+        let snapshot = MempoolReadSnapshot::from_entries(entries);
+        const PASSES: usize = 100;
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let start = std::time::Instant::now();
+        for _ in 0..PASSES {
+            let selected = select_user_txs(
+                &mut CandidateOverlay::new(&utxo),
+                &snapshot,
+                &ctx(),
+                &params,
+                &[],
+                budget,
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+            assert_eq!(selected.checked.len(), 1);
+            assert_eq!(budget - selected.total_cost, 1);
+            assert!(selected.suspects.is_empty());
+        }
+        let elapsed = start.elapsed();
+        let calls = VALIDATION_CALLS.with(|calls| calls.get());
+        println!("1000 independent valid trivial-script txs; {PASSES} passes; budget={budget}; remaining=1; validation_calls/pass={}; elapsed={elapsed:?}; time/pass={:?}", calls / PASSES, elapsed / PASSES as u32);
+    }
 
     // ----- helpers -----
 
@@ -890,6 +985,275 @@ mod tests {
 
     fn wire_entry(tx: &Transaction, fee: u64, seed: u8) -> Entry {
         entry(tx, fee, tx_bytes(tx).len() as u32, seed)
+    }
+
+    /// Use the production admission validator so the estimate is observed cost,
+    /// in the same units and fresh accumulator used by real mempool admission.
+    fn admitted_entry(tx: &Transaction, utxo: &MapUtxo, context: &TransactionContext) -> Entry {
+        use ergo_mempool::Validator;
+        let params = ProtocolParams::mainnet_default();
+        let mut cost = CostAccumulator::new(JitCost::from_block_cost(4_900_000).unwrap());
+        let validated = ergo_mempool::ErgoValidator
+            .validate(
+                &tx_bytes(tx),
+                utxo,
+                utxo,
+                &mut TxValidationCtx {
+                    ctx: context,
+                    params: &params,
+                    cost: &mut cost,
+                    last_headers: &[],
+                    rules: TxValidationRules { reemission: None },
+                },
+            )
+            .unwrap();
+        let mut e = wire_entry(tx, 0, 0);
+        e.tx_id = validated.tx_id;
+        e.cost = validated.consumed_cost;
+        e
+    }
+
+    /// Always true, with a short branch at fast_height and extra work elsewhere.
+    fn context_cost_box(fast_height: u32) -> ErgoBox {
+        let height = || {
+            Expr::Op(IrNode {
+                opcode: 0xA3,
+                payload: Payload::Zero,
+            })
+        };
+        let binary = |opcode, left, right| {
+            Expr::Op(IrNode {
+                opcode,
+                payload: Payload::Two(Box::new(left), Box::new(right)),
+            })
+        };
+        let fast = binary(
+            0x93,
+            height(),
+            Expr::Const {
+                tpe: SigmaType::SInt,
+                val: SigmaValue::Int(fast_height as i32),
+            },
+        );
+        let mut slow = binary(0x93, height(), height());
+        for _ in 0..16 {
+            slow = binary(0xED, binary(0x93, height(), height()), slow);
+        }
+        let mut b = box_at(1_000_000_000, HEIGHT, 1);
+        let mut tree = trivial_tree();
+        tree.body = Expr::Op(IrNode {
+            opcode: 0xD1,
+            payload: Payload::One(Box::new(binary(0xEC, fast, slow))),
+        });
+        b.candidate = ErgoBoxCandidate::new(
+            1_000_000_000,
+            tree,
+            HEIGHT,
+            vec![],
+            AdditionalRegisters::empty(),
+        )
+        .unwrap();
+        b
+    }
+
+    #[test]
+    fn exhausted_cost_skips_remaining_admission_costs_without_validation() {
+        let boxes: Vec<_> = (1..=3)
+            .map(|seed| box_at(1_000_000_000, HEIGHT, seed))
+            .collect();
+        let utxo = MapUtxo::new(&boxes);
+        let entries: Vec<_> = boxes
+            .iter()
+            .map(|b| admitted_entry(&spend_tx(b, 1_000_000_000, HEIGHT), &utxo, &ctx()))
+            .collect();
+        let budget = entries[0].cost + 1;
+        assert!(entries.iter().skip(1).all(|e| e.cost > 1));
+        let snapshot = MempoolReadSnapshot::from_entries(entries);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(budget - selected.total_cost, 1);
+        assert!(selected.suspects.is_empty());
+        assert!(!overlay.is_spent(&boxes[1].box_id().unwrap()));
+        assert!(!overlay.is_spent(&boxes[2].box_id().unwrap()));
+    }
+
+    #[test]
+    fn admission_cost_that_fits_still_uses_exact_candidate_cost_check() {
+        let b = context_cost_box(HEIGHT);
+        let utxo = MapUtxo::new(std::slice::from_ref(&b));
+        let tx = spend_tx(&b, 1_000_000_000, HEIGHT);
+        let mut candidate_ctx = ctx();
+        candidate_ctx.height += 1;
+        let e = admitted_entry(&tx, &utxo, &ctx());
+        let budget = e.cost;
+        assert!(admitted_entry(&tx, &utxo, &candidate_ctx).cost > budget);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![e]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &candidate_ctx,
+            &ProtocolParams::mainnet_default(),
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert!(selected.checked.is_empty());
+        assert_eq!(selected.total_cost, 0);
+        assert!(selected.suspects.is_empty());
+        assert!(!overlay.is_spent(&b.box_id().unwrap()));
+        assert!(overlay.in_block_outputs.is_empty());
+    }
+
+    #[test]
+    fn higher_admission_cost_does_not_skip_a_cheaper_candidate_context() {
+        let b = context_cost_box(HEIGHT + 1);
+        let utxo = MapUtxo::new(std::slice::from_ref(&b));
+        let tx = spend_tx(&b, 1_000_000_000, HEIGHT);
+        let mut candidate_ctx = ctx();
+        candidate_ctx.height += 1;
+        let e = admitted_entry(&tx, &utxo, &ctx());
+        let budget = admitted_entry(&tx, &utxo, &candidate_ctx).cost;
+        assert!(
+            e.cost > budget,
+            "a raw admission-cost filter would falsely skip"
+        );
+        let snapshot = MempoolReadSnapshot::from_entries(vec![e]);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &candidate_ctx,
+            &ProtocolParams::mainnet_default(),
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.total_cost, budget);
+        assert!(selected.suspects.is_empty());
+    }
+
+    #[test]
+    fn structural_cost_skip_does_not_validate_and_keeps_later_cheap_entry() {
+        let (utxo, expensive, _, cheap) = non_fitting_parent_family();
+        let expensive_entry = admitted_entry(&expensive, &utxo, &ctx());
+        let cheap_entry = admitted_entry(&cheap, &utxo, &ctx());
+        let budget = cheap_entry.cost;
+        assert!(expensive_entry.cost > budget);
+        let snapshot = MempoolReadSnapshot::from_entries(vec![expensive_entry, cheap_entry]);
+        let mut overlay = CandidateOverlay::new(&utxo);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut overlay,
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(
+            selected.checked[0].0.tx_id(),
+            transaction_id(&cheap).unwrap().as_bytes()
+        );
+        assert_eq!(selected.total_cost, budget);
+        assert!(selected.suspects.is_empty());
+        assert!(!overlay.is_spent(&expensive.inputs[0].box_id));
+        assert!(overlay.is_spent(&cheap.inputs[0].box_id));
+    }
+
+    #[test]
+    fn structural_floor_equality_reaches_exact_check() {
+        let b = box_at(1_000_000_000, HEIGHT, 1);
+        let utxo = MapUtxo::new(std::slice::from_ref(&b));
+        let tx = spend_tx(&b, 1_000_000_000, HEIGHT);
+        let e = admitted_entry(&tx, &utxo, &ctx());
+        let params = ProtocolParams::mainnet_default();
+        let budget = INTERPRETER_INIT_COST + params.input_cost + params.output_cost;
+        assert!(e.cost > budget, "script work exceeds the structural floor");
+        let snapshot = MempoolReadSnapshot::from_entries(vec![e]);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &params,
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert!(selected.checked.is_empty());
+        assert!(selected.suspects.is_empty());
+    }
+
+    #[test]
+    fn cost_floors_use_current_candidate_parameters() {
+        let b = box_at(1_000_000_000, HEIGHT, 1);
+        let utxo = MapUtxo::new(std::slice::from_ref(&b));
+        let tx = spend_tx(&b, 1_000_000_000, HEIGHT);
+        let e = admitted_entry(&tx, &utxo, &ctx());
+        let admission_cost = e.cost;
+        let snapshot = MempoolReadSnapshot::from_entries(vec![e]);
+        let mut params = ProtocolParams::mainnet_default();
+        params.input_cost = 0;
+        params.output_cost = 0;
+        let probe = select_user_txs(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &params,
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(probe.checked.len(), 1);
+        let budget = probe.total_cost;
+        assert!(admission_cost > budget);
+        VALIDATION_CALLS.with(|calls| calls.set(0));
+        let selected = select_user_txs(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &params,
+            &[],
+            budget,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.total_cost, budget);
     }
 
     #[test]
