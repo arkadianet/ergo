@@ -72,6 +72,7 @@ def run(args):
     for _, binary, commit in versions:
         if not binary.is_file() or len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
             raise RuntimeError('binaries must exist and source commits must be complete lowercase Git hashes')
+        command('git', 'cat-file', '-e', commit + '^{commit}')
     with locked_snapshot(args.snapshot) as snapshot:
         source_hash = sha(snapshot)
         if source_hash != args.snapshot_sha256:

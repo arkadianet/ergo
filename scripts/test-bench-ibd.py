@@ -65,7 +65,7 @@ print(json.dumps(dict(start_height=850, end_height=1000, root='different' if BEH
     persist_channel_observed_peak_jobs=1, unpersisted_pinned_observed_peak_bytes=12, phases_ms={'validation':10})))
 '''.replace('BEHAVIOR', repr(behavior)))
         binary.chmod(0o700)
-        return argparse.Namespace(binary=binary, source_commit='a' * 40, baseline_binary=None,
+        return argparse.Namespace(binary=binary, source_commit=BENCH.command('git', 'rev-parse', 'HEAD'), baseline_binary=None,
                                   baseline_source_commit=None, snapshot=snapshot, snapshot_sha256=BENCH.sha(snapshot),
                                   output_dir=directory / 'output', runs=2, profile=[BENCH.profile('one:1:1'), BENCH.profile('two:2:2')],
                                   blocks=150, proof_policy='regenerate', persist_jobs=64, flush_interval=500,
