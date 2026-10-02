@@ -96,7 +96,12 @@ fn ibd_auto_exit_utxo_backend_exits_ibd_when_near_tip() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_state(&tmp.path().join("utxo.redb"));
     // Arm IBD mode (same call as boot.rs:664).
-    state.store.as_utxo_mut().unwrap().set_ibd_mode(true, 50).unwrap();
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .set_ibd_mode(true, 50)
+        .unwrap();
     assert!(
         state.store.as_utxo_mut().unwrap().ibd_mode(),
         "pre-condition: IBD armed"
@@ -115,7 +120,12 @@ fn ibd_auto_exit_utxo_backend_exits_ibd_when_near_tip() {
 fn ibd_auto_exit_utxo_backend_stays_ibd_when_gap_large() {
     let tmp = tempfile::tempdir().unwrap();
     let mut state = make_state(&tmp.path().join("utxo.redb"));
-    state.store.as_utxo_mut().unwrap().set_ibd_mode(true, 50).unwrap();
+    state
+        .store
+        .as_utxo_mut()
+        .unwrap()
+        .set_ibd_mode(true, 50)
+        .unwrap();
 
     // Gap = bh - fb = 100 - 5 = 95, well above the threshold.
     maybe_exit_ibd(&mut state.store, 0, 5, 100);

@@ -647,4 +647,3 @@ fn mine_announced_before_apply(
     assert_announced_ids_served(state, &probed.before_apply);
     mined.id
 }
-

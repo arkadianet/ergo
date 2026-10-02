@@ -5,7 +5,7 @@
 //! - Target 96 outbound, up to 256 inbound (decoupled — a full outbound
 //!   set never reduces inbound capacity)
 //! - 1 connection per IP
-//! - Max 3 from same /16 subnet [inherited, relaxed]
+//! - Max 3 from one IPv4 /16 or native IPv6 /48 connection group
 //!
 //! Peer selection currently sorts by most-recently-seen. Full bucketed
 //! ranking with throughput metrics and randomization is queued for a

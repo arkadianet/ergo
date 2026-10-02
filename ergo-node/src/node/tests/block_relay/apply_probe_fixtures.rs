@@ -413,4 +413,3 @@ fn session_sibling(later: bool, digest: bool, assemble: bool) {
         );
     }
 }
-
