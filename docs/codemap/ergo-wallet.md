@@ -10,7 +10,6 @@ and `gf2_192` — sigma-rust is never a runtime dependency.
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma,
 ergo-validation, ergo-state, gf2_192
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~8,900 (src/**/*.rs)
 
 ## Start here
 - `src/lib.rs` — module tree + crate-root re-exports (`Mnemonic`,
