@@ -78,11 +78,11 @@ jobs:
           # one actual outcome per selected test after fetching the pinned inputs.
           # Operator REST captures and live-node oracles remain manual.
           cargo nextest run --locked --workspace --features ergo-validation/diagnostics --no-fail-fast \
-            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_(stratified_ranges|required_selection)_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))' \
+            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))' \
             --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
           cargo nextest run --locked -p ergo-validation --features diagnostics --no-fail-fast \
             --run-ignored only \
-            -E 'test(/cost_parity_(stratified_ranges|required_selection)_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)' \
+            -E 'test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)' \
             --message-format libtest-json >> "$COST_LEDGER_TEST_RESULTS"
       - name: Validate closure evidence
         if: ${{ always() && !cancelled() }}
