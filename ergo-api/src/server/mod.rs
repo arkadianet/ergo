@@ -148,9 +148,10 @@ impl WebhookWorkerGuard {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.as_mut() {
             let _ = worker.await;
         }
+        self.worker.take();
     }
 }
 impl Drop for WebhookWorkerGuard {
