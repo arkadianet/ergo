@@ -13,10 +13,10 @@ pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_typ
     determinable_root_type_of(&tree.body, &tree.constants)
 }
 
-/// [`determinable_root_type`] over a raw `(body, constants)` pair — so the nested
+/// `determinable_root_type` over a raw `(body, constants)` pair — so the nested
 /// `SBox`-constant inner-script path (which parses a body + constants without
 /// building an [`ErgoTree`]) can run the same rule-1001 root-type judgement.
-/// Entry point: the root is typed with an EMPTY [`ValDefTypeStore`].
+/// Entry point: the root is typed with an EMPTY `ValDefTypeStore`.
 /// `Some(SSigmaProp)` accepts, `Some(other)` is the wrap/reject verdict, and
 /// `None` is lenient (the root type is not statically determinable). Public so
 /// the `difftest --methodcall` harness can diff this exact verdict against the
@@ -30,7 +30,7 @@ pub(super) fn determinable_root_type(tree: &ErgoTree) -> Option<crate::sigma_typ
 /// read it (the body's `ValDef` write is the last write, both here and in
 /// Scala), and an id the body never binds misses our store and resolves `None`
 /// (lenient — Scala reads the polluted type, or throws for a genuinely unbound
-/// id; see [`infer_type`] on both residuals).
+/// id; see `infer_type` on both residuals).
 pub fn determinable_root_type_of(
     body: &crate::opcode::Expr,
     constants: &[(crate::sigma_type::SigmaType, crate::sigma_value::SigmaValue)],

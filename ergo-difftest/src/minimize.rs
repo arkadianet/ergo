@@ -11,7 +11,7 @@
 //!   length is bounded below by 0, this terminates in ≤ `O(n²)` predicate calls.
 //!
 //! [`minimize_divergence`] wires the minimizer to the JVM oracle: it builds the
-//! predicate from a `diff` call (same surface + same [`DivergenceKind`] + same
+//! predicate from a `diff` call (same surface + same [`crate::oracle::DivergenceKind`] + same
 //! rust/jvm verdict class), minimizes, and then **re-verifies** that the result
 //! still produces the same divergence signature.  A non-reproducing result is a
 //! bug in the minimizer — not a finding — and is reported as an error.

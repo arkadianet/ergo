@@ -27,7 +27,7 @@ thread_local! {
 
 /// True when the current thread is inside a guarded AVL verifier operation.
 /// The node's global panic hook calls this to suppress the log for an expected,
-/// contained AVL verifier panic (see [`AvlVerifier::guarded`]).
+/// contained AVL verifier panic (see `AvlVerifier::guarded`).
 pub fn in_expected_avl_panic() -> bool {
     IN_AVL_GUARD.with(|f| f.get())
 }
@@ -68,7 +68,7 @@ impl Drop for AvlGuard {
 /// several op-time sites (`authenticated_tree_ops.rs` 413/431/635/...). The
 /// Scala reference throws the same error but catches it in an enclosing `Try`,
 /// so the operation fails and the transaction is invalid while the node
-/// survives. [`AvlVerifier::guarded`] restores that fail-closed parity: a caught
+/// survives. `AvlVerifier::guarded` restores that fail-closed parity: a caught
 /// panic drops the inner verifier (`None`), and every later op — including
 /// [`AvlVerifier::digest`] — then fails, exactly as Scala's `topNode = None`
 /// does after a failed op. Reading a digest from a half-mutated verifier would

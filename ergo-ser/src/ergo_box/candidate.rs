@@ -30,13 +30,11 @@ pub fn write_ergo_box_candidate(w: &mut VlqWriter, c: &ErgoBoxCandidate) -> Resu
 
 /// Read ErgoBoxCandidate in standalone mode (full token IDs).
 ///
-/// The ErgoTree is parsed from the stream. For size-delimited trees (has_size
-/// flag set in header), this works directly. For non-size-delimited trees,
-/// the `read_ergo_tree` call consumes all remaining bytes as the tree body,
-/// so this function only works when the reader is bounded to exact box data.
-///
-/// For parsing real mainnet box bytes (which may have non-size-delimited trees),
-/// use `parse_ergo_box_bytes` which handles tree boundary detection.
+/// The tree reader consumes its parsed expression, leaving the following box
+/// fields available for both size-delimited and non-size-delimited trees.
+/// Consensus acceptance gates run on untrusted box bytes. Use
+/// [`super::parse_ergo_box_bytes`] when also checking externally supplied
+/// proposition bytes against the complete box encoding.
 pub fn read_ergo_box_candidate(r: &mut VlqReader) -> Result<ErgoBoxCandidate, ReadError> {
     // A candidate read that starts a top-level reader starts Scala's
     // `valDefTypeStore` empty, as `read_ergo_box` does.

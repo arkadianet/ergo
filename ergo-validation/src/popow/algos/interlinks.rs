@@ -95,7 +95,7 @@ pub fn kv_to_leaf(key: &[u8], value: &[u8]) -> Vec<u8> {
     leaf
 }
 
-/// Build a [`PoPowHeader`] from a header, its interlinks vector,
+/// Build a [`ergo_ser::popow_header::PoPowHeader`] from a header, its interlinks vector,
 /// and the FULL set of extension fields (kv pairs — used only to
 /// check the packed interlinks are really present in this block).
 ///

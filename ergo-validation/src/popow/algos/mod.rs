@@ -2,13 +2,13 @@
 //! update_interlinks. Scala reference: `NipopowAlgos.scala` (lines
 //! cited inline at each function).
 //!
-//! - [`interlinks`] — pack/unpack the interlinks vector to/from the
+//! - `interlinks` — pack/unpack the interlinks vector to/from the
 //!   extension's key-value fields, [`interlinks::build_popow_header`],
 //!   and the [`interlinks::update_interlinks`] vector-update rule.
-//! - [`scoring`] — μ-level ([`scoring::max_level_of`]) and best-argument
+//! - `scoring` — μ-level ([`scoring::max_level_of`]) and best-argument
 //!   score (KMZ17 Algorithm 4).
 //! - [`prove`] — NiPoPoW proof construction ([`prove::prove`]).
-//! - [`lca`] — [`lca::lowest_common_ancestor`] between two chains.
+//! - `lca` — [`lca::lowest_common_ancestor`] between two chains.
 
 mod interlinks;
 mod lca;

@@ -7,7 +7,7 @@
 //! reports totals. Exit non-zero on any divergence or pin mismatch.
 //!
 //! Usage:
-//!   replay [--from <h>] --to <h> [--node <url>] [--pins <path>]
+//! `replay [--from <h>] --to <h> [--node <url>] [--pins <path>]`
 //!
 //! The `--from` height must be 1 (contiguous-from-genesis only). The
 //! apply pipeline needs the full UTXO history to validate each block's

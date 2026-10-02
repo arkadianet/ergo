@@ -13,11 +13,11 @@
 //!
 //! 1. **Emit records origins** — for every typed node it lowers, the
 //!    serialized bytes of the IR subtree it produced with the typed node's
-//!    `pos` ([`Origins`]). After emit, those are pinned onto the emit-time
-//!    tree node by node ([`EmitTree`]): on the untouched emit output every
+//!    `pos` (`Origins`). After emit, those are pinned onto the emit-time
+//!    tree node by node (`EmitTree`): on the untouched emit output every
 //!    recorded subtree is literally present, so the pinning is exact.
 //! 2. **After the pipeline, the emit-time tree is aligned top-down against
-//!    the final tree** ([`resolve`]). A final node whose opcode and arity
+//!    the final tree** (`resolve`). A final node whose opcode and arity
 //!    match its emit-time counterpart is cited at that node's position and
 //!    the children are aligned pairwise; so a fold deep in a subtree uncites
 //!    only the folded node, never its ancestors. Three rewrite shapes get

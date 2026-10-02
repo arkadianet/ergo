@@ -319,12 +319,12 @@ pub(crate) fn required_difficulty_checked(
 
 /// Compute the encoded `nBits` value a candidate block at
 /// `child_height` must use, given the same `epoch_headers` window the
-/// verifier reads. Wraps [`required_difficulty_checked`] +
+/// verifier reads. Wraps `required_difficulty_checked` +
 /// [`encode_compact_bits`] so mining can produce the right value
 /// without re-implementing the retarget logic.
 ///
 /// Returns the same `DifficultyError` variants as
-/// [`required_difficulty_checked`].
+/// `required_difficulty_checked`.
 pub fn next_n_bits(
     child_height: u32,
     epoch_headers: &[Header],

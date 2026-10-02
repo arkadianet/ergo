@@ -33,7 +33,7 @@ mod transaction;
 
 /// The SER surfaces a structured generator targets. Names match the hermetic
 /// surface registry ([`crate::surfaces::registry`]) so a [`GenOutput`] can be
-/// fed straight through [`crate::run_one`].
+/// fed straight through `crate::run_one`.
 pub const SURFACES: [&str; 7] = [
     "ergo_tree",
     "constant",
