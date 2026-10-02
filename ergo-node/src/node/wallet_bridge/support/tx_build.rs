@@ -799,7 +799,13 @@ fn selection_candidates(
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     mempool: &dyn ergo_api::MempoolView,
-) -> Result<Vec<ergo_wallet::box_selector::BoxSummary>, WalletAdminError> {
+) -> Result<
+    (
+        Vec<ergo_wallet::box_selector::BoxSummary>,
+        ergo_api::MempoolBoxSnapshot,
+    ),
+    WalletAdminError,
+> {
     use ergo_api::wallet::native::dto::InputSource;
     use ergo_primitives::digest::Digest32;
     use ergo_wallet::box_selector::BoxSummary;
@@ -899,12 +905,13 @@ fn selection_candidates(
         }
         // Preserve explicit order: construction uses this same order, and an
         // issuance token ID is bound to the first input.
-        return requested
+        let selected = requested
             .into_iter()
             .map(|id| summaries.remove(&id).ok_or(WalletAdminError::BoxNotFound))
-            .collect();
+            .collect::<Result<_, _>>()?;
+        return Ok((selected, overlay));
     }
-    Ok(summaries.into_values().collect())
+    Ok((summaries.into_values().collect(), overlay))
 }
 
 /// Native `boxes/select`: a read-only, burn-aware selection dry-run over the
@@ -924,7 +931,7 @@ pub(crate) fn select_boxes_impl(
     let target_erg = parse_u64_dec(&req.target.nano_erg, "target.nanoErg")?;
     let target_tokens = parse_native_assets(&req.target.assets)?;
 
-    let summaries = selection_candidates(&req.inputs, state, db, chain, mempool)?;
+    let (summaries, _) = selection_candidates(&req.inputs, state, db, chain, mempool)?;
 
     let reemission = chain.reemission_rules();
     let reemission_height = chain
@@ -1096,6 +1103,27 @@ pub(crate) async fn build_transaction_impl(
     network: ergo_ser::address::NetworkPrefix,
     mempool: &dyn ergo_api::MempoolView,
 ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
+    build_transaction_impl_with_snapshot(intent, state, db, chain, network, mempool)
+        .await
+        .map(|(response, _)| response)
+}
+
+/// Retain the same pool outputs and spend marks used for candidate selection
+/// so an intent send can sign against that view after the live pool changes.
+pub(crate) async fn build_transaction_impl_with_snapshot(
+    intent: &ergo_api::wallet::native::dto::TxIntent,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn ergo_api::MempoolView,
+) -> Result<
+    (
+        ergo_api::wallet::native::dto::BuildTxResponse,
+        ergo_api::MempoolBoxSnapshot,
+    ),
+    WalletAdminError,
+> {
     use ergo_api::wallet::native::dto as ndto;
 
     if intent.outputs.is_empty() {
@@ -1198,21 +1226,14 @@ pub(crate) async fn build_transaction_impl(
         None => None,
     };
 
+    let (available, pool_snapshot) =
+        selection_candidates(&intent.inputs, state, db, chain, mempool)?;
     let override_inputs: Option<Vec<String>> = match &intent.inputs {
         ndto::InputSource::Auto { .. } => {
-            options.available = Some(selection_candidates(
-                &intent.inputs,
-                state,
-                db,
-                chain,
-                mempool,
-            )?);
+            options.available = Some(available);
             None
         }
-        ndto::InputSource::BoxIds { box_ids } => {
-            selection_candidates(&intent.inputs, state, db, chain, mempool)?;
-            Some(box_ids.clone())
-        }
+        ndto::InputSource::BoxIds { box_ids } => Some(box_ids.clone()),
         ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
     };
     let override_data_inputs: Option<Vec<String>> = match &intent.data_inputs {
@@ -1313,14 +1334,17 @@ pub(crate) async fn build_transaction_impl(
         })
         .collect();
 
-    Ok(ndto::BuildTxResponse {
-        unsigned_transaction: ndto::TxRepr::from_bytes(&built.bytes),
-        inputs_selected,
-        change_outputs,
-        fee: built.fee.to_string(),
-        reemission_burn,
-        as_of: built.as_of,
-    })
+    Ok((
+        ndto::BuildTxResponse {
+            unsigned_transaction: ndto::TxRepr::from_bytes(&built.bytes),
+            inputs_selected,
+            change_outputs,
+            fee: built.fee.to_string(),
+            reemission_burn,
+            as_of: built.as_of,
+        },
+        pool_snapshot,
+    ))
 }
 
 #[cfg(test)]

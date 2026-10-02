@@ -4,7 +4,7 @@
 use parking_lot::RwLock;
 
 use super::generate_sign::transaction_sign_impl_with_snapshot;
-use super::tx_build::build_transaction_impl;
+use super::tx_build::build_transaction_impl_with_snapshot;
 use crate::node::wallet_bridge::{
     map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
 };
@@ -127,11 +127,13 @@ pub(crate) async fn send_transaction_native_impl(
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, db, chain, network, mempool).await?;
+            let (built, pool_snapshot) =
+                build_transaction_impl_with_snapshot(intent, state, db, chain, network, mempool)
+                    .await?;
             let snapshot = chain
                 .chain_snapshot()
                 .map_err(map_chain_error)?
-                .with_pool_outputs(mempool.box_snapshot(&[]).outputs);
+                .with_pool_outputs(pool_snapshot.outputs);
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
                 None,

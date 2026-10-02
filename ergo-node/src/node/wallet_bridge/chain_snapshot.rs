@@ -327,6 +327,195 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn intent_send_reuses_selection_pool_snapshot_for_signing() {
+        use ergo_api::wallet::native::dto::{InputSource, SendTxRequest, TxIntent};
+        use ergo_ser::{address::NetworkPrefix, ergo_box::serialize_ergo_box};
+        use ergo_state::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        use std::{
+            collections::{HashMap, HashSet},
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Arc, Mutex,
+            },
+        };
+
+        struct ChangingPool {
+            first: ergo_api::MempoolBoxSnapshot,
+            captures: AtomicUsize,
+            committed_id: Digest32,
+        }
+        impl ergo_api::MempoolView for ChangingPool {
+            fn is_spent_by_pool(&self, _: &Digest32) -> bool {
+                panic!("intent send must use the coherent box snapshot");
+            }
+            fn pool_spending_tx(&self, _: &Digest32) -> Option<Digest32> {
+                panic!("intent send must use the coherent box snapshot");
+            }
+            fn pool_outputs(&self) -> Arc<HashMap<Digest32, ErgoBox>> {
+                panic!("intent send must use the coherent box snapshot");
+            }
+            fn box_snapshot(&self, committed_ids: &[Digest32]) -> ergo_api::MempoolBoxSnapshot {
+                if self.captures.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Capturing before the wallet IDs are known would miss spent
+                    // committed inputs in implementations using the trait default.
+                    assert!(committed_ids.contains(&self.committed_id));
+                    self.first.clone()
+                } else {
+                    // The parent is evicted immediately after selection. A fresh
+                    // capture during signing can no longer resolve this input.
+                    ergo_api::MempoolBoxSnapshot {
+                        outputs: Arc::new(HashMap::new()),
+                        spent_box_ids: HashSet::new(),
+                    }
+                }
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingSubmitter(Mutex<Vec<Vec<u8>>>);
+        #[async_trait::async_trait]
+        impl super::super::TxSubmitter for RecordingSubmitter {
+            async fn submit_transaction(
+                &self,
+                bytes: Vec<u8>,
+            ) -> Result<String, ergo_api::types::SubmitError> {
+                let transaction =
+                    ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
+                let id = ergo_ser::transaction::transaction_id(&transaction).unwrap();
+                self.0.lock().unwrap().push(bytes);
+                Ok(hex::encode(id.as_bytes()))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        let db = store.db_arc();
+        let mut storage =
+            ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet"));
+        storage
+            .restore(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                "",
+                "test",
+                false,
+            )
+            .unwrap();
+        let mut wallet = ergo_wallet::state::WalletState::empty(false);
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut wallet,
+            &db,
+            NetworkPrefix::Mainnet,
+            "test",
+        )
+        .unwrap();
+        let address = wallet.change_address().unwrap().to_owned();
+        let pubkey =
+            ergo_ser::address::decode_p2pk_address(&address, NetworkPrefix::Mainnet).unwrap();
+        let tree_bytes = ergo_ser::address::build_p2pk_tree_bytes(&pubkey).unwrap();
+        let tree = ergo_ser::ergo_tree::read_ergo_tree(&mut VlqReader::new(&tree_bytes)).unwrap();
+        let pool_parent = ErgoBox {
+            candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                10_000_000,
+                tree,
+                1,
+                vec![],
+                Default::default(),
+            )
+            .unwrap(),
+            transaction_id: ModifierId::from_bytes([0x42; 32]),
+            index: 0,
+        };
+        let pool_id = pool_parent.box_id().unwrap();
+        let mut committed_box = pool_parent.clone();
+        committed_box.transaction_id = ModifierId::from_bytes([0x43; 32]);
+        committed_box.candidate.value = 100_000_000;
+        let committed_id = committed_box.box_id().unwrap();
+        store
+            .initialize_genesis(&[(
+                *committed_id.as_bytes(),
+                serialize_ergo_box(&committed_box).unwrap(),
+            )])
+            .unwrap();
+        apply_headers(&mut store, 5);
+        let accessor = super::super::ChainStateAccessorImpl::new(db.clone(), false, None);
+        assert!(accessor
+            .chain_snapshot()
+            .unwrap()
+            .lookup_utxo(pool_id.as_bytes())
+            .unwrap()
+            .is_none());
+        let record = WalletBox {
+            box_id: *committed_id.as_bytes(),
+            creation_tx_id: *committed_box.transaction_id.as_bytes(),
+            creation_output_index: committed_box.index,
+            creation_height: 1,
+            value: committed_box.candidate.value,
+            assets: vec![],
+            status: BoxStatus::Confirmed,
+            provenance: BoxProvenance::Owned,
+        };
+        let write = db.begin_write().unwrap();
+        write
+            .open_table(WALLET_BOXES)
+            .unwrap()
+            .insert(record.box_id, bincode::serialize(&record).unwrap())
+            .unwrap();
+        write.commit().unwrap();
+
+        let pool = ChangingPool {
+            first: ergo_api::MempoolBoxSnapshot {
+                outputs: Arc::new(HashMap::from([(pool_id, pool_parent)])),
+                spent_box_ids: HashSet::from([committed_id]),
+            },
+            captures: AtomicUsize::new(0),
+            committed_id,
+        };
+        let mut intent: TxIntent = serde_json::from_value(serde_json::json!({
+            "outputs": [{"type": "payment", "address": address, "value": "2000000"}]
+        }))
+        .unwrap();
+        intent.inputs = InputSource::Auto {
+            min_confirmations: -1,
+            exclude_box_ids: vec![],
+        };
+        let submitter = RecordingSubmitter::default();
+        let response = super::super::support::sign_submit::send_transaction_native_impl(
+            &SendTxRequest::Intent { intent },
+            &parking_lot::RwLock::new(storage),
+            &parking_lot::RwLock::new(wallet),
+            &db,
+            &accessor,
+            &submitter,
+            NetworkPrefix::Mainnet,
+            &pool,
+        )
+        .await
+        .unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(pool.captures.load(Ordering::SeqCst), 1);
+        let submitted = submitter.0.lock().unwrap();
+        assert_eq!(submitted.len(), 1);
+        let transaction =
+            ergo_ser::transaction::read_transaction(&mut VlqReader::new(&submitted[0])).unwrap();
+        assert_eq!(transaction.inputs.len(), 1);
+        assert_eq!(transaction.inputs[0].box_id, pool_id);
+        assert!(!transaction.inputs[0].spending_proof.proof.is_empty());
+        assert_eq!(
+            hex::encode(
+                ergo_ser::transaction::transaction_id(&transaction)
+                    .unwrap()
+                    .as_bytes()
+            ),
+            response.tx_id
+        );
+    }
+
     #[test]
     fn snapshot_stale_after_committed_tip_moves() {
         let dir = tempfile::tempdir().unwrap();
