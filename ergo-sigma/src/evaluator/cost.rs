@@ -24,37 +24,44 @@ pub(crate) fn equal_sigma_boolean(
     r: &SigmaBoolean,
     mut cost: Option<&mut CostAccumulator>,
 ) -> Result<bool, EvalError> {
-    // One MatchType per node, before dispatch (charged even on throwing arms).
-    if let Some(c) = cost.as_deref_mut() {
-        c.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
-    }
-    let mismatch =
-        || EvalError::RuntimeException("Cannot compare SigmaBoolean values: unknown type");
-    match l {
-        SigmaBoolean::ProveDlog(x) => match r {
-            SigmaBoolean::ProveDlog(y) => {
+    let mut pending = vec![(l, r)];
+    let mut compared = std::collections::HashSet::new();
+    while let Some((l, r)) = pending.pop() {
+        // Uncosted comparisons can reuse a successful stored-node comparison.
+        // Costed comparisons still charge every logical occurrence in order.
+        if cost.is_none() && !compared.insert((l as *const _, r as *const _)) {
+            continue;
+        }
+        if let Some(c) = cost.as_deref_mut() {
+            c.add(JitCost::from_jit(cost_table::MATCH_TYPE))?;
+        }
+        let mismatch =
+            || EvalError::RuntimeException("Cannot compare SigmaBoolean values: unknown type");
+        let children = match (l, r) {
+            (SigmaBoolean::ProveDlog(a), SigmaBoolean::ProveDlog(b)) => {
                 if let Some(c) = cost.as_deref_mut() {
                     c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
                 }
-                Ok(x == y)
+                if a != b {
+                    return Ok(false);
+                }
+                None
             }
-            _ => Ok(false),
-        },
-        SigmaBoolean::ProveDHTuple {
-            g: xg,
-            h: xh,
-            u: xu,
-            v: xv,
-        } => match r {
-            SigmaBoolean::ProveDHTuple {
-                g: yg,
-                h: yh,
-                u: yu,
-                v: yv,
-            } => {
-                // `&&` short-circuit: equalECPoint charges 172 then compares;
-                // a mismatch stops the chain (later points not charged).
-                for (a, b) in [(xg, yg), (xh, yh), (xu, yu)] {
+            (
+                SigmaBoolean::ProveDHTuple {
+                    g: ag,
+                    h: ah,
+                    u: au,
+                    v: av,
+                },
+                SigmaBoolean::ProveDHTuple {
+                    g: bg,
+                    h: bh,
+                    u: bu,
+                    v: bv,
+                },
+            ) => {
+                for (a, b) in [(ag, bg), (ah, bh), (au, bu), (av, bv)] {
                     if let Some(c) = cost.as_deref_mut() {
                         c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
                     }
@@ -62,57 +69,38 @@ pub(crate) fn equal_sigma_boolean(
                         return Ok(false);
                     }
                 }
-                if let Some(c) = cost.as_deref_mut() {
-                    c.add(JitCost::from_jit(cost_table::EQ_GROUP_ELEMENT))?;
-                }
-                Ok(xv == yv)
+                None
             }
-            _ => Ok(false),
-        },
-        SigmaBoolean::TrivialProp(a) => match r {
-            // No extra cost beyond the per-node MatchType already charged.
-            SigmaBoolean::TrivialProp(b) => Ok(a == b),
-            _ => Ok(false),
-        },
-        SigmaBoolean::Cand(ch) => match r {
-            SigmaBoolean::Cand(rch) => equal_sigma_booleans(ch, rch, cost),
-            _ => Err(mismatch()),
-        },
-        SigmaBoolean::Cor(ch) => match r {
-            SigmaBoolean::Cor(rch) => equal_sigma_booleans(ch, rch, cost),
-            _ => Err(mismatch()),
-        },
-        SigmaBoolean::Cthreshold { k, children } => match r {
-            SigmaBoolean::Cthreshold {
-                k: k2,
-                children: c2,
-            } => {
-                // `k == k2 && equalSigmaBooleans(...)`: k mismatch short-circuits
-                // to false (NOT an error — same constructor).
-                if k != k2 {
+            (SigmaBoolean::TrivialProp(a), SigmaBoolean::TrivialProp(b)) => {
+                if a != b {
                     return Ok(false);
                 }
-                equal_sigma_booleans(children, c2, cost)
+                None
             }
-            _ => Err(mismatch()),
-        },
-    }
-}
-
-/// Scala `equalSigmaBooleans`: length mismatch -> `false` (no recursion/cost);
-/// otherwise compare element-wise with a first-false short-circuit (errors
-/// propagate).
-pub(crate) fn equal_sigma_booleans(
-    xs: &[SigmaBoolean],
-    ys: &[SigmaBoolean],
-    mut cost: Option<&mut CostAccumulator>,
-) -> Result<bool, EvalError> {
-    if xs.len() != ys.len() {
-        return Ok(false);
-    }
-    for (x, y) in xs.iter().zip(ys.iter()) {
-        if !equal_sigma_boolean(x, y, cost.as_deref_mut())? {
-            return Ok(false);
+            (
+                SigmaBoolean::ProveDlog(_)
+                | SigmaBoolean::ProveDHTuple { .. }
+                | SigmaBoolean::TrivialProp(_),
+                _,
+            ) => return Ok(false),
+            (SigmaBoolean::Cand(a), SigmaBoolean::Cand(b))
+            | (SigmaBoolean::Cor(a), SigmaBoolean::Cor(b)) => Some((a, b)),
+            (
+                SigmaBoolean::Cthreshold { k: ak, children: a },
+                SigmaBoolean::Cthreshold { k: bk, children: b },
+            ) => {
+                if ak != bk {
+                    return Ok(false);
+                }
+                Some((a, b))
+            }
+            _ => return Err(mismatch()),
+        };
+        if let Some((a, b)) = children {
+            if a.len() != b.len() {
+                return Ok(false);
+            }
+            pending.extend(a.iter().zip(b.iter()).rev());
         }
     }
     Ok(true)

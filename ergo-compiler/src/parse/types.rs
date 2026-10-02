@@ -44,7 +44,12 @@ pub(crate) fn starts_type(t: &Token) -> bool {
 /// is recognised only when the `=>` token starts at offset 0 (any leading
 /// space/newline/comment pushes its start past 0 and breaks the raw match).
 pub(crate) fn type_(c: &mut Cursor, raw_entry: bool) -> Result<SType, ParseError> {
-    with_depth_guard(c, |c| type_impl(c, raw_entry))
+    with_depth_guard(c, |c| {
+        let pos = c.peek().start;
+        let tpe = type_impl(c, raw_entry)?;
+        check_type_depth(&tpe, pos)?;
+        Ok(tpe)
+    })
 }
 
 /// The guarded body of [`type_`] (renamed so every recursive call in this
@@ -131,6 +136,7 @@ pub(crate) fn build_infix(
                 name: op,
                 args: vec![t, acc],
             };
+            check_type_depth(&acc, start)?;
         }
         return Ok(acc);
     }
@@ -143,6 +149,7 @@ pub(crate) fn build_infix(
                 name: op,
                 args: vec![acc, t],
             };
+            check_type_depth(&acc, start)?;
         }
         return Ok(acc);
     }

@@ -138,10 +138,13 @@ fn verify_sigma_and_two_dlogs() {
     let r2 = scalar_from_byte(44);
     let message = b"AND test message";
 
-    let prop = SigmaBoolean::Cand(vec![
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk1_bytes)),
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk2_bytes)),
-    ]);
+    let prop = SigmaBoolean::Cand(
+        vec![
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk1_bytes)),
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk2_bytes)),
+        ]
+        .into(),
+    );
 
     // For AND: all children share the root challenge.
     // Proof = root_challenge(24) || z1(32) || z2(32) = 88 bytes
@@ -211,10 +214,13 @@ fn verify_sigma_or_two_dlogs() {
 
     let message = b"OR test message";
 
-    let prop = SigmaBoolean::Cor(vec![
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk1_bytes)),
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk2_bytes)),
-    ]);
+    let prop = SigmaBoolean::Cor(
+        vec![
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk1_bytes)),
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk2_bytes)),
+        ]
+        .into(),
+    );
 
     // Simulate child2: pick random e2 and z2, compute a2 = g^z2 * pk2^(-e2)
     let e2_bytes = blake2b256(b"simulated challenge")[..SOUNDNESS_BYTES].to_vec();
@@ -311,7 +317,8 @@ fn verify_sigma_threshold_2_of_3() {
             SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk1_bytes)),
             SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk2_bytes)),
             SigmaBoolean::ProveDlog(GroupElement::from_bytes(pk3_bytes)),
-        ],
+        ]
+        .into(),
     };
 
     // Prover protocol for threshold:
@@ -429,10 +436,13 @@ fn verify_sigma_and_reject_bad_z() {
     let pk1 = ProjectivePoint::mul_by_generator(&secret1);
     let pk2 = ProjectivePoint::mul_by_generator(&secret2);
 
-    let prop = SigmaBoolean::Cand(vec![
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk1))),
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk2))),
-    ]);
+    let prop = SigmaBoolean::Cand(
+        vec![
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk1))),
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk2))),
+        ]
+        .into(),
+    );
 
     let proof = vec![0x42u8; SOUNDNESS_BYTES + GROUP_SIZE * 2];
     // Corrupt to ensure it fails
@@ -446,10 +456,13 @@ fn verify_sigma_or_reject_bad_z() {
     let pk1 = ProjectivePoint::mul_by_generator(&secret1);
     let pk2 = ProjectivePoint::mul_by_generator(&scalar_from_byte(22));
 
-    let prop = SigmaBoolean::Cor(vec![
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk1))),
-        SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk2))),
-    ]);
+    let prop = SigmaBoolean::Cor(
+        vec![
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk1))),
+            SigmaBoolean::ProveDlog(GroupElement::from_bytes(point_bytes(&pk2))),
+        ]
+        .into(),
+    );
 
     // Garbage OR proof: root_challenge(24) + child1_challenge(24) + z1(32) + z2(32)
     let proof = vec![0x42u8; SOUNDNESS_BYTES + SOUNDNESS_BYTES + GROUP_SIZE * 2];

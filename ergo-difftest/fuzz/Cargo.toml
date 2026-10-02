@@ -84,3 +84,15 @@ name = "p2p_delivery"
 path = "fuzz_targets/p2p_delivery.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "compiler_source"
+path = "fuzz_targets/compiler_source.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bounded_evaluator"
+path = "fuzz_targets/bounded_evaluator.rs"
+test = false
+doc = false
