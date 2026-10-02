@@ -78,3 +78,8 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[[bench]]
+name = "mempool_publication"
+path = "benches/mempool_publication.rs"
+harness = false
