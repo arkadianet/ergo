@@ -70,9 +70,10 @@ proof, live-mainnet performance or perfection.
 ## Delivery and verification
 
 All five draft PRs are open. The delivery table records the completed local
-gates; hosted CI is verified separately on the corrected stack. The PR base defines the file count, rather than `main`
-for every layer. The complete stack changes 440 unique paths, requiring at least five PRs under
-the requested limit; this stack uses five.
+gates; hosted CI is verified separately on the corrected stack. The PR base
+defines the file count, rather than `main` for every layer. The complete stack
+changes 440 unique paths, requiring at least five PRs under the requested limit;
+this stack uses five.
 
 | Order | Scope | Draft PR | Changed paths | Checks |
 | --- | --- | --- | ---: | --- |
@@ -92,7 +93,8 @@ Clippy with warnings denied, and Rust formatting. Included fragments are checked
 from the layer that introduces them. The complete stack additionally runs strict
 all-feature Rustdoc, all-feature tests, cost-trace and wallet proving targets,
 CI/release policy checks, browser model tests, dependency checks and a Linux
-archive smoke. Existing intentional ignores are reported, not counted as passes. Hosted Scala
+archive smoke. Existing intentional ignores are reported, not counted as passes.
+Hosted Scala
 wallet interoperability has passed. A Windows persistence test exposed a
 notification/commit assertion race; the assertions now run after joining the
 worker and passed 100 concurrent repeated runs. The final state unit suite
@@ -104,10 +106,23 @@ before the two placeholder removals. Strict fetched cost-ledger evidence passed
 all three manual tests, including the 101,187-transaction required replay; the
 aggregate closure check validated 299 rows (274 CLOSED, 25 N-A). Raw normal
 and manual results are retained separately, and the strict merge rejects missing,
-failed or duplicate manual results. CI/release policy (13 tests), the ledger
+failed or duplicate manual results. CI/release policy (18 tests), the ledger
 checker (16 tests), all 65 browser model tests, dependency checks and Linux GNU
 release archive smoke passed. The documented bincode unmaintained exception
 remains; no known vulnerabilities were reported.
+
+Hosted Windows verified the corrected persistence regression on `17ec4550`:
+[shard 3](https://github.com/arkadianet/ergo/actions/runs/37035756343/job/110933432440)
+passed 2,484 tests (14 skipped), and
+[shard 4](https://github.com/arkadianet/ergo/actions/runs/37035756343/job/110933432425)
+passed 1,968 (64 skipped); both also passed three cost-trace tests. Other hosted
+checks may still be queued or running.
+
+The extracted archive review also checked operator commands and links. Packaged
+quick starts use archive paths, bundled links remain local, and omitted references
+point to the exact source revision. Both GNU archives passed the final smoke;
+60 local and 32 source-reference targets were checked. Repository source-build
+instructions remain appropriate to source checkouts.
 
 Recorded measurements and oracle provenance are linked from
 [resource safety](perf/resource-safety-profile.md),
