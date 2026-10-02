@@ -550,3 +550,65 @@ async fn fee_recommendation_uses_configured_relay_floor() {
     }
     node.shutdown().await.unwrap();
 }
+
+/// The documented TOML policy must gate every endpoint after real node boot.
+#[tokio::test]
+async fn native_script_toml_policy_gates_all_routes_at_boot() {
+    use clap::Parser;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("node.toml");
+    std::fs::write(
+        &path,
+        r#"
+[api]
+bind = "127.0.0.1:0"
+[api.security]
+api_key_hash = "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf"
+[api.script]
+require_api_key = true
+max_cost = 12345
+[peers]
+known = ["127.0.0.1:1"]
+"#,
+    )
+    .unwrap();
+    let cli = ergo_node::config::Cli::parse_from([
+        "ergo-node",
+        "--config",
+        path.to_str().unwrap(),
+        "--data-dir",
+        tmp.path().join("data").to_str().unwrap(),
+    ]);
+    let config = ergo_node::config::NodeConfig::load(cli).unwrap();
+    assert!(config.api_script.require_api_key);
+    let handle = spawn_node(config).await;
+    let addr = handle.api_addr.unwrap();
+    for route in [
+        "compile", "inspect", "execute", "cost", "simulate", "explain", "diff",
+    ] {
+        for key in [None, Some("hello")] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let auth = key
+                .map(|key| format!("api_key: {key}\r\n"))
+                .unwrap_or_default();
+            let request = format!("POST /api/v1/script/{route} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n{auth}Connection: close\r\n\r\n{{}}");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut bytes = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            let response = String::from_utf8(bytes).unwrap();
+            if key.is_none() {
+                assert!(response.starts_with("HTTP/1.1 401"), "{route}: {response}");
+            } else {
+                assert!(
+                    !response.contains("\"reason\":\"unauthorized\""),
+                    "{route}: {response}"
+                );
+            }
+        }
+    }
+    handle.shutdown().await.unwrap();
+}

@@ -1,11 +1,9 @@
 //! Bounded store reads whose work, including response serialization, runs off the runtime.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use axum::{http::header::RETRY_AFTER, response::Response};
-use tokio::{sync::Semaphore, time::timeout};
-
-use super::error::{v1_error, Reason};
+use super::compute::ComputePool;
+use axum::response::Response;
 
 /// Separate capacity for bounded point lookups and bulk scans.
 #[derive(Debug, Clone, Copy)]
@@ -64,21 +62,27 @@ impl BlockingReadsConfig {
 /// Clones share both lanes; operator and public readers use the same instance.
 #[derive(Clone)]
 pub struct BlockingReads {
-    point: Arc<Semaphore>,
-    scan: Arc<Semaphore>,
-    queue_wait: Duration,
-    run_timeout: Duration,
+    point: ComputePool,
+    scan: ComputePool,
 }
 
 impl BlockingReads {
     pub fn new(cfg: BlockingReadsConfig) -> Result<Self, BlockingReadsConfigError> {
         cfg.validate()?;
         Ok(Self {
-            point: Arc::new(Semaphore::new(cfg.point_permits)),
-            scan: Arc::new(Semaphore::new(cfg.scan_permits)),
-            queue_wait: cfg.queue_wait,
-            run_timeout: cfg.run_timeout,
+            point: ComputePool::for_reads(cfg.point_permits, cfg.queue_wait, cfg.run_timeout),
+            scan: ComputePool::for_reads(cfg.scan_permits, cfg.queue_wait, cfg.run_timeout),
         })
+    }
+
+    pub fn close(&self) {
+        self.point.close();
+        self.scan.close();
+    }
+
+    pub async fn shutdown(&self) {
+        self.close();
+        tokio::join!(self.point.shutdown(), self.scan.shutdown());
     }
 
     /// Acquire capacity after request extraction and validation, then build the response off-runtime.
@@ -86,57 +90,11 @@ impl BlockingReads {
     where
         F: FnOnce() -> Response + Send + 'static,
     {
-        let semaphore = match lane {
-            ReadLane::Point => &self.point,
-            ReadLane::Scan => &self.scan,
-        };
-        let permit = match timeout(self.queue_wait, semaphore.clone().acquire_owned()).await {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return shutting_down(),
-            Err(_) => {
-                let mut response = v1_error(
-                    Reason::Overloaded,
-                    "read capacity is busy",
-                    "retry the request shortly",
-                );
-                response
-                    .headers_mut()
-                    .insert(RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
-                return response;
-            }
-        };
-        let task = tokio::task::spawn_blocking(move || {
-            // The task owns the permit even after a timeout or request cancellation.
-            // Detached work keeps capacity occupied until it returns, bounding the pool.
-            let _permit = permit;
-            work()
-        });
-        match timeout(self.run_timeout, task).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) if error.is_panic() => {
-                tracing::error!(%error, "blocking API read panicked");
-                v1_error(
-                    Reason::InternalError,
-                    "the read could not be completed",
-                    "an internal error occurred",
-                )
-            }
-            Ok(Err(_)) => shutting_down(),
-            Err(_) => v1_error(
-                Reason::Timeout,
-                "the read timed out",
-                "retry the request shortly",
-            ),
+        match lane {
+            ReadLane::Point => self.point.response(work).await,
+            ReadLane::Scan => self.scan.response(work).await,
         }
     }
-}
-
-fn shutting_down() -> Response {
-    v1_error(
-        Reason::ShuttingDown,
-        "read service is shutting down",
-        "retry when the node is available",
-    )
 }
 
 #[cfg(test)]

@@ -43,6 +43,4 @@ pub use engine::{
 };
 pub use model::{sign_body, Subscription, UrlPolicy};
 pub use routes::{webhooks_router, WebhooksHandle, WebhooksState};
-pub use worker::{
-    spawn_webhook_worker, spawn_webhook_worker_once, ReqwestSink, WebhookSink, DEFAULT_WORKER_TICK,
-};
+pub use worker::{spawn_webhook_worker, ReqwestSink, WebhookSink, DEFAULT_WORKER_TICK};

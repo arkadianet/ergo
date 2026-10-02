@@ -415,6 +415,8 @@ async fn get(failure: Failure, uri: &str) -> (StatusCode, serde_json::Value) {
             emission_scripts: None,
             utxo_reads_supported: true,
             local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None,
     );

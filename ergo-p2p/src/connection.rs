@@ -189,7 +189,7 @@ impl ReadBudget {
 }
 
 /// One address's claim on the slot pool, released on drop — including
-/// when the reader is cancelled mid-frame.
+/// when its connection discards the frame or closes.
 struct IpClaim {
     ip: IpAddr,
     ip_slots: Arc<Mutex<HashSet<IpAddr>>>,
@@ -204,6 +204,18 @@ impl Drop for IpClaim {
             .remove(&self.ip);
         self.ip_notify.notify_waiters();
     }
+}
+
+/// Admission belongs to the buffered frame, rather than to an individual
+/// read future. `select!` may cancel and resume that future while the
+/// connection still owns the bytes and must keep their permits and slot.
+#[derive(Default)]
+struct FrameAdmission {
+    budget: Option<Arc<Semaphore>>,
+    bytes: Option<OwnedSemaphorePermit>,
+    slot: Option<OwnedSemaphorePermit>,
+    claim: Option<IpClaim>,
+    waiting_since: Option<tokio::time::Instant>,
 }
 
 /// A framed P2P connection over TCP.
@@ -234,6 +246,7 @@ pub struct Connection {
     /// per-address slot cap. `None` only if the socket was already gone,
     /// in which case the next read fails anyway.
     peer_ip: Option<IpAddr>,
+    admission: FrameAdmission,
 }
 
 /// Failures produced by [`Connection::read_message`] /
@@ -295,6 +308,7 @@ impl Connection {
             first_body_timeout: FIRST_BODY_TIMEOUT,
             frame_deadline: None,
             peer_ip,
+            admission: FrameAdmission::default(),
         }
     }
 
@@ -376,8 +390,7 @@ impl Connection {
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
-                    self.read_buf.clear();
-                    self.frame_deadline = None;
+                    self.discard_frame();
                     return Err(ConnectionError::Frame(e));
                 }
             }
@@ -453,29 +466,43 @@ impl Connection {
         // The waits are strictly ordered — address claim, then slot, then
         // bytes — and nothing ever waits in the other direction, so the
         // three cannot form a cycle.
-        let mut _claim = None;
-        let _slot = match budget {
-            Some(budget) if want.saturating_sub(self.read_buf.len()) > READ_BUF_SIZE => {
-                // Admission can block, and on a resumed read the frame's
-                // deadline is already ticking; that wait is ours, not the
-                // peer's, so it is credited back below.
-                let waiting_since = tokio::time::Instant::now();
-                if budget.per_address_cap {
+        if let Some(budget) = budget {
+            if let Some(previous) = &self.admission.budget {
+                if !Arc::ptr_eq(previous, &budget.bytes) {
+                    self.discard_frame();
+                    return Err(ConnectionError::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "a buffered frame cannot change its read budget",
+                    )));
+                }
+            } else {
+                self.admission.budget = Some(budget.bytes.clone());
+            }
+            if want > READ_BUF_SIZE && self.admission.slot.is_none() {
+                self.begin_internal_wait();
+                if budget.per_address_cap && self.admission.claim.is_none() {
                     if let Some(ip) = self.peer_ip {
-                        _claim = Some(budget.claim_ip(ip).await);
+                        self.admission.claim = Some(budget.claim_ip(ip).await);
                     }
                 }
-                let slot = Arc::clone(&budget.slots)
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| ConnectionError::BudgetClosed)?;
-                self.credit_internal_wait(waiting_since.elapsed());
-                Some(slot)
+                let slot = match Arc::clone(&budget.slots).acquire_owned().await {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        self.discard_frame();
+                        return Err(ConnectionError::BudgetClosed);
+                    }
+                };
+                self.admission.slot = Some(slot);
+                self.finish_internal_wait();
             }
-            _ => None,
-        };
+        } else if self.admission.budget.is_some() {
+            self.discard_frame();
+            return Err(ConnectionError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a buffered metered frame must resume with its read budget",
+            )));
+        }
 
-        let mut held: Option<OwnedSemaphorePermit> = None;
         loop {
             match framing::deserialize_frame(&self.magic, &self.read_buf) {
                 Ok(Some((frame, consumed))) => {
@@ -485,6 +512,8 @@ impl Connection {
                     }
                     // This frame is done; the next one arms its own.
                     self.frame_deadline = None;
+                    let held = self.admission.bytes.take();
+                    self.admission = FrameAdmission::default();
                     return Ok((frame, held));
                 }
                 Ok(None) => {
@@ -505,21 +534,26 @@ impl Connection {
                     // acquiring more while it holds permits.
                     if let Some(budget) = budget {
                         let owed = got + chunk;
-                        let paid = held.as_ref().map_or(0, |p| p.num_permits());
+                        let paid = self.admission.bytes.as_ref().map_or(0, |p| p.num_permits());
                         if owed > paid {
                             // The shortfall never exceeds one chunk plus
                             // the header-phase overshoot, so the cast
                             // cannot truncate.
-                            let waiting_since = tokio::time::Instant::now();
-                            let permit = Arc::clone(&budget.bytes)
+                            self.begin_internal_wait();
+                            let permit = match Arc::clone(&budget.bytes)
                                 .acquire_many_owned((owed - paid) as u32)
                                 .await
-                                .map_err(|_| ConnectionError::BudgetClosed)?;
-                            // Budget backpressure is ours, not the peer's.
-                            self.credit_internal_wait(waiting_since.elapsed());
-                            match &mut held {
+                            {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    self.discard_frame();
+                                    return Err(ConnectionError::BudgetClosed);
+                                }
+                            };
+                            self.finish_internal_wait();
+                            match &mut self.admission.bytes {
                                 Some(existing) => existing.merge(permit),
-                                None => held = Some(permit),
+                                None => self.admission.bytes = Some(permit),
                             }
                         }
                     }
@@ -545,15 +579,36 @@ impl Connection {
                     } else {
                         self.first_body_timeout
                     };
-                    self.fill_before_deadline(chunk, total, got, want).await?;
+                    if let Err(error) = self.fill_before_deadline(chunk, total, got, want).await {
+                        self.discard_frame();
+                        return Err(error);
+                    }
                 }
                 Err(e) => {
                     // Protocol error — clear buffer and return error
-                    self.read_buf.clear();
-                    self.frame_deadline = None;
+                    self.discard_frame();
                     return Err(ConnectionError::Frame(e));
                 }
             }
+        }
+    }
+
+    fn discard_frame(&mut self) {
+        self.read_buf.clear();
+        self.read_buf.shrink_to(READ_BUF_SIZE);
+        self.frame_deadline = None;
+        self.admission = FrameAdmission::default();
+    }
+
+    fn begin_internal_wait(&mut self) {
+        self.admission
+            .waiting_since
+            .get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn finish_internal_wait(&mut self) {
+        if let Some(started) = self.admission.waiting_since.take() {
+            self.credit_internal_wait(started.elapsed());
         }
     }
 
@@ -1078,10 +1133,61 @@ mod tests {
             PER_READER_MAX - (HEADER_LENGTH + READ_BUF_SIZE),
             "a bare header must hold the bytes it has plus one read chunk"
         );
-        // Cancelling the read released both the bytes and the slot.
+        // Cancellation leaves the buffered frame admitted. Only discarding
+        // the connection releases its bytes and reader slot.
+        assert_eq!(budget.bytes().available_permits(), available);
+        assert_eq!(budget.slots_available(), 0);
+        drop(server);
         assert_eq!(budget.bytes().available_permits(), PER_READER_MAX);
         assert_eq!(budget.slots_available(), 1);
         drop(client);
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_body_keeps_admission_until_completion() {
+        let (mut client, mut server) = connected_pair_with_idle(Duration::from_secs(30)).await;
+        let payload = vec![0x51; 128 * 1024];
+        let wire = framing::serialize_frame(
+            &MAINNET_MAGIC,
+            &MessageFrame {
+                code: 55,
+                payload: payload.clone(),
+            },
+        );
+        client
+            .stream
+            .write_all(&wire[..wire.len() - 1])
+            .await
+            .unwrap();
+        let budget = ReadBudget::new(PER_READER_MAX);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            server.read_frame_body_metered(&budget)
+        )
+        .await
+        .is_err());
+        assert!(server.read_buf.len() > READ_BUF_SIZE);
+        let charged = PER_READER_MAX - budget.bytes().available_permits();
+        assert!(charged >= server.read_buf.len());
+        assert_eq!(budget.slots_available(), 0);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            server.read_frame_body_metered(&budget)
+        )
+        .await
+        .is_err());
+        assert_eq!(PER_READER_MAX - budget.bytes().available_permits(), charged);
+        client
+            .stream
+            .write_all(&wire[wire.len() - 1..])
+            .await
+            .unwrap();
+        let (frame, permit) = server.read_frame_body_metered(&budget).await.unwrap();
+        assert_eq!(frame.payload, payload);
+        assert_eq!(budget.slots_available(), 1);
+        assert_eq!(permit.as_ref().unwrap().num_permits(), charged);
+        drop(permit);
+        assert_eq!(budget.bytes().available_permits(), PER_READER_MAX);
     }
 
     /// The metered path returns the same frames as the plain one, with a

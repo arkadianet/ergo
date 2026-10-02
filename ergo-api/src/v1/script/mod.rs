@@ -9,8 +9,9 @@
 //!
 //! **Tier.** The whole group is **T0 public-but-BOUNDED**,
 //! gated not by an api-key but by the shared per-IP [`Governor`] at the
-//! `Compute` route class + a hard per-request cost cap. The cost governor is
-//! the load-bearing anti-DoS control: `execute` / `cost` /
+//! `Compute` route class, a hard per-request cost cap, and the shared bounded
+//! blocking compute lane. The combined controls are
+//! the anti-DoS boundary: `execute` / `cost` /
 //! `simulate` / `explain` run attacker-supplied code, and every reduction is
 //! bounded by [`ScriptConfig::max_cost`] through an enforcing
 //! [`CostAccumulator`] — a script that would exceed it answers
@@ -71,8 +72,8 @@ pub const MAX_SOURCE_LEN: usize = 64 * 1024;
 pub struct ScriptConfig {
     /// `[api.script] require_api_key` — flip the group from **T0 public**
     /// (default, bounded by the governor) to **T1** (operator api-key gate).
-    /// Default `false`: the cost governor is the load-bearing control, so the
-    /// bounded surface is safe to expose publicly like any other T0 dry-run.
+    /// Default `false`: governor, cost cap, and aggregate compute admission
+    /// bound public dry runs; operators can require a key for access control.
     pub require_api_key: bool,
     /// Per-request reduce/execute cost ceiling in block-cost units — the
     /// anti-DoS bound. Clamped to `[1, MAX_BLOCK_COST]`; a per-request
@@ -147,6 +148,8 @@ pub struct ScriptState {
     pub oracle: Option<Arc<dyn ScalaOracle>>,
     /// Operator knobs (tier switch + cost ceiling).
     pub config: ScriptConfig,
+    /// Node-wide compiler/interpreter concurrency admission.
+    pub compute: crate::v1::ComputePool,
 }
 
 /// Build the `/api/v1/script/*` router. All seven routes sit at

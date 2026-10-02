@@ -18,6 +18,7 @@
 pub mod accounts;
 pub mod auth;
 pub mod blocking;
+pub mod compute;
 pub mod cursor;
 pub mod decode;
 pub mod error;
@@ -36,6 +37,7 @@ pub use auth::{
     assess_posture, warn_startup_posture, InsecurePosture, Tier, V1AuthConfig, V1AuthState,
 };
 pub use blocking::{BlockingReads, BlockingReadsConfig, BlockingReadsConfigError, ReadLane};
+pub use compute::ComputePool;
 pub use cursor::{
     clamp_limit, decode_cursor, decode_opt_cursor, encode_cursor, CursorError, CursorPayload, Page,
     CURSOR_VERSION, DEFAULT_LIMIT, MAX_LIMIT,
@@ -44,18 +46,16 @@ pub use decode::{decode_box, entry_by_id, ProtocolEntry, REGISTRY};
 pub use error::{v1_error, Reason, V1Error, V1ErrorInner};
 pub use governor::{Governor, GovernorConfig, GovernorConfigError, GovernorState, RouteClass};
 pub use mempool_depth::{
-    sample_into, spawn_depth_sampler, spawn_depth_sampler_once, MempoolDepthRing,
-    MempoolDepthSample, DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
+    sample_into, spawn_depth_sampler, MempoolDepthRing, MempoolDepthSample,
+    DEFAULT_SAMPLE_INTERVAL, DEPTH_RING_CAP,
 };
 pub use operator::{operator_router, OperatorState};
-pub use realtime::{
-    spawn_event_bridge, spawn_event_bridge_once, ConnLimiter, RealtimeBus, RealtimeHandle,
-};
+pub use realtime::{spawn_event_bridge, ConnLimiter, RealtimeBus, RealtimeHandle};
 pub use routes::{batch_router, v1_router, V1State};
 pub use script::{script_router, OracleVerdict, ScalaOracle, ScriptConfig, ScriptState};
 pub use webhooks::{
-    spawn_webhook_worker, spawn_webhook_worker_once, webhooks_router, ReqwestSink, WebhookEngine,
-    WebhookSink, WebhooksHandle, WebhooksState,
+    spawn_webhook_worker, webhooks_router, ReqwestSink, WebhookEngine, WebhookSink, WebhooksHandle,
+    WebhooksState,
 };
 
 #[derive(Clone, Copy)]

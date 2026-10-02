@@ -212,6 +212,8 @@ pub struct NodeConfig {
     /// `[api] local_reverse_proxy` — withdraw loopback trust when a reverse
     /// proxy terminates on loopback. Default `false`.
     pub api_local_reverse_proxy: bool,
+    /// Native script authentication and execution cost policy.
+    pub api_script: ergo_api::v1::ScriptConfig,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.

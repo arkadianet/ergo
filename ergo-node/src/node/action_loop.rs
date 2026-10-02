@@ -33,6 +33,11 @@ use super::{NodeError, NodeState};
 use ergo_mining::engine::BuildReason;
 use ergo_mining::handle::MiningHandle;
 
+fn reply_to_api_submission(state: &mut NodeState, req: SubmitRequest) {
+    let result = admit_api_transaction(state, &req.bytes, req.mode, Instant::now());
+    let _ = req.reply.send(result);
+}
+
 /// Park indefinitely while no mining work is pending. An armed deadline wakes
 /// the normal post-arm producer check without depending on mempool polling.
 async fn wait_for_mining_deadline(deadline: Option<Instant>) {
@@ -143,6 +148,28 @@ pub(super) async fn action_loop(
     }
 
     loop {
+        // Give queued control-plane work an explicit service opportunity before
+        // a ready peer batch. Dispatch at most one request from each queue per
+        // iteration; ordinary selection below still wakes immediately on a new
+        // request and shares progress with peer traffic and timers.
+        if !matches!(
+            shutdown_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) {
+            shutdown_log!("[node] shutdown requested, exiting loop...");
+            break;
+        }
+        if let Ok(req) = submit_rx.try_recv() {
+            reply_to_api_submission(&mut state, req);
+        }
+        if let Ok(req) = mining_submit_rx.try_recv() {
+            mining_rebuild_requested |= handle_mining_request(
+                &mut state,
+                mining.as_ref().map(|m| &m.handle),
+                mining.as_ref().is_some_and(|m| m.offline_generation),
+                req,
+            );
+        }
         tokio::select! {
             biased;
             // Shutdown ordering matches the pre-refactor signal arms:
@@ -152,98 +179,102 @@ pub(super) async fn action_loop(
                 shutdown_log!("[node] shutdown requested, exiting loop...");
                 break;
             }
-            _ = sync_tick.tick() => {
-                handle_sync_tick(&mut state);
-            }
-            _ = dial_tick.tick() => {
-                try_dial_peers(&mut state);
-            }
-            Some(addr) = peer_connect_rx.recv() => {
-                connect_to_address(&mut state, addr);
-            }
-            Some(()) = votes_changed_rx.recv() => {
-                // Operator changed votes; coalesce any queued updates and force
-                // ONE same-tip rebuild below — each rebuild reads the latest
-                // shared target map, so extra queued notifications add nothing.
-                while votes_changed_rx.try_recv().is_ok() {}
-                mining_votes_dirty = true;
-            }
-            _ = mempool_tick.tick() => {
-                handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
-            }
-            _ = wait_for_mining_deadline(mining_deadline) => {}
-            Some(first) = event_rx.recv() => {
-                // INGEST COALESCE: drain additional queued events
-                // without yielding so consecutive header-Modifier
-                // messages from different peers can be folded into
-                // ONE `execute_all` call. The executor's batch path
-                // (rayon pre-validate + sequential finalize + one
-                // redb txn) amortizes its per-batch overhead over
-                // however many headers we hand it. With 60 peers
-                // each shipping ~400 IDs every RTT, several Modifier
-                // messages routinely queue while one is being
-                // processed; coalescing them saves N × per-batch
-                // overhead.
-                //
-                // Cap drain at MAX_COALESCE so the other timer arms
-                // (sync_tick, dial_tick, mempool_tick) aren't starved
-                // during high-throughput periods.
-                //
-                // **Outbound serving is unchanged.** This only
-                // affects how *we ingest* incoming Modifier messages
-                // from other peers; we still respond to inbound Inv /
-                // RequestModifier messages individually with the
-                // per-request semantics Scala expects.
-                const MAX_COALESCE: usize = 64;
-                let mut events = Vec::with_capacity(MAX_COALESCE);
-                events.push(first);
-                while events.len() < MAX_COALESCE {
-                    match event_rx.try_recv() {
-                        Ok(e) => events.push(e),
-                        Err(_) => break,
+            _ = async {
+                // Randomize all ordinary work while keeping shutdown priority
+                // in the outer select, even under a saturated peer channel.
+                tokio::select! {
+                    _ = sync_tick.tick() => {
+                        handle_sync_tick(&mut state);
+                    }
+                    _ = dial_tick.tick() => {
+                        try_dial_peers(&mut state);
+                    }
+                    Some(addr) = peer_connect_rx.recv() => {
+                        connect_to_address(&mut state, addr);
+                    }
+                    Some(()) = votes_changed_rx.recv() => {
+                        // Operator changed votes; coalesce any queued updates and force
+                        // ONE same-tip rebuild below — each rebuild reads the latest
+                        // shared target map, so extra queued notifications add nothing.
+                        while votes_changed_rx.try_recv().is_ok() {}
+                        mining_votes_dirty = true;
+                    }
+                    _ = mempool_tick.tick() => {
+                        handle_mempool_tick(&mut state, mining.as_ref().map(|w| &w.handle));
+                    }
+                    _ = wait_for_mining_deadline(mining_deadline) => {}
+                    Some(first) = event_rx.recv() => {
+                        // INGEST COALESCE: drain additional queued events
+                        // without yielding so consecutive header-Modifier
+                        // messages from different peers can be folded into
+                        // ONE `execute_all` call. The executor's batch path
+                        // (rayon pre-validate + sequential finalize + one
+                        // redb txn) amortizes its per-batch overhead over
+                        // however many headers we hand it. With 60 peers
+                        // each shipping ~400 IDs every RTT, several Modifier
+                        // messages routinely queue while one is being
+                        // processed; coalescing them saves N × per-batch
+                        // overhead.
+                        //
+                        // Cap drain at MAX_COALESCE so the other timer arms
+                        // (sync_tick, dial_tick, mempool_tick) aren't starved
+                        // during high-throughput periods.
+                        //
+                        // **Outbound serving is unchanged.** This only
+                        // affects how *we ingest* incoming Modifier messages
+                        // from other peers; we still respond to inbound Inv /
+                        // RequestModifier messages individually with the
+                        // per-request semantics Scala expects.
+                        const MAX_COALESCE: usize = 64;
+                        let mut events = Vec::with_capacity(MAX_COALESCE);
+                        events.push(first);
+                        while events.len() < MAX_COALESCE {
+                            match event_rx.try_recv() {
+                                Ok(e) => events.push(e),
+                                Err(_) => break,
+                            }
+                        }
+                        handle_event_batch(&mut state, events);
+                    }
+                    // API submissions cross from the axum task into the main
+                    // loop via this channel. Each request carries a oneshot
+                    // reply; ordinary channels share randomized selection,
+                    // preventing a perpetually ready peer queue from always winning.
+                    // A long handler can still delay every source.
+                    // The reply send may fail if the handler timed out and
+                    // dropped its oneshot — that's fine, the outcome is
+                    // still recorded in the mempool's anti-DoS state per
+                    // invariant #7.
+                    Some(req) = submit_rx.recv() => {
+                        reply_to_api_submission(&mut state, req);
+                    }
+                    // Mining requests (candidate fetch / solution submit).
+                    // One request is dispatched per selected iteration, sharing
+                    // randomized selection with peer and API traffic. Each request
+                    // is single-shot and replies through its own oneshot.
+                    //
+                    // When mining is disabled at startup, `mining_handle`
+                    // is `None` and `handle_mining_request` rejects with
+                    // `Unavailable`. The sender side of the channel is only
+                    // exposed through the `MiningBridge` (which is also
+                    // only constructed when enabled), so the disabled path
+                    // is unreachable in practice — the rejection is defense
+                    // in depth.
+                    Some(req) = mining_submit_rx.recv() => {
+                        mining_rebuild_requested |= handle_mining_request(
+                            &mut state,
+                            mining.as_ref().map(|m| &m.handle),
+                            mining.as_ref().is_some_and(|m| m.offline_generation),
+                            req,
+                        );
+                    }
+                    _ = mem_tick.tick() => {
+                        if let Some(path) = mem_csv_path.as_deref() {
+                            sample_memory(&state, path, &mut mem_csv_file);
+                        }
                     }
                 }
-                handle_event_batch(&mut state, events);
-            }
-            // API submissions cross from the axum task into the main
-            // loop via this channel. Each request carries a oneshot
-            // reply; we drain one per iteration to keep per-
-            // submission latency bounded by one tick of the loop.
-            // The reply send may fail if the handler timed out and
-            // dropped its oneshot — that's fine, the outcome is
-            // still recorded in the mempool's anti-DoS state per
-            // invariant #7.
-            Some(req) = submit_rx.recv() => {
-                let now = Instant::now();
-                let result = admit_api_transaction(&mut state, &req.bytes, req.mode, now);
-                let _ = req.reply.send(result);
-            }
-            // Mining requests (candidate fetch / solution submit).
-            // One request drained per iteration matches the
-            // submit_rx ordering: each request is single-shot and
-            // replies through its own oneshot, so back-to-back
-            // drains are still bounded by one tick of the loop.
-            //
-            // When mining is disabled at startup, `mining_handle`
-            // is `None` and `handle_mining_request` rejects with
-            // `Unavailable`. The sender side of the channel is only
-            // exposed through the `MiningBridge` (which is also
-            // only constructed when enabled), so the disabled path
-            // is unreachable in practice — the rejection is defense
-            // in depth.
-            Some(req) = mining_submit_rx.recv() => {
-                mining_rebuild_requested |= handle_mining_request(
-                    &mut state,
-                    mining.as_ref().map(|m| &m.handle),
-                    mining.as_ref().is_some_and(|m| m.offline_generation),
-                    req,
-                );
-            }
-            _ = mem_tick.tick() => {
-                if let Some(path) = mem_csv_path.as_deref() {
-                    sample_memory(&state, path, &mut mem_csv_file);
-                }
-            }
+            } => {}
         }
 
         // Post-arm mining-engine signal. The `shutdown_rx` arm `break`s above

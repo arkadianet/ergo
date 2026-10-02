@@ -53,6 +53,8 @@ pub struct RunHandle {
     pub(super) wallet_cancel: tokio::sync::watch::Sender<bool>,
     pub(super) wallet_handle: Option<JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>>,
     pub(crate) api_handle: Option<JoinHandle<()>>,
+    /// Retains blocking-job ownership even if the HTTP task is aborted.
+    pub(super) api_services: Option<Arc<ergo_api::ApiServices>>,
     /// Handle to the inbound P2P listener task spawned when
     /// `[peers] bind_addr` is set. Aborted on shutdown so the bound
     /// port releases instead of staying parked in `accept()` until the
@@ -117,75 +119,35 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
-    /// Send the shutdown signal and await loop termination.
+    /// Stop admission, join storage-owning work and await durable loop shutdown.
     ///
-    /// **Contract.** Best-effort graceful drain of in-flight HTTP
-    /// requests with a 5-second cap, then forced abort. Requests that
-    /// complete within the cap return a structured response (typically
-    /// `503 shutting_down` for write handlers, the last cached snapshot
-    /// for reads). Requests that exceed the cap — pathologically slow
-    /// clients, deliberately stalled bodies — are force-cancelled and
-    /// will see TCP RST. This is intentional: bounding shutdown is the
-    /// load-bearing requirement for atomic-commit durability via
-    /// `StateStore::shutdown_cleanly()` after workers have quiesced.
+    /// HTTP handlers receive up to five seconds to drain; slower handlers are
+    /// aborted. Accepted synchronous API jobs, wallet writers/rescans, mining
+    /// builders and the indexer are joined without a timeout before returning,
+    /// so their database references cannot outlive a successful shutdown.
     ///
-    /// Ordering, in detail:
-    ///
-    /// 1. Close wallet command/rescan admission, cancel the writer and join
-    ///    every blocking rescan. Keep the action loop alive while in-flight
-    ///    wallet submissions await its reply. A slow blocking operation is
-    ///    awaited without a timeout: returning while it owns the database
-    ///    would break the durability and database-reopen contract.
-    /// 2. Fire `shutdown_tx` — action loop breaks out of `select!`
-    ///    and enters cleanup. First thing in cleanup is
-    ///    `drop(submit_rx)`, which closes the submission channel; any
-    ///    write handler still parked on its oneshot reply observes the
-    ///    closed channel via `bridge.rs` → `shutting_down`. This is
-    ///    the right reason code for a stopping node, distinct from
-    ///    `timeout`. Firing the loop signal first means in-flight
-    ///    write handlers learn their reason *before* axum starts
-    ///    draining them, so they emit the structured `shutting_down`
-    ///    response rather than waiting on a dropped oneshot during
-    ///    axum drain.
-    /// 3. Fire `api_shutdown_tx` (inside `drain_api_and_inbound`) —
-    ///    axum's `with_graceful_shutdown` future resolves, the listener
-    ///    stops accepting new connections, and in-flight handlers are
-    ///    allowed to finish. Read handlers complete with whatever
-    ///    snapshot they already captured. Write handlers complete via
-    ///    the closed channel from step 2.
-    /// 4. Abort inbound listener — no graceful drain meaningful here,
-    ///    it's a bare `accept()` loop with no per-connection state.
-    /// 5. Await `api_handle` with a 5-second timeout fallback. Axum
-    ///    typically drains in milliseconds once the channel closes;
-    ///    the timeout protects against pathologically slow clients
-    ///    holding a handler open. If the timeout fires we abort the
-    ///    task and await its termination so the bound port is actually
-    ///    released before `shutdown()` returns.
-    /// 6. Await `loop_handle` and surface its result — that result
-    ///    encodes whether `StateStore::shutdown_cleanly()` succeeded,
-    ///    which is the load-bearing signal for the
-    ///    AVL+undo_log+chain_index+state_meta atomic-commit invariant.
-    ///
-    /// Background-task teardown is interleaved with these steps. Async tasks
-    /// have bounded abort fallbacks. Wallet rescans, the mining build worker and indexer worker
-    /// are cancelled and awaited to completion (unbounded): shutdown
-    /// completes only when both workers are quiescent. The mining worker drains
-    /// its current build; the indexer drains its atomic step or cancellable
-    /// rebuild chunk. This is the truthful contract — tokio's
-    /// runtime drop waits for `spawn_blocking` tasks anyway, so a
-    /// proceed-on-timeout design only makes the API lie while process exit
-    /// still blocks. Awaiting here also prevents `DatabaseAlreadyOpen` on a
-    /// restart before the worker drops its `Arc<Database>` read snapshot.
-    ///
-    /// Also releases bound ports promptly — important for tests that
-    /// spin up many nodes back-to-back.
+    /// The action loop remains available while wallet submissions finish. Once
+    /// wallet and API blocking work is quiescent, loop cleanup closes submission
+    /// admission and performs the final persistence barrier. Worker and storage
+    /// errors are returned to the caller. Cancelling this future transfers its
+    /// retained wallet/API drain ownership to the best-effort Drop supervisor;
+    /// only awaiting this method provides a completion signal for safe reopen.
     pub async fn shutdown(mut self) -> Result<(), NodeError> {
         let shutdown_started = std::time::Instant::now();
         info!("shutdown initiated");
         // Stop wallet command admission and finish/cancel every blocking
         // rescan before the action loop's final durability barrier. Keep the
         // loop running until wallet submissions have received their replies.
+        if let Some(tx) = self.api_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(services) = &self.api_services {
+            services.close_blocking();
+        }
         let wallet_result = self.drain_wallet().await;
+        if let Some(services) = &self.api_services {
+            services.shutdown_blocking().await;
+        }
         // Action-loop shutdown — taken so Drop can't double-fire if
         // this future is cancelled mid-await.
         if let Some(tx) = self.shutdown_tx.take() {
@@ -429,7 +391,7 @@ impl RunHandle {
 /// tasks and bound ports.
 ///
 /// **Persistence guarantee — IMPORTANT for embedders.** This `Drop` is
-/// best-effort: on a live runtime a cleanup supervisor joins wallet workers
+/// best-effort: on a live runtime a cleanup supervisor joins wallet and API blocking workers
 /// before signalling the action loop. Outside a runtime it only releases
 /// shutdown channels. The loop's
 /// task continues to run in the background until the persist pipeline
@@ -446,6 +408,10 @@ impl Drop for RunHandle {
         self.wallet_rescan.stop();
         let _ = self.wallet_cancel.send(true);
         let wallet_handle = self.wallet_handle.take();
+        let api_services = self.api_services.take();
+        if let Some(services) = &api_services {
+            services.close_blocking();
+        }
         let loop_shutdown = self.shutdown_tx.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let rescan = self.wallet_rescan.clone();
@@ -466,8 +432,9 @@ impl Drop for RunHandle {
                 if let Err(error) = rescan.join_workers().await {
                     error!(%error, "wallet rescan join failed during drop cleanup");
                 }
-                // Other state-owning services must drain here before the
-                // action loop performs its terminal store barrier.
+                if let Some(services) = api_services {
+                    services.shutdown_blocking().await;
+                }
                 if let Some(tx) = loop_shutdown {
                     let _ = tx.send(());
                 }
@@ -477,6 +444,7 @@ impl Drop for RunHandle {
             // channels requests shutdown, but only explicit shutdown().await
             // provides the joined/durable completion contract.
             drop(wallet_handle);
+            drop(api_services);
             drop(loop_shutdown);
         }
         // Drop runs synchronously and cannot await — the

@@ -138,6 +138,7 @@ pub(super) struct ApiBind {
     pub wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
     pub wallet_cancel: tokio::sync::watch::Sender<bool>,
     pub wallet_handle: JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>,
+    pub api_services: Option<Arc<ergo_api::ApiServices>>,
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
@@ -315,6 +316,7 @@ pub(super) async fn bind(
             wallet_rescan,
             wallet_cancel,
             wallet_handle,
+            api_services: None,
             live_wallet_hook: Some(hook),
         });
     };
@@ -343,6 +345,7 @@ pub(super) async fn bind(
                 wallet_rescan,
                 wallet_cancel,
                 wallet_handle,
+                api_services: None,
                 live_wallet_hook: Some(hook),
             });
         }
@@ -382,7 +385,8 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    // Realtime WS bridge (A2): the same process-wide bus the
+    let api_services = Arc::new(ergo_api::ApiServices::new());
+    // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
@@ -390,13 +394,13 @@ pub(super) async fn bind(
     // coarse ring (which only carries block/reorg/peer events).
     mempool.set_observer(Some(Arc::new(
         crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            ergo_api::realtime_handle().bus,
+            api_services.realtime.bus.clone(),
         ),
     )));
     // Restore any durable webhook cursor before activating this observer.
     // Disabled indexers and boot failures without a store have no observer.
     if let Some(observer) = indexer_event_observer {
-        observer.activate(ergo_api::realtime_handle().bus);
+        observer.activate(api_services.realtime.bus.clone());
     }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
@@ -439,6 +443,8 @@ pub(super) async fn bind(
         // here yet, but the gate is the right shape now.
         utxo_reads_supported: config.state_type == crate::config::StateType::Utxo,
         local_reverse_proxy: config.api_local_reverse_proxy,
+        services: api_services.clone(),
+        script_config: config.api_script.clone(),
     };
     let security = api_security(config)?;
     let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
@@ -458,6 +464,7 @@ pub(super) async fn bind(
         wallet_rescan,
         wallet_cancel,
         wallet_handle,
+        api_services: Some(api_services),
         live_wallet_hook: Some(hook),
     })
 }
