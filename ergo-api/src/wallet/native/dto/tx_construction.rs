@@ -67,12 +67,10 @@ impl<'de> Deserialize<'de> for TxRepr {
     }
 }
 
-/// One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-/// assets/registers) and `burn` are load-bearing; `mint`
-/// are valid shapes that ship `unsupported_intent(422)` until builder support
-/// lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
-/// change). Manual `Deserialize` so unknown sibling fields and cross-variant field
-/// leakage are rejected.
+/// One requested output of a [`TxIntent`], tagged. Payments support assets and
+/// dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
+/// destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
+/// rejects unknown sibling fields and cross-variant field leakage.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum OutputIntent {
@@ -92,7 +90,8 @@ pub enum OutputIntent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registers: Option<std::collections::BTreeMap<String, String>>,
     },
-    /// Mint a new token to `address`. `unsupported_intent` until wired.
+    /// Mint a new token to `address` in a box carrying 1,000,000 nanoErg.
+    /// Its token ID is the selected first input box ID; at most one mint intent is allowed.
     #[serde(rename_all = "camelCase")]
     Mint {
         /// Recipient of the minted token.
@@ -382,10 +381,8 @@ pub struct TxIntent {
     /// Permit spending a reward box carrying the re-emission token.
     #[serde(default)]
     pub allow_reemission_spend: bool,
-    /// Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
-    /// current builder never drops a non-re-emission token (any surplus always
-    /// becomes change), so this flag has no effect yet; it gates the deferred
-    /// `burn` output intent (which ships `unsupported_intent` until wired).
+    /// Permit the explicit destruction quantities requested by `burn` intents.
+    /// Unrequested token surplus remains in change.
     #[serde(default)]
     pub allow_token_burn: bool,
 }

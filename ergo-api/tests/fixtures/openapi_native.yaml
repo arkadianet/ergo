@@ -3908,7 +3908,9 @@ components:
             type: string
             description: nanoErg to send (decimal string).
       - type: object
-        description: Mint a new token to `address`. `unsupported_intent` until wired.
+        description: |-
+          Mint a new token to `address` in a box carrying 1,000,000 nanoErg.
+          Its token ID is the selected first input box ID; at most one mint intent is allowed.
         required:
         - address
         - amount
@@ -3957,12 +3959,10 @@ components:
             enum:
             - burn
       description: |-
-        One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-        assets/registers) and `burn` are load-bearing; `mint`
-        are valid shapes that ship `unsupported_intent(422)` until builder support
-        lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
-        change). Manual `Deserialize` so unknown sibling fields and cross-variant field
-        leakage are rejected.
+        One requested output of a [`TxIntent`], tagged. Payments support assets and
+        dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
+        destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
+        rejects unknown sibling fields and cross-variant field leakage.
     RawTransactionBytes:
       type: string
       format: binary
@@ -4397,10 +4397,8 @@ components:
         allowTokenBurn:
           type: boolean
           description: |-
-            Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
-            current builder never drops a non-re-emission token (any surplus always
-            becomes change), so this flag has no effect yet; it gates the deferred
-            `burn` output intent (which ships `unsupported_intent` until wired).
+            Permit the explicit destruction quantities requested by `burn` intents.
+            Unrequested token surplus remains in change.
         changeAddress:
           type:
           - string
