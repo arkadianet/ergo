@@ -74,12 +74,26 @@ on stable, against the production `ergo-p2p` codecs:
 - `p2p_message` interprets the first input byte as a message code and checks the
   canonical fixed point of accepted inventory, modifiers, peers, sync, snapshot
   and NiPoPoW payloads. Unknown codes and malformed payloads are clean outcomes.
+- `p2p_delivery` drives the production modifier delivery tracker through
+  requests, saturated batches, arrivals, duplicates, timeout checks, early
+  reassignments, disconnects, forgetting and hedged requests. An independent
+  ownership ledger checks per-peer capacity, request timestamps/types, timeout
+  boundaries and cancellation after each operation.
 
 Frame/message inputs are bounded to 1 MiB of supplied bytes, while declared
 lengths are unrestricted. Handshake inputs retain one byte beyond the production
 cap to exercise oversized admission. These are codec and framing checks, not TCP
 timing, consensus acceptance or Scala verdict claims. They do not change the
 consensus structured campaign's vocabulary or coverage denominator.
+
+The delivery target uses five-byte instructions: operation, peer, little-endian
+modifier index, argument. Operations are selected modulo ten; four peers and
+4096 modifier ids keep memory bounded, and at most 128 instructions execute.
+The clock advances only through encoded offsets (including the timeout and late
+allowance boundaries). The received set fits inside the production dedupe
+window. A history of requested senders checks never-solicited arrivals without
+reimplementing the late allowance expiry or retry policy. This is a state-machine
+robustness check; it does not simulate TCP scheduling or assert Scala parity.
 
 ## Corpus
 
@@ -96,6 +110,7 @@ consensus structured campaign's vocabulary or coverage denominator.
 | `p2p_frame`         | Scala framing vectors, negative/maximal declared lengths |
 | `p2p_handshake`     | Minimal synthetic handshake and negative feature count |
 | `p2p_message`       | Scala payload vectors and synthetic seeds for every registered code |
+| `p2p_delivery`      | Synthetic saturation, hedge/late delivery, disconnect/retry and timeout-boundary sequences |
 
 P2P files named `scala-*` are decoded from the existing external vectors under
 `test-vectors/ergo-p2p/`; their provenance is retained in that directory's
