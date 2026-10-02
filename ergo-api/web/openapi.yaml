@@ -3106,6 +3106,30 @@ components:
           nullable: true
           description: Detailed error description
 
+    ScriptServiceError:
+      description: Nested error returned by bounded script computation.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - reason
+            - message
+            - detail
+          properties:
+            reason:
+              type: string
+              enum: [internal_error, overloaded, shutting_down, timeout]
+              description: Stable machine-readable failure reason.
+            message:
+              type: string
+              description: Human-readable failure description.
+            detail:
+              type: string
+              description: Remediation hint (may be empty).
+
     StorageRentEligibleResponse:
       description: Paged envelope of storage-rent-eligible boxes.
       type: object
@@ -6121,8 +6145,7 @@ paths:
 
   /script/p2sAddress:
     post:
-      security:
-        - ApiKeyAuth: [api_key]
+      security: []
       summary: Create P2SAddress from Sigma source
       operationId: scriptP2SAddress
       tags:
@@ -6146,6 +6169,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Wallet read or internal computation failure.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ApiError'
+                  - $ref: '#/components/schemas/ScriptServiceError'
+        '503':
+          description: Compute overloaded or shutting_down.
+          headers:
+            Retry-After:
+              description: Present on overloaded responses; retry after 1 second.
+              schema:
+                type: string
+                enum: ['1']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
+        '504':
+          description: Computation timed out (timeout).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
         default:
           description: Error
           content:
@@ -6155,8 +6204,7 @@ paths:
 
   /script/p2shAddress:
     post:
-      security:
-        - ApiKeyAuth: [api_key]
+      security: []
       summary: Create P2SHAddress from Sigma source
       operationId: scriptP2SHAddress
       tags:
@@ -6180,6 +6228,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '500':
+          description: Wallet read or internal computation failure.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ApiError'
+                  - $ref: '#/components/schemas/ScriptServiceError'
+        '503':
+          description: Compute overloaded or shutting_down.
+          headers:
+            Retry-After:
+              description: Present on overloaded responses; retry after 1 second.
+              schema:
+                type: string
+                enum: ['1']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
+        '504':
+          description: Computation timed out (timeout).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScriptServiceError'
         default:
           description: Error
           content:
