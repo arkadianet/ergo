@@ -37,6 +37,28 @@ const MAX_UPCAST_STRIP_ROUNDS: usize = 110;
 /// Mainnet's activated script version (protocol 6.0).
 const CURRENT_ACTIVATED_VERSION: u8 = 3;
 
+fn is_boolean_depth_limit_error(error: &ReadError) -> bool {
+    match error {
+        ReadError::DepthLimitExceeded { max: 110 } => true,
+        // ergo-ser/src/block_transactions.rs:237-238 wraps transaction read
+        // errors as InvalidData(format!("tx[{tx_idx}]: {e}")). Match exactly
+        // that wrapper with a canonical usize index and this depth error.
+        ReadError::InvalidData(message) => {
+            let Some((index, inner)) = message
+                .strip_prefix("tx[")
+                .and_then(|rest| rest.split_once("]: "))
+            else {
+                return false;
+            };
+            index
+                .parse::<usize>()
+                .is_ok_and(|parsed| parsed.to_string() == index)
+                && inner == ReadError::DepthLimitExceeded { max: 110 }.to_string()
+        }
+        _ => false,
+    }
+}
+
 /// read+write fixed-point check shared by every (decode, encode) pair.
 ///
 /// `is_soft_fork_opaque` marks values whose body is a size-delimited
@@ -85,9 +107,7 @@ where
             // Scala writes TrueLeaf/FalseLeaf as Boolean constants. At the
             // last expression level their added data-value read exceeds 110.
             // Exempt only this AST shape and the matching depth failure.
-            if matches!(e, ReadError::DepthLimitExceeded { max: 110 })
-                && v1.has_depth_expanding_boolean()
-            {
+            if is_boolean_depth_limit_error(&e) && v1.has_depth_expanding_boolean() {
                 return Outcome::WriteRejected;
             }
             // Scala also expands compact type descriptors (e.g. 0x18 into
@@ -1545,6 +1565,288 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// Local campaign: a box candidate whose tree is `XorOf^n(FalseLeaf)` to
+    /// the read-depth limit. sigma-state 6.0.6 parses it, re-serializes it to
+    /// 117 bytes, and then CANNOT re-read its own output
+    /// (`DeserializeCallDepthExceeded: ...depth(111) exceeds allowed maximum
+    /// 110`), because writing the leaf as a Boolean constant costs one more
+    /// read level. `WriteRejected` is therefore the reference-compatible
+    /// verdict.
+    ///
+    /// #459 already pinned that verdict for the standalone `ergo_tree`
+    /// surface, but `has_depth_expanding_boolean` defaulted to false and
+    /// `view!` never forwarded it, so the box surface could not reach it.
+    #[test]
+    fn box_boolean_depth_exemption_reaches_container_surfaces() {
+        let transcript =
+            include_str!("../../test-vectors/scala/sigma/nightly_box_boolean_depth.txt");
+        let field = |key: &str| {
+            transcript
+                .lines()
+                .find_map(|l| l.strip_prefix(key).map(str::trim))
+                .unwrap_or_else(|| panic!("{key} missing from the oracle transcript"))
+        };
+        assert_eq!(field("verdict="), "ACCEPT");
+        assert_eq!(
+            field("redecode_exception="),
+            "sigma.serialization.DeserializeCallDepthExceeded"
+        );
+
+        let bytes = hex::decode(field("input=")).unwrap();
+        assert_eq!(
+            bytes.len(),
+            field("parsed_bytes=").parse::<usize>().unwrap()
+        );
+        // The corpus seed and the pinned oracle input are the same bytes, so
+        // the fuzzer's reproducer and the transcript cannot drift apart.
+        assert_eq!(
+            bytes,
+            include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth")
+        );
+
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let candidate = ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap();
+        // The exemption has to see THROUGH the box to the tree it carries.
+        assert!(candidate.ergo_tree().has_depth_expanding_boolean());
+        assert!(candidate.has_depth_expanding_boolean());
+
+        let mut writer = VlqWriter::new();
+        ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, &candidate).unwrap();
+        let output = writer.result().to_vec();
+        assert_eq!(
+            output.len(),
+            field("reencoded_bytes=").parse::<usize>().unwrap()
+        );
+        assert_eq!(hex::encode(&output), field("reencoded_hex="));
+
+        // The reference cannot read this back; we must not call that a Bug.
+        assert!(matches!(
+            ergo_ser::ergo_box::read_ergo_box_candidate(
+                &mut VlqReader::new(&output).with_activated_script_version(3)
+            ),
+            Err(ReadError::DepthLimitExceeded { max: 110 })
+        ));
+        assert_eq!(
+            (registry(Some("ergo_box_candidate"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        crate::fuzz::fuzz_one("ergo_box_candidate", &bytes);
+    }
+
+    /// The exemption has to survive being nested: a transaction reaches its
+    /// tree through `output_candidates`, a `Vec`, so forwarding only one level
+    /// (container -> Vec) still loses it. Found by a later local campaign,
+    /// after the container forwarding above looked complete: the output box's
+    /// own predicate was `true` while the transaction's was `false`, because
+    /// the `Vec<T>` impl did not forward the predicate at all.
+    #[test]
+    fn boolean_depth_exemption_survives_vec_nesting() {
+        let bytes: &[u8] =
+            include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
+        let mut reader = VlqReader::new(bytes).with_activated_script_version(3);
+        let tx = ergo_ser::transaction::read_transaction(&mut reader).unwrap();
+
+        // The box itself sees it...
+        let box_predicate = tx.output_candidates[0]
+            .ergo_tree()
+            .has_depth_expanding_boolean();
+        assert!(
+            box_predicate,
+            "the output box carries the depth-109 Boolean"
+        );
+        // ...and so must the box, its Vec, and the transaction around it.
+        assert!(tx.output_candidates[0].has_depth_expanding_boolean());
+        assert!(tx.output_candidates.has_depth_expanding_boolean());
+        assert!(tx.has_depth_expanding_boolean());
+
+        assert_eq!(
+            (registry(Some("transaction"))[0].run)(bytes),
+            Outcome::WriteRejected
+        );
+        crate::fuzz::fuzz_one("transaction", bytes);
+    }
+
+    #[test]
+    fn boolean_depth_limit_error_accepts_only_exact_forms() {
+        let depth_error = ReadError::DepthLimitExceeded { max: 110 };
+        assert!(is_boolean_depth_limit_error(&depth_error));
+        for index in [0, 1, usize::MAX] {
+            assert!(is_boolean_depth_limit_error(&ReadError::InvalidData(
+                format!("tx[{index}]: {depth_error}")
+            )));
+        }
+
+        let other_depth = ReadError::DepthLimitExceeded { max: 111 };
+        assert!(!is_boolean_depth_limit_error(&other_depth));
+        let other_error = ReadError::InvalidData("different inner error".into());
+        for message in [
+            format!("tx[0]: {other_error}"),
+            format!("tx[0]: {other_depth}"),
+            format!("tx[not-a-number]: {depth_error}"),
+            format!("tx[0]: {depth_error} trailing text"),
+            format!("tx[00]: {depth_error}"),
+            format!("tx[+0]: {depth_error}"),
+            format!("tx[-1]: {depth_error}"),
+            format!("tx[ 0]: {depth_error}"),
+            format!("tx[]: {depth_error}"),
+            format!("tx[{}0]: {depth_error}", usize::MAX),
+            format!("prefix tx[0]: {depth_error}"),
+            format!("tx[0]:{depth_error}"),
+            depth_error.to_string(),
+        ] {
+            assert!(
+                !is_boolean_depth_limit_error(&ReadError::InvalidData(message.clone())),
+                "unexpectedly accepted {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_depth_exemption_survives_ctx_expr_tuple_nesting() {
+        use ergo_ser::input::{read_context_extension, write_context_extension, ContextExtension};
+
+        let seed =
+            include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth");
+        let mut writer = VlqWriter::new();
+        write_context_extension(&mut writer, &ContextExtension::empty()).unwrap();
+        let mut bytes = writer.result();
+        assert_eq!(bytes, [0]);
+        bytes.extend_from_slice(seed);
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let frame = (
+            read_context_extension(&mut reader).unwrap(),
+            ergo_ser::ergo_box::read_ergo_box_candidate(&mut reader).unwrap(),
+        );
+        assert!(frame.1.has_depth_expanding_boolean());
+        assert_eq!(
+            (registry(Some("ctx_expr"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        assert!(frame.has_depth_expanding_boolean());
+    }
+
+    /// Preserve the committed seed's leaf encoding for the initial input.
+    /// A normally read candidate already caches the expanded, unreadable
+    /// canonical tree, so writing that candidate would skip the regression's
+    /// successful first read. Validate its original bytes before using the
+    /// real container writers to frame them.
+    fn boolean_depth_candidate_for_writing() -> ergo_ser::ergo_box::ErgoBoxCandidate {
+        use ergo_ser::ergo_box::{
+            read_ergo_box_candidate, write_ergo_box_candidate, ErgoBoxCandidate,
+        };
+
+        let seed =
+            include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth");
+        let mut reader = VlqReader::new(seed).with_activated_script_version(3);
+        let parsed = read_ergo_box_candidate(&mut reader).unwrap();
+        let candidate = ErgoBoxCandidate::try_from_raw_parts(
+            parsed.value,
+            parsed.ergo_tree().clone(),
+            parsed.ergo_tree_bytes().to_vec(),
+            parsed.creation_height,
+            parsed.tokens.clone(),
+            parsed.additional_registers.clone(),
+            parsed.register_bytes().to_vec(),
+        )
+        .unwrap();
+        let mut writer = VlqWriter::new();
+        write_ergo_box_candidate(&mut writer, &candidate).unwrap();
+        // The fuzz seed includes a suffix that the candidate reader ignores.
+        assert_eq!(writer.result(), &seed[..reader.position()]);
+        candidate
+    }
+
+    fn boolean_depth_transaction_for_writing() -> ergo_ser::transaction::Transaction {
+        let seed = include_bytes!("../fuzz/corpus/transaction/nightly-2026-10-02-boolean-depth");
+        let mut reader = VlqReader::new(seed).with_activated_script_version(3);
+        let mut tx = ergo_ser::transaction::read_transaction(&mut reader).unwrap();
+        tx.output_candidates = vec![boolean_depth_candidate_for_writing()];
+        tx
+    }
+
+    #[test]
+    fn boolean_depth_exemption_reaches_ergo_box_surface() {
+        use ergo_ser::ergo_box::{read_ergo_box, write_ergo_box, ErgoBox};
+
+        let bx = ErgoBox {
+            candidate: boolean_depth_candidate_for_writing(),
+            transaction_id: ergo_primitives::digest::ModifierId::from_bytes([0; 32]),
+            index: 0,
+        };
+        let mut writer = VlqWriter::new();
+        write_ergo_box(&mut writer, &bx).unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let parsed = read_ergo_box(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert!(parsed.candidate.has_depth_expanding_boolean());
+        assert_eq!(
+            (registry(Some("ergo_box"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        assert!(parsed.has_depth_expanding_boolean());
+    }
+
+    #[test]
+    fn boolean_depth_exemption_reaches_unsigned_transaction_surface() {
+        use ergo_ser::{
+            input::UnsignedInput,
+            transaction::{
+                read_unsigned_transaction, write_unsigned_transaction, UnsignedTransaction,
+            },
+        };
+
+        let tx = boolean_depth_transaction_for_writing();
+        let unsigned = UnsignedTransaction {
+            inputs: tx
+                .inputs
+                .iter()
+                .map(|input| UnsignedInput {
+                    box_id: input.box_id,
+                    extension: input.spending_proof.extension().clone(),
+                })
+                .collect(),
+            data_inputs: tx.data_inputs,
+            output_candidates: tx.output_candidates,
+        };
+        let mut writer = VlqWriter::new();
+        write_unsigned_transaction(&mut writer, &unsigned).unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let parsed = read_unsigned_transaction(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert!(parsed.output_candidates.has_depth_expanding_boolean());
+        assert_eq!(
+            (registry(Some("unsigned_transaction"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
+        assert!(parsed.has_depth_expanding_boolean());
+    }
+
+    #[test]
+    fn boolean_depth_exemption_reaches_block_transactions_surface() {
+        use ergo_ser::block_transactions::{
+            read_block_transactions, write_block_transactions, BlockTransactions,
+        };
+
+        let block = BlockTransactions {
+            header_id: ergo_primitives::digest::ModifierId::from_bytes([0; 32]),
+            transactions: vec![boolean_depth_transaction_for_writing()],
+        };
+        let mut writer = VlqWriter::new();
+        write_block_transactions(&mut writer, &block).unwrap();
+        let bytes = writer.result();
+        let mut reader = VlqReader::new(&bytes).with_activated_script_version(3);
+        let parsed = read_block_transactions(&mut reader).unwrap();
+        assert!(reader.is_empty());
+        assert!(parsed.transactions.has_depth_expanding_boolean());
+        assert!(parsed.has_depth_expanding_boolean());
+        assert_eq!(
+            (registry(Some("block_transactions"))[0].run)(&bytes),
+            Outcome::WriteRejected
+        );
     }
 
     #[test]

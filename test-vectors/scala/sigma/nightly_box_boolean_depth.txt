@@ -1,0 +1,32 @@
+# sigma-state 6.0.6; activated version 3; captured with -Xss32m.
+#
+# A box candidate whose tree is `CreateProveDlog(XorOf(...XorOf(FalseLeaf)))`
+# nested to the read-depth limit. The reference:
+#
+#   1. PARSES the input, and re-serializes it to 117 bytes (shorter than the
+#      121-byte input: four trailing bytes are dropped).
+#   2. CANNOT re-read its own output:
+#
+#        REDECODE sigma.serialization.DeserializeCallDepthExceeded:
+#                 nested value deserialization call depth(111)
+#                 exceeds allowed maximum 110
+#
+# So the reference accepts the input, writes it, and then cannot read the
+# result back. Scala writes TrueLeaf/FalseLeaf as Boolean constants, and a
+# constant's data read costs one more nesting level than the leaf opcode did --
+# which is exactly what puts the written form one level over the limit.
+#
+# That makes `WriteRejected` the reference-compatible hermetic verdict, the
+# same one #459 already pins for the standalone `ergo_tree` surface. This
+# vector exists because that exemption did not reach the box surface:
+# `ParityNormalize::has_depth_expanding_boolean` defaulted to false and the
+# `view!` macro never forwarded it, so a box candidate could never satisfy the
+# check no matter what tree it held.
+input=3bc904cdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff805800000000830000
+parsed_bytes=121
+reencoded_bytes=117
+reencoded_hex=3bc96fcdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0100580000
+verdict=ACCEPT
+redecode_exception=sigma.serialization.DeserializeCallDepthExceeded
+redecode_detail=nested value deserialization call depth(111) exceeds allowed maximum 110
+root=CreateProveDlog(XorOf^n(FalseLeaf))

@@ -76,6 +76,9 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
     fn has_pending_upcast_strip(&self) -> bool {
         self.0.has_pending_upcast_strip() || self.1.has_pending_upcast_strip()
     }
+    fn has_depth_expanding_boolean(&self) -> bool {
+        self.0.has_depth_expanding_boolean() || self.1.has_depth_expanding_boolean()
+    }
     fn retained_boxes(&self) -> Vec<&[u8]> {
         let mut boxes = self.0.retained_boxes();
         boxes.extend(self.1.retained_boxes());
@@ -96,6 +99,10 @@ impl<A: ParityNormalize, B: ParityNormalize> ParityNormalize for (A, B) {
 impl<T: ParityNormalize> ParityNormalize for Vec<T> {
     fn has_pending_upcast_strip(&self) -> bool {
         self.iter().any(ParityNormalize::has_pending_upcast_strip)
+    }
+    fn has_depth_expanding_boolean(&self) -> bool {
+        self.iter()
+            .any(ParityNormalize::has_depth_expanding_boolean)
     }
     fn parity_normalized(&self, after_write: bool) -> impl PartialEq {
         self.iter()
@@ -384,7 +391,17 @@ macro_rules! view {
         view!($ty, $v, $body, $headers, Vec::new());
     };
     ($ty:ty, $v:ident, $body:expr, $headers:expr, $boxes:expr) => {
-        view!($ty, $v, _after_write, $body, $headers, $boxes, false);
+        view!(
+            $ty,
+            $v,
+            _after_write,
+            $body,
+            $headers,
+            $boxes,
+            false,
+            None,
+            false
+        );
     };
     ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr) => {
         view!(
@@ -395,10 +412,24 @@ macro_rules! view {
             $headers,
             $boxes,
             $pending,
-            None
+            None,
+            false
         );
     };
     ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr, $limit:expr) => {
+        view!(
+            $ty,
+            $v,
+            $after_write,
+            $body,
+            $headers,
+            $boxes,
+            $pending,
+            $limit,
+            false
+        );
+    };
+    ($ty:ty, $v:ident, $after_write:ident, $body:expr, $headers:expr, $boxes:expr, $pending:expr, $limit:expr, $bools:expr) => {
         impl ParityNormalize for $ty {
             fn wire_position_limit(&self) -> Option<usize> {
                 $limit
@@ -411,6 +442,11 @@ macro_rules! view {
                 let $v = self;
                 let _ = $v;
                 $pending
+            }
+            fn has_depth_expanding_boolean(&self) -> bool {
+                let $v = self;
+                let _ = $v;
+                $bools
             }
             fn header_values(&self) -> Vec<(&Header, [u8; 32])> {
                 let $v = self;
@@ -515,7 +551,8 @@ view!(
         boxes
     },
     v.ergo_tree().has_pending_upcast_strip(),
-    Some(4096)
+    Some(4096),
+    v.ergo_tree().has_depth_expanding_boolean()
 );
 view!(
     ErgoBox,
@@ -528,7 +565,9 @@ view!(
     ),
     v.candidate.header_values(),
     v.candidate.retained_boxes(),
-    v.candidate.has_pending_upcast_strip()
+    v.candidate.has_pending_upcast_strip(),
+    None,
+    v.candidate.has_depth_expanding_boolean()
 );
 view!(
     Transaction,
@@ -549,7 +588,9 @@ view!(
         boxes.extend(v.output_candidates.retained_boxes());
         boxes
     },
-    v.output_candidates.has_pending_upcast_strip()
+    v.output_candidates.has_pending_upcast_strip(),
+    None,
+    v.output_candidates.has_depth_expanding_boolean()
 );
 view!(
     UnsignedTransaction,
@@ -570,7 +611,9 @@ view!(
         boxes.extend(v.output_candidates.retained_boxes());
         boxes
     },
-    v.output_candidates.has_pending_upcast_strip()
+    v.output_candidates.has_pending_upcast_strip(),
+    None,
+    v.output_candidates.has_depth_expanding_boolean()
 );
 view!(
     BlockTransactions,
@@ -579,7 +622,9 @@ view!(
     (v.header_id, v.transactions.parity_normalized(after_write)),
     v.transactions.header_values(),
     v.transactions.retained_boxes(),
-    v.transactions.has_pending_upcast_strip()
+    v.transactions.has_pending_upcast_strip(),
+    None,
+    v.transactions.has_depth_expanding_boolean()
 );
 
 pub(super) fn normalized_tree(tree: &ErgoTree, after_write: bool) -> ErgoTree {
