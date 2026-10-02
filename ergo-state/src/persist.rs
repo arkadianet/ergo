@@ -482,6 +482,12 @@ where
 }
 
 impl PersistPipeline {
+    /// Jobs waiting in the input channel. Excludes the worker's current
+    /// batch and result channel; this is not total queued payload memory.
+    pub fn queued_jobs(&self) -> usize {
+        self.tx.as_ref().map_or(0, crossbeam_channel::Sender::len)
+    }
+
     /// Deterministic pending-result fixture, without a background worker.
     #[cfg(feature = "test-utils")]
     pub(crate) fn with_pending_failure_for_test(height: u32) -> Self {
