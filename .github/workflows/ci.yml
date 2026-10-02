@@ -113,7 +113,9 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
 
       - name: cargo fmt
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          python3 scripts/check-rust-fragments.py
 
       # NOTE: no separate `cargo check --locked --all` step — clippy runs check
       # under the hood, so a standalone check pass is pure duplicate work.

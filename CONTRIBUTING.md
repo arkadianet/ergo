@@ -51,6 +51,7 @@ Run the full local gate before submitting — it mirrors CI:
 
 ```bash
 cargo fmt --all -- --check
+python3 scripts/check-rust-fragments.py
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps

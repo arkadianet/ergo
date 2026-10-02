@@ -63,8 +63,11 @@ independent streaming-parser or cold-disk measurement.
 [Maintained replay profiles](replay-profiles.md) cover real state validation,
 queued persistence, committed/durable boundaries, residency and clean reopen.
 The [matched 1,000-block smoke](replay-profiles-2026-10-02.md) retains hashes,
-workload dimensions and 12 complete records. The dataset is too small to choose
-production cache budgets; a representative later-chain replay needs a closed,
+workload dimensions and 12 complete records. The [remediation replay smoke](data/resource-safety-2026-10-03/state-replay-assurance.json)
+repeated three 150-block constrained-profile runs on the integrated fixes,
+retaining provenance, every raw sample and root/reopen checks. All three ended
+at the expected mainnet root; host load was uncontrolled. The dataset is too
+small to choose production cache budgets; a representative later-chain replay needs a closed,
 consistent, separately owned snapshot. None is substituted with a live database.
 
 [Node performance measurements](node-performance-2026-09-26.md) retain repeatable

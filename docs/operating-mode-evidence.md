@@ -26,6 +26,7 @@ person, a deadline, or an already completed campaign.
 
 | Obligation | Owning subsystem and evidence needed to close it |
 |---|---|
+| Mode 3 complete activation lifecycle | Pruning/node maintainers: extend the bounded Scala sentinel and eviction tests into an owned full-node header-sync/activation/restart run with retained reference sentinel and section-retention observations. The operating guide's end-to-end activation gate remains open. |
 | Mode 2 external trust anchor | Bootstrap/state maintainers: preserve a Scala-produced manifest/chunk set, its reference version and hashes, and an independently reported header state root. Exercise accepted installation, altered manifest/chunk/root rejection with unchanged state, and reopen. A Rust-built tree or a trust-flag lifecycle test is insufficient. |
 | Mode 4 live soak | Node/sync maintainers: run an owned multi-peer deployment with a recorded duration, versions/configuration, snapshot anchor, header/full-tip/root observations, disconnect/reconnect and restart outcomes, selected/executed/skipped counts, and retained logs. The deterministic three-peer catch-up regression closes that seam, while the long-running live-soak obligation stays open. |
 | Broader Mode 5 historical recovery | Digest/sync maintainers: add earlier protocol eras, voting changes and more complex transaction/data-input workloads with independently captured proofs/roots. For external-window cold-open/process-death reorg campaigns, first provision an owned database with complete historical rollback/index/parameter substrate; the eight-block seeded windows intentionally cannot stand in for that snapshot. Retain both branches, interruption points and all post-reopen commitments. |
@@ -41,7 +42,9 @@ Two adjacent R05 policies have more specific current contracts. The
 [webhook connector](../ergo-api/src/v1/webhooks/worker.rs) checks every DNS answer,
 rejects mixed forbidden/public answers, connects through those checked results,
 and disables redirects/proxies; its unit tests cover the resolver boundary.
-[Peer address budgets](../ergo-p2p/src/peer.rs) normalize IPv4-mapped addresses
-and apply IPv4 `/16` subnet policy; native IPv6 remains per-host without a
-prefix quota. A future IPv6 prefix policy is a design decision with dedicated
-admission and mapped-address tests, not evidence implied by the IPv4 tests.
+[Peer address budgets](../ergo-p2p/src/peer_manager/limits.rs) normalize
+IPv4-mapped addresses and apply IPv4 `/16` or native IPv6 `/48` connection groups.
+Inbound, outbound, handshake slots and dial selection use that same grouping.
+[Regression tests](../ergo-p2p/src/peer_manager/tests.rs) cover mixed directions,
+rotation inside an IPv6 prefix, distinct prefixes and mapped-address accounting.
+The legacy `Peer::subnet` IPv4 helper is not the manager's admission key.
