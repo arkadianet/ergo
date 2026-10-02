@@ -22,6 +22,7 @@ pub mod node;
 pub mod notifier;
 pub mod peer_details;
 pub mod peer_loop;
+pub mod realtime_indexer_bridge;
 pub mod realtime_mempool_bridge;
 pub mod snapshot;
 pub mod wallet_boot;

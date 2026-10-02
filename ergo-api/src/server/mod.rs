@@ -923,8 +923,8 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // depth sampler so non-async test router builds never spawn it and repeated
     // router assembly never stacks pollers). `realtime_handle()` uses
     // `RealtimeHandle::blocks_and_mempool()`, which marks `blocks`, `mempool`,
-    // `peers`, and `tx` live; fine-grained address/box/token taps remain a
-    // follow-up.
+    // `peers`, and `tx` live. Node boot enables address/box/token classes after
+    // installing a real indexer writer observer.
     // Process singletons: the `*_once` workers below bind the FIRST bus/engine
     // they see, so every router assembly must share those exact instances — a
     // per-assembly bus/engine would leave later routers holding handles no

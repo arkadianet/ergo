@@ -1,19 +1,19 @@
 # Operator events — the frozen vocabulary
 
-The node pushes typed events on two surfaces backed by ONE producer chain:
+The node publishes coarse operator events and fine-grained changes:
 
 - **`GET /api/v1/events`** — the poll/backfill twin: a bounded coarse ring
   (seq-keyed, `?since=` filtering strictly greater).
 - **`GET /api/v1/ws`** — the realtime WebSocket bus: subscribe / resume /
   backfill with per-channel filtering.
 
-The REST ring and the WebSocket bus are two views over the same
-snapshot-diff producer chain — one differ derives the events, both surfaces
-serve them — so a consumer can mix them (poll to catch up, subscribe to
-stay current) without seeing contradictory histories. This page freezes the vocabulary: kinds, channels, required
-fields, and sequence semantics. Additions are backward-compatible (new kinds
-/ new optional fields); renames and removals are breaking and will not
-happen casually.
+Block/reorg/peer events share the snapshot-diff producer across the REST ring
+and WebSocket bus. Mempool and committed extra-index changes feed that bus
+directly; webhooks consume it too. REST-ring cursors and bus cursors are
+independent, so reconcile observations by their block or transaction identity
+rather than exchanging sequence numbers between surfaces. This page freezes
+kinds, channels, required fields and sequence semantics. New kinds and optional
+fields are backward-compatible additions.
 
 ## Coarse feed kinds (`GET /api/v1/events`)
 
@@ -47,14 +47,60 @@ Subscribe with `{"op":"subscribe","channels":[…]}`. Channels:
 | Channel | Live | Events |
 |---|---|---|
 | `blocks` | yes | `block_applied`, `reorg` |
-| `mempool` | yes | `tx_accepted`, `tx_dropped` |
+| `mempool` | yes | `tx_accepted`, `tx_dropped`, `tx_confirmed` |
 | `peers` | yes | `peer_connected`, `peer_disconnected` |
-| `tx:<id>` | yes (terminal) | `tx_confirmed` — fires once, then the channel auto-unsubscribes (`reason:"fulfilled"`). |
-| `box:<id>` | yes (terminal) | `box_spent` — same terminal semantics. |
-| `address:<addr>` / `token:<id>` | **not yet** | Subscribing answers `channel_unavailable` — the fine-grained node-internals taps are the remaining workstream-A item. |
+| `tx:<id>` | yes (terminal) | `tx_confirmed` or `tx_dropped` fulfills the subscription. |
+| `box:<id>` | with a live indexer observer | `box_spent` fulfills; `box_unspent` after resubscribing does not. |
+| `address:<addr>` | with a live indexer observer | `box_created`, `box_spent`, `box_reverted`, `box_unspent` |
+| `token:<id>` | with a live indexer observer | `token_moved`, `token_reverted` |
 
-WS event payloads use the same field vocabulary as the coarse feed (the
-`reorg` payload is identical field-for-field).
+WS event payloads use the v1 REST field vocabulary (`reorg` is identical to
+its coarse counterpart). Indexer-backed classes are enabled only after an
+actual writer observer is installed and the API has bound successfully;
+disabled indexers and boot failures without a backing store answer
+`channel_unavailable`, even when a status/query handle exists. Availability
+follows the installed writer: a later indexer halt keeps these classes enabled
+but stops new changes; inspect indexer status to distinguish halt from an idle
+feed. API-disabled nodes do not capture typed changes.
+
+Box events reuse the canonical v1 box projection, with `header_id` added for
+the block creating, spending or reversing the change. `tx_id` remains the
+creating transaction; `spent_by` identifies the spending transaction. Creation
+and its retraction route to `address:`; spending and restoration route to both
+`address:` and `box:`. A retracted creation clears `confirmed`,
+`inclusion_height`, `confirmations` and `global_index` on the box DTO. Its
+original block height is still in the event envelope. A terminal box client
+must resubscribe to observe a later restoration; only the next `box_spent`
+fulfills that renewed subscription. Restored box confirmations use the
+committed height after the orphan block was removed.
+
+Token events are per asset per box, including mint outputs. They carry
+`token_id`, decimal-string `amount`, `direction`, `tx_id` (the creating/spending
+transaction for this change), `header_id`, `box_id`, and `address`. Direction
+`in` adds this box's assets to the owner's indexed unspent set; `out` removes
+them. Transfers normally produce a spent `out` and a created `in`, possibly at
+the same address. Reorg inverses use `token_reverted` with the opposite
+direction and `confirmed:false`; amount is positive in either direction. Mint
+and burn amounts can therefore appear without an opposite pair.
+
+These feeds follow successful indexer commits and may trail the consensus tip
+or replay an indexer catch-up interval. The payload height names the indexed
+change. They are current-session observations, not an audit log: boot catch-up
+before API activation and changes outside retained undo history are not
+fabricated. Reorg events include `previous_seq` only when this observer
+published the original and retains it in its bounded recent-event ledger.
+The ledger holds at most 8192 entries and prunes against the bus cursor;
+otherwise `previous_seq` is null. Concurrent publishers can advance bus
+retention between lookup and inverse publication, so the link does not
+guarantee the original is still backfillable. Match retractions by
+box/token/transaction/header identity when rebuilding
+from REST. Slow consumers use the same bounded drop/close policy as other
+classes; they never hold an indexer commit open. The shared bus is a bounded
+best-effort source; durable webhook delivery begins at successful enqueue,
+not at every source change.
+
+Protocol genesis boxes are not extra-index rows, so their first spends do not
+produce these box/token observations.
 
 ## Sequence + resume semantics
 

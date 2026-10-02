@@ -34,6 +34,8 @@ use crate::TokenId;
 /// Reusable scratch buffers for one indexer run loop. Lives across many
 /// `apply_block` calls; cleared (not reallocated) at each scope entry.
 pub struct BlockApplyScratch {
+    pub(crate) capture_changes: bool,
+    pub(crate) box_changes: Vec<crate::events::BoxChange>,
     pub(crate) touched_addresses: HashMap<Digest32, IndexedAddress>,
     pub(crate) touched_templates: HashMap<Digest32, IndexedTemplate>,
     pub(crate) touched_tokens: HashMap<TokenId, IndexedToken>,
@@ -53,6 +55,8 @@ pub struct BlockApplyScratch {
 impl BlockApplyScratch {
     pub fn new() -> Self {
         Self {
+            capture_changes: false,
+            box_changes: Vec::new(),
             touched_addresses: HashMap::new(),
             touched_templates: HashMap::new(),
             touched_tokens: HashMap::new(),
@@ -71,6 +75,7 @@ impl BlockApplyScratch {
     /// Reset all per-block + per-tx state. Called at apply_block entry so
     /// stale data from a prior aborted apply can never leak in.
     pub(crate) fn clear_block(&mut self) {
+        self.box_changes.clear();
         self.touched_addresses.clear();
         self.touched_templates.clear();
         self.touched_tokens.clear();

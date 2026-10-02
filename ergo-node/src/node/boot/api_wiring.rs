@@ -185,6 +185,7 @@ pub(super) async fn bind(
     read_state: Arc<dyn ergo_api::NodeReadState>,
     submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
     indexer_handle: Option<ergo_indexer::IndexerHandle>,
+    indexer_event_observer: Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     mempool: &mut ergo_mempool::Mempool,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
@@ -377,6 +378,11 @@ pub(super) async fn bind(
             ergo_api::realtime_handle().bus,
         ),
     )));
+    // Restore any durable webhook cursor before activating this observer.
+    // Disabled indexers and boot failures without a store have no observer.
+    if let Some(observer) = indexer_event_observer {
+        observer.activate(ergo_api::realtime_handle().bus);
+    }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
         Some(peer_connect_tx.clone()),
