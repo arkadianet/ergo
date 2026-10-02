@@ -201,7 +201,18 @@ object ErgoSerdeOracle {
           surface match {
             case "ergo_tree" =>
               val t = tree.deserializeErgoTree(bytes)
-              acc(t.bytesHex)
+              // Re-serialize from the parsed structure, like every other
+              // surface below. `t.bytesHex` is the RETAINED input slice, so
+              // reporting it compares Rust's fresh serialization against bytes
+              // the reference never re-encoded: any tree that reads in a
+              // non-canonical form (a declared size that is not the body's
+              // length, a pre-v3 Upcast, a compact Coll[Coll[T]] prefix) then
+              // reads as a canonical divergence when both writers in fact
+              // agree. Retained-input-byte parity is a real property, but it
+              // is `propositionBytes` parity, not canonical re-encoding, and
+              // it is checked by comparing the input to the reference's own
+              // parse rather than by this line.
+              acc(hex(tree.serializeErgoTree(t)))
             case "sigma_type" =>
               val tpe = TypeSerializer.deserialize(SigmaSerializer.startReader(bytes))
               acc {
