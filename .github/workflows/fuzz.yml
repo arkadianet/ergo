@@ -198,6 +198,13 @@ jobs:
         if: steps.cargo-fuzz-bin-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz --version ${{ steps.rust.outputs.fuzz }} --locked
 
+      # cargo-fuzz has no --locked option. Resolve its separate workspace
+      # against the committed lock before building, then detect any drift even
+      # when libFuzzer reports a crash.
+      - name: check locked fuzz dependencies
+        working-directory: ergo-difftest
+        run: cargo +${{ steps.rust.outputs.nightly }} metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+
       # Bounded run: build (ASan) + a coverage-guided run seeded from the
       # committed corpus/<surface>, capped at 10 minutes wall-clock per target
       # (fail-fast: false means one target's crash doesn't stop the others).
@@ -216,8 +223,14 @@ jobs:
         env:
           ASAN_OPTIONS: malloc_context_size=0
         run: |
-          cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" --locked -- \
+          cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" -- \
             -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1
+
+      - name: verify fuzz lockfile unchanged
+        if: always()
+        run: |
+          git ls-files --error-unmatch ergo-difftest/fuzz/Cargo.lock
+          git diff --exit-code -- ergo-difftest/fuzz/Cargo.lock
 
       - name: upload crash artifacts
         if: failure()
