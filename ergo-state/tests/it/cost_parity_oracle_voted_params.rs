@@ -13,8 +13,9 @@
 //!
 //! **Running**
 //! ```
-//! cargo test --release --features test-helpers \
-//!   --test cost_parity_oracle_voted_params -- --ignored --nocapture
+//! cargo test --locked --release -p ergo-state --features test-helpers \
+//!   --test it cost_parity_oracle_voted_params::cost_parity_against_scala_corpus_sampled \
+//!   -- --ignored --exact --nocapture
 //! ```
 //! No running node or StateStore required once vectors are on disk.
 //!
@@ -28,6 +29,10 @@
 //!
 //! Pins per-tx block cost against the Scala oracle for the voted-parameters
 //! era — divergence here means our cost model has drifted from Scala.
+//!
+//! Activation-boundary cost parity at the v2 transition (height 417792) and
+//! EIP-37 remains unverified here: Scala-produced activation fixtures and
+//! their pre-extracted historical UTXO snapshots are still missing.
 
 #![cfg(feature = "test-helpers")]
 
@@ -439,22 +444,12 @@ fn cost_parity_against_scala_corpus_sampled() {
         "[cost_parity] {matches}/{total} exact matches ({} corpus entries)",
         corpus.len()
     );
+    assert!(
+        total > 0,
+        "corpus produced no cost comparisons; check matching headers and extensions"
+    );
     assert_eq!(
         mismatches, 0,
         "{mismatches}/{total} cost mismatches — see stderr for details"
     );
-}
-
-#[test]
-#[ignore = "requires extracted corpus + pre-extracted UTXO snapshots"]
-fn cost_parity_at_v2_activation_h_417792() {
-    // v1 → v2 forced-activation oracle.
-    eprintln!("[cost_parity_oracle] STUB: v2 activation fixture pending");
-}
-
-#[test]
-#[ignore = "requires soft-fork activation fixture"]
-fn cost_parity_at_eip37_activation() {
-    // EIP-37 activation: rule 409 disabled at this epoch boundary.
-    eprintln!("[cost_parity_oracle] STUB: EIP-37 activation fixture pending");
 }
