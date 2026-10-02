@@ -326,10 +326,9 @@ pub(super) fn setup(
     // `apply_block_digest` (no batched AVL replay), so neither applies.
     if let Some(s) = store.as_utxo_mut() {
         if config.ibd_flush_interval > 0 {
-            s.set_ibd_mode(true, config.ibd_flush_interval);
+            s.set_ibd_mode(true, config.ibd_flush_interval)?;
             info!(
                 flush_interval = config.ibd_flush_interval,
-                max_replay_blocks = config.ibd_flush_interval,
                 "IBD durability enabled",
             );
         }
@@ -341,7 +340,7 @@ pub(super) fn setup(
         // degrades to 1 job per batch when the queue stays empty between
         // blocks. In-flight memory is bounded by queue_depth × per-job
         // serialized AVL/undo size (~100-500KB), so 64 ≈ 32MB upper bound.
-        s.enable_persist_pipeline(64);
+        s.enable_persist_pipeline(64)?;
         info!(
             queue_depth = 64,
             "persist pipeline started in background thread"

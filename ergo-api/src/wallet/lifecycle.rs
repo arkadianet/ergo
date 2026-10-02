@@ -34,6 +34,7 @@ pub(crate) fn map_err(e: super::WalletAdminError) -> (StatusCode, Json<serde_jso
         E::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
         E::StaleChainTip(_) => (StatusCode::CONFLICT, "stale_chain_tip"),
         E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        E::ShuttingDown => (StatusCode::SERVICE_UNAVAILABLE, "shutting_down"),
         E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
         E::ScanInvalidated => (StatusCode::CONFLICT, "scan_invalidated"),
         // Native-only typed variants: never constructed on the Scala-compat path

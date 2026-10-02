@@ -59,6 +59,8 @@ pub(super) mod send;
 /// acquires the locks it needs at the granularity the arm previously
 /// did inline.
 pub(super) struct WriterContext<'a> {
+    pub rescan: &'a Arc<crate::wallet_boot::RescanControl>,
+    pub rescan_workers: &'a parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub storage: &'a Arc<RwLock<SecretStorage>>,
     pub state: &'a Arc<RwLock<WalletState>>,
     pub db: &'a Arc<redb::Database>,

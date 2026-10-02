@@ -221,7 +221,7 @@ fn finalize_leaf(
             secret, r_scalar, ..
         } => {
             let e = challenge_to_scalar(challenge);
-            let z = r_scalar + e * secret;
+            let z = *r_scalar + e * *secret;
             Ok((z.to_bytes().into(), 0))
         }
         LeafState::Simulated { z_bytes, .. } => Ok((z_bytes, 0)),

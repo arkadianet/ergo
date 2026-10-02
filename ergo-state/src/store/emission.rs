@@ -628,7 +628,7 @@ mod tests {
             let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
             let (mut store, seed) = seeded_store(&dir.path().join("state.redb"));
             if pipeline {
-                store.enable_persist_pipeline(8);
+                store.enable_persist_pipeline(8).unwrap();
             }
             let tx = transaction(seed, 1);
             let expected = box_id(&output_box(&tx).unwrap()).unwrap();
@@ -780,7 +780,7 @@ mod tests {
             );
             assert_eq!(store.emission_identity(&target).unwrap(), None);
             if pipeline {
-                store.enable_persist_pipeline(8);
+                store.enable_persist_pipeline(8).unwrap();
             }
             // Leave a persistence job in flight for rollback to flush.
             apply(&mut store, height + 2, vec![], 3);

@@ -160,6 +160,10 @@ fn seed_disk_for_reconcile_at(
     params: &ActiveProtocolParameters,
 ) -> [u8; 32] {
     assert_eq!(height % 1024, 0);
+    {
+        let mut store = StateStore::open(db_path).unwrap();
+        store.test_force_set_committed_height(height).unwrap();
+    }
     let db = Arc::new(Database::create(db_path).unwrap());
 
     // Build extension for these params, then a header pointing at it.
@@ -349,6 +353,10 @@ fn open_rejects_corrupt_voted_params_row_at_expected_key() {
 fn open_fails_loud_when_chain_index_missing_for_required_height() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("state.redb");
+    {
+        let mut store = StateStore::open(&db_path).unwrap();
+        store.test_force_set_committed_height(1024).unwrap();
+    }
 
     // Set tip = 1024 in chain_state_meta but write NOTHING into
     // chain_index/headers/block_sections — reconcile must fail loud

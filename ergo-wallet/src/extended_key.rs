@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_master_key_post_1627() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let xsk = ExtendedSecretKey::derive_master_key(&seed, false)
+        let xsk = ExtendedSecretKey::derive_master_key(&seed[..], false)
             .expect("standard BIP32 master key must derive");
         assert_eq!(
             hex::encode(xsk.secret_bytes()),
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_first_hardened_child() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         // m/0' = hardened index 0 = HARDENED_OFFSET | 0
         let child = master
             .derive_child(HARDENED_OFFSET)
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_two_step_derive_at_path() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         // m/0'/1
         let path: DerivationPath = "m/0'/1".parse().unwrap();
         let leaf = master
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn extended_pubkey_from_xsk_returns_compressed_secp256k1_pubkey() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         let xpub = master.public_key();
         // BIP32 Vector 1, master pubkey (compressed sec1):
         // 0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2
@@ -503,7 +503,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
+        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().unwrap().compressed_bytes();
@@ -527,7 +527,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().compressed_bytes();
@@ -549,7 +549,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
+        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
         let expected_master_hex: &str = "<EXTRACT_FROM_SCALA>";
         let expected_master_chain_hex: &str = "<EXTRACT_FROM_SCALA>";
         assert_eq!(hex::encode(master.secret_bytes()), expected_master_hex);

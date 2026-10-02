@@ -70,6 +70,11 @@ pub struct AccountsState {
 pub(super) fn map_wallet_err(e: WalletAdminError) -> Response {
     use WalletAdminError as E;
     let (reason, message, detail): (Reason, &str, String) = match e {
+        E::ShuttingDown => (
+            Reason::ShuttingDown,
+            "the wallet is shutting down",
+            String::new(),
+        ),
         E::Uninitialized => (
             Reason::WalletUninitialized,
             "the wallet is not initialized",

@@ -135,6 +135,9 @@ pub(super) struct ApiBind {
     pub api_addr: Option<std::net::SocketAddr>,
     pub api_handle: Option<JoinHandle<()>>,
     pub api_shutdown_tx: Option<oneshot::Sender<()>>,
+    pub wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
+    pub wallet_cancel: tokio::sync::watch::Sender<bool>,
+    pub wallet_handle: JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>,
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
@@ -277,7 +280,9 @@ pub(super) async fn bind(
     let submit_handle: Arc<dyn super::super::wallet_bridge::TxSubmitter> = Arc::new(
         super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
     );
-    tokio::spawn(super::super::wallet_bridge::run_wallet_writer(
+    let wallet_rescan = Arc::new(crate::wallet_boot::RescanControl::default());
+    let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);
+    let wallet_handle = tokio::spawn(super::super::wallet_bridge::run_wallet_writer_supervised(
         wallet_rx,
         wallet_storage,
         wallet_state,
@@ -288,11 +293,15 @@ pub(super) async fn bind(
         // Clone the mempool view for the wallet's unconfirmed-balance
         // overlay; the original moves into ServerCtx below.
         mempool_view.clone(),
+        wallet_rescan.clone(),
+        wallet_shutdown,
     ));
-    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> =
-        Arc::new(super::super::wallet_bridge::NodeWalletAdmin::new(wallet_tx));
+    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(
+        super::super::wallet_bridge::NodeWalletAdmin::with_rescan(wallet_tx, wallet_rescan.clone()),
+    );
     let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
         wallet: wallet_state_for_hook,
+        rescan: wallet_rescan.clone(),
         db: db_arc.clone(),
         store: wallet_store,
     });
@@ -303,6 +312,9 @@ pub(super) async fn bind(
             api_addr: None,
             api_handle: None,
             api_shutdown_tx: None,
+            wallet_rescan,
+            wallet_cancel,
+            wallet_handle,
             live_wallet_hook: Some(hook),
         });
     };
@@ -328,6 +340,9 @@ pub(super) async fn bind(
                 api_addr: None,
                 api_handle: None,
                 api_shutdown_tx: None,
+                wallet_rescan,
+                wallet_cancel,
+                wallet_handle,
                 live_wallet_hook: Some(hook),
             });
         }
@@ -440,6 +455,9 @@ pub(super) async fn bind(
         api_addr: Some(actual),
         api_handle: Some(handle),
         api_shutdown_tx: Some(api_shutdown_tx),
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle,
         live_wallet_hook: Some(hook),
     })
 }

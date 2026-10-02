@@ -235,7 +235,19 @@ impl StateStore {
                 Err(e) => return Err(e.into()),
             };
             match from_table {
-                Some(cs) => cs,
+                Some(cs) => {
+                    if cs.best_full_block_height != height {
+                        return Err(StateError::DbCorruption {
+                            table: "chain_state_meta",
+                            key: "chain_state".into(),
+                            reason: format!(
+                                "full-block height {} disagrees with AVL height {height}",
+                                cs.best_full_block_height
+                            ),
+                        });
+                    }
+                    cs
+                }
                 None if height > 0 => {
                     // Derive from committed state: best_full_block = current tip.
                     // best_header defaults to same (header-first sync hasn't started).

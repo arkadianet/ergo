@@ -156,7 +156,7 @@ pub(crate) fn tx_hints_bag_to_dto(
         match hint {
             Hint::OwnCommitment(oc) => HintDto::OwnCommitment {
                 image: sigma_boolean_to_json(&oc.image),
-                secret: hex::encode(oc.secret_randomness),
+                secret: hex::encode(&oc.secret_randomness[..]),
                 commitment: fpm_to_json(&oc.commitment),
                 position: node_position_to_str(&oc.position.positions),
             },
@@ -284,7 +284,7 @@ pub(crate) fn tx_hints_bag_from_dto(
                 };
                 Ok(Hint::OwnCommitment(OwnCommitment {
                     image: sb,
-                    secret_randomness: parse_secret(secret)?,
+                    secret_randomness: parse_secret(secret)?.into(),
                     commitment: fpm_from_json(commitment)?,
                     position: pos,
                 }))

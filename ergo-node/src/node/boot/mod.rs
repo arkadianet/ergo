@@ -145,6 +145,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -163,6 +166,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -883,6 +889,9 @@ async fn run_inner_with_backend(
     let api_handle = api_bind.api_handle;
     let api_shutdown_tx = api_bind.api_shutdown_tx;
     let live_wallet_hook = api_bind.live_wallet_hook;
+    let wallet_rescan = api_bind.wallet_rescan;
+    let wallet_cancel = api_bind.wallet_cancel;
+    let wallet_handle = api_bind.wallet_handle;
 
     // Inbound P2P listener (opt-in via `[peers] bind_addr`). Without it
     // the node runs outbound-only: peers we dialed feed us blocks/txs
@@ -1000,6 +1009,7 @@ async fn run_inner_with_backend(
         // wallet routes process without erroring (UTXO-dependent reads
         // see an empty set; secret-only ops like init/unlock work).
         // Mode-aware route gating is tracked separately as feature work.
+        wallet_rescan: wallet_rescan.clone(),
         wallet_hook: if sync.backend_is_utxo {
             live_wallet_hook
         } else {
@@ -1112,6 +1122,9 @@ async fn run_inner_with_backend(
         api_shutdown_tx,
         loop_handle,
         api_handle,
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle: Some(wallet_handle),
         inbound_handle,
         shadow_task_handle: sync.shadow_task_handle,
         indexer_cancel: sync.indexer_cancel,

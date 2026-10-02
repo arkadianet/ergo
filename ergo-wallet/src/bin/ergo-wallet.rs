@@ -280,7 +280,7 @@ fn generate(a: GenerateArgs) -> Result<(), WalletError> {
         n => return Err(WalletError::UnsupportedWordCount(n as usize)),
     };
     let m = Mnemonic::generate(strength)?;
-    let seed = Zeroizing::new(m.to_seed(""));
+    let seed = m.to_seed("");
     let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     let pk_hex = hex::encode(pk);
 
@@ -300,7 +300,7 @@ fn generate(a: GenerateArgs) -> Result<(), WalletError> {
 fn import(a: ImportArgs) -> Result<(), WalletError> {
     let phrase = a.source.read()?;
     let m = Mnemonic::import(&phrase)?;
-    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let seed = m.to_seed(&a.passphrase);
     let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     println!("Mnemonic validates.");
     println!("miner_public_key_hex: {}", hex::encode(pk));
@@ -313,7 +313,7 @@ fn import(a: ImportArgs) -> Result<(), WalletError> {
 fn derive(a: DeriveArgs) -> Result<(), WalletError> {
     let phrase = a.source.read()?;
     let m = Mnemonic::import(&phrase)?;
-    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let seed = m.to_seed(&a.passphrase);
     let master = ExtendedSecretKey::derive_master_key(seed.as_ref(), false)?;
     let path: DerivationPath = a.path.parse()?;
     let leaf = master.derive_at_path(&path)?;
@@ -326,7 +326,7 @@ fn derive(a: DeriveArgs) -> Result<(), WalletError> {
 fn pubkey(a: PubkeyArgs) -> Result<(), WalletError> {
     let phrase = a.source.read()?;
     let m = Mnemonic::import(&phrase)?;
-    let seed = Zeroizing::new(m.to_seed(&a.passphrase));
+    let seed = m.to_seed(&a.passphrase);
     let pk = ergo_wallet::miner_pubkey_for_seed(seed.as_ref())?;
     // Single line, 66-char hex. Shell-pipe-friendly. Post-1627 only;
     // pre-1627 legacy wallet support not yet implemented.
