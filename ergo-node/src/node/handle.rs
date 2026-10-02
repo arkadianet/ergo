@@ -170,8 +170,10 @@ impl RunHandle {
         // receiver was already dropped (the builder already exited
         // for another reason).
         let _ = self.anchor_builder_cancel_tx.send(true);
-        if let Some(mut h) = self.anchor_builder_handle.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
+        // Keep each owned async handle on self while joining: if this future
+        // is cancelled, Drop can still abort it rather than detach the task.
+        if let Some(h) = self.anchor_builder_handle.as_mut() {
+            if tokio::time::timeout(Duration::from_secs(5), &mut *h)
                 .await
                 .is_err()
             {
@@ -180,9 +182,10 @@ impl RunHandle {
                     "anchor builder did not stop within timeout; aborting"
                 );
                 h.abort();
-                let _ = h.await;
+                let _ = (&mut *h).await;
             }
         }
+        self.anchor_builder_handle.take();
         // Mining engine cancel — latched watch + bounded await, same pattern.
         // The coordinator checks the cancel flag at every await (between builds
         // and during backoff), so it exits within at most one candidate build of
@@ -193,8 +196,8 @@ impl RunHandle {
         // send-error ignored (the engine may already have exited when its intent
         // sender dropped).
         let _ = self.mining_engine_cancel_tx.send(true);
-        if let Some(mut h) = self.mining_engine_handle.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
+        if let Some(h) = self.mining_engine_handle.as_mut() {
+            if tokio::time::timeout(Duration::from_secs(5), &mut *h)
                 .await
                 .is_err()
             {
@@ -203,9 +206,10 @@ impl RunHandle {
                     "mining engine did not stop within timeout; aborting"
                 );
                 h.abort();
-                let _ = h.await;
+                let _ = (&mut *h).await;
             }
         }
+        self.mining_engine_handle.take();
         // Join the build-worker thread — AFTER the coordinator future is gone
         // (returned or aborted above), so its request `Sender` has dropped and
         // the worker's `recv()` has erred. The worker then drains its (≤1)
@@ -348,35 +352,39 @@ impl RunHandle {
         }
         // Shadow watch — observation-only; abort + await so the task is
         // fully torn down (and its reader dropped) before shutdown returns.
-        if let Some(h) = self.shadow_task_handle.take() {
+        if let Some(h) = self.shadow_task_handle.as_mut() {
             h.abort();
-            let _ = h.await;
+            let _ = (&mut *h).await;
         }
+        self.shadow_task_handle.take();
         if let Some(h) = self.inbound_handle.take() {
             h.abort();
         }
-        if let Some(mut h) = self.api_handle.take() {
+        if let Some(h) = self.api_handle.as_mut() {
             // Race graceful drain against a 5-second cap. Axum
             // typically drains in milliseconds once the channel
             // closes; the timeout protects against pathologically
-            // slow clients holding a handler open. We pass `&mut h`
+            // slow clients holding a handler open. We pass `&mut *h`
             // (not `h`) so the JoinHandle survives a timeout — on
-            // elapse we abort and then await the handle so the task
+            // elapse we abort and then await the retained handle so the task
             // is actually torn down (and the bound port released)
-            // before this future returns. Without the post-abort
+            // before this future returns. The handle remains on self while
+            // awaited, so cancelling this drain leaves Drop able to abort it.
+            // Without the post-abort
             // await, `abort()` only signals cancellation and the
             // listener socket can outlive `RunHandle::shutdown()`.
             // (A prior version dropped the JoinHandle inside `timeout`,
             // leaving no way to observe termination on the slow-client
             // path.)
-            if tokio::time::timeout(Duration::from_secs(5), &mut h)
+            if tokio::time::timeout(Duration::from_secs(5), &mut *h)
                 .await
                 .is_err()
             {
                 h.abort();
-                let _ = h.await;
+                let _ = (&mut *h).await;
             }
         }
+        self.api_handle.take();
     }
 }
 
@@ -506,3 +514,6 @@ impl Drop for RunHandle {
         drop(self.mining_worker_handle.take());
     }
 }
+
+#[cfg(test)]
+mod tests;
