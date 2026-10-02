@@ -78,3 +78,9 @@ name = "p2p_message"
 path = "fuzz_targets/p2p_message.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "p2p_delivery"
+path = "fuzz_targets/p2p_delivery.rs"
+test = false
+doc = false

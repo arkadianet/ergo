@@ -171,7 +171,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr, p2p_frame, p2p_handshake, p2p_message]
+        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr, p2p_frame, p2p_handshake, p2p_message, p2p_delivery]
     steps:
       - uses: actions/checkout@v4
         with:
