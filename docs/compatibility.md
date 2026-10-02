@@ -235,9 +235,12 @@ Be aware of these before depending on the node.
   sync-info, and API seams, and syncs headers from live peers (the
   executor's header pipeline is backend-agnostic, so a digest store
   validates and persists headers exactly as a UTXO store does).
-  AD-proof block replay is oracle-pinned only against the mainnet window
-  in `test-vectors/mode5/`; broader corpus parity (further mainnet
-  windows, testnet, negatives) and the reorg-abort re-anchor remain open.
+  AD-proof block replay is oracle-pinned against the mainnet voting-boundary
+  window and additional mainnet/testnet windows in `test-vectors/mode5/`.
+  The additional corpus exercises full transaction validation, root-preserving
+  rollback/replay, and corrupted-proof rejection with unchanged committed
+  state (`ergo-sync/tests/it/mode5_corpus_breadth.rs`). Broader historical-era
+  coverage and reorg-abort recovery remain open.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference
