@@ -624,3 +624,316 @@ fn complete_side_branch_can_beat_full_tip_while_best_headers_withhold_bodies() {
     assert_eq!(store.chain_state_meta().best_header_id, withheld_tip);
     assert_eq!(executor.take_applied_blocks(), ids[1..]);
 }
+
+// ----- interrupted reorg recovery -----
+
+/// Copy the established fork scaffold into an owned crash-test database. The
+/// abandoned branch is synthetic; replacement blocks and expected roots are
+/// the externally captured mainnet blocks 1..=3 used by prepare_chain.
+fn crash_backend(
+    path: &std::path::Path,
+    digest_mode: bool,
+) -> (ergo_state::StateBackendKind, Vec<[u8; 32]>) {
+    let (source_dir, source, ids, old3) = competing_fixture();
+    if !digest_mode {
+        drop(source);
+        std::fs::copy(source_dir.path().join("state.redb"), path).unwrap();
+        return (
+            ergo_state::StateBackendKind::Utxo(StateStore::open(path).unwrap()),
+            ids,
+        );
+    }
+    let genesis = ergo_chain_spec::GenesisParams::mainnet().state_digest;
+    let mut digest = ergo_state::DigestStateStore::open(
+        path,
+        ergo_validation::scala_launch(),
+        ergo_chain_spec::VotingParams::mainnet(),
+        genesis,
+    )
+    .unwrap();
+    for id in &ids {
+        let raw = source.get_header(id).unwrap().unwrap();
+        let meta = source.get_header_meta(id).unwrap().unwrap();
+        digest
+            .store_validated_header(
+                id,
+                &raw,
+                &meta,
+                Some((meta.height, meta.cumulative_score.clone())),
+            )
+            .unwrap();
+        let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+        let expected = ExpectedSections::from_header(
+            id,
+            header.transactions_root.as_bytes(),
+            header.extension_root.as_bytes(),
+            header.ad_proofs_root.as_bytes(),
+        );
+        for (section, kind) in [
+            (expected.transactions_id, 102),
+            (expected.extension_id, 108),
+            (expected.ad_proofs_id, 104),
+        ] {
+            if let Some(bytes) = source.get_block_section(&section).unwrap() {
+                digest
+                    .store_block_section_typed(&section, &bytes, kind)
+                    .unwrap();
+            }
+        }
+    }
+    let raw = digest.get_header(&ids[0]).unwrap().unwrap();
+    let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+    let mut state = digest.chain_state_meta();
+    state.best_full_block_id = ids[0];
+    state.best_full_block_height = 1;
+    digest
+        .apply_block_digest(*header.state_root.as_bytes(), state, None)
+        .unwrap();
+    let old2 = source.get_header_meta(&old3).unwrap().unwrap().parent_id;
+    for id in [old2, old3] {
+        let raw = source.get_header(&id).unwrap().unwrap();
+        let meta = source.get_header_meta(&id).unwrap().unwrap();
+        digest
+            .store_validated_header(&id, &raw, &meta, None)
+            .unwrap();
+        let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+        let mut state = digest.chain_state_meta();
+        state.best_full_block_id = id;
+        state.best_full_block_height = meta.height;
+        digest
+            .apply_block_digest(*header.state_root.as_bytes(), state, None)
+            .unwrap();
+    }
+    (ergo_state::StateBackendKind::Digest(digest), ids)
+}
+
+fn promote_crash_branch(store: &mut ergo_state::StateBackendKind, id: [u8; 32], score: u8) {
+    let bytes = store.get_header(&id).unwrap().unwrap();
+    let mut meta = store.get_header_meta(&id).unwrap().unwrap();
+    meta.cumulative_score = vec![score];
+    store
+        .store_validated_header(&id, &bytes, &meta, Some((meta.height, vec![score])))
+        .unwrap();
+}
+
+fn backend_root(store: &mut ergo_state::StateBackendKind) -> [u8; 33] {
+    match store {
+        ergo_state::StateBackendKind::Utxo(store) => *store.root_digest().as_bytes(),
+        ergo_state::StateBackendKind::Digest(store) => store.root_digest(),
+    }
+}
+
+/// Internal subprocess entry point. The parent kills this process while the
+/// database and executor are still live, so shutdown/Drop cannot make the
+/// restart test accidentally exercise only a clean close.
+#[test]
+#[ignore = "subprocess entry point; exercised by reorg_interrupted_* tests"]
+fn reorg_crash_child() {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("ERGO_REORG_TEST_DATABASE").expect("parent supplies an owned database"),
+    );
+    let digest_mode = std::env::var("ERGO_REORG_TEST_BACKEND").unwrap() == "digest";
+    let phase = std::env::var("ERGO_REORG_TEST_PHASE").unwrap();
+    let (mut backend, ids) = crash_backend(&path, digest_mode);
+    // A shorter, heavier AVAILABLE replacement suffix commits rollback even
+    // though its header height is lower than the abandoned full-block tip.
+    promote_crash_branch(&mut backend, ids[1], 9);
+    let raw = backend.get_header(&ids[2]).unwrap().unwrap();
+    let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+    let sections = ExpectedSections::from_header(
+        &ids[2],
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    let transactions = backend
+        .get_block_section(&sections.transactions_id)
+        .unwrap()
+        .unwrap();
+    std::fs::write(path.with_extension("transactions"), transactions).unwrap();
+    withhold_transactions(&backend, sections.transactions_id);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(3);
+    assert!(matches!(
+        executor
+            .rollback_full_chain_to_best_header(&mut backend, &mut coordinator, None)
+            .unwrap(),
+        super::ReorgOutcome::Performed
+    ));
+    assert_eq!(backend.chain_state_meta().best_full_block_id, ids[0]);
+    if phase == "partial_apply" {
+        executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+        assert_eq!(backend.chain_state_meta().best_full_block_id, ids[1]);
+    } else {
+        assert_eq!(phase, "rollback");
+    }
+    let tip = backend.chain_state_meta().best_full_block_height;
+    let header_bytes = backend.get_header(&ids[tip as usize - 1]).unwrap().unwrap();
+    let header = read_header(&mut VlqReader::new(&header_bytes)).unwrap();
+    assert_eq!(backend_root(&mut backend), *header.state_root.as_bytes());
+    std::fs::write(path.with_extension("ready"), b"committed").unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+struct CrashChild(std::process::Child);
+impl Drop for CrashChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn interrupted_reorg_restarts(digest_mode: bool, phase: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.redb");
+    let output = std::fs::File::create(directory.path().join("child.log")).unwrap();
+    let mut child = CrashChild(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "executor::relay_tests::reorg_crash_child",
+                "--nocapture",
+            ])
+            .env("ERGO_REORG_TEST_DATABASE", &path)
+            .env(
+                "ERGO_REORG_TEST_BACKEND",
+                if digest_mode { "digest" } else { "utxo" },
+            )
+            .env("ERGO_REORG_TEST_PHASE", phase)
+            .stdout(output.try_clone().unwrap())
+            .stderr(output)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    while !path.with_extension("ready").exists() {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            panic!(
+                "crash subprocess exited before checkpoint ({status}): {}",
+                std::fs::read_to_string(directory.path().join("child.log")).unwrap()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "crash subprocess did not reach {phase}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.0.kill().unwrap();
+    let status = child.0.wait().unwrap();
+    assert!(!status.success(), "interruption must bypass clean shutdown");
+    let mut backend = if digest_mode {
+        ergo_state::StateBackendKind::Digest(
+            ergo_state::DigestStateStore::open(
+                &path,
+                ergo_validation::scala_launch(),
+                ergo_chain_spec::VotingParams::mainnet(),
+                ergo_chain_spec::GenesisParams::mainnet().state_digest,
+            )
+            .unwrap(),
+        )
+    } else {
+        ergo_state::StateBackendKind::Utxo(StateStore::open(&path).unwrap())
+    };
+    let headers = load_headers();
+    let ids: Vec<[u8; 32]> = headers
+        .iter()
+        .take(3)
+        .map(|row| {
+            hex::decode(row["id"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        })
+        .collect();
+    let expected_height = if phase == "rollback" { 1 } else { 2 };
+    assert_eq!(
+        backend.chain_state_meta().best_full_block_height,
+        expected_height
+    );
+    let expected_header = read_header(&mut VlqReader::new(
+        &hex::decode(
+            headers[expected_height as usize - 1]["bytes"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        backend_root(&mut backend),
+        *expected_header.state_root.as_bytes()
+    );
+    assert_eq!(backend.chain_state_meta().best_header_id, ids[1]);
+    let params_before = backend.active_params().clone();
+    let raw = backend.get_header(&ids[2]).unwrap().unwrap();
+    let header = read_header(&mut VlqReader::new(&raw)).unwrap();
+    let sections = ExpectedSections::from_header(
+        &ids[2],
+        header.transactions_root.as_bytes(),
+        header.extension_root.as_bytes(),
+        header.ad_proofs_root.as_bytes(),
+    );
+    backend
+        .store_block_section_typed(
+            &sections.transactions_id,
+            &std::fs::read(path.with_extension("transactions")).unwrap(),
+            102,
+        )
+        .unwrap();
+    promote_crash_branch(&mut backend, ids[2], 10);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut coordinator = SyncCoordinator::new(expected_height);
+    executor.rebuild_block_context(&backend).unwrap();
+    executor
+        .recover_coordinator(&backend, &mut coordinator)
+        .unwrap();
+    executor.try_apply_next_blocks(&mut backend, &mut coordinator, Instant::now(), None);
+    assert_eq!(
+        backend.chain_state_meta().best_full_block_id,
+        ids[2],
+        "restart must recover the replacement suffix: {:?}",
+        executor.last_block_apply_error()
+    );
+    let expected_header = read_header(&mut VlqReader::new(
+        &hex::decode(headers[2]["bytes"].as_str().unwrap()).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        backend_root(&mut backend),
+        *expected_header.state_root.as_bytes(),
+        "final root must match external mainnet bytes"
+    );
+    assert_eq!(backend.active_params(), &params_before);
+    assert_eq!(
+        executor.take_applied_blocks(),
+        ids[expected_height as usize..]
+    );
+    assert_eq!(coordinator.sync_state().best_full_block_height(), 3);
+}
+
+#[test]
+fn reorg_interrupted_utxo_rollback_recovers_after_process_death() {
+    interrupted_reorg_restarts(false, "rollback");
+}
+#[test]
+fn reorg_interrupted_utxo_partial_apply_recovers_after_process_death() {
+    interrupted_reorg_restarts(false, "partial_apply");
+}
+#[test]
+fn reorg_interrupted_digest_rollback_recovers_after_process_death() {
+    interrupted_reorg_restarts(true, "rollback");
+}
+#[test]
+fn reorg_interrupted_digest_partial_apply_recovers_after_process_death() {
+    interrupted_reorg_restarts(true, "partial_apply");
+}
