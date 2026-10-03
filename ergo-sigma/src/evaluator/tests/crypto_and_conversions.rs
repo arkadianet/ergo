@@ -704,11 +704,6 @@ fn methodcall_context_getvarfrominput_v6_reads_other_inputs() {
     );
 }
 
-/// EIP-50 v6 `SGlobal.deserializeTo[T]` (MethodCall 106, 4) — Scala
-/// `SGlobalMethods.deserializeTo_eval` delegates to
-/// `DataSerializer.deserialize(typeArg, reader)`, which reads raw
-/// typed value bytes (NOT an expression body). For `SBoolean`,
-/// `DataSerializer.deserialize` is `r.getUByte() != 0` — non-strict,
 /// Zero-arg v6 methods are serialized by the compiler as `0xDB PropertyCall`
 /// (not `0xDC MethodCall`), so they must resolve through the shared no-arg
 /// dispatch table. Pins the dispatch unification: bitwiseInverse (numeric +
@@ -789,6 +784,11 @@ fn zero_arg_v6_methods_resolve_via_property_call() {
     );
 }
 
+/// EIP-50 v6 `SGlobal.deserializeTo[T]` (MethodCall 106, 4) — Scala
+/// `SGlobalMethods.deserializeTo_eval` delegates to
+/// `DataSerializer.deserialize(typeArg, reader)`, which reads raw
+/// typed value bytes (NOT an expression body). For `SBoolean`,
+/// `DataSerializer.deserialize` is `r.getUByte() != 0` — non-strict,
 /// so any nonzero byte reads as `true`. Pin the boolean branch
 /// here; the multi-type round-trip with serialize is pinned by
 /// `methodcall_global_serialize_roundtrips_via_deserializeto`.
