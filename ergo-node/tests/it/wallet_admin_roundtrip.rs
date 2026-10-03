@@ -1726,3 +1726,57 @@ async fn native_signed_private_delivery_preserves_bytes_without_wallet_unlock_or
     }
     assert_eq!(submitter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+/// The real writer journals a future operation while locked, protects its
+/// pinned inputs against duplicate jobs, and releases them on cancellation.
+#[tokio::test]
+async fn mining_jobs_are_finite_reserved_and_cancellable_while_locked() {
+    use ergo_api::wallet::native::dto::{WalletJobRequest, WalletJobState, WalletJobTask};
+    use ergo_state::wallet::tables::WALLET_BOXES;
+    use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
+    let (admin, db, _dir) = spawn_writer(Arc::new(StubTxSubmitter));
+    admin.init("pw".into(), String::new(), 24).await.unwrap();
+    let owned = WalletBox {
+        box_id: [0xA0; 32],
+        creation_tx_id: [0xB0; 32],
+        creation_output_index: 0,
+        creation_height: 100,
+        value: 1_000_000,
+        assets: vec![([0xC0; 32], 42)],
+        status: BoxStatus::Confirmed,
+        provenance: BoxProvenance::Owned,
+    };
+    let write = db.begin_write().unwrap();
+    write
+        .open_table(WALLET_BOXES)
+        .unwrap()
+        .insert(owned.box_id, bincode::serialize(&owned).unwrap())
+        .unwrap();
+    write.commit().unwrap();
+    let request = WalletJobRequest {
+        label: "approved renewal".into(),
+        task: WalletJobTask::Renew {
+            box_ids: vec![hex::encode(owned.box_id)],
+        },
+        not_before_height: 201,
+        expires_at_height: 921,
+        max_attempts: 2,
+    };
+    assert!(admin.native_status().await.unwrap().locked);
+    let job = admin.create_mining_job(request.clone()).await.unwrap();
+    assert_eq!(job.state, WalletJobState::Waiting);
+    assert_eq!(job.attempts, 0);
+    assert!(admin.create_mining_job(request.clone()).await.is_err());
+    let listed = admin.mining_jobs().await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].request, request);
+    assert_eq!(
+        admin.cancel_mining_job(job.id.clone()).await.unwrap().state,
+        WalletJobState::Cancelled
+    );
+    assert_eq!(
+        admin.cancel_mining_job(job.id).await.unwrap().state,
+        WalletJobState::Cancelled
+    );
+    assert!(admin.create_mining_job(request).await.is_ok());
+}

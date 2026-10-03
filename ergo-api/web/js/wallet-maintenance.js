@@ -29,10 +29,11 @@ export function summarizeBoxes(boxes) {
 export function createWalletMaintenance(root) {
   let disposed = false, busy = false, epoch = 0, offset = 0, selected = new Map(), currentBoxes = [], request = null, status = null;
   const intro = el('p', 'Approve one finite operation for a block mined by this node. Selected inputs stay reserved; unlocking lets the node sign when the start height is reached. Miner fee: 0 ERG.');
-  const form = el('form', null, 'wb-compose'), kind = el('select'), destination = el('select'), label = el('input'), start = el('input'), expiry = el('input'), attempts = el('input');
+  const form = el('form', null, 'w-form'), kind = el('select'), destination = el('select'), label = el('input'), start = el('input'), expiry = el('input'), attempts = el('input');
   for (const [value, title] of Object.entries(kinds)) { const option = el('option', title); option.value = value; kind.append(option); }
   label.value = 'Wallet maintenance'; start.type = expiry.type = attempts.type = 'number'; start.min = '0'; expiry.min = '1'; attempts.min = '1'; attempts.max = '100'; attempts.value = '10';
   form.append(field('Operation', kind), field('Label', label), field('Receiving address', destination), field('Start at block height', start), field('Expire after block height', expiry), field('Maximum attempts', attempts));
+  for (const input of [kind, destination, label, start, expiry, attempts]) input.className = 'input';
   const boxes = el('div'), controls = el('div', null, 'wb-actions'), prev = el('button', 'Previous', 'btn btn--sm'), next = el('button', 'Next', 'btn btn--sm'), pageInfo = el('span'), review = el('button', 'Review selected operation', 'btn btn--primary');
   prev.type = next.type = 'button'; review.type = 'submit'; controls.append(prev, pageInfo, next, review); form.append(boxes, controls);
   const note = el('p', '', 'wb-note'), preview = el('div'), history = el('div'); root.replaceChildren(intro, form, note, preview, history);
@@ -43,7 +44,7 @@ export function createWalletMaintenance(root) {
     for (const box of currentBoxes.filter(box => eligibleFor(kind.value, box))) {
       const input = el('input'); input.type = 'checkbox'; input.checked = selected.has(box.boxId); input.disabled = busy;
       input.addEventListener('change', () => { if (input.checked) selected.set(box.boxId, box); else selected.delete(box.boxId); invalidate(); });
-      const row = el('label', null, 'w-field'); row.append(input, el('span', `${decimal(box.value)} ERG · ${(box.assets || []).length} tokens · ${box.boxId} · ${box.status.type === 'immature' ? 'matures at ' + box.status.maturesAtHeight : 'confirmed'}`)); boxes.append(row);
+      const row = el('label', null, 'wb-check'); row.append(input, el('span', `${decimal(box.value)} ERG · ${(box.assets || []).length} tokens · ${box.boxId} · ${box.status.type === 'immature' ? 'matures at ' + box.status.maturesAtHeight : 'confirmed'}`)); boxes.append(row);
     }
     if (!boxes.children.length) boxes.append(el('p', 'No eligible boxes on this page.', 'wb-note'));
     pageInfo.textContent = `Boxes ${offset + 1}–${offset + currentBoxes.length}`;

@@ -208,7 +208,7 @@ export function canLeave() {
         'Leaving discards it permanently. Leave anyway?',
     );
   }
-  if (submitInFlight) {
+  if (submitInFlight || maintenance?.isBusy()) {
     return window.confirm(
       'A wallet operation is still in progress — its result (including a freshly ' +
         'generated recovery phrase) may be lost. Leave anyway?',

@@ -215,7 +215,8 @@ pub(super) fn create_owned(
             "job deadline has already passed".into(),
         ));
     }
-    let reserved = ctx.chain.reserved_wallet_inputs()?;
+    let mut reserved = ctx.chain.reserved_wallet_inputs()?;
+    reserved.extend(reserved_inputs(ctx.db)?);
     let read = ctx.db.begin_read().map_err(internal)?;
     let reader = WalletReader::new(&read);
     for value in task_box_ids(&request.task) {
@@ -235,8 +236,23 @@ pub(super) fn create_owned(
         if matches!(wallet_box.status, BoxStatus::Spent { .. }) {
             return Err(WalletAdminError::BoxNotFound);
         }
+        let expected = if matches!(request.task, WalletJobTask::Rewards { .. }) {
+            BoxProvenance::MinerReward
+        } else {
+            BoxProvenance::Owned
+        };
+        if wallet_box.provenance != expected {
+            return Err(WalletAdminError::BadRequest(
+                "job input provenance does not match its task".into(),
+            ));
+        }
     }
     drop(read);
+    match &request.task {
+        WalletJobTask::Consolidate { destination, .. }
+        | WalletJobTask::Rewards { destination, .. } => tracked_destination(ctx, destination)?,
+        _ => {}
+    }
     create(ctx.db, request)
 }
 
@@ -620,6 +636,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         if record.job.state.terminal() && record.job.state != WalletJobState::Mined {
             continue;
         }
+        let mut queue_known = false;
         if let Some(tx_id) = record.job.tx_id.as_ref() {
             match ctx
                 .submit_handle
@@ -627,6 +644,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 .await
             {
                 Ok(Some(entry)) => {
+                    queue_known = true;
                     let state = match entry.state.as_str() {
                         "mined" => WalletJobState::Mined,
                         "in_candidate" => WalletJobState::InCandidate,
@@ -672,13 +690,15 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 }
             }
         }
-        if height > record.job.request.expires_at_height {
+        if height >= record.job.request.expires_at_height {
             if let Some(tx_id) = record.job.tx_id.as_ref() {
-                match ctx
-                    .submit_handle
-                    .cancel_private_transaction(tx_id.clone())
-                    .await
-                {
+                match if queue_known {
+                    ctx.submit_handle
+                        .cancel_private_transaction(tx_id.clone())
+                        .await
+                } else {
+                    Ok(())
+                } {
                     Ok(()) => {}
                     Err(error) if error.reason == "not_found" => {}
                     Err(error) => {
@@ -845,6 +865,24 @@ mod tests {
         let response = serde_json::to_value(list(&db).unwrap()).unwrap();
         assert!(!response.to_string().contains("abcd"));
         assert!(response["items"][0].get("signedHex").is_none());
+    }
+
+    #[test]
+    fn interrupted_unsigned_preparation_recovers_input_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("jobs.redb")).unwrap();
+        create(&db, request()).unwrap();
+        assert!(reserved_inputs(&db).unwrap().contains(&[0x11; 32]));
+        let (_, mut record) = records(&db).unwrap().remove(0);
+        transition(&mut record, WalletJobState::Preparing, None);
+        save(&db, 1, &record).unwrap();
+        assert!(reserved_inputs(&db).unwrap().is_empty());
+        recover_preparing(&db).unwrap();
+        assert!(reserved_inputs(&db).unwrap().contains(&[0x11; 32]));
+        assert_eq!(list(&db).unwrap().items[0].state, WalletJobState::Waiting);
+        transition(&mut record, WalletJobState::Cancelled, None);
+        save(&db, 1, &record).unwrap();
+        assert!(reserved_inputs(&db).unwrap().is_empty());
     }
 
     // ----- error paths -----
