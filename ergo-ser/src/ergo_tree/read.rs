@@ -95,6 +95,16 @@ fn take_unparsed_size_region(
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
+    read_ergo_tree_tracking_template(r).map(|(tree, wrapped, _)| (tree, wrapped))
+}
+
+/// Record the original expression slice while parsing. Scala's cached
+/// `ErgoTree.template` strips the received header and constants, rather than
+/// serializing the normalized expression again. Wrapped trees have no parsed
+/// template; callers retain the existing unparseable policy for them.
+pub(super) fn read_ergo_tree_tracking_template(
+    r: &mut VlqReader,
+) -> Result<(ErgoTree, bool, Option<std::ops::Range<usize>>), ReadError> {
     let tree_start = r.position();
     // A tree that starts a fresh top-level reader starts Scala's reader too, so
     // its `valDefTypeStore` is empty and unbound uses are decidable.
@@ -132,6 +142,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
             return Ok((
                 unparsed_soft_fork_tree(version, has_size, constant_segregation, full, None),
                 true,
+                None,
             ));
         }
 
@@ -271,11 +282,12 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                     )),
                 ),
                 true,
+                None,
             ));
         }
 
         match parsed {
-            Ok(tree) => {
+            Ok((tree, template_start)) => {
                 // Every frame the body entered returned: only degrades nested
                 // in it (a size-delimited box script) left levels open.
                 debug_assert_eq!(level_after, entry_level, "unbalanced reader level");
@@ -301,13 +313,14 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                             Some((1001, vec![])),
                         ),
                         true,
+                        None,
                     ));
                 }
                 // Parsed as SigmaProp: advance `r` by the ACTUAL body length so the
                 // next box field is read from the structural body end, exactly where
                 // Scala leaves the reader on success (the declared size is ignored).
                 let _ = r.get_bytes(body_consumed)?;
-                Ok((tree, false))
+                Ok((tree, false, Some(body_start + template_start..r.position())))
             }
             // Reached only when NO unresolved method preceded the error (that
             // case wrapped above), so this error is the FIRST thing Scala hits
@@ -345,6 +358,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
                         validation_error,
                     ),
                     true,
+                    None,
                 ))
             }
         }
@@ -367,7 +381,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
         let parsed = parse_body(r, header, has_size, constant_segregation);
         r.set_position_limit(saved_limit);
         r.set_ergo_tree_version(saved_v);
-        parsed.map(|tree| (tree, false))
+        parsed.map(|(tree, template_start)| (tree, false, Some(template_start..r.position())))
     }
 }
 
@@ -455,7 +469,7 @@ fn parse_body(
     header: u8,
     has_size: bool,
     constant_segregation: bool,
-) -> Result<ErgoTree, ReadError> {
+) -> Result<(ErgoTree, usize), ReadError> {
     let version = header & VERSION_MASK;
     let constants = if constant_segregation {
         // Scala `deserializeConstants` reads the count via `getUInt().toInt`
@@ -480,20 +494,24 @@ fn parse_body(
         vec![]
     };
 
+    let template_start = r.position();
     let saved_pool_len = r.constant_pool_len();
     r.set_constant_pool_len(Some(constants.len()));
     let body = opcode::parse_body_with_constants(r, version, &constants);
     r.set_constant_pool_len(saved_pool_len);
     let body = body?;
 
-    Ok(ErgoTree {
-        version,
-        has_size,
-        constant_segregation,
-        reserved_header_bits: header & RESERVED_HEADER_MASK,
-        constants,
-        body,
-    })
+    Ok((
+        ErgoTree {
+            version,
+            has_size,
+            constant_segregation,
+            reserved_header_bits: header & RESERVED_HEADER_MASK,
+            constants,
+            body,
+        },
+        template_start,
+    ))
 }
 
 #[cfg(test)]
