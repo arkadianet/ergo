@@ -154,6 +154,14 @@ pub enum IndexerError {
     /// Chain-free repair cannot reconstruct its original mint metadata.
     #[error("indexer token mint metadata missing for {token_id:?}")]
     TokenMetadataMissing { token_id: crate::TokenId },
+    /// A committed-chain read or stored-chain decode failed. Missing chain
+    /// data is represented separately by `Ok(None)` on the source trait.
+    #[error("indexer chain source {operation} failed: {source}")]
+    ChainRead {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     // ----- write-path (encode / hash / size cast) -----
     /// A persistence-write-path serializer call returned an error.
@@ -394,6 +402,7 @@ impl IndexerError {
             | Self::RepairInProgress
             | Self::CounterRange { .. }
             | Self::TokenMetadataMissing { .. }
+            | Self::ChainRead { .. }
             | Self::Serialize { .. }
             | Self::LengthExceedsI32 { .. }
             | Self::HashDerivation { .. }

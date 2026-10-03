@@ -6,11 +6,11 @@
 **Depended on by:** (see codemap index)
 
 ## Start here
-- `apply::apply_block_with_scratch` (`src/apply.rs:117`) — the heart: how one block becomes box/tx/address/template/token rows in a single atomic redb txn. Read its module doc (`src/apply.rs:1-22`) first.
-- `task::IndexerTask::step` (`src/task.rs:124`) — the poll loop: self-repair gate → reorg-check → caught-up-check → load+verify+apply. Defines forward progress, reorg detection, and secondary-index rebuild dispatch via the `IndexerChainSource` trait.
+- `apply::apply_block_with_scratch` — the heart: how one block becomes box/tx/address/template/token rows in a single atomic redb txn. Read its module doc first.
+- `task::IndexerTask::step` — the poll loop: self-repair gate → reorg-check → caught-up-check → load+verify+apply. Defines forward progress, reorg detection, and secondary-index rebuild dispatch via the `IndexerChainSource` trait.
 - `segment.rs` module doc + `segment_buffer.rs` module doc — the head-buffer/spill model (512-entry spills, sign-bit = spent flag) shared by all three keyed indexes. This is the trickiest invariant in the crate.
-- `store::IndexerStore` (`src/store/mod.rs:57`) — owns the redb file, the wipe/resume open table, and every read accessor the handle drives.
-- `lib.rs` (`src/lib.rs:15-27`) — the module map, written as a guided tour.
+- `store::IndexerStore` — owns the redb file, the wipe/resume open table, and every read accessor the handle drives.
+- `lib.rs` — the module map, written as a guided tour.
 
 ## Modules
 - `src/lib.rs` — crate root: module tree, re-exports, and a re-export of the reader-side surface from `ergo-indexer-types`.
@@ -32,45 +32,72 @@
 - `src/store/` — redb layer. `mod.rs` (`IndexerStore` + all read accessors), `tables.rs` (10 table defs + `create_all`), `meta.rs` (`IndexerMeta`, `INDEXER_SCHEMA_VERSION = 2`), `undo.rs` (`UndoEntry`, `ROLLBACK_WINDOW = 200`, prune), `storage_rent.rs` (`unspent_by_creation_height` index), plus `boxes`/`txs`/`numeric`/`address`/`template`/`token`/`segment` row helpers.
 
 ## Key types, traits & functions
-- `IndexerStore` (struct) — owns the `Arc<redb::Database>`; wipe/resume `open`; every read accessor — `src/store/mod.rs:57`, `open` at `:85`.
-- `IndexerHandle` (struct) — read-side handle, implements `IndexerQuery`; `boot` returns `None` only when disabled, else `Some(syncing|halted)` — `src/handle.rs:28`, `boot` at `:56`.
-- `IndexerTask<C>` (struct) — poll driver over `IndexerChainSource` — `src/task.rs:98`; `step` at `:124`, `run` at `:287`.
-- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `full_block` read surface; production wires `ChainStoreReader` — `src/task.rs:56`.
-- `IndexerPoll` (enum) — `Idle`/`Applied`/`RolledBack`/`SectionRetry`/`Race`/`Halted` step outcomes — `src/task.rs:76`.
-- `apply_block` / `apply_block_with_scratch` (fn) — forward apply; scratch variant reuses arenas — `src/apply.rs:104` / `:117`.
-- `rollback_one_block` (fn) — inverse apply, undo-snapshot meta restore — `src/rollback.rs:76`.
-- `IndexerBlock<'a>` (struct) — caller-provided apply/rollback input (`height`, `header_id`, `&[Transaction]`) — `src/apply.rs:64`.
-- `IndexerMeta` (struct) — persisted meta mirror (`indexed_height`, `indexed_header_id`, `global_tx_index`, `global_box_index`) — `src/store/meta.rs:153`.
-- `UndoEntry` (struct) — `[height-1]` snapshot for rollback meta restore; own framing (not ergo-ser) — `src/store/undo.rs:23`.
-- `Segment` (struct) — shared body for all parent + spill records; signed-i64 box entries (sign = spent) — `src/segment.rs:48`.
-- `IndexedAddress` + `BalanceInfo` (struct) — address parent + running balance — `src/address.rs:131` / `:46`.
-- `IndexedTemplate` (struct) — template parent (box-segment only) — `src/template.rs:41`.
-- `IndexedToken` (struct) — token parent + mint metadata — `src/token.rs:60`; `is_mint` (EIP-4 predicate) + `from_box`.
-- `box_segment_id` / `tx_segment_id` / `token_unique_id` / `tree_hash_from_bytes` (fn) — `[inherited]` byte-exact derivations — `src/segment_id.rs:43`/`:48`/`:95`/`:84`.
-- `IndexerError` (enum) + `halt_reason()` — typed errors; never crosses the API boundary — `src/error.rs:104`, mapping at `:355`.
-- `IndexerConfig` (struct) — `[indexer]` TOML section — `src/config.rs:6`.
-- `BlockApplyScratch` (struct) — run-loop arenas — `src/scratch.rs:36`.
-- `OpenOutcome` (enum) — `CreatedFresh`/`Resumed`/`WipedAndRecreated` — `src/store/mod.rs:39`.
-- `StoreHealthSnapshot` (struct) — mutually-consistent repair-marker + meta snapshot captured under one redb read txn; driven by `IndexerStore::health_snapshot` and surfaced via `IndexerHandle::health` as `IndexerHealthDto` — `src/store/mod.rs:67`.
+- `IndexerStore` (struct) — owns the `Arc<redb::Database>`; wipe/resume `open`; every read accessor.
+- `IndexerHandle` (struct) — read-side handle, implements `IndexerQuery`; `boot` returns `None` only when disabled, else `Some(syncing|halted)`.
+- `IndexerTask<C>` (struct) — poll driver over `IndexerChainSource` — `src/task.rs`.
+- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `full_block` read surface; production wires `ChainStoreReader`.
+- `IndexerPoll` (enum) — `Idle`/`Applied`/`RolledBack`/`SectionRetry`/`Race`/`Halted` step outcomes.
+- `apply_block` / `apply_block_with_scratch` (fn) — forward apply; scratch variant reuses arenas — `src/apply.rs`.
+- `rollback_one_block` (fn) — inverse apply, undo-snapshot meta restore.
+- `IndexerBlock<'a>` (struct) — caller-provided apply/rollback input (`height`, `header_id`, `&[Transaction]`).
+- `IndexerMeta` (struct) — persisted meta mirror (`indexed_height`, `indexed_header_id`, `global_tx_index`, `global_box_index`).
+- `UndoEntry` (struct) — `[height-1]` snapshot for rollback meta restore; own framing (not ergo-ser).
+- `Segment` (struct) — shared body for all parent + spill records; signed-i64 box entries (sign = spent).
+- `IndexedAddress` + `BalanceInfo` (struct) — address parent + running balance — `src/address.rs`.
+- `IndexedTemplate` (struct) — template parent (box-segment only).
+- `IndexedToken` (struct) — token parent + mint metadata — `src/token.rs`; `is_mint` (EIP-4 predicate) + `from_box`.
+- `box_segment_id` / `tx_segment_id` / `token_unique_id` / `tree_hash_from_bytes` (fn) — `[inherited]` byte-exact derivations — `src/segment_id.rs`.
+- `IndexerError` (enum) + `halt_reason()` — typed errors; never crosses the API boundary.
+- `IndexerConfig` (struct) — `[indexer]` TOML section.
+- `BlockApplyScratch` (struct) — run-loop arenas.
+- `OpenOutcome` (enum) — `CreatedFresh`/`Resumed`/`WipedAndRecreated`.
+- `StoreHealthSnapshot` (struct) — mutually-consistent repair-marker + meta snapshot captured under one redb read txn; driven by `IndexerStore::health_snapshot` and surfaced via `IndexerHandle::health` as `IndexerHealthDto`.
 
 ## Invariants & contracts
-- **Per-block atomicity.** All of a block's mutations — box/tx/numeric rows, address/template/token parents, spill segments, storage-rent rows, meta, undo write, undo prune — commit in a single redb `WriteTransaction`. Any `?` drops the txn (no commit), so on-disk state is exactly pre-call (`src/apply.rs:150-578`, `src/rollback.rs:156-635`).
-- **Durability is `Eventual` on apply** (`src/apply.rs:162`): the per-block txn stays atomic but defers fsync; the crash-recovery model is "replay from chain tip" because every indexer row is derived state reproducible from the durable consensus store.
-- **Sequential height contract.** Apply requires `block.height == meta.indexed_height + 1` (`HeightMismatch` otherwise); rollback requires `block.height == meta.indexed_height` AND `Some(block.header_id) == meta.indexed_header_id` (`HeightMismatch`/`HeaderMismatch`) — guards indexer/chain divergence and reorg races (`src/apply.rs:123`, `src/rollback.rs:87-102`).
-- **Segment spill topology.** Head buffers spill when length is *strictly* > 512; each spill row holds exactly 512 entries; spill count counters are monotonic; rollback pops must merge-back and match the expected global index or fail `SegmentTopologyError` (`src/segment.rs:38,63`, `src/segment_buffer.rs:135`, `src/rollback.rs:321`).
-- **Box-segment sign encoding.** Box entries are signed-i64: `+global_index` while unspent, `-global_index` after spend; the box *record's* `global_index` stays positive (the spent state lives on the spending-* fields). Tx entries are always positive. Dereference via `abs(entry)` (`src/segment.rs:11-13`, `src/handle.rs:733`).
-- **`[inherited]` byte-exact derivations.** Segment-id strings (`" box segment "`, `" tx segment "`), token unique-id suffix (`"token"`, no spaces), tree-hash = `blake2b256(canonical tree bytes)`, and template-hash are Scala-parity formulas; a single wrong byte produces records Scala-compatible clients cannot look up (`src/segment_id.rs:20-101`).
-- **Wire-format parity.** All persisted row codecs mirror Scala `ExtraIndexSerializer`/`Segment.scala`/`BalanceInfo.scala`/`IndexedToken.scala`: VLQ-zigzag i32/i64, unsigned VLQ for u16 and token `emissionAmount` (u64), raw 32-byte ids, `Opt[X]` = 1 marker byte + body. `emissionAmount` u64-vs-i32 and `Some("")` ≠ `None` are load-bearing (`src/ser/mod.rs:1-58`, `src/token.rs:9-23`). `BalanceInfo.tokens` is order-preserving (first-touch append) — byte output depends on token-touch order.
-- **Schema wipe/resume.** `INDEXER_SCHEMA_VERSION = 2`. File absent → create fresh; version matches → resume; version mismatches → delete + recreate (full resync); version key missing → halt `SchemaCorruption`; meta table missing → halt `DbCorruption`. No in-place migration (`src/store/mod.rs:85-144`, `src/store/meta.rs:25`).
-- **Rollback window.** `INDEXER_UNDO` retains entries for `ROLLBACK_WINDOW = 200` (mirrors `ergo-state`); pruned strictly-less-than `current_height - 200` so the deepest target survives. Undo decode enforces strict-EOF (rollback removes the row after consuming it, so a corrupt-then-rewritten row would otherwise hide) (`src/store/undo.rs:128-146,84-95`).
-- **Protocol-genesis box absorption.** The 3 protocol-seeded box IDs (foundation / no-premine / emission) are never in `INDEXED_BOX`; their first spend pushes `0` to `input_nums` and continues instead of `InputMissing`, mirroring Scala `ExtraIndexer.scala:331`. Genesis (height 1) skips the input-spend pass entirely (`src/apply.rs:191-222,318`, `src/rollback.rs:241-243,414`).
-- **Storage-rent index coherence.** `unspent_by_creation_height` is keyed by the box's own `creationHeight` (R3 metadata, *not* inclusion height) + immutable `global_box_index`; symmetric insert-on-output / remove-on-input with apply, fully re-derived from unchanged `IndexedErgoBox` rows on rollback (no undo-payload extension) (`src/store/storage_rent.rs:1-24`, `src/apply.rs:251,381`, `src/rollback.rs:295,472`).
-- **Secondary-index degrade-not-halt.** A `SegmentEntryMissing` on a DERIVED secondary index (template/token box-segment) is tolerated — the indexer marks a sticky `repair_pending` marker in `INDEXER_META` and continues applying blocks rather than halting. The PRIMARY address segments still halt on any topology error. On the next poll, `IndexerTask::step` detects the marker and runs `rebuild_secondary_indexes` (chain-free, from the intact primary box table) before resuming normal forward-apply. A process-lifetime counter `secondary_index_drift_skips()` and the durable repair markers drive the health surface (`src/segment_buffer.rs:76,101`, `src/task.rs:139-170`, `src/rebuild.rs`).
-- **Halted-handle read isolation.** A boot-time-halted handle has no store; database reads return `Err(IndexerReadError)` for the unavailable store and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault (`src/handle.rs:45-52,71-75,251-277`).
-- **Indexer DB isolation.** The redb file is separate from the chain store, so an indexer wipe never touches consensus data (`src/store/mod.rs:1-3`).
+- **Per-block atomicity.** All of a block's mutations — box/tx/numeric rows, address/template/token parents, spill segments, storage-rent rows, meta, undo write, undo prune — commit in a single redb `WriteTransaction`. Any `?` drops the txn (no commit), so on-disk state is exactly pre-call (`src/apply.rs`, `src/rollback.rs`).
+- **Durable checkpoints.** Apply and batched catch-up use `Immediate` durability. The complete batch commits atomically; observers and the cached height are published only after commit. An error abandons the entire uncommitted batch, including undo and numeric rows.
+- **Checkpoint ownership.** An initialized schema-v2 store requires all four checkpoint fields. Empty height has no header or counters; nonempty height has a header. Writer-representable counters are checked. Apply and rollback compare the caller's complete checkpoint under the redb writer lock, so a stale caller receives `StaleCheckpoint` before changing any rows.
+- **Sequential height contract.** Apply requires `block.height == meta.indexed_height + 1` (`HeightMismatch` otherwise); rollback requires `block.height == meta.indexed_height` AND `Some(block.header_id) == meta.indexed_header_id` (`HeightMismatch`/`HeaderMismatch`) — guards indexer/chain divergence and reorg races (`src/apply.rs`, `src/rollback.rs`).
+- **Persisted-codec bounds.** Stored parent heads and spill rows reject arrays exceeding 512 entries and negative spill counters before allocating. Claimed entry counts must fit the remaining bytes. The generic segment codec can still represent transient buffers larger than a stored head. Balance token counts must fit their minimum encoded entry size; initial reservations are bounded. These checks protect local storage decoding and preserve valid row bytes.
+- **Segment spill topology.** Head buffers spill when length is *strictly* > 512; each spill row holds exactly 512 entries; spill count counters are monotonic; rollback pops must merge-back and match the expected global index or fail `SegmentTopologyError` (`src/segment.rs`, `src/segment_buffer.rs`, `src/rollback.rs`).
+- **Box-segment sign encoding.** Box entries are signed-i64: `+global_index` while unspent, `-global_index` after spend; the box *record's* `global_index` stays positive (the spent state lives on the spending-* fields). Tx entries are always positive. Dereference via `abs(entry)` (`src/segment.rs`, `src/handle.rs`).
+- **`[inherited]` byte-exact derivations.** Segment-id strings (`" box segment "`, `" tx segment "`), token unique-id suffix (`"token"`, no spaces), tree-hash = `blake2b256(canonical tree bytes)`, and template-hash are Scala-parity formulas; a single wrong byte produces records Scala-compatible clients cannot look up.
+- **Wire-format parity.** All persisted row codecs mirror Scala `ExtraIndexSerializer`/`Segment.scala`/`BalanceInfo.scala`/`IndexedToken.scala`: VLQ-zigzag i32/i64, unsigned VLQ for u16 and token `emissionAmount` (u64), raw 32-byte ids, `Opt[X]` = 1 marker byte + body. `emissionAmount` u64-vs-i32 and `Some("")` ≠ `None` are load-bearing (`src/ser/mod.rs`, `src/token.rs`). `BalanceInfo.tokens` is order-preserving (first-touch append) — byte output depends on token-touch order.
+- **Schema wipe/resume.** `INDEXER_SCHEMA_VERSION = 2`. File absent → create fresh; version matches → resume; version mismatches → delete + recreate (full resync); version key missing → halt `SchemaCorruption`; meta table missing → halt `DbCorruption`. No in-place migration (`src/store/mod.rs`, `src/store/meta.rs`).
+- **Rollback window.** `INDEXER_UNDO` retains entries for `ROLLBACK_WINDOW = 200` (mirrors `ergo-state`); pruned strictly-less-than `current_height - 200` so the deepest target survives. Undo decode enforces strict-EOF (rollback removes the row after consuming it, so a corrupt-then-rewritten row would otherwise hide).
+- **Protocol-genesis box absorption.** The 3 protocol-seeded box IDs (foundation / no-premine / emission) are never in `INDEXED_BOX`; their first spend pushes `0` to `input_nums` and continues instead of `InputMissing`, mirroring Scala `ExtraIndexer.scala:331`. Genesis (height 1) skips the input-spend pass entirely (`src/apply.rs`, `src/rollback.rs`).
+- **Storage-rent index coherence.** `unspent_by_creation_height` is keyed by the box's own `creationHeight` (R3 metadata, *not* inclusion height) + immutable `global_box_index`; symmetric insert-on-output / remove-on-input with apply, fully re-derived from unchanged `IndexedErgoBox` rows on rollback (no undo-payload extension) (`src/store/storage_rent.rs`, `src/apply.rs`, `src/rollback.rs`).
+- **Required mint metadata.** Spending, transferring, rolling back or rebuilding a token requires its existing parent record. A missing parent returns `TokenMetadataMissing`; these operations never invent mint metadata from a transfer box. A failed repair retains its durable pending marker and cursor, including across reopening.
+- **Repair ownership.** A process-local guard is shared by store clones. Durable pending markers and writer-side checks also exclude ordinary apply, rollback and metadata-only commits while repair is incomplete. Repair chunks commit independently; cancellation or failure preserves already committed chunks and resume state.
+- **Secondary-index degrade-not-halt.** A `SegmentEntryMissing` on a DERIVED secondary index (template/token box-segment) is tolerated — the indexer marks a sticky `repair_pending` marker in `INDEXER_META` and continues applying blocks rather than halting. The PRIMARY address segments still halt on any topology error. On the next poll, `IndexerTask::step` detects the marker and runs `rebuild_secondary_indexes` (chain-free, from the intact primary box table) before resuming normal forward-apply. A process-lifetime counter `secondary_index_drift_skips()` and the durable repair markers drive the health surface (`src/segment_buffer.rs`, `src/task.rs`, `src/rebuild.rs`).
+- **Halted-handle read isolation.** A boot-time-halted handle has no store; database reads return `Err(IndexerReadError)` for the unavailable store and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault.
+- **Indexer DB isolation.** The redb file is separate from the chain store, so an indexer wipe never touches consensus data.
 
-## Notes for the architecture doc
-Two stale *source comments* in `src/store/mod.rs` (not README/docs claims): the `IndexerStore` doc at `:53-55` says apply/rollback are "layered on top via the `commit_apply_meta_only` / `commit_rollback_meta_only` helpers" — but `apply.rs`/`rollback.rs` inline their meta+undo+prune writes in their own write txn; those helpers are only used by integration tests. `begin_write`'s doc at `:591` references a `commit_block_txn` method that does not exist. Worth a cleanup pass, but outside the README/docs accuracy scope.
+## Chain reads, polling and parity evidence
+
+`IndexerChainSource` returns `Result` for every read. `Ok(None)` means absent
+header or section data; an error means a failed storage read or decode. The
+production adapter retains the underlying cause in `IndexerError::ChainRead`.
+A failure during batching or rollback halts the task, preserves the last
+committed checkpoint and prevents a previous `CaughtUp` status from surviving
+as healthy. Custom source implementations must preserve this distinction.
+Each call can observe a separate chain snapshot; canonicality is rechecked
+before forward commit. This adapter consumes already accepted chain data and
+does not perform independent block authentication.
+
+The dedicated worker continues after committed apply/rollback progress.
+Persistent `Race` results wait 50 ms; `Idle` waits for the configured interval
+with a 50 ms minimum even when `poll_idle_ms` is zero. These waits observe
+cancellation. Missing sections retain the bounded five-attempt, one-second
+retry policy. Public single-step methods publish halt status but do not sleep.
+
+Token names, descriptions and persisted optional strings use JVM-compatible
+UTF-8 replacement. Decimal parsing follows Scala 2.12 signed `Int` behavior,
+including Java 17 BMP decimal digits, ASCII signs, checked range and rejection
+of non-BMP digits. `test-vectors/ergo-indexer/token-text` retains actual finite
+JVM captures, the complete BMP digit observation, pinned source and runtime
+provenance. It compares selected `IndexedToken` expressions rather than a
+complete Scala node execution or evidence of those values occurring on-chain.
 
 Read errors propagate to API consumers. Page and global-range references are
 resolved in one redb snapshot; a missing referenced row fails the entire
@@ -83,4 +110,4 @@ remain queryable. Storeless syncing/halted handles still reject database
 queries with an unavailable-store error. Only `health()` may return `Ok` with
 zero store-backed counters for their explicit offline status, provided no
 read error is latched; `drift_skips` remains the live process counter
-(`src/handle.rs:280-308`).
+(`src/handle.rs`).

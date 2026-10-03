@@ -387,23 +387,30 @@ mod tests {
         tip: AtomicU32,
     }
     impl IndexerChainSource for Chain {
-        fn committed_tip(&self) -> ChainTip {
+        fn committed_tip(&self) -> Result<ChainTip, ergo_indexer::IndexerError> {
             let height = self.tip.load(Ordering::Relaxed);
-            ChainTip {
+            Ok(ChainTip {
                 height,
                 header_id: self.blocks[height as usize - 1].header_id,
-            }
+            })
         }
-        fn header_id_at(&self, height: u32) -> Option<Digest32> {
+        fn header_id_at(
+            &self,
+            height: u32,
+        ) -> Result<Option<Digest32>, ergo_indexer::IndexerError> {
             if height > self.tip.load(Ordering::Relaxed) {
-                return None;
+                return Ok(None);
             }
-            self.blocks
-                .get(height.checked_sub(1)? as usize)
-                .map(|b| b.header_id)
+            Ok(height
+                .checked_sub(1)
+                .and_then(|index| self.blocks.get(index as usize))
+                .map(|b| b.header_id))
         }
-        fn full_block(&self, id: &Digest32) -> Option<IndexerFullBlock> {
-            self.blocks.iter().find(|b| &b.header_id == id).cloned()
+        fn full_block(
+            &self,
+            id: &Digest32,
+        ) -> Result<Option<IndexerFullBlock>, ergo_indexer::IndexerError> {
+            Ok(self.blocks.iter().find(|b| &b.header_id == id).cloned())
         }
     }
 
