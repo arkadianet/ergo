@@ -110,6 +110,7 @@ impl OutcomeJournal {
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&temporary, path)?;
+            #[cfg(unix)]
             std::fs::File::open(parent)?.sync_all()?;
             Ok(())
         })();

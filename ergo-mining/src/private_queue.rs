@@ -405,7 +405,9 @@ impl PrivateTransactionQueue {
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)?;
-            std::fs::File::open(parent)?.sync_all()
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
