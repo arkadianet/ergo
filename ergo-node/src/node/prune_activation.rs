@@ -13,13 +13,12 @@ use tracing::{info, warn};
 
 /// Repair a header-only floor left by older boot activation, then rebuild the
 /// pending window from the actual applied tip. A fresh valid floor is a no-op.
-pub(super) fn seed_prune_sentinel_and_rebuild_pending(
+pub(super) fn repair_unapplied_floor_and_rebuild_pending(
     store: &mut ergo_state::StateBackendKind,
     executor: &mut SyncExecutor,
     coordinator: &mut SyncCoordinator,
-    blocks_to_keep: i32,
 ) -> Result<Option<u32>, HydrationError> {
-    let Some(sentinel) = seed_prune_sentinel_at_flip(store, coordinator, blocks_to_keep) else {
+    let Some(sentinel) = repair_unapplied_floor_after_header_sync(store, coordinator) else {
         return Ok(None);
     };
     executor.reset_recovery_done();
@@ -34,10 +33,9 @@ pub(super) fn seed_prune_sentinel_and_rebuild_pending(
 /// Header synchronization cannot advance a fresh UTXO download floor past the
 /// first unapplied block. Reset the old header-only sentinel when present;
 /// pruning after apply and snapshot installation own all later floors.
-pub(super) fn seed_prune_sentinel_at_flip(
+pub(super) fn repair_unapplied_floor_after_header_sync(
     store: &mut ergo_state::StateBackendKind,
     coordinator: &mut SyncCoordinator,
-    _blocks_to_keep: i32,
 ) -> Option<u32> {
     if !coordinator.sync_state().headers_chain_synced()
         || store.chain_state_meta().best_full_block_height != 0
@@ -82,8 +80,6 @@ mod tests {
 
     /// Header-chain tip the fixture seeds.
     const HEADER_TIP: u32 = 1200;
-    /// Smallest legal pruned window (`keep_versions 200 + SAFETY_MARGIN 50`).
-    const BLOCKS_TO_KEEP: i32 = 250;
     /// Scala `updateBestFullBlock` output for `(current_min = 1,
     /// header_height = 1200, blocksToKeep = 250, votingLength = 1024)` —
     /// oracle vector `flip_h1200_keep250_mainnet`. `1200 - 250 + 1 = 951`.
@@ -126,8 +122,9 @@ mod tests {
 
     /// A genesis-initialized store carrying a linear synthetic header
     /// chain `1..=HEADER_TIP` whose tip timestamp is `now` — the state a
-    /// from-scratch pruned node reaches at the headers-synced flip: every
-    /// header validated, no full block applied, no sentinel row.
+    /// from-scratch UTXO node reaches at the headers-synced flip: header
+    /// metadata stored as accepted, no full block applied, no sentinel row.
+    /// This fixture bypasses header validation and does not prove PoW validity.
     ///
     /// The fresh tip timestamp is what makes `recover_coordinator` flip
     /// the latch with no peers connected (`check_headers_synced` is a pure
@@ -170,7 +167,7 @@ mod tests {
 
     /// Replay the boot sequence up to (but not including) the legacy floor
     /// repair: hydrate, build the header index, recover the coordinator.
-    fn boot_up_to_the_seed(
+    fn boot_before_floor_repair(
         store: &mut ergo_state::StateBackendKind,
     ) -> (SyncExecutor, SyncCoordinator) {
         let mut executor = SyncExecutor::new(
@@ -193,7 +190,7 @@ mod tests {
         );
         assert!(
             executor.recovery_done(),
-            "fixture premise: boot recovery latches recovery_done before the seed",
+            "fixture premise: boot recovery latches recovery_done before floor repair",
         );
         (executor, coordinator)
     }
@@ -203,13 +200,12 @@ mod tests {
     #[test]
     fn fresh_pruned_utxo_downloads_preserve_the_first_unapplied_parent() {
         let (mut store, _dir) = seeded_store();
-        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+        let (mut executor, mut coordinator) = boot_before_floor_repair(&mut store);
         assert_eq!(
-            seed_prune_sentinel_and_rebuild_pending(
+            repair_unapplied_floor_and_rebuild_pending(
                 &mut store,
                 &mut executor,
                 &mut coordinator,
-                BLOCKS_TO_KEEP
             )
             .unwrap(),
             None
@@ -231,16 +227,15 @@ mod tests {
             .unwrap()
             .write_minimal_full_block_height(EXPECTED_SENTINEL)
             .unwrap();
-        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+        let (mut executor, mut coordinator) = boot_before_floor_repair(&mut store);
         coordinator
             .sync_state_mut()
             .set_prune_sentinel(EXPECTED_SENTINEL);
         assert_eq!(
-            seed_prune_sentinel_and_rebuild_pending(
+            repair_unapplied_floor_and_rebuild_pending(
                 &mut store,
                 &mut executor,
                 &mut coordinator,
-                BLOCKS_TO_KEEP
             )
             .unwrap(),
             Some(1)
@@ -255,11 +250,10 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            seed_prune_sentinel_and_rebuild_pending(
+            repair_unapplied_floor_and_rebuild_pending(
                 &mut store,
                 &mut executor,
                 &mut coordinator,
-                BLOCKS_TO_KEEP
             )
             .unwrap(),
             None
@@ -267,12 +261,11 @@ mod tests {
     }
 
     #[test]
-    fn boot_seed_refused_for_an_archive_node_leaves_the_pending_range_intact() {
-        // Same fixture with `blocks_to_keep = -1`. Its valid fresh floor is unchanged, so
-        // the helper must not disturb the range boot recovery already
-        // built: an archive node downloads from genesis onward.
+    fn valid_fresh_utxo_floor_leaves_the_pending_range_intact() {
+        // A valid fresh UTXO floor needs no repair. The helper must preserve
+        // the genesis download range that boot recovery already built.
         let (mut store, _dir) = seeded_store();
-        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+        let (mut executor, mut coordinator) = boot_before_floor_repair(&mut store);
         let before: Vec<u32> = coordinator
             .sync_state()
             .blocks_to_download()
@@ -282,17 +275,13 @@ mod tests {
         assert_eq!(
             before.first().copied(),
             Some(1),
-            "archive premise: boot recovery seeds from genesis onward",
+            "fresh floor premise: boot recovery starts from genesis",
         );
 
-        let seeded = seed_prune_sentinel_and_rebuild_pending(
-            &mut store,
-            &mut executor,
-            &mut coordinator,
-            -1,
-        )
-        .expect("archive rebuild is a no-op, not a failure");
-        assert_eq!(seeded, None, "an archive node must never arm the sentinel");
+        let repaired =
+            repair_unapplied_floor_and_rebuild_pending(&mut store, &mut executor, &mut coordinator)
+                .expect("valid fresh floor repair is a no-op");
+        assert_eq!(repaired, None, "a valid fresh floor needs no repair");
 
         let after: Vec<u32> = coordinator
             .sync_state()
@@ -300,6 +289,6 @@ mod tests {
             .iter()
             .map(|b| b.height)
             .collect();
-        assert_eq!(after, before, "archive download range must be untouched");
+        assert_eq!(after, before, "valid download range must be untouched");
     }
 }

@@ -78,7 +78,7 @@ to start on an unsupported combination.
 | **Mode 2 — UTXO snapshot bootstrap** | Mode 1 plus `[node.utxo] utxo_bootstrap = true` | Supported | Clean-DB boot and you want to skip multi-hour genesis replay by installing a UTXO snapshot, then resume normal sync. See the trust caveat below. |
 | **Mode 6 — headers-only** | `state_type = "digest"`, `verify_transactions = false`, `blocks_to_keep = 0`, `utxo_bootstrap = false` | Supported | You only need the validated header chain (PoW + difficulty) and never need block bodies, transaction validation, the mempool, or UTXO queries. |
 | **Mode 5 — digest verifier** | `state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`, `utxo_bootstrap = false`, `nipopow_bootstrap = false` | Partial | External replay covers a mainnet voting boundary and additional mainnet/testnet windows, with rollback/replay and corrupted-proof rejection. Bounded process-death reorg recovery is tested for digest and UTXO backends. Broader historical coverage, complete external-window cold-open recovery campaigns and a history-retention policy remain open. |
-| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction and headers-synced activation landed; end-to-end activation-parity tests are the remaining done gate. |
+| **Mode 3 — pruned** | `state_type = "utxo"`, `blocks_to_keep = N > 0` | Partial | A standard pruned config boots — `blocks_to_keep` at or above the rollback-window floor (`keep_versions + SAFETY_MARGIN`, 250 at the defaults) — with `block_sections` eviction. Fresh UTXO stores replay from genesis before pruning; complete activation and retention campaigns remain open. |
 | **Mode 4 — pruned + bootstrap** | Mode 3 plus `utxo_bootstrap = true` | Partial | Install/reopen and both NiPoPoW/UTXO orderings are tested. A three-peer test exercises deferred snapshot installation through real header catch-up, full validation of the next mainnet block and restart. Long-running live multi-peer soak remains outstanding. |
 
 The [operating-mode evidence inventory](operating-mode-evidence.md) links the
@@ -843,9 +843,12 @@ until sync catches up.
 **Disk usage growing faster than expected.** Enabling the extra-index
 (`[indexer] enabled = true`) adds an `indexer.redb` file and roughly doubles
 the on-disk footprint. Disable it if you are not querying the
-address/token/template indices. Pruning (positive `[node] blocks_to_keep`)
-is not a supported posture today; the supported way to run without keeping
-full blocks is Mode 6 (headers-only).
+address/token/template indices. Pruned Mode 3 (positive `[node] blocks_to_keep`) is partial, as described
+above. A fresh pruned UTXO node still downloads and validates the chain from
+genesis before discarding old block sections; pruning does not skip initial
+UTXO reconstruction or remove the current UTXO set. Its retained window must
+cover the rollback safety floor. Mode 6 (headers-only) avoids full blocks
+and does not provide UTXO or transaction validation.
 
 **Reorgs.** The node handles reorgs automatically with delta-based rollback
 through the undo log. You will see a brief dip in `best_full_block_height`

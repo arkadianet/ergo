@@ -501,11 +501,10 @@ pub(super) fn setup(
     // legacy header-only download floor, if present, before serving requests;
     // the guarded state helper refuses applied or bootstrap-marked stores.
     // Rebuild the pending range only when a floor was actually reset.
-    if let Err(e) = crate::node::prune_activation::seed_prune_sentinel_and_rebuild_pending(
+    if let Err(e) = crate::node::prune_activation::repair_unapplied_floor_and_rebuild_pending(
         store,
         &mut executor,
         &mut coordinator,
-        config.blocks_to_keep,
     ) {
         report_sync_boot_failure(store, "recover_coordinator", &e);
         return Err(Box::new(e));
