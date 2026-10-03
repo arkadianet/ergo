@@ -124,7 +124,39 @@ impl Args {
 #[derive(Deserialize)]
 struct PinFile {
     network: String,
+    #[serde(deserialize_with = "unique_pin_heights")]
     heights: HashMap<String, PinEntry>,
+}
+
+/// Preserve duplicate-key detection before a JSON object becomes a HashMap.
+fn unique_pin_heights<'de, D>(deserializer: D) -> Result<HashMap<String, PinEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct PinsVisitor;
+    impl<'de> serde::de::Visitor<'de> for PinsVisitor {
+        type Value = HashMap<String, PinEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a height-to-pin object with unique keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut pins = HashMap::new();
+            while let Some((height, pin)) = map.next_entry::<String, PinEntry>()? {
+                if pins.insert(height.clone(), pin).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate pin key: {height}"
+                    )));
+                }
+            }
+            Ok(pins)
+        }
+    }
+    deserializer.deserialize_map(PinsVisitor)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1141,6 +1173,15 @@ mod tests {
             .contains("duplicate numeric"));
         let zero = serde_json::json!({"network":"mainnet", "heights":{"0":entry}});
         assert!(parse_pins(&zero.to_string()).is_err());
+    }
+
+    #[test]
+    fn exact_duplicate_pin_keys_cannot_silently_replace_a_pin() {
+        let pins = fixture_pins();
+        let entry =
+            serde_json::json!({"headerId":pins[&1].header_id, "stateRoot":pins[&1].state_root});
+        let data = format!(r#"{{"network":"mainnet","heights":{{"1":{entry},"1":{entry}}}}}"#);
+        assert!(parse_pins(&data).unwrap_err().contains("duplicate pin key"));
     }
 
     #[test]
