@@ -85,6 +85,8 @@ Every error from these routes follows the nested error envelope \
         crate::v1::operator::mining::miner_stats,
         crate::v1::operator::mining::status,
         crate::v1::operator::mining::candidate,
+        crate::v1::operator::mining::candidate_details,
+        crate::v1::operator::mining::history,
         crate::v1::operator::mining::solution,
         crate::v1::operator::mining::reward_address,
         crate::v1::operator::mining::reward_pubkey,

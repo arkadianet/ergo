@@ -42,3 +42,23 @@ pub struct ExcludedTransaction {
     pub tx_id: Digest32,
     pub reason: String,
 }
+
+/// One bounded lifecycle observation. This is local diagnostics, not a durable
+/// accounting ledger or evidence that a block remains on the canonical chain.
+#[derive(Debug, Clone)]
+pub struct MiningOutcome {
+    pub msg: Option<[u8; 32]>,
+    pub template_seq: Option<u64>,
+    pub block_id: Option<[u8; 32]>,
+    pub at_ms: u64,
+    pub outcome: String,
+    pub detail: Option<String>,
+}
+
+/// Cheap snapshot of a retained template. The Arc avoids copying transactions
+/// and AVL proof blobs and permits formatting outside the cache lock.
+#[derive(Debug, Clone)]
+pub struct InspectionSnapshot {
+    pub template: std::sync::Arc<crate::engine::Template>,
+    pub status: &'static str,
+}

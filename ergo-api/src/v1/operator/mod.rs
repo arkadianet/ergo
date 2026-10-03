@@ -265,6 +265,11 @@ pub fn operator_router(
         )
         // mining controls
         .route("/api/v1/mining/candidate", get(mining::candidate))
+        .route(
+            "/api/v1/mining/candidate-details",
+            get(mining::candidate_details),
+        )
+        .route("/api/v1/mining/history", get(mining::history))
         .route("/api/v1/mining/solution", post(mining::solution))
         .route("/api/v1/mining/reward-address", get(mining::reward_address))
         .route("/api/v1/mining/reward-pubkey", get(mining::reward_pubkey))

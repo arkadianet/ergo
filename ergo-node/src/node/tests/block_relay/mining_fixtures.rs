@@ -119,6 +119,7 @@ fn solved_block(
             last_headers: Vec::new(),
             last_block_utxo_root: build_last_block_utxo_root(state_root),
         },
+        observation: Default::default(),
         transactions,
         ad_proof_bytes,
         extension_fields: Vec::new(),

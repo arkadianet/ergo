@@ -88,6 +88,7 @@ pub(super) fn build_subsystem(
     let serve_rx = handle.subscribe_serve_changes();
     let bridge =
         crate::mining_bridge::MiningBridge::new(mining_submit_tx.clone(), network_prefix, serve_rx)
+            .with_handle(handle.clone())
             .into_dyn();
     match reward_key {
         ergo_mining::handle::RewardKeySource::Pinned(pk) => {

@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+mod inspection;
+
 use async_trait::async_trait;
 use ergo_api::mining::{MiningApiError, NodeMining};
 use ergo_rest_json::mining::{AutolykosSolutionJson, CandidateMetricsJson, WorkMessageJson};
@@ -102,6 +104,15 @@ pub enum MiningRequest {
     },
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// `NodeMining` impl over an mpsc channel. Construct one in the node
 /// init alongside the `mining_submit_{tx,rx}` channel, hand the
 /// `Sender` here and the `Receiver` to the action loop.
@@ -112,6 +123,7 @@ pub enum MiningRequest {
 /// network prefix for address encoding.
 pub struct MiningBridge {
     tx: mpsc::Sender<MiningRequest>,
+    handle: Option<ergo_mining::handle::MiningHandle>,
     network: ergo_ser::address::NetworkPrefix,
     /// Serve-state-change receiver from the [`MiningHandle`]. Observes a change
     /// whenever the served candidate changes — a publish OR a tip transition
@@ -139,10 +151,24 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout: LONGPOLL_TIMEOUT,
         }
+    }
+
+    /// Give the operator inspection path direct access to the immutable cache.
+    /// Formatting happens on the API task, outside the writer-loop/cache lock.
+    pub fn with_handle(mut self, handle: ergo_mining::handle::MiningHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    fn inspection_handle(&self) -> Result<&ergo_mining::handle::MiningHandle, MiningApiError> {
+        self.handle
+            .as_ref()
+            .ok_or_else(|| MiningApiError::Unavailable("mining cache unavailable".into()))
     }
 
     /// Test-only constructor with an explicit (short) longpoll bound so the
@@ -157,6 +183,7 @@ impl MiningBridge {
     ) -> Self {
         Self {
             tx,
+            handle: None,
             network,
             serve_rx,
             longpoll_timeout,
@@ -249,6 +276,84 @@ fn parse_and_encode_reward_address(
 
 #[async_trait]
 impl NodeMining for MiningBridge {
+    async fn candidate_details(
+        &self,
+        msg: Option<String>,
+        template_seq: Option<u64>,
+    ) -> Result<Option<ergo_rest_json::mining_inspection::CandidateDetailsJson>, MiningApiError>
+    {
+        let msg = inspection::parse_msg(msg)?;
+        let snapshot = self
+            .inspection_handle()?
+            .inspect_template(msg, template_seq);
+        snapshot
+            .map(|s| inspection::candidate_details(s, self.network, now_ms()))
+            .transpose()
+    }
+
+    async fn mining_history(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningHistoryJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::{MiningHistoryJson, MiningOutcomeJson};
+        let handle = self.inspection_handle()?;
+        Ok(MiningHistoryJson {
+            retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES,
+            retained_templates: handle
+                .inspect_history()
+                .into_iter()
+                .map(inspection::summary)
+                .collect(),
+            outcomes: handle
+                .mining_outcomes()
+                .into_iter()
+                .map(|e| MiningOutcomeJson {
+                    msg: e.msg.map(hex::encode),
+                    template_seq: e.template_seq,
+                    block_id: e.block_id.map(hex::encode),
+                    at_ms: e.at_ms,
+                    outcome: e.outcome,
+                    detail: e.detail,
+                })
+                .collect(),
+            resets_on_restart: true,
+        })
+    }
+
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        use ergo_rest_json::mining_inspection::MiningFreshnessJson;
+        let handle = self.inspection_handle()?;
+        let best = handle.best_tip();
+        let current = handle.cached_template_if_synced();
+        Ok(MiningFreshnessJson {
+            mining_started: best.synced,
+            last_template_msg: current.as_ref().map(|(w, _)| hex::encode(w.msg)),
+            last_template_height: current.as_ref().map(|(w, _)| w.height),
+            last_template_age_ms: current
+                .as_ref()
+                .map(|(_, id)| now_ms().saturating_sub(id.built_at_ms)),
+            template_seq: current.map(|(_, id)| id.template_seq),
+        })
+    }
+
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        serde_json::to_value(self.inspection_handle()?.policy())
+            .map_err(|e| MiningApiError::Internal(e.to_string()))
+    }
+
+    async fn set_block_policy(
+        &self,
+        policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        let policy: ergo_mining::policy::BlockPolicy = serde_json::from_value(policy)
+            .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+        self.inspection_handle()?
+            .set_policy(policy)
+            .map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+        self.block_policy().await
+    }
+
     async fn candidate(
         &self,
         longpoll: Option<String>,

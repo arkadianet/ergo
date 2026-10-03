@@ -184,3 +184,19 @@ async fn mining_reward_pubkey_gated() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn mining_candidate_inventory_and_history_require_operator_key() {
+    for path in ["/api/v1/mining/candidate-details", "/api/v1/mining/history"] {
+        assert_eq!(
+            app().oneshot(get(path)).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "{path} must not expose private candidate content"
+        );
+        assert_eq!(
+            app().oneshot(with_key(get(path))).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} must reach the authenticated handler"
+        );
+    }
+}

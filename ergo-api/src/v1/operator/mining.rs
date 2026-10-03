@@ -168,15 +168,23 @@ pub(crate) struct MiningStatus {
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     let mining_enabled = s.read.identity().mining;
-    let synced = s.read.status().sync_state == SyncStateLabel::AtTip;
+    let freshness = match &s.mining {
+        Some(m) => m.mining_freshness().await.unwrap_or_default(),
+        None => Default::default(),
+    };
+    let synced = if mining_enabled {
+        freshness.mining_started
+    } else {
+        s.read.status().sync_state == SyncStateLabel::AtTip
+    };
     Json(MiningStatus {
         mining_enabled,
         synced,
         longpoll_supported: true,
-        last_template_msg: None,
-        last_template_height: None,
-        last_template_age_ms: None,
-        template_seq: None,
+        last_template_msg: freshness.last_template_msg,
+        last_template_height: freshness.last_template_height,
+        last_template_age_ms: freshness.last_template_age_ms,
+        template_seq: freshness.template_seq,
     })
     .into_response()
 }
@@ -217,6 +225,54 @@ pub(crate) async fn candidate(
             "no candidate could be built (not synced or generation race)",
             "retry once the node reports at_tip",
         ),
+        Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
+    }
+}
+
+/// Select a retained template precisely; combining selectors is an AND.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct InspectionQuery {
+    msg: Option<String>,
+    template_seq: Option<u64>,
+}
+
+/// Operator-only transaction and rent inventory of one frozen template.
+#[utoipa::path(
+    get, path = "/api/v1/mining/candidate-details", tag = "mining",
+    params(("msg" = Option<String>, Query, description = "32-byte hexadecimal work ID"), ("template_seq" = Option<u64>, Query, description = "Exact retained publish sequence")),
+    responses((status = 200, description = "Frozen template inventory and miner proceeds", body = serde_json::Value), (status = 404, description = "Template was evicted or selectors do not match", body = V1Error), (status = 503, description = "No current template", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn candidate_details(
+    State(s): State<OperatorState>,
+    Query(q): Query<InspectionQuery>,
+) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    let historical = q.msg.is_some() || q.template_seq.is_some();
+    match mining.candidate_details(q.msg, q.template_seq).await {
+        Ok(Some(details)) => Json(details).into_response(),
+        Ok(None) if historical => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":404,"reason":"template_not_retained","detail":"No retained template matches both selectors; re-fetch current work."}))).into_response(),
+        Ok(None) => v1_error(Reason::CandidateUnavailable, "no current template", "retry once mining work is available"),
+        Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
+    }
+}
+
+/// Bounded local template and solution history. Resets on restart.
+#[utoipa::path(
+    get, path = "/api/v1/mining/history", tag = "mining",
+    responses((status = 200, description = "Bounded operator mining history", body = serde_json::Value), (status = 503, description = "Mining history unavailable", body = V1Error)),
+    security(("ApiKeyAuth" = [])),
+)]
+pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
+    let mining = match s.mining() {
+        Ok(m) => m,
+        Err(e) => return *e,
+    };
+    match mining.mining_history().await {
+        Ok(history) => Json(history).into_response(),
         Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
     }
 }
