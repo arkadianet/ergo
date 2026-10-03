@@ -1,5 +1,106 @@
 {
-  "reference": "sigma-state6.0.6/Scala2.12.20/Circe0.14.5",
+  "reference": "sigma-state 6.0.6 / Scala 2.12.20 / resolved Circe 0.14.15",
+  "boundaries": [
+    {
+      "kind": "boundary",
+      "input": "1e262143",
+      "digits": 262144
+    },
+    {
+      "kind": "boundary",
+      "input": "1e262144",
+      "digits": null
+    },
+    {
+      "kind": "boundary",
+      "input": "0e999999999999999999999",
+      "digits": 1
+    },
+    {
+      "kind": "boundary",
+      "input": "1e999999999999999999999",
+      "digits": null
+    },
+    {
+      "kind": "boundary",
+      "input": "1e-999999999999999999999",
+      "digits": null
+    }
+  ],
+  "values": [
+    {
+      "kind": "value",
+      "input": "0101",
+      "canonical": "0101",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "0100",
+      "canonical": "0100",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "0105",
+      "canonical": "0101",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "010101",
+      "canonical": "0101",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "01",
+      "canonical": null,
+      "consumed": null
+    },
+    {
+      "kind": "value",
+      "input": "0402",
+      "canonical": "0402",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "040201",
+      "canonical": "0402",
+      "consumed": 2
+    },
+    {
+      "kind": "value",
+      "input": "048200",
+      "canonical": "0402",
+      "consumed": 3
+    },
+    {
+      "kind": "value",
+      "input": "860201010402",
+      "canonical": "860201010402",
+      "consumed": 6
+    },
+    {
+      "kind": "value",
+      "input": "86020101040201",
+      "canonical": "860201010402",
+      "consumed": 6
+    },
+    {
+      "kind": "value",
+      "input": "86020101",
+      "canonical": null,
+      "consumed": null
+    },
+    {
+      "kind": "value",
+      "input": "9800",
+      "canonical": null,
+      "consumed": null
+    }
+  ],
   "numeric": [
     {
       "kind": "number",
@@ -198,90 +299,6 @@
       "input": "\"1e+002\"",
       "bigint": "100",
       "long": "100"
-    }
-  ],
-  "boundaries": [
-    {
-      "kind": "boundary",
-      "input": "1e262143",
-      "digits": 262144
-    },
-    {
-      "kind": "boundary",
-      "input": "1e262144",
-      "digits": null
-    },
-    {
-      "kind": "boundary",
-      "input": "0e999999999999999999999",
-      "digits": 1
-    },
-    {
-      "kind": "boundary",
-      "input": "1e999999999999999999999",
-      "digits": null
-    },
-    {
-      "kind": "boundary",
-      "input": "1e-999999999999999999999",
-      "digits": null
-    }
-  ],
-  "values": [
-    {
-      "kind": "value",
-      "input": "0101",
-      "canonical": "0101"
-    },
-    {
-      "kind": "value",
-      "input": "0100",
-      "canonical": "0100"
-    },
-    {
-      "kind": "value",
-      "input": "0105",
-      "canonical": "0101"
-    },
-    {
-      "kind": "value",
-      "input": "010101",
-      "canonical": "0101"
-    },
-    {
-      "kind": "value",
-      "input": "01",
-      "canonical": null
-    },
-    {
-      "kind": "value",
-      "input": "0402",
-      "canonical": "0402"
-    },
-    {
-      "kind": "value",
-      "input": "040201",
-      "canonical": "0402"
-    },
-    {
-      "kind": "value",
-      "input": "860201010402",
-      "canonical": "860201010402"
-    },
-    {
-      "kind": "value",
-      "input": "86020101040201",
-      "canonical": "860201010402"
-    },
-    {
-      "kind": "value",
-      "input": "86020101",
-      "canonical": null
-    },
-    {
-      "kind": "value",
-      "input": "9800",
-      "canonical": null
     }
   ]
 }

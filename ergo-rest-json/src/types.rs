@@ -90,7 +90,7 @@ pub struct ScalaPowSolutions {
 }
 
 /// Read a nonnegative Scala `BigInt` magnitude from a JSON number or numeric
-/// string. Exact integral decimal/exponent forms follow pinned Circe0.14.5;
+/// string. Exact integral decimal/exponent forms follow pinned Circe 0.14.15;
 /// negative nonzero values are refused by this field's unsigned policy.
 ///
 /// Shared by the two such fields on the REST surface: the mining target
@@ -118,7 +118,7 @@ pub(crate) fn unsigned_bigint_from_json(field: &str, value: &JsonValue) -> Resul
     .map_err(|reason| format!("{field}: {reason}"))
 }
 
-// Circe0.14.5 BiggerDecimal.MaxBigIntegerDigits. Check the resulting length,
+// Circe 0.14.15 BiggerDecimal.MaxBigIntegerDigits. Check the resulting length,
 // not the exponent alone: significant digits and scale can cancel each other.
 const MAX_BIGINT_DECIMAL_DIGITS: usize = 1 << 18;
 

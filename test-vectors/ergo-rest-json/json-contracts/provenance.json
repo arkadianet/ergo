@@ -46,22 +46,23 @@
   },
   "circe_sources": [
     {
-      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.5/modules/numbers/shared/src/main/scala/io/circe/numbers/BiggerDecimal.scala",
-      "sha256": "1d11edc054b0f947b7a947f0107175d0bcb05b110ffe41cd5ea69571b86c5598",
-      "bytes": 12749
+      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.15/modules/numbers/shared/src/main/scala/io/circe/numbers/BiggerDecimal.scala",
+      "sha256": "251d637a1a6763ab382ab98d718452d1077f0fca3cb6b5584ab1226b8eb7e2fc",
+      "bytes": 13399
     },
     {
-      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.5/modules/core/shared/src/main/scala/io/circe/JsonNumber.scala",
-      "sha256": "b82346b76004e67ec6a6f15d10746f2c96854bb8ba2cd6ec600e8c43d839d35a",
-      "bytes": 10059
+      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.15/modules/core/shared/src/main/scala/io/circe/JsonNumber.scala",
+      "sha256": "2458aef05e59557ee2b79dee5f3e1510cfe6c8109154088aa9596c5eb40dae46",
+      "bytes": 11142
     }
   ],
   "files": {
-    "cases.json": "29972e7b7c69eab3856a4343858667f7b6ba50973948187dbed95dd9a2cce9ea",
-    "Capture.scala": "05e19bfaa155e3ed64fb05265e803ce219f4104d534f5cfd5564398fee1b358f",
-    "scala.stderr": "6be89e9d12cfa0f1b7a29fdcd18c5c1bd906637bbd9edc4bd00ba7ad211f7a3d",
-    "scala.stdout": "6d44aed7e9ec0ba39a413f362136ea6df7183c88f8a26c314b2a2759f6653baa",
-    "README.md": "dcdf0062d424e1b80536dfe75534d17eef63f2118ae0f234e23fde78d43078bc"
+    "cases.json": "da92fb25b3e52194f55ce89cc214c412e3742982e360354820ecd6c3e62a841e",
+    "Capture.scala": "783c037ac7837b22ca04ae5b04bba8804082080ab3e20e67c8ecfdceb26b090a",
+    "scala.stderr": "dcecd0de513a0b4ace001f1ef59eed07ee5e01c0f83423de0b1d2230ee364283",
+    "scala.stdout": "851374ba45af81b19d06dfe26ee311e8cf2076bfb59c11b0350f639e310e355f",
+    "README.md": "b80447d3e0e2ab08118fd824dc9ec3cb574ba7c60fafcaf26ae72eb12585566a"
   },
-  "scope": "Finite actual numeric and evaluated-value decodes. Unsigned field policy separately refuses negative nonzero magnitudes. No transaction, node or chain execution."
+  "scope": "Finite actual numeric and evaluated-value decodes. Unsigned field policy separately refuses negative nonzero magnitudes. No transaction, node or chain execution.",
+  "circe": "0.14.15"
 }
