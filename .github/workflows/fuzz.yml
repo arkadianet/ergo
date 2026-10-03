@@ -14,8 +14,8 @@ name: Fuzz (nightly scheduled)
 # job) but is gated on a `REPLAY_NODE_URL` secret pointing at a reachable archival
 # Scala node — it no-ops when unset (GitHub-hosted runners have no node), so it
 # runs on a self-hosted runner or an operator `workflow_dispatch`. This is where
-# the deep contiguous state-root coverage retired from committed fixtures now
-# lives (see test-vectors/mainnet/FIXTURES.md).
+# the implemented early-mainnet diagnostic coverage is exercised; deeper
+# historical context reconstruction remains unimplemented.
 
 on:
   schedule:
@@ -199,39 +199,67 @@ jobs:
         if: steps.cargo-fuzz-bin-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz --version ${{ steps.rust.outputs.fuzz }} --locked
 
-      # cargo-fuzz has no --locked option. Resolve its separate workspace
-      # against the committed lock before building, then detect any drift even
-      # when libFuzzer reports a crash.
-      - name: check locked fuzz dependencies
-        working-directory: ergo-difftest
-        run: cargo +${{ steps.rust.outputs.nightly }} metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
-
-      # Bounded run: build (ASan) + a coverage-guided run seeded from the
-      # committed corpus/<surface>, capped at 10 minutes wall-clock per target
-      # (fail-fast: false means one target's crash doesn't stop the others).
-      # -error_exitcode=1 makes a real crash fail the job (actionable red);
-      # the type-depth guard artifact is already filtered out of the Bug class
-      # (SER-003) so it will not spuriously fail this.
-      - name: fuzz ${{ matrix.target }} (bounded run, 10 min)
-        working-directory: ergo-difftest
-        # ASan records the allocation stack of every malloc in a depot it never
-        # frees. The recursive parsers produce new stacks with nearly every
-        # input, so RSS grew ~330 B per execution (live heap ~33 MB) and
-        # sigma_expr crossed the 2048 MB limit at ~6.5M executions. Without
-        # allocation stacks RSS stays flat (~650 MB at 5.3M locally). A memory
-        # error report then omits the alloc/free stacks: replay the uploaded
-        # artifact locally with default ASAN_OPTIONS to get them back.
+      - name: capture initial fuzz authority and ordered seeds
         env:
           ASAN_OPTIONS: malloc_context_size=0
         run: |
-          cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" -- \
+          python3 scripts/fuzz-evidence.py start --root "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/fuzz-evidence" --target "${{ matrix.target }}" \
+            --toolchain "${{ steps.rust.outputs.nightly }}" \
+            --build-directory "$RUNNER_TEMP/native-fuzz-target"
+
+      # cargo-fuzz has no --locked option. Preserve the locked precheck and
+      # postcheck even when a build/run fails, plus exact command transcripts.
+      - name: check locked fuzz dependencies
+        working-directory: ergo-difftest
+        run: |
+          ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" locked-precheck \
+            cargo +${{ steps.rust.outputs.nightly }} metadata --locked \
+            --manifest-path fuzz/Cargo.toml --format-version 1
+
+      - name: build ${{ matrix.target }} with ASan
+        working-directory: ergo-difftest
+        env:
+          ASAN_OPTIONS: malloc_context_size=0
+        run: |
+          ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" build \
+            cargo +${{ steps.rust.outputs.nightly }} fuzz build "${{ matrix.target }}" \
+            --sanitizer address --target x86_64-unknown-linux-gnu \
+            --target-dir "$RUNNER_TEMP/native-fuzz-target"
+
+      - name: fuzz ${{ matrix.target }} (bounded run, 10 min)
+        working-directory: ergo-difftest
+        # Restrict ASan's allocation-stack memory. Artifact replay with default
+        # ASAN_OPTIONS can recover alloc/free stacks; that replay is separate.
+        env:
+          ASAN_OPTIONS: malloc_context_size=0
+        run: |
+          ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" run \
+            cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" \
+            "fuzz/corpus/${{ matrix.target }}" --sanitizer address \
+            --target x86_64-unknown-linux-gnu --target-dir "$RUNNER_TEMP/native-fuzz-target" -- \
             -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1
 
       - name: verify fuzz lockfile unchanged
         if: always()
+        working-directory: ergo-difftest
         run: |
-          git ls-files --error-unmatch ergo-difftest/fuzz/Cargo.lock
-          git diff --exit-code -- ergo-difftest/fuzz/Cargo.lock
+          ../scripts/fuzz-step.sh "$RUNNER_TEMP/fuzz-evidence" locked-postcheck \
+            git diff --exit-code -- fuzz/Cargo.lock
+
+      - name: finish fuzz evidence (including incomplete runs)
+        if: always()
+        run: |
+          python3 scripts/fuzz-evidence.py finish --root "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/fuzz-evidence" --target "${{ matrix.target }}"
+
+      - name: upload fuzz execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-evidence-${{ matrix.target }}
+          path: ${{ runner.temp }}/fuzz-evidence/
+          if-no-files-found: error
 
       - name: upload crash artifacts
         if: failure()

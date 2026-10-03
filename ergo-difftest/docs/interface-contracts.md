@@ -1,11 +1,13 @@
 # Fuzz-differential harness — interface contracts
 
 Authoritative spec for the continuous fuzz-differential harness (Rust Ergo node
-vs the Scala reference at `reference/ergo-core` v6.0.2). Every slice builds
+vs the current pinned Scala runtime 6.0.6). Every slice builds
 against the contracts here. Changing a contract is a lead-engineer decision, not
 a slice-local one.
 
-The ground-truth table and D1 decision below record the July 2026 environment.
+The ground-truth table below preserves the July 2026 environment; it is
+historical attribution, not present execution evidence. D1 now describes the
+current pinned-nightly workflow.
 The workspace now pins stable Rust 1.99.0. CI also runs coverage-guided campaigns
 with the independently pinned nightly in `.github/ci-tools.toml`; see
 [`fuzz/README.md`](../fuzz/README.md) for the current setup. The hermetic runner
@@ -22,7 +24,7 @@ built · **[DEFERRED]** out of this session's scope, contract reserved.
 |------|-------|
 | Scala oracle | `scripts/jvm_serde_oracle/ErgoSerdeOracle.scala`, scala-cli, sigma-state 6.0.2 (Maven) + ergo-core 6.0.2 (publishLocal). **Live-confirmed** — answers `ACCEPT <canon-hex>` on a real tree. |
 | Oracle wire | long-lived process; stdin line `<surface> <hex>`; stdout one line `ACCEPT <hex>` / `ACCEPT` / `REJECT <ExcName>` / `ERR <msg>`; special `reduce`→`ACCEPT P:<sigmahex>\|<cost>`, `mc_root`→`SIGMA`/`WRAP`/`THROW`. |
-| Oracle surfaces (today) | ergo_tree, sigma_type, constant, ergo_box_candidate, transaction, header, reduce, mc_root |
+| Oracle surfaces (2026-07-03) | ergo_tree, sigma_type, constant, ergo_box_candidate, transaction, header, reduce, mc_root |
 | Archival node | Scala `:9053`, `fullHeight` ≈ 1,820,888, `appVersion` 6.0.2. Serves `GET /blocks/at/{h}` → `[headerId]`, `GET /blocks/{id}` → full block JSON (header, blockTransactions, extension, adProofs). **Block source AND per-tx/state oracle.** |
 | Rust dev nodes | `:9073/:9072` **down** → replay applies blocks **in-process**, not over REST. |
 | Rust block-apply | `ergo_validation::block::validate_full_block_parallel(checked_header, &block_txs, &extension, &ctx) -> Result<CheckedBlock,_>` then `ergo_state::StateStore::apply_block(&checked, voted_params, hook)`; root via `StateStore::root_digest() -> ADDigest` (33 bytes). test-helpers: `apply_block_checked_for_test(height, id, expected_digest, &[CheckedTransaction])`. |
@@ -40,7 +42,7 @@ built · **[DEFERRED]** out of this session's scope, contract reserved.
 Keep the process model (long-lived, one input line → one output line) and the
 `ACCEPT/REJECT/ERR` verdict grammar. Add two surfaces:
 
-### `validate <hex>`  [SPEC]
+### `validate <hex>`  [BUILT]
 Stateless transaction validity (the context-free half of Scala
 `ErgoTransaction.validateStateless`). Input `<hex>` = a serialized
 `ErgoLikeTransaction`.
@@ -50,10 +52,10 @@ Stateless transaction validity (the context-free half of Scala
 - `ERR <msg>` — oracle could not run (not a finding).
 
 Stateful validation (`validateStateful`, needs boxesToSpend + stateContext) is
-**[DEFERRED]** to the replay driver (§2), which already has full state — the
-sidecar stays context-free so it can be driven purely from wire bytes.
+**[DEFERRED]** as a general sidecar contract. The early-mainnet replay driver
+(§2) owns a narrower fixed context; the sidecar remains context-free.
 
-### `verify_avl <hex>`  [SPEC]
+### `verify_avl <hex>`  [BUILT]
 AVL+ batch-proof verification twin of `ergo_sigma::avl::AvlVerifier`. Input
 `<hex>` = a length-framed blob: `startingDigest(33) ‖ keyLen(u8) ‖
 valueLenOpt(1 tag + optional u8) ‖ proofLen(vlq) ‖ proof ‖ opCount(vlq) ‖
@@ -224,8 +226,8 @@ reports use the replay driver's block-specific schema rather than `auto_file`.
 
 ## 5. Known-bug rediscovery suite  (Slice 5 — the anti-theater gate)
 
-Catalog: `ergo-difftest/docs/known-bug-catalog.md` (25 entries, fix
-locations verified). Machine-readable manifest:
+Catalog: `ergo-difftest/docs/known-bug-catalog.md`. Machine-readable manifest
+(currently 39 entries; entry presence is not executed rediscovery evidence):
 `ergo-difftest/known_bugs/manifest.toml`, one entry per re-injectable bug:
 
 ```toml
@@ -255,23 +257,22 @@ catalog cases require their own correctly contextualized replay evidence.
 
 ## 6. Decisions (lead engineer)
 
-**D1 — cargo-fuzz vs hermetic runner.** No nightly here or in CI, and the repo is
-pinned to stable 1.95.0; a libFuzzer target would "run green" only by never
-running — the exact theater the mission forbids. **Decision:** the generators are
-a *library* (`src/gen/`). The primary consumer is the stable hermetic runner
-(`--structured`), which runs in CI and against the live oracle. A thin `fuzz/`
-cargo-fuzz target reuses the same library for coverage-guided runs **when nightly
-is available** (opt-in, not CI-gating). This delivers "cargo-fuzz targets per
-surface" without making the gate depend on a toolchain we don't have. Recorded as
-a "remaining risk / offline trade" in the final report.
+**D1 — cargo-fuzz vs hermetic runner.** Stable Rust 1.99.0 drives the PR
+hermetic runner. The detached workspace uses the exact nightly and cargo-fuzz
+versions in `.github/ci-tools.toml`; PR CI checks locked metadata, while scheduled
+and manual jobs build/run all 12 native targets with address sanitizer.
+`libfuzzer-sys` compiles bundled C++ libFuzzer sources. Nightly enables the unstable
+Rust sanitizer/SanitizerCoverage instrumentation; a missing stable library is
+not the reason. Generator and fixed-point coverage, native crash/artifact
+assurance, and independent JVM comparisons are different evidence obligations.
+Workflow wiring or a collector unit pass does not prove an executed campaign.
 
-**D2 — fixture retirement scope.** Deleting the 101 MB committed ranges breaks
-~10 CI-run tests. **Decision:** (1) harvest interesting structures from the ranges
-into the seed corpus FIRST; (2) rewire the affected tests to a *small* committed
-hermetic seed (genesis + a handful of known-gnarly heights: 836113, plus 1–200)
-that still runs offline in CI; (3) move full-range coverage to the streamed replay
-driver, pinned by height+hash (§2). Net: CI stays hermetic on a small seed; deep
-coverage is the streamed oracle, reproducible without committing bytes.
+**D2 — fixture retirement plan.** Committed full ranges still support hermetic
+Rust tests. Retirement requires small externally sourced seeds and replacement
+receipts before deletion. The current replay driver only models heights 1–200;
+deep epoch/context reconstruction and retained later incident pins do not provide
+replacement deep coverage. Do not retire fixtures based on a skipped workflow
+or an unimplemented historical plan.
 
 **D3 — consensus-truth.** Any divergence where the correct side is unclear (incl.
 "is this a JVM quirk to bug-for-bug match?") is escalated to the human via the
@@ -280,7 +281,10 @@ triage queue. No subagent, and not the lead engineer, silently resolves it or
 
 ---
 
-## 7. Slice sequencing + model ledger
+## 7. Historical slice sequencing + model ledger
+
+This table preserves the original planning allocation; it is not a current
+reviewer assignment or proof that a slice passed its acceptance gate.
 
 | Slice | What | Model | Why |
 |-------|------|-------|-----|
