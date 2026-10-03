@@ -1513,6 +1513,56 @@ fn package_rbf_accepts_over_multi_tx_descendant_closure() {
 }
 
 #[test]
+fn package_replacement_retains_the_bounded_descendant_frontier() {
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_family_depth: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x80]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(9, 2_000_000, &[0x80], &[0x81])
+        .plan(8, 2_000_000, &[0x81], &[0x82])
+        .plan(7, 2_000_000, &[0x82], &[0x83])
+        .plan(1, 1_000_000, &[0x80], &[0x85])
+        .plan(2, 20_000_000, &[0x85], &[0x86]);
+    let now = Instant::now();
+    for b in [9, 8, 7] {
+        assert!(matches!(
+            mp.process(&tx_bytes(b), TxSource::Api, now, &tip.view(&utxo), &v)
+                .0,
+            AdmissionOutcome::Admitted { .. }
+        ));
+    }
+    assert!(matches!(
+        mp.process(&tx_bytes(1), TxSource::Api, now, &tip.view(&utxo), &v)
+            .0,
+        AdmissionOutcome::Rejected {
+            reason: RejectReason::DoubleSpendLoser
+        }
+    ));
+    assert!(matches!(
+        mp.process(&tx_bytes(2), TxSource::Api, now, &tip.view(&utxo), &v)
+            .0,
+        AdmissionOutcome::Admitted { .. }
+    ));
+    assert!(mp.contains(&d(7)), "the first removal is bounded");
+    assert_eq!(mp.orphan_eviction_pending(), 1);
+    let actions = mp.tick_revalidation(now, &tip.view(&utxo), &v);
+    assert!(!mp.contains(&d(7)));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, MempoolAction::RevokeBroadcast { tx_ids } if tx_ids == &vec![d(7)])));
+    assert!(mp.contains(&d(1)) && mp.contains(&d(2)));
+    assert!(!mp.is_invalidated(&d(7)));
+    assert_eq!(mp.orphan_eviction_pending(), 0);
+    mp.pool().check_invariants();
+}
+
+#[test]
 fn package_rbf_rejects_over_multi_tx_closure_when_r2_fails_on_descendant_fee() {
     // Same incumbent family, but the DESCENDANT I2 carries a large absolute fee
     // (10M) at a low feerate (cost 200_000). Counting the whole closure, the
