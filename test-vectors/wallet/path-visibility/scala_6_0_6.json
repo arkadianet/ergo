@@ -1,0 +1,162 @@
+{
+  "sdk" : "6.0.6",
+  "cases" : [
+    {
+      "name" : "master-only",
+      "keys" : [
+        {
+          "components" : [
+          ],
+          "isMaster" : true,
+          "isEip3" : false,
+          "publicKey" : "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+          "address" : "9guByt3WGrJ1MGWJnNMNw3x13XXsfptePFydfJhwkGCikP8NotD"
+        }
+      ],
+      "nextPath" : "m/44'/429'/0'/0/0"
+    },
+    {
+      "name" : "master-pre-eip3",
+      "keys" : [
+        {
+          "components" : [
+          ],
+          "isMaster" : true,
+          "isEip3" : false,
+          "publicKey" : "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+          "address" : "9guByt3WGrJ1MGWJnNMNw3x13XXsfptePFydfJhwkGCikP8NotD"
+        },
+        {
+          "components" : [
+            1
+          ],
+          "isMaster" : false,
+          "isEip3" : false,
+          "publicKey" : "037c2098fd2235660734667ff8821dbbe0e6592d43cfd86b5dde9ea7c839b93a50",
+          "address" : "9hQUMhDM2GF13Sc8SooANrAZiqjeARrf6KArcky2EwsEUeejZGn"
+        }
+      ],
+      "nextPath" : "m/2"
+    },
+    {
+      "name" : "master-eip3",
+      "keys" : [
+        {
+          "components" : [
+          ],
+          "isMaster" : true,
+          "isEip3" : false,
+          "publicKey" : "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+          "address" : "9guByt3WGrJ1MGWJnNMNw3x13XXsfptePFydfJhwkGCikP8NotD"
+        },
+        {
+          "components" : [
+            2147483692,
+            2147484077,
+            2147483648,
+            0,
+            0
+          ],
+          "isMaster" : false,
+          "isEip3" : true,
+          "publicKey" : "03d95c95998b73340085053685a68f8dfeccaaed90ec562d2116ced797d49031a4",
+          "address" : "9i7XuLo8774SkMRwgcU4KBGSZHc5TybxK9GTk4EYifQzCs5yjcb"
+        }
+      ],
+      "nextPath" : "m/44'/429'/0'/0/1"
+    },
+    {
+      "name" : "master-eip3-three",
+      "keys" : [
+        {
+          "components" : [
+          ],
+          "isMaster" : true,
+          "isEip3" : false,
+          "publicKey" : "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+          "address" : "9guByt3WGrJ1MGWJnNMNw3x13XXsfptePFydfJhwkGCikP8NotD"
+        },
+        {
+          "components" : [
+            2147483692,
+            2147484077,
+            2147483648,
+            0,
+            0
+          ],
+          "isMaster" : false,
+          "isEip3" : true,
+          "publicKey" : "03d95c95998b73340085053685a68f8dfeccaaed90ec562d2116ced797d49031a4",
+          "address" : "9i7XuLo8774SkMRwgcU4KBGSZHc5TybxK9GTk4EYifQzCs5yjcb"
+        },
+        {
+          "components" : [
+            2147483692,
+            2147484077,
+            2147483648,
+            0,
+            1
+          ],
+          "isMaster" : false,
+          "isEip3" : true,
+          "publicKey" : "029da59215e355dc24b70c21c968cd4d2532b4cdfc879395c43b0bdaff35c0e096",
+          "address" : "9fiVPZzPPnN1Z5UmeiaFSeTpFMzJ18v1VENxw2msupixfWRFxHF"
+        }
+      ],
+      "nextPath" : "m/44'/429'/0'/0/2"
+    },
+    {
+      "name" : "non-master-eip3",
+      "keys" : [
+        {
+          "components" : [
+            1
+          ],
+          "isMaster" : false,
+          "isEip3" : false,
+          "publicKey" : "037c2098fd2235660734667ff8821dbbe0e6592d43cfd86b5dde9ea7c839b93a50",
+          "address" : "9hQUMhDM2GF13Sc8SooANrAZiqjeARrf6KArcky2EwsEUeejZGn"
+        },
+        {
+          "components" : [
+            2147483692,
+            2147484077,
+            2147483648,
+            0,
+            0
+          ],
+          "isMaster" : false,
+          "isEip3" : true,
+          "publicKey" : "03d95c95998b73340085053685a68f8dfeccaaed90ec562d2116ced797d49031a4",
+          "address" : "9i7XuLo8774SkMRwgcU4KBGSZHc5TybxK9GTk4EYifQzCs5yjcb"
+        }
+      ],
+      "nextPath" : "m/44'/429'/0'/0/1"
+    },
+    {
+      "name" : "master-eip3-account",
+      "keys" : [
+        {
+          "components" : [
+          ],
+          "isMaster" : true,
+          "isEip3" : false,
+          "publicKey" : "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+          "address" : "9guByt3WGrJ1MGWJnNMNw3x13XXsfptePFydfJhwkGCikP8NotD"
+        },
+        {
+          "components" : [
+            2147483692,
+            2147484077,
+            2147483648
+          ],
+          "isMaster" : false,
+          "isEip3" : true,
+          "publicKey" : "02841a778ffe2697d1c7dd74427db400380ba1a37d81cd51746804fb54746c3f65",
+          "address" : "9fXEvEu8vPdVoPpbDX3kBUrZN2f8F7sDcpHLM3gcEoPzbrb5y44"
+        }
+      ],
+      "nextPath" : "m/44'/429'/1'"
+    }
+  ]
+}
