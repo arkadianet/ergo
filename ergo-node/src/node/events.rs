@@ -765,7 +765,7 @@ fn inject_local_full_block(
             );
             return Err(SubmitError {
                 reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
+                detail: Some(format!("local failure during header apply: {e}")),
             });
         }
         Err(e @ HeaderProcessError::Deserialize(_)) => {
