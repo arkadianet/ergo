@@ -269,7 +269,7 @@ retail ISP. These display-only details never affect peer selection or scoring.
 Realtime subscriptions, mempool-depth sampling, and the webhook registry belong
 to one node, including when several nodes run in one process. Router construction
 starts no background workers; the API listener owns them and stops them at
-shutdown. Webhook registrations remain in memory. Delivery permits only public
+shutdown. Delivery permits only public
 DNS destinations by default, checks every resolved address before connecting,
 and disables redirects and environment HTTP proxies so those checks also apply
 to retries and cannot be bypassed by alternate routing.

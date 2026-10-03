@@ -12,6 +12,20 @@ const CACHE_BYTES: usize = 16 * 1024 * 1024;
 const SNAPSHOT: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("webhook_snapshot_v1");
 
+// One-shot faults stay local to each test thread and do not exist in production.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenFault {
+    Metadata,
+    FileSync,
+    CreateRace,
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPEN_FAULT: std::cell::Cell<Option<OpenFault>> = const { std::cell::Cell::new(None) };
+}
+
 pub(crate) struct RedbWebhookStore {
     db: redb::Database,
 }
@@ -36,49 +50,76 @@ impl RedbWebhookStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(path).map_err(|e| e.to_string())?;
-        let opened = file.metadata().map_err(|e| e.to_string())?;
-        if !opened.is_file() {
-            return Err("webhook database must be a regular file".into());
+        #[cfg(test)]
+        let fault = OPEN_FAULT.with(std::cell::Cell::take);
+        #[cfg(test)]
+        if fault == Some(OpenFault::CreateRace) {
+            fs::write(path, b"raced initializer").map_err(|e| e.to_string())?;
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if existing.as_ref().is_some_and(|metadata| {
-                metadata.dev() != opened.dev() || metadata.ino() != opened.ino()
-            }) {
-                return Err("webhook database changed identity while opening".into());
+        // An unsuccessful create_new must never enter cleanup: another
+        // initializer may have won the race and owns the existing file.
+        let file = options.open(path).map_err(|e| e.to_string())?;
+        let initialized = (|| {
+            #[cfg(test)]
+            if fault == Some(OpenFault::Metadata) {
+                return Err("injected webhook metadata failure".into());
+            }
+            let opened = file.metadata().map_err(|e| e.to_string())?;
+            if !opened.is_file() {
+                return Err("webhook database must be a regular file".into());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if existing.as_ref().is_some_and(|metadata| {
+                    metadata.dev() != opened.dev() || metadata.ino() != opened.ino()
+                }) {
+                    return Err("webhook database changed identity while opening".into());
+                }
+            }
+            // Keep the verified handle: dropping it and reopening the path would
+            // allow a different file to receive signing secrets. Tighten existing
+            // permissions only after redb validates and locks this same database.
+            let permissions_file = file.try_clone().map_err(|e| e.to_string())?;
+            let db = redb::Database::builder()
+                .set_cache_size(CACHE_BYTES)
+                .create_file(file)
+                .map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions_file
+                    .set_permissions(fs::Permissions::from_mode(0o600))
+                    .map_err(|e| e.to_string())?;
+            }
+            #[cfg(test)]
+            if fault == Some(OpenFault::FileSync) {
+                return Err("injected webhook file-sync failure".into());
+            }
+            permissions_file.sync_all().map_err(|e| e.to_string())?;
+            // A durable registration also needs the newly-created directory
+            // entry to survive a crash. Windows has no portable directory sync.
+            #[cfg(unix)]
+            if created {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(Self { db })
+        })();
+        // The closure owns every file/database handle. They have all dropped
+        // on Err before removal, including on Windows where open handles can
+        // prevent unlinking. Existing files remain available for diagnosis.
+        if created && initialized.is_err() {
+            if let Err(error) = fs::remove_file(path) {
+                tracing::warn!(%error, "failed to remove newly-created webhook database after initialization error");
             }
         }
-        // Keep the verified handle: dropping it and reopening the path would
-        // allow a different file to receive signing secrets. Tighten existing
-        // permissions only after redb validates and locks this same database.
-        let permissions_file = file.try_clone().map_err(|e| e.to_string())?;
-        let db = redb::Database::builder()
-            .set_cache_size(CACHE_BYTES)
-            .create_file(file)
-            .map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            permissions_file
-                .set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
-        }
-        permissions_file.sync_all().map_err(|e| e.to_string())?;
-        // A durable registration also needs the newly-created directory
-        // entry to survive a crash. Windows has no portable directory sync.
-        #[cfg(unix)]
-        if created {
-            let parent = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(Self { db })
+        initialized
     }
 }
 
@@ -297,6 +338,67 @@ mod tests {
             Arc::new(RedbWebhookStore::open(&directory.path().join("webhooks.redb")).unwrap());
         store.commit(b"not a snapshot").unwrap();
         assert!(WebhookEngine::durable(Default::default(), store).is_err());
+    }
+
+    #[test]
+    fn failed_new_initialization_releases_handles_removes_file_and_allows_retry() {
+        for (fault, expected) in [
+            (OpenFault::Metadata, "injected webhook metadata failure"),
+            (OpenFault::FileSync, "injected webhook file-sync failure"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("webhooks.redb");
+            OPEN_FAULT.with(|injection| injection.set(Some(fault)));
+            assert_eq!(RedbWebhookStore::open(&path).err().unwrap(), expected);
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound,
+                "a failed new initialization must not poison the next startup"
+            );
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+            // The late fault runs with a real redb database and cloned handle
+            // alive. Immediate removal/retry also checks their Windows cleanup.
+            let store = RedbWebhookStore::open(&path).unwrap();
+            store.commit(b"acknowledged after retry").unwrap();
+            drop(store);
+            let reopened = RedbWebhookStore::open(&path).unwrap();
+            assert_eq!(
+                reopened.load().unwrap().unwrap(),
+                b"acknowledged after retry"
+            );
+        }
+    }
+
+    #[test]
+    fn initialization_errors_never_remove_an_existing_snapshot() {
+        for (fault, expected) in [
+            (OpenFault::Metadata, "injected webhook metadata failure"),
+            (OpenFault::FileSync, "injected webhook file-sync failure"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("webhooks.redb");
+            let store = RedbWebhookStore::open(&path).unwrap();
+            store.commit(b"existing acknowledged snapshot").unwrap();
+            drop(store);
+            OPEN_FAULT.with(|injection| injection.set(Some(fault)));
+            assert_eq!(RedbWebhookStore::open(&path).err().unwrap(), expected);
+            assert!(path.is_file());
+            let reopened = RedbWebhookStore::open(&path).unwrap();
+            assert_eq!(
+                reopened.load().unwrap().unwrap(),
+                b"existing acknowledged snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn losing_create_new_race_never_removes_the_winning_initializers_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("webhooks.redb");
+        OPEN_FAULT.with(|injection| injection.set(Some(OpenFault::CreateRace)));
+        assert!(RedbWebhookStore::open(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"raced initializer");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

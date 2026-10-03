@@ -466,7 +466,6 @@ impl WebhookEngine {
             if event.seq >= u64::MAX - 1 {
                 return 0;
             }
-            g.highest_seq = g.highest_seq.max(event.seq);
             // Snapshot the matching subs first (immutable borrow) to avoid holding
             // a mutable borrow of `subs` while mutating `deliveries`.
             let hits: Vec<(String, String)> = g
@@ -489,7 +488,6 @@ impl WebhookEngine {
                     continue;
                 };
                 let delivery_id = format!("dl_{:016x}", g.next_dl);
-                g.next_dl = next_dl;
                 let body = render_body(&webhook_id, &delivery_id, &channel, event);
                 let delivery = Delivery {
                     delivery_id,
@@ -508,8 +506,12 @@ impl WebhookEngine {
                 let inner = &mut *g;
                 inner.dedupe.insert(key);
                 if push_bounded(&mut inner.deliveries, &mut inner.dedupe, delivery) {
+                    inner.next_dl = next_dl;
                     enqueued += 1;
                 }
+            }
+            if enqueued > 0 {
+                g.highest_seq = g.highest_seq.max(event.seq);
             }
             enqueued
         })
@@ -1181,9 +1183,17 @@ mod tests {
                 inner.highest_seq = DELIVERY_RING_CAP as u64;
             })
             .unwrap();
+        let before_rejection = store.load().unwrap();
+        let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             engine.enqueue_matches(&blocks_event(DELIVERY_RING_CAP as u64 + 1, true), 0),
             0
+        );
+        assert_eq!(engine.highest_event_seq(), DELIVERY_RING_CAP as u64);
+        assert_eq!(store.load().unwrap(), before_rejection);
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before_commits
         );
         drop(engine);
         let recovered = durable(store.clone());
@@ -1255,6 +1265,48 @@ mod tests {
     }
 
     // ----- enqueue + dedupe -----
+
+    #[test]
+    fn durable_unadmitted_events_leave_cursor_and_snapshot_unchanged() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let assert_unadmitted = |event: &RealtimeEvent| {
+            let before_snapshot = store.load().unwrap();
+            let before_cursor = engine.highest_event_seq();
+            let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(engine.enqueue_matches(event, 0), 0);
+            assert_eq!(engine.highest_event_seq(), before_cursor);
+            assert_eq!(store.load().unwrap(), before_snapshot);
+            assert_eq!(
+                store.commits.load(std::sync::atomic::Ordering::SeqCst),
+                before_commits
+            );
+        };
+
+        assert_unadmitted(&blocks_event(10, true)); // No registrations.
+        let subscription = register_blocks(&engine);
+        assert_unadmitted(&blocks_event(11, false)); // Confirmation gate.
+        let mut nonmatching = blocks_event(12, true);
+        nonmatching.routes = vec!["mempool".into()];
+        assert_unadmitted(&nonmatching);
+        engine.set_active(&subscription.webhook_id, false).unwrap();
+        assert_unadmitted(&blocks_event(13, true)); // Paused registration.
+        engine.set_active(&subscription.webhook_id, true).unwrap();
+
+        let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(engine.enqueue_matches(&blocks_event(20, true), 0), 1);
+        assert_eq!(engine.highest_event_seq(), 20);
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before_commits + 1
+        );
+        assert_unadmitted(&blocks_event(20, true)); // Duplicate delivery.
+        assert_eq!(engine.enqueue_matches(&blocks_event(19, true), 0), 1);
+        assert_eq!(engine.highest_event_seq(), 20); // Never move backwards.
+
+        engine.mutate(|inner| inner.next_dl = u64::MAX - 1).unwrap();
+        assert_unadmitted(&blocks_event(21, true)); // Exhausted delivery IDs.
+    }
 
     #[test]
     fn enqueue_matches_creates_one_delivery_and_dedupes() {
