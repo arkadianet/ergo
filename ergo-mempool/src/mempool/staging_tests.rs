@@ -727,6 +727,28 @@ fn package_admitted_when_child_completes_held_parent_threshold() {
 
 #[test]
 fn package_admission_traces_each_members_original_source() {
+    // Other unit-test threads emit at these same callsites through the no-op
+    // dispatcher. Isolate scoped capture so their interest-cache updates cannot
+    // suppress an event in this test's temporary subscriber.
+    const CHILD_MARKER: &str = "ERGO_TEST_PACKAGE_SOURCE_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mempool::staging_tests::package_admission_traces_each_members_original_source",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated capture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     use tracing_subscriber::prelude::*;
     #[derive(Clone, Default)]
     struct Events(Arc<std::sync::Mutex<Vec<(String, String, tracing::Level)>>>);
