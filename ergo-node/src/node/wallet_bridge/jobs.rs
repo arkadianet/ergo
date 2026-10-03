@@ -781,6 +781,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         .map_err(internal)?;
         let options = ergo_api::mining::PrivateTransactionOptions {
             label: Some(format!("Wallet job {}", record.job.id)),
+            expires_at_height: Some(record.job.request.expires_at_height),
             ..Default::default()
         };
         match ctx
