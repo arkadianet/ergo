@@ -11,6 +11,7 @@ import { minerNode, poolLabel, fetchOwnPk, ownPkHex } from './miners.js';
 import { miningWork } from './mining-work.js';
 import { miningReward } from './mining-reward.js';
 import { createMiningInspector } from './mining-inspector.js';
+import { miningPolicy } from './mining-policy.js';
 
 const EPOCH = 128; // EIP-37 difficulty-adjustment period (blocks)
 
@@ -138,6 +139,7 @@ export function mount(elRoot) {
   );
   inspector = createMiningInspector(elRoot.querySelector('[data-inspector]'));
   fetchOwnPk();
+  elRoot.querySelector('.mn-grid').append(miningPolicy());
 }
 
 function blockLink(b, label) {

@@ -26,7 +26,7 @@ use crate::v1::routes::chain::chain_read_failed;
 /// Map a [`MiningApiError`] onto the standard v1 error envelope. `unavailable`
 /// picks the endpoint-appropriate 503 reason (`candidate_unavailable` for the
 /// candidate path, `reward_unavailable` for the reward path).
-fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
+pub(super) fn map_mining_error(e: MiningApiError, unavailable: Reason) -> Response {
     match e {
         MiningApiError::InvalidPow => v1_error(
             Reason::InvalidPow,

@@ -187,10 +187,14 @@ async fn mining_reward_pubkey_gated() {
 
 #[tokio::test]
 async fn mining_candidate_inventory_and_history_require_operator_key() {
-    for path in ["/api/v1/mining/candidate-details", "/api/v1/mining/history"] {
+    for path in [
+        "/api/v1/mining/candidate-details",
+        "/api/v1/mining/history",
+        "/api/v1/mining/policy",
+    ] {
         assert_eq!(
             app().oneshot(get(path)).await.unwrap().status(),
-            StatusCode::FORBIDDEN,
+            StatusCode::UNAUTHORIZED,
             "{path} must not expose private candidate content"
         );
         assert_eq!(
@@ -199,4 +203,24 @@ async fn mining_candidate_inventory_and_history_require_operator_key() {
             "{path} must reach the authenticated handler"
         );
     }
+}
+
+#[tokio::test]
+async fn mining_policy_mutation_requires_operator_key() {
+    let request = || {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/mining/policy")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from("{}"))
+            .unwrap()
+    };
+    assert_eq!(
+        app().oneshot(request()).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app().oneshot(with_key(request())).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 }

@@ -72,6 +72,7 @@ pub const JS_MINING: &str = include_str!("../web/js/mining.js");
 pub const JS_MINING_INSPECTOR: &str = include_str!("../web/js/mining-inspector.js");
 pub const JS_MINING_WORK: &str = include_str!("../web/js/mining-work.js");
 pub const JS_MINING_REWARD: &str = include_str!("../web/js/mining-reward.js");
+pub const JS_MINING_POLICY: &str = include_str!("../web/js/mining-policy.js");
 pub const JS_WS_CLIENT: &str = include_str!("../web/js/ws-client.js");
 pub const JS_APP: &str = include_str!("../web/js/app.js");
 

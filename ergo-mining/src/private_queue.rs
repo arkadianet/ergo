@@ -440,7 +440,7 @@ fn materialize(record: &Record) -> Result<Entry, String> {
         .enumerate()
         .map(|(index, candidate)| ergo_ser::ergo_box::ErgoBox {
             candidate,
-            transaction_id: id.into(),
+            transaction_id: id,
             index: index as u16,
         })
         .collect();

@@ -228,6 +228,7 @@ pub struct MiningHandle {
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
     private_queue: Arc<crate::private_queue::PrivateTransactionQueue>,
     policy: Arc<RwLock<(u64, crate::policy::BlockPolicy)>>,
+    policy_store: Option<Arc<std::path::PathBuf>>,
     outcomes: Arc<Mutex<crate::outcome_journal::OutcomeJournal>>,
     reward_key: RewardKeySource,
     monetary: Arc<MonetarySettings>,
@@ -315,6 +316,7 @@ impl MiningHandle {
             serve_notify: Arc::new(tokio::sync::watch::channel(0u64).0),
             private_queue: Arc::new(crate::private_queue::PrivateTransactionQueue::default()),
             policy: Arc::new(RwLock::new((0, crate::policy::BlockPolicy::default()))),
+            policy_store: None,
             outcomes: Arc::new(Mutex::new(crate::outcome_journal::OutcomeJournal::default())),
             reward_key,
             monetary: Arc::new(monetary),
@@ -360,6 +362,21 @@ impl MiningHandle {
         self.policy.read().expect("policy poisoned").clone()
     }
 
+    /// Reopen saved operator preferences at startup. A saved policy overrides
+    /// the boot default; malformed state refuses startup instead of mining
+    /// blocks under an unexpected fallback policy.
+    pub fn with_policy_store(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, MiningError> {
+        let path = path.into();
+        if let Some(policy) = crate::policy_store::load(&path)? {
+            *self.policy.write().expect("policy poisoned") = (0, policy);
+        }
+        self.policy_store = Some(Arc::new(path));
+        Ok(self)
+    }
+
     pub fn policy(&self) -> crate::policy::BlockPolicy {
         self.policy_snapshot().1
     }
@@ -375,6 +392,9 @@ impl MiningHandle {
         let mut slot = self.policy.write().expect("policy poisoned");
         if slot.1 == policy {
             return Ok(());
+        }
+        if let Some(path) = &self.policy_store {
+            crate::policy_store::save(path, &policy)?;
         }
         let mut cache = self.cache.write().expect("cache poisoned");
         slot.0 = slot
