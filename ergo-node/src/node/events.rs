@@ -744,7 +744,12 @@ fn inject_local_full_block(
                 detail: Some(format!("header rejected by validator: {e}")),
             });
         }
-        Err(e @ HeaderProcessError::Storage(_)) => {
+        Err(
+            e @ (HeaderProcessError::Storage(_)
+            | HeaderProcessError::LocalHeaderIntegrity { .. }
+            | HeaderProcessError::PrevalidatedBytesMismatch
+            | HeaderProcessError::LocalContext(_)),
+        ) => {
             let chain = state.store.chain_state_meta();
             ergo_state::storage_observability::report_storage_failure(
                 &ergo_state::storage_observability::StorageFailureContext {
@@ -760,7 +765,7 @@ fn inject_local_full_block(
             );
             return Err(SubmitError {
                 reason: "internal_error".to_string(),
-                detail: Some(format!("local store error during header apply: {e}")),
+                detail: Some(format!("local failure during header apply: {e}")),
             });
         }
         Err(e @ HeaderProcessError::Deserialize(_)) => {
