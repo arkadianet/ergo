@@ -215,10 +215,21 @@ pub async fn storage_rent_eligible_handler(
         limit,
     };
 
-    let rows = state
+    let rows = match state
         .indexer
-        .storage_rent_eligible_paged(height_cutoff, page, dir);
-    let total = state.indexer.storage_rent_eligible_total(height_cutoff);
+        .storage_rent_eligible_paged(height_cutoff, page, dir)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state.indexer.storage_rent_eligible_total(height_cutoff) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
 
     let items = match build_items(rows, factor, &*chain_params, &*state.indexer) {
         Ok(items) => items,
@@ -261,12 +272,24 @@ pub async fn storage_rent_matures_at_handler(
         offset: q.offset.unwrap_or(0),
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
     };
-    let rows = state
+    let rows = match state
         .indexer
-        .storage_rent_in_creation_range(cutoff, cutoff, page, dir);
-    let total = state
+        .storage_rent_in_creation_range(cutoff, cutoff, page, dir)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state
         .indexer
-        .storage_rent_total_in_creation_range(cutoff, cutoff);
+        .storage_rent_total_in_creation_range(cutoff, cutoff)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let items = match build_items(rows, factor, &*chain_params, &*state.indexer) {
         Ok(items) => items,
         Err(detail) => return internal_error(&detail),
@@ -339,12 +362,24 @@ pub async fn storage_rent_matures_in_range_handler(
         offset: q.offset.unwrap_or(0),
         limit: q.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT),
     };
-    let rows = state
+    let rows = match state
         .indexer
-        .storage_rent_in_creation_range(lo_cutoff, hi_cutoff, page, dir);
-    let total = state
+        .storage_rent_in_creation_range(lo_cutoff, hi_cutoff, page, dir)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
+    let total = match state
         .indexer
-        .storage_rent_total_in_creation_range(lo_cutoff, hi_cutoff);
+        .storage_rent_total_in_creation_range(lo_cutoff, hi_cutoff)
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    };
     let items = match build_items(rows, factor, &*chain_params, &*state.indexer) {
         Ok(items) => items,
         Err(detail) => return internal_error(&detail),
@@ -403,7 +438,7 @@ fn parse_sort_dir(raw: Option<&str>) -> Result<SortDir, Box<Response>> {
 /// whole response fails with a 500 — a missing box means either the rent
 /// index and `INDEXED_BOX` genuinely disagree (index desync), a
 /// rollback/prune landed between the scan and the lookup, or the backend
-/// read errored (`box_by_id` collapses read failures to `None`). All three
+/// read errored (`box_by_id` preserves the backend failure). All three
 /// are "stop, don't serve half-truths" conditions; this mirrors
 /// `remove_unspent`'s refusal to treat a missing key as a no-op.
 fn build_items(
@@ -414,7 +449,10 @@ fn build_items(
 ) -> Result<Vec<StorageRentEligibleEntry>, String> {
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        let Some(b) = indexer.box_by_id(&row.box_id) else {
+        let Some(b) = indexer
+            .box_by_id(&row.box_id)
+            .map_err(|error| error.to_string())?
+        else {
             return Err(format!(
                 "storage-rent box {} unavailable: listed eligible but absent from the box \
                  store (index desync, concurrent rollback/prune, or backend read error)",

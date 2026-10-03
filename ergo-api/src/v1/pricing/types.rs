@@ -99,7 +99,7 @@ impl Rational {
 pub fn token_decimals_from_r6(box_data: &ErgoBox) -> Option<u32> {
     let register = box_data
         .candidate
-        .additional_registers
+        .additional_registers()
         .get(RegisterId::R6)?;
     let parsed_i32 = match (&register.tpe, &register.value) {
         (SigmaType::SColl(inner), SigmaValue::Coll(CollValue::Bytes(bytes)))

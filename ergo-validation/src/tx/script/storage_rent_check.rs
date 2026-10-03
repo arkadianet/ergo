@@ -120,7 +120,8 @@ pub(super) fn check_storage_rent(
     // R1 (script/ergoTree) and R2 (tokens) are checked via ergoTree and tokens fields.
     let correct_script = output.ergo_tree_bytes() == input_box.candidate.ergo_tree_bytes();
     let correct_tokens = output.tokens == input_box.candidate.tokens;
-    let correct_registers = output.additional_registers == input_box.candidate.additional_registers;
+    let correct_registers =
+        output.additional_registers() == input_box.candidate.additional_registers();
 
     if correct_creation_height
         && correct_value

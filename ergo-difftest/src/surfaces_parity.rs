@@ -537,17 +537,17 @@ view!(
         .to_vec(),
         v.creation_height,
         v.tokens.clone(),
-        v.additional_registers.parity_normalized(false),
+        v.additional_registers().parity_normalized(false),
         v.register_bytes().to_vec()
     ),
     {
         let mut headers = v.ergo_tree().header_values();
-        headers.extend(v.additional_registers.header_values());
+        headers.extend(v.additional_registers().header_values());
         headers
     },
     {
         let mut boxes = v.ergo_tree().retained_boxes();
-        boxes.extend(v.additional_registers.retained_boxes());
+        boxes.extend(v.additional_registers().retained_boxes());
         boxes
     },
     v.ergo_tree().has_pending_upcast_strip(),

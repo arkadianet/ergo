@@ -497,7 +497,7 @@ pub(crate) fn apply_block_in_transaction(
                                 let fresh = IndexedToken::from_box(
                                     &box_id,
                                     token,
-                                    &candidate.additional_registers,
+                                    candidate.additional_registers(),
                                 );
                                 record.creating_box_id = fresh.creating_box_id;
                                 record.emission_amount = fresh.emission_amount;

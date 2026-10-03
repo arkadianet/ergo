@@ -16,7 +16,7 @@
 //!
 //! * [`store`] — redb tables + transaction helpers (`IndexerStore`).
 //! * [`apply`] / [`rollback`] — per-block apply and rollback paths.
-//! * [`segment`] / [`segment_buffer`] / [`segment_id`] — segmented
+//! * [`segment`] / `segment_buffer` / [`segment_id`] — segmented
 //!   indexes (address / template / token) with spill-on-overflow.
 //! * [`address`] / [`template`] / [`token`] — per-type apply
 //!   bookkeeping (balance maintenance, mint metadata, etc.).

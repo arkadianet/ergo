@@ -6,16 +6,16 @@
 //! [`validate::validate_full_block`] and
 //! [`validate::validate_full_block_parallel`] (plus its wrappers) are the
 //! public entry points; everything else in this module supports them:
-//! - [`error`] — [`BlockValidationError`], the shared error type every
+//! - `error` — [`BlockValidationError`], the shared error type every
 //!   other submodule constructs variants of.
-//! - [`extension`] — structural extension checks (rules 400/404/405/406).
-//! - [`size`] — block-transactions section size cap (rule 306).
-//! - [`interlinks`] — interlink validation against the parent extension
+//! - `extension` — structural extension checks (rules 400/404/405/406).
+//! - `size` — block-transactions section size cap (rule 306).
+//! - `interlinks` — interlink validation against the parent extension
 //!   (rules 401/402).
-//! - [`fork_vote`] — soft-fork vote prohibited-window check (rule 407).
-//! - [`overlay`] — the intra-block UTXO overlay both validation paths share.
-//! - [`layering`] — topological tx layering for the parallel path.
-//! - [`validate`] — `validate_full_block` and `validate_full_block_parallel_impl`
+//! - `fork_vote` — soft-fork vote prohibited-window check (rule 407).
+//! - `overlay` — the intra-block UTXO overlay both validation paths share.
+//! - `layering` — topological tx layering for the parallel path.
+//! - `validate` — `validate_full_block` and `validate_full_block_parallel_impl`
 //!   (+ its production wrappers), kept together deliberately: these are
 //!   intentionally near-duplicate mirror implementations (sequential vs.
 //!   parallel) whose inline comments cross-reference each other's steps.

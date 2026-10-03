@@ -69,11 +69,12 @@ pub async fn block_by_header_id_handler(
         None => return not_found("block not found"),
     };
     match build_indexed_full_block_response(&state, scala_block) {
-        Some(resp) => Json(resp).into_response(),
+        Ok(Some(resp)) => Json(resp).into_response(),
         // Reassembly failure (indexer lag or data inconsistency) presents
         // to the client as a clean miss — same observable shape as Scala
         // when `IndexedBlock.fromOption` returns None.
-        None => not_found("block not found"),
+        Ok(None) => not_found("block not found"),
+        Err(error) => internal_error(&error),
     }
 }
 
@@ -95,8 +96,10 @@ pub async fn blocks_by_header_ids_handler(
         let Some(scala_block) = chain.full_block_by_id(id) else {
             continue;
         };
-        if let Some(resp) = build_indexed_full_block_response(&state, scala_block) {
-            out.push(resp);
+        match build_indexed_full_block_response(&state, scala_block) {
+            Ok(Some(resp)) => out.push(resp),
+            Ok(None) => {}
+            Err(error) => return internal_error(&error),
         }
     }
     Json(out).into_response()
@@ -105,7 +108,7 @@ pub async fn blocks_by_header_ids_handler(
 fn build_indexed_full_block_response(
     state: &BlockchainState,
     scala_block: ScalaFullBlock,
-) -> Option<IndexedFullBlockResponse> {
+) -> Result<Option<IndexedFullBlockResponse>, String> {
     let ScalaFullBlock {
         header,
         block_transactions,
@@ -120,20 +123,28 @@ fn build_indexed_full_block_response(
     let mut indexed_txs: Vec<IndexedErgoTransactionResponse> =
         Vec::with_capacity(block_transactions.transactions.len());
     for stx in &block_transactions.transactions {
-        let tx_id_bytes = parse_modifier_id(&stx.id)?;
+        let Some(tx_id_bytes) = parse_modifier_id(&stx.id) else {
+            return Ok(None);
+        };
         let tx_id = TxId::from_bytes(tx_id_bytes);
-        let indexed_tx = state.indexer.tx_by_id(&tx_id)?;
+        let Some(indexed_tx) = state
+            .indexer
+            .tx_by_id(&tx_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
         let resp = match build_indexed_tx_response(state, &indexed_tx) {
             Ok(r) => r,
             Err(detail) => {
                 tracing::warn!(%detail, "block reassembly: failed to build indexed tx response");
-                return None;
+                return Err(detail);
             }
         };
         indexed_txs.push(resp);
     }
 
-    Some(IndexedFullBlockResponse {
+    Ok(Some(IndexedFullBlockResponse {
         header,
         block_transactions: IndexedBlockTransactionsResponse {
             header_id: header_id_hex,
@@ -143,5 +154,5 @@ fn build_indexed_full_block_response(
         extension,
         ad_proofs,
         size,
-    })
+    }))
 }

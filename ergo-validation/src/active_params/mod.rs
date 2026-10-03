@@ -6,12 +6,12 @@
 //! [`crate::voting::extension_validation`]; this module owns the
 //! parser, the persistence codec, and the launch-time defaults.
 //!
-//! - [`launch`] — `scala_launch*` mainnet/testnet launch-time defaults.
-//! - [`extension_codec`] — `parse_active_params` /
+//! - `launch` — `scala_launch*` mainnet/testnet launch-time defaults.
+//! - `extension_codec` — `parse_active_params` /
 //!   `active_params_to_extension_fields`, the block-extension wire
 //!   format (a genuinely different format from the redb persist codec
 //!   below, despite encoding the same struct).
-//! - [`persist_codec`] — `validate`/`serialize`/`deserialize`, the redb
+//! - `persist_codec` — `validate`/`serialize`/`deserialize`, the redb
 //!   storage wire format. Kept together deliberately: `deserialize`
 //!   documents matching the exact byte-shape `serialize` produces
 //!   (v1/v2 auto-detection).

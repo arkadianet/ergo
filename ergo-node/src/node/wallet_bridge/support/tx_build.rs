@@ -1499,7 +1499,7 @@ mod tests {
             );
             assert!(tx.output_candidates[1..]
                 .iter()
-                .all(|b| b.additional_registers.count() == 0));
+                .all(|b| b.additional_registers().count() == 0));
             assert_eq!(built.change_outputs[0].nano_erg, "2000000");
         }
         for length in [3900, 5000] {

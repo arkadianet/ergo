@@ -330,14 +330,17 @@ pub async fn protocol_state(
         .blocking
         .clone()
         .run(ReadLane::Point, move || {
-            let boxes = idx.token_unspent_paged(
+            let boxes = match idx.token_unspent_paged(
                 &tid,
                 IdxPage {
                     offset: 0,
                     limit: 1,
                 },
                 SortDir::Desc,
-            );
+            ) {
+                Ok(value) => value,
+                Err(error) => return crate::v1::routes::indexer_read_failed(error),
+            };
             let Some(b) = boxes.into_iter().next() else {
                 return v1_error(
                     Reason::StateUnavailable,

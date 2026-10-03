@@ -101,7 +101,11 @@ pub async fn tx_by_id(State(state): State<V1State>, Path(tx_id_hex): Path<String
         .clone()
         .run(ReadLane::Point, move || {
             // Confirmed path: extra-index wins over a same-id pool entry.
-            if let Some(itx) = indexer.tx_by_id(&tx_id) {
+            let indexed_tx = match indexer.tx_by_id(&tx_id) {
+                Ok(value) => value,
+                Err(error) => return crate::v1::routes::indexer_read_failed(error),
+            };
+            if let Some(itx) = indexed_tx {
                 let bstate = state.blockchain_state(&indexer);
                 return match build_indexed_tx_response(&bstate, &itx) {
                     Ok(resp) => {
