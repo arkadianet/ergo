@@ -71,6 +71,8 @@ pub trait IndexerChainSource: Send + Sync {
     /// snapshot — two reads from the same poll may otherwise see
     /// different values (the chain reader opens a fresh redb txn per
     /// call, so callers cannot count on snapshot stability).
+    /// Pre-genesis is height zero with [`HeaderId::ZERO`], including after
+    /// State rolls all applied blocks back. It has no height-zero header.
     fn committed_tip(&self) -> Result<ChainTip, IndexerError>;
 
     /// Header ID on the committed fully applied block chain at `height`, or
@@ -301,8 +303,15 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 // Separate source calls can observe a rollback between the
                 // tip and height lookups. Only unwind when the captured State
                 // tip belongs to the same applied chain we now observe.
-                let state_reorged = tip.height > 0
-                    && chain_read!(self.chain.header_id_at(tip.height)) == Some(tip.header_id);
+                let state_reorged = if tip.height == 0 {
+                    // There is no applied header at height zero to anchor a
+                    // complete rollback. Require the legitimate pre-genesis
+                    // sentinel and a second coherent atomic tip observation.
+                    tip.header_id == HeaderId::ZERO
+                        && chain_read!(self.chain.committed_tip()) == tip
+                } else {
+                    chain_read!(self.chain.header_id_at(tip.height)) == Some(tip.header_id)
+                };
                 if !state_reorged {
                     if !self.hold_logged {
                         tracing::warn!(
