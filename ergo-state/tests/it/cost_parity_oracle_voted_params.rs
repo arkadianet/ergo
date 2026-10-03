@@ -249,6 +249,10 @@ fn cost_parity_against_scala_corpus_sampled() {
             .expect("corpus missing — run extract_block_costs_voted_params.sh"),
     )
     .expect("parse corpus");
+    assert!(
+        !corpus.is_empty(),
+        "cost corpus must have an advertised denominator"
+    );
 
     // Group corpus by height.
     let mut corpus_by_height: HashMap<u32, HashMap<String, u64>> = HashMap::new();
@@ -444,10 +448,7 @@ fn cost_parity_against_scala_corpus_sampled() {
         "[cost_parity] {matches}/{total} exact matches ({} corpus entries)",
         corpus.len()
     );
-    assert!(
-        total > 0,
-        "corpus produced no cost comparisons; check matching headers and extensions"
-    );
+    assert_eq!(total, corpus.len(), "every advertised cost record must be compared; missing context and duplicate IDs cannot silently reduce the denominator");
     assert_eq!(
         mismatches, 0,
         "{mismatches}/{total} cost mismatches — see stderr for details"

@@ -23,7 +23,7 @@ use ergo_ser::header::Header;
 use ergo_ser::modifier_id::{
     compute_section_id, TYPE_AD_PROOFS, TYPE_BLOCK_TRANSACTIONS, TYPE_EXTENSION,
 };
-use ergo_state::store::StateStore;
+use ergo_state::store::{StateError, StateStore};
 use tempfile::TempDir;
 
 fn open_store() -> (StateStore, TempDir) {
@@ -268,7 +268,7 @@ fn phase3a_rejects_sub_sentinel_section_resurrection_after_eviction() {
         .store_block_section_typed(&section_id, &[0xBB; 8], TYPE_AD_PROOFS)
         .expect_err("resurrection write at sub-sentinel must reject via tombstone");
     assert!(
-        format!("{err:?}").contains("PrunedSection"),
+        matches!(err, StateError::PrunedSection { .. }),
         "expected PrunedSection, got {err:?}",
     );
 }
@@ -318,7 +318,7 @@ fn phase3a_rejects_unindexed_section_when_sentinel_active() {
         .store_block_section_typed(&unknown_section_id, &[0xDD; 8], TYPE_AD_PROOFS)
         .expect_err("unindexed section in sentinel-active store must reject");
     assert!(
-        format!("{err:?}").contains("PrunedSection"),
+        matches!(err, StateError::PrunedSection { .. }),
         "expected PrunedSection, got {err:?}",
     );
 }
@@ -347,7 +347,7 @@ fn phase4_rollback_below_sentinel_rejects_before_mutation() {
         .rollback_to(1, None, None)
         .expect_err("rollback to h=1 below sentinel must reject");
     assert!(
-        format!("{err:?}").contains("RollbackBelowPruningSentinel"),
+        matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
         "expected RollbackBelowPruningSentinel, got {err:?}",
     );
 
@@ -488,7 +488,7 @@ fn archive_toggle_after_natural_pruning_preserves_sentinel_and_blocks_resurrecti
         .store_block_section_typed(&section_id, &[0xAA; 8], TYPE_AD_PROOFS)
         .expect_err("sub-sentinel write must be refused even under archive toggle");
     assert!(
-        format!("{err:?}").contains("PrunedSection"),
+        matches!(err, StateError::PrunedSection { .. }),
         "expected PrunedSection, got {err:?}",
     );
 
@@ -501,7 +501,7 @@ fn archive_toggle_after_natural_pruning_preserves_sentinel_and_blocks_resurrecti
         .rollback_to(advanced.saturating_sub(2), None, None)
         .expect_err("rollback below the legal boundary must be refused");
     assert!(
-        format!("{err:?}").contains("RollbackBelowPruningSentinel"),
+        matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
         "expected RollbackBelowPruningSentinel, got {err:?}",
     );
 }
@@ -571,7 +571,7 @@ fn phase4_rollback_below_bootstrap_sentinel_rejects_even_in_archive_mode() {
         .rollback_to(50, None, None)
         .expect_err("below-sentinel rollback must reject in Mode 2 archive too");
     assert!(
-        format!("{err:?}").contains("RollbackBelowPruningSentinel"),
+        matches!(err, StateError::RollbackBelowPruningSentinel { .. }),
         "expected RollbackBelowPruningSentinel, got {err:?}",
     );
 }
