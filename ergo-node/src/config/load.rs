@@ -32,18 +32,19 @@ impl NodeConfig {
             .clone()
             .unwrap_or_else(|| PathBuf::from("./ergo-data"));
 
-        // 2. Load TOML config if it exists
+        // 2. An explicitly selected config must be readable. The implicit
+        // data-directory config is optional only when it is absent.
         let config_path = cli
             .config
             .clone()
             .unwrap_or_else(|| data_dir.join("ergo-node.toml"));
-        let toml_cfg = if config_path.exists() {
-            let contents = std::fs::read_to_string(&config_path)
-                .map_err(|e| format!("failed to read {}: {e}", config_path.display()))?;
-            toml::from_str::<TomlConfig>(&contents)
-                .map_err(|e| format!("failed to parse {}: {e}", config_path.display()))?
-        } else {
-            TomlConfig::default()
+        let toml_cfg = match std::fs::read_to_string(&config_path) {
+            Ok(contents) => toml::from_str::<TomlConfig>(&contents)
+                .map_err(|e| format!("failed to parse {}: {e}", config_path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && cli.config.is_none() => {
+                TomlConfig::default()
+            }
+            Err(e) => return Err(format!("failed to read {}: {e}", config_path.display())),
         };
 
         // 3. Merge: CLI overrides TOML overrides defaults
@@ -1178,6 +1179,39 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn explicit_missing_config_errors_but_absent_default_is_optional() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("selected.toml");
+        let cli =
+            Cli::try_parse_from(["ergo-node", "--config", missing.to_str().unwrap()]).unwrap();
+        let error = NodeConfig::load(cli).unwrap_err();
+        assert!(error.contains("failed to read"), "{error}");
+        assert!(error.contains("selected.toml"), "{error}");
+
+        let cli = Cli::try_parse_from([
+            "ergo-node",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert!(NodeConfig::load(cli).is_ok());
+    }
+
+    #[test]
+    fn existing_unreadable_default_does_not_fall_back_to_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("ergo-node.toml")).unwrap();
+        let cli = Cli::try_parse_from([
+            "ergo-node",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = NodeConfig::load(cli).unwrap_err();
+        assert!(error.contains("failed to read"), "{error}");
+    }
+
     // ----- happy path -----
 
     #[test]
@@ -1193,10 +1227,10 @@ mod tests {
     }
     #[test]
     fn devnet_magic_private_network_replaces_wire_magic() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [102, 111, 114, 107]\n").unwrap();
-        let cli =
-            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("node.toml");
+        std::fs::write(&file, "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [102, 111, 114, 107]\n").unwrap();
+        let cli = Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
         assert_eq!(
             NodeConfig::load(cli)
                 .unwrap()
@@ -1209,10 +1243,10 @@ mod tests {
 
     #[test]
     fn devnet_magic_absent_keeps_the_built_in_devnet_magic() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n").unwrap();
-        let cli =
-            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("node.toml");
+        std::fs::write(&file, "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n").unwrap();
+        let cli = Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
         assert_eq!(
             NodeConfig::load(cli)
                 .unwrap()
@@ -1226,10 +1260,11 @@ mod tests {
     #[test]
     fn devnet_magic_rejected_on_public_networks() {
         for net in ["mainnet", "testnet"] {
-            let file = tempfile::NamedTempFile::new().unwrap();
-            std::fs::write(file.path(), format!("network = \"{net}\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [7, 7, 7, 7]\n")).unwrap();
-            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
-                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("node.toml");
+            std::fs::write(&file, format!("network = \"{net}\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = [7, 7, 7, 7]\n")).unwrap();
+            let cli =
+                Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
             let err = NodeConfig::load(cli).expect_err("public network must reject devnet_magic");
             // the named rejection, not the unknown-key error a build without the key would raise
             assert!(
@@ -1242,10 +1277,11 @@ mod tests {
     #[test]
     fn devnet_magic_rejects_public_network_magics() {
         for magic in ["[1, 0, 2, 4]", "[2, 3, 2, 3]"] {
-            let file = tempfile::NamedTempFile::new().unwrap();
-            std::fs::write(file.path(), format!("network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = {magic}\n")).unwrap();
-            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
-                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("node.toml");
+            std::fs::write(&file, format!("network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_magic = {magic}\n")).unwrap();
+            let cli =
+                Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
             let err = NodeConfig::load(cli).expect_err("a public network's magic must be rejected");
             assert!(err.to_string().contains("public network"), "{err}");
         }
@@ -1253,10 +1289,10 @@ mod tests {
 
     #[test]
     fn devnet_cost_cap_private_network_preserves_override() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_max_block_cost = 37509\n").unwrap();
-        let cli =
-            Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("node.toml");
+        std::fs::write(&file, "network = \"devnet\"\n[peers]\nknown = [\"127.0.0.1:19530\"]\n[api]\ndisabled = true\n[chain]\ndevnet_max_block_cost = 37509\n").unwrap();
+        let cli = Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
         assert_eq!(
             NodeConfig::load(cli).unwrap().devnet_max_block_cost,
             Some(37509)
@@ -1273,14 +1309,15 @@ mod tests {
             ("devnet", 0),
             ("devnet", 2147483648),
         ] {
-            let file = tempfile::NamedTempFile::new().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("node.toml");
             std::fs::write(
-                file.path(),
+                &file,
                 format!("network = \"{network}\"\n[chain]\ndevnet_max_block_cost = {cap}\n"),
             )
             .unwrap();
-            let cli = Cli::try_parse_from(["ergo-node", "--config", file.path().to_str().unwrap()])
-                .unwrap();
+            let cli =
+                Cli::try_parse_from(["ergo-node", "--config", file.to_str().unwrap()]).unwrap();
             let error = NodeConfig::load(cli).unwrap_err();
             assert!(error.to_string().contains("devnet_max_block_cost"));
         }
