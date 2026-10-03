@@ -46,7 +46,8 @@ pub use outcome::{AdmissionOutcome, CheckOutcome, RejectReason};
 pub use revalidate::revalidate_pooled;
 pub(crate) use revalidate::{is_recheck_evictable, record_failed_tx};
 
-use outcome::{classify, ReplacementDecision};
+pub(crate) use outcome::classify;
+use outcome::ReplacementDecision;
 
 /// Pure-logic admission. No `&mut self` on the mempool here — callers
 /// thread the individual pieces in. The top-level `Mempool::process()`
