@@ -224,27 +224,28 @@ closure criteria.
   `blocks_to_keep < -1`, and `blocks_to_keep = 0` outside the canonical
   headers-only Mode 6 combo.
 
-  **Activation (when pruning starts).** A pruned node fixes its prune
-  low-water mark — `minimalFullBlockHeight`, the first height it will
-  download and retain full blocks from — the moment it decides the
-  header chain is synced, not on its first block apply. This matches
-  Scala: `ToDownloadProcessor.toDownload` calls
-  `FullBlockPruningProcessor.updateBestFullBlock(header)` on the header
-  that flips `isHeadersChainSynced`, and from then on
-  `nextModifiersToDownload` starts its walk at that height for a node
-  with no full blocks yet. The value is
-  `max(1, header_height - blocks_to_keep + 1)`, snapped down to the
-  start of the containing voting epoch when it exceeds `votingLength`,
-  so a retained window never begins mid-epoch. Practically, a
-  from-scratch pruned node does **not** replay the chain from genesis
-  and prune afterwards — it starts downloading block sections at the
-  sentinel. The seed is one-shot: it fires only while no full block has
-  been applied and no sentinel has been recorded, so a restart resumes
-  with the same value, a UTXO-snapshot or NiPoPoW bootstrap keeps the
-  sentinel that bootstrap wrote, and the sentinel never moves backward.
-  Archive (`blocks_to_keep = -1`) and headers-only Mode 6
-  (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
-  would reach below the sentinel are refused rather than half-applied.
+  **Fresh startup and retention.** A fresh UTXO store starts downloading
+  full blocks at height 1, even when its header chain is already synced.
+  Validation requires the applied parent state; a recent header alone cannot
+  replace the skipped UTXO history. The node replays from genesis and advances
+  `minimalFullBlockHeight` as blocks are applied and old sections are pruned.
+  The applied-block retention formula is
+  `max(1, applied_height - blocks_to_keep + 1)`, snapped down to the
+  containing voting epoch's start when it exceeds `votingLength`.
+
+  Older startup code could persist a header-derived floor before any full
+  block was applied. Boot and sync ticks repair that floor to 1 only when
+  both live and committed UTXO state remain at height 0 and neither bootstrap
+  marker is present, then rebuild pending downloads. A valid fresh floor is
+  unchanged. Applied and snapshot stores keep their floor; the ordinary
+  setter remains monotonic. Repair failures are logged and retried. Archive
+  nodes also download from their applied parent; headers-only Mode 6 does
+  not download full blocks. Rollbacks below a retained floor are refused.
+
+  This fresh-download policy is specific to the Rust UTXO backend. The
+  committed Scala sentinel vectors cover retention calculations, while
+  native boot/reopen tests cover the guarded repair and pending range.
+  Complete historical activation and retention coverage remains open.
 - **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
   boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
