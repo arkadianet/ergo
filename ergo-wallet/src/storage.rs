@@ -474,10 +474,7 @@ impl SecretStorage {
                 crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(seed.as_slice())?,
             )
         } else {
-            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(
-                seed.as_slice(),
-                false,
-            )?)
+            UnlockedMaster::Modern(ExtendedSecretKey::derive_master_key(seed.as_slice())?)
         };
 
         self.unlocked = Some(UnlockedSecret {
@@ -517,7 +514,7 @@ impl SecretStorage {
             crate::extended_key::ExtendedSecretKeyLegacy::derive_master_key(&seed[..])
                 .and_then(|m| m.public_key().map(|p| p.compressed_bytes()))
         } else {
-            ExtendedSecretKey::derive_master_key(&seed[..], false)
+            ExtendedSecretKey::derive_master_key(&seed[..])
                 .map(|m| m.public_key().compressed_bytes())
         }) else {
             return false;

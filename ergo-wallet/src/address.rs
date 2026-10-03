@@ -56,7 +56,7 @@ mod tests {
         )
         .unwrap();
         let seed = m.to_seed("");
-        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
         let leaf = master
             .derive_at_path(&DerivationPath::eip3_first_address())
             .unwrap();
