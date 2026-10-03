@@ -46,12 +46,6 @@ pub fn read_ergo_tree_with_activated_version(
     result.map(|(tree, _was_wrapped)| tree)
 }
 
-/// Like [`read_ergo_tree`] but also reports whether the returned tree
-/// was rebuilt by `unparsed_soft_fork_tree` instead of fully parsed
-/// (Scala's `Left(UnparsedErgoTree)` branch). Used by the template-hash
-/// path — Scala's `tree.template` throws on the unparsed branch, so we
-/// skip recording a template entry rather than emit one bogus hash for
-/// every unparsed tree.
 /// Advance `r` from the body start to the DECLARED-size end and return the
 /// verbatim bytes. Mirrors Scala's wrap path EXACTLY: it computes
 /// `numBytes = bodyPos - startPos + declaredSize`, rewinds (`r.position =
@@ -82,6 +76,9 @@ fn take_unparsed_size_region(
     Ok(r.data_slice(tree_start, end).to_vec())
 }
 
+/// Also reports local soft-fork wrapping. Template helpers currently refuse
+/// these opaque trees because no parsed expression boundary was established;
+/// that is an explicit helper policy, not a claim about Scala cached templates.
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {

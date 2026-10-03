@@ -114,10 +114,11 @@ impl ErgoBoxCandidate {
         })
     }
 
-    /// Build from already-trusted parts, preserving verbatim ErgoTree and
-    /// register bytes. Use this when reconstructing a box from external
-    /// data the on-chain Scala node already accepted (REST mainnet replay,
-    /// captured fixtures) and `box_id` byte-identity must hold.
+    /// Build from already-trusted canonical parts without reserialization.
+    /// Reference acceptance alone does not establish canonicality: accepted
+    /// bytes can normalize when written. Use the checked constructor when that
+    /// distinction has not already been established. Parsed whole-box received
+    /// identity belongs to the whole-box reader, not this candidate constructor.
     ///
     /// # Safety contract
     ///

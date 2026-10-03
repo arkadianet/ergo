@@ -47,15 +47,12 @@ const SIZE_FLAG: u8 = 0x08;
 const CONSTANT_SEGREGATION_FLAG: u8 = 0x10;
 const RESERVED_HEADER_MASK: u8 = 0xE0;
 
-/// Soft `Vec::with_capacity` cap for an ErgoTree's segregated-constant list.
-/// `parse_body` reads the count via `get_u32_exact`, which only bounds it to
-/// i32::MAX — so a hostile tree header claiming `count = i32::MAX` would
-/// otherwise reserve multiple GiB before the first constant is read. The Vec
-/// still grows on `push`, so a legitimate tree with more constants than this
-/// parses unchanged; the cap only bounds the *initial* reservation. It is a
-/// soft cap (not the hard reject `skip_ergo_tree` applies to inner,
-/// box-size-bounded trees) because `parse_body` is the top-level consensus
-/// parse and must not reject a tree the Scala node would accept.
+/// Soft initial reservation cap for an ErgoTree's segregated constants.
+/// The reference count is `getUInt().toInt`: Rust reads its wrapped signed
+/// value with `get_uint_to_i32`, then enforces the reader array-size gate. A
+/// large accepted count must not reserve the entire list before the first
+/// constant is decoded. Growth on `push` preserves wire acceptance; this is
+/// only an allocation policy, not a count limit.
 const CONSTANTS_VEC_SOFT_CAP: usize = 4096;
 
 /// Scala `SigmaSerializer.MaxPropositionSize` (`SigmaConstants.MaxPropositionBytes`
