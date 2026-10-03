@@ -315,6 +315,8 @@ impl NodeMining for MiningBridge {
                     at_ms: e.at_ms,
                     outcome: e.outcome,
                     detail: e.detail,
+                    canonical: None,
+                    confirmations: None,
                     accounting: e.accounting.map(|a| MiningAccountingJson {
                         height: a.height,
                         emission_nano_erg: a.emission_nano_erg,
@@ -333,6 +335,7 @@ impl NodeMining for MiningBridge {
                 .collect(),
             resets_on_restart: !handle.outcome_journal_status().0,
             journal_error: handle.outcome_journal_status().1,
+            chain_tip: None,
         })
     }
 

@@ -145,9 +145,8 @@ pub(crate) async fn miner_stats(
 
 /// The `mining/status` aggregate. Always `200` — safe to poll from an
 /// unauthenticated dashboard even when mining is off (hence T0). The
-/// `last_template_*` / `template_seq` fields require the mining bridge to cache
-/// its last-published template metadata; that seam is not wired yet, so they are
-/// emitted as `null` (honest) rather than fabricated.
+/// Freshness comes from the served cache and contains no transaction content.
+/// `synced` means the mining-started latch when mining is enabled.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MiningStatus {
     mining_enabled: bool,
@@ -164,7 +163,7 @@ pub(crate) struct MiningStatus {
 /// build just to health-check.
 #[utoipa::path(
     get, path = "/api/v1/mining/status", tag = "mining",
-    responses((status = 200, description = "Mining capability + template freshness (nulls until the template-cache seam is wired)", body = MiningStatus)),
+    responses((status = 200, description = "Mining capability and current served-template freshness", body = MiningStatus)),
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
     let mining_enabled = s.read.identity().mining;
@@ -271,10 +270,59 @@ pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
         Ok(m) => m,
         Err(e) => return *e,
     };
-    match mining.mining_history().await {
-        Ok(history) => Json(history).into_response(),
-        Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
-    }
+    let mut history = match mining.mining_history().await {
+        Ok(history) => history,
+        Err(e) => return map_mining_error(e, Reason::CandidateUnavailable),
+    };
+    let Some(chain) = s.chain.clone() else {
+        return Json(history).into_response();
+    };
+    s.blocking
+        .run(ReadLane::Scan, move || {
+            let heights: Vec<u32> = history
+                .outcomes
+                .iter()
+                .filter_map(|e| e.accounting.as_ref().map(|a| a.height))
+                .collect();
+            let snapshot = match chain.applied_chain_at_heights(&heights) {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => return Json(history).into_response(),
+                Err(e) => return chain_read_failed(e),
+            };
+            for event in &mut history.outcomes {
+                let Some(accounting) = &event.accounting else {
+                    continue;
+                };
+                let Some(block_id) = &event.block_id else {
+                    continue;
+                };
+                match snapshot
+                    .blocks
+                    .iter()
+                    .find(|(h, _)| *h == accounting.height)
+                    .and_then(|(_, id)| id.as_ref())
+                {
+                    Some(applied) => {
+                        let canonical = applied == block_id;
+                        event.canonical = Some(canonical);
+                        event.confirmations = canonical.then(|| {
+                            snapshot
+                                .tip
+                                .height
+                                .saturating_sub(accounting.height)
+                                .saturating_add(1)
+                        });
+                    }
+                    None => {
+                        event.canonical = None;
+                        event.confirmations = None;
+                    }
+                }
+            }
+            history.chain_tip = Some(snapshot.tip);
+            Json(history).into_response()
+        })
+        .await
 }
 
 /// `POST /api/v1/mining/solution` — T1. Reuses [`NodeMining::submit_solution`].

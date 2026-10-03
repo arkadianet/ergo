@@ -25,6 +25,16 @@ pub enum ChainReadError {
 }
 
 pub trait NodeChainQuery: Send + Sync {
+    /// Bounded mining-ledger lookups on the applied chain, with a consistent
+    /// committed full-block tip. None means the capability is unavailable.
+    fn applied_chain_at_heights(
+        &self,
+        _heights: &[u32],
+    ) -> Result<Option<ergo_rest_json::mining_inspection::MiningAppliedChainJson>, ChainReadError>
+    {
+        Ok(None)
+    }
+
     /// `/info` — node identity, tip pointers, peer/mempool counts,
     /// protocol parameters. Volatile fields may differ slightly from the
     /// instant a client polls; stable fields are config-derived and do

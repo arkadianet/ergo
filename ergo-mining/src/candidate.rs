@@ -582,6 +582,7 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
         }
     })?;
     let params = ProtocolParams::from_active(&active_params);
+    observation.rent_storage_fee_factor = Some(params.storage_fee_factor);
     let ctx = TransactionContext {
         height: candidate_height,
         miner_pubkey: *miner_pk,

@@ -127,6 +127,7 @@ pub struct MiningHistoryJson {
     /// Applies to outcomes; template cache always resets on restart.
     pub resets_on_restart: bool,
     pub journal_error: Option<String>,
+    pub chain_tip: Option<MiningChainTipJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +153,8 @@ pub struct MiningOutcomeJson {
     pub outcome: String,
     pub detail: Option<String>,
     pub accounting: Option<MiningAccountingJson>,
+    pub canonical: Option<bool>,
+    pub confirmations: Option<u32>,
 }
 
 /// Public freshness contains no transaction IDs, values, or wallet contents.
@@ -171,4 +174,17 @@ pub struct MiningAccountingJson {
     pub fees_nano_erg: String,
     pub rent_nano_erg: String,
     pub recovered_tokens: Vec<MiningAssetJson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MiningChainTipJson {
+    pub height: u32,
+    pub block_id: String,
+}
+
+/// Internal reader seam: all IDs come from one applied-chain snapshot.
+#[derive(Debug, Clone)]
+pub struct MiningAppliedChainJson {
+    pub tip: MiningChainTipJson,
+    pub blocks: Vec<(u32, Option<String>)>,
 }

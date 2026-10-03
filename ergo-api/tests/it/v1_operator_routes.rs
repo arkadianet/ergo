@@ -437,6 +437,17 @@ fn fixed_work() -> WorkMessageJson {
 
 #[async_trait]
 impl NodeMining for StubMining {
+    async fn mining_freshness(
+        &self,
+    ) -> Result<ergo_rest_json::mining_inspection::MiningFreshnessJson, MiningApiError> {
+        Ok(ergo_rest_json::mining_inspection::MiningFreshnessJson {
+            mining_started: true,
+            last_template_msg: Some("ab".repeat(32)),
+            last_template_height: Some(100),
+            last_template_age_ms: Some(25),
+            template_seq: Some(7),
+        })
+    }
     async fn candidate(
         &self,
         _longpoll: Option<String>,
@@ -664,7 +675,10 @@ async fn mining_status_t0_composed_always_200() {
     assert_eq!(v["mining_enabled"], true);
     assert_eq!(v["synced"], true);
     assert_eq!(v["longpoll_supported"], true);
-    assert!(v["last_template_msg"].is_null());
+    assert_eq!(v["last_template_msg"], "ab".repeat(32));
+    assert_eq!(v["last_template_height"], 100);
+    assert_eq!(v["last_template_age_ms"], 25);
+    assert_eq!(v["template_seq"], 7);
 }
 
 #[tokio::test]

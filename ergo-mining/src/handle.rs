@@ -107,7 +107,7 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Upper bound on templates retained in the [`MiningCache`] ring — the number
+/// Upper bound on templates retained in the `MiningCache` ring — the number
 /// of recently-published templates whose in-flight solutions can still be
 /// verified. Deliberately small: it bounds both memory (a handful of full
 /// candidates) and the per-`verify_solution` scan cost (each submit recomputes

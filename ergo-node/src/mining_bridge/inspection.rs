@@ -73,6 +73,17 @@ pub(super) fn candidate_details(
     for (index, tx) in candidate.transactions.iter().enumerate() {
         let observation = candidate.observation.transactions.get(index);
         let category = observation.map_or("unknown", |o| o.category);
+        let recreated_indices = observation
+            .map(|o| {
+                ergo_mining::inspection::rent_recreated_indices(
+                    tx,
+                    o,
+                    candidate.observation.rent_storage_fee_factor,
+                )
+            })
+            .transpose()
+            .map_err(internal)?
+            .unwrap_or_default();
         let id = transaction_id(tx).map_err(internal)?;
         let id_hex = hex::encode(id.as_bytes());
         let mut writer = VlqWriter::new();
@@ -99,7 +110,7 @@ pub(super) fn candidate_details(
                 "emission" | "fees" => output.ergo_tree_bytes() == delayed_script.as_slice(),
                 "rent" => {
                     output.ergo_tree_bytes() == plain_script.as_slice()
-                        && output_index == tx.output_candidates.len() - 1
+                        && !recreated_indices.contains(&output_index)
                 }
                 _ => false,
             };
@@ -133,7 +144,6 @@ pub(super) fn candidate_details(
             if let Some(observation) = observation {
                 let inputs = &observation.resolved_inputs;
                 rent.selected_boxes = inputs.len();
-                let payout_index = tx.output_candidates.len().saturating_sub(1);
                 for (input, original) in tx.inputs.iter().zip(inputs) {
                     let destination =
                         input
@@ -145,7 +155,7 @@ pub(super) fn candidate_details(
                                 SigmaValue::Short(i) => usize::try_from(*i).ok(),
                                 _ => None,
                             });
-                    let recreated = destination.filter(|i| *i < payout_index);
+                    let recreated = destination.filter(|i| recreated_indices.contains(i));
                     let collected = recreated
                         .and_then(|i| tx.output_candidates.get(i))
                         .map_or(original.candidate.value, |o| {
@@ -190,9 +200,10 @@ pub(super) fn candidate_details(
                 );
                 rent.recovered_tokens = total_assets(token_totals(
                     tx.output_candidates
-                        .last()
-                        .into_iter()
-                        .flat_map(|b| &b.tokens),
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !recreated_indices.contains(i))
+                        .flat_map(|(_, b)| &b.tokens),
                 ));
             }
         }

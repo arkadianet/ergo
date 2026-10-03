@@ -169,7 +169,7 @@ export function createMiningInspector(host) {
   let drawnIdentity = null;
 
   const draw = () => {
-    const signature = `${selected?.msg || 'current'}:${result?.data?.msg || ''}:${result?.data?.template_seq || ''}:${result?.data?.status || ''}:${result?.status || 0}:${result?.reason || ''}:${history?.outcomes?.[0]?.at_ms || 0}:${history?.retained_templates?.[0]?.template_seq || 0}`;
+    const signature = `${selected?.msg || 'current'}:${result?.data?.msg || ''}:${result?.data?.template_seq || ''}:${result?.data?.status || ''}:${result?.status || 0}:${result?.reason || ''}:${history?.outcomes?.[0]?.at_ms || 0}:${history?.retained_templates?.[0]?.template_seq || 0}:${history?.chain_tip?.block_id || ''}`;
     if (signature === drawnIdentity) return;
     drawnIdentity = signature;
     host.replaceChildren();
@@ -203,6 +203,8 @@ export function createMiningInspector(host) {
       const link = event.block_id ? el('a', 'ex-link', truncMiddle(event.block_id, 8, 8)) : el('span', 'muted', 'No block');
       if (event.block_id) link.href = `#explorer/block/${event.block_id}`;
       row.append(kv(`${event.outcome} · ${new Date(event.at_ms).toLocaleString()}`, link));
+      if (event.block_id) row.append(kv('Current applied chain', event.canonical === true ? `${num(event.confirmations)} confirmations` : event.canonical === false ? 'Orphaned by a reorg' : 'Not verified'));
+      if (event.accounting?.recovered_tokens?.length) row.append(assetsView(event.accounting.recovered_tokens));
       if (event.detail) row.append(el('p', 'muted', event.detail));
       if (event.accounting) for (const [label, amount] of [['Emission', event.accounting.emission_nano_erg], ['Fees', event.accounting.fees_nano_erg], ['Rent', event.accounting.rent_nano_erg]]) row.append(kv(label, money(amount)));
       outcomes.body.append(row);
