@@ -12,7 +12,7 @@ use ergo_wallet::extended_key::ExtendedSecretKey;
 #[test]
 fn bip32_vector_1_three_step_path() {
     let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-    let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
+    let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
     let path: DerivationPath = "m/0'/1/2'".parse().unwrap();
     let leaf = master
         .derive_at_path(&path)
@@ -32,7 +32,7 @@ fn bip32_vector_2_master() {
     let seed = hex::decode(
         "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542"
     ).unwrap();
-    let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
+    let master = ExtendedSecretKey::derive_master_key(&seed[..]).unwrap();
     assert_eq!(
         hex::encode(master.secret_bytes()),
         "4b03d6fc340455b363f51020ad3ecca4f0850280cf436c70c727923f6db46c3e",
