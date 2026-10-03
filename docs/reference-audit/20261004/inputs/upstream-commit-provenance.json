@@ -1,0 +1,365 @@
+{
+  "API001": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "resolved_commit": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "API002": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "resolved_commit": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "API003": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "resolved_commit": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "API004": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "NODE002": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "16a8d8e8",
+        "resolved_commit": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "38e286cd",
+        "resolved_commit": "38e286cd40f1e36c70749bc1cf8dcb8477cbf2b7",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "NODE011": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "WALLET003": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "16a8d8e8",
+        "resolved_commit": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "WALLET004": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "resolved_commit": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "WALLET009": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "INDEXER005": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "resolved_commit": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "INDEXER006": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "resolved_commit": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "INDEXER010": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "REST005": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "MP007": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "resolved_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "ST011": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "16a8d8e8",
+        "resolved_commit": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "ST006": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "16a8d8e8",
+        "resolved_commit": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "EV007": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "EP2P001": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "f7d72c58",
+        "resolved_commit": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "EP2P003": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "714479ed9",
+        "resolved_commit": "714479ed9c5d296016b7c28412b74dfbc018f83f",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "EM003": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "SIG004": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "resolved_commit": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "ES008": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "4449b727",
+        "resolved_commit": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "ES011": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "4449b727",
+        "resolved_commit": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "ES001": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "resolved_commit": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "EC006": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "resolved_commit": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "DIFF15": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "resolved_commit": "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "resolved_commit": "bc3befeae957481456ffff06534be2d823f7c3d6",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "WS001": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "df56a9f7",
+        "resolved_commit": "df56a9f7c2b9ab06553942756a564af539ebaf56",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "2b0db836",
+        "resolved_commit": "2b0db836127fb030744fb20104076a343b0a4645",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "6c523dfc",
+        "resolved_commit": "6c523dfcc7873b0dc7d304f5c93cb7eed4dde6ee",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "4d08adf9",
+        "resolved_commit": "4d08adf941f85fc41045af8a3de733b9e8379e13",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  },
+  "WS002": {
+    "source_or_fix_revisions": [
+      {
+        "supplied": "df56a9f7",
+        "resolved_commit": "df56a9f7c2b9ab06553942756a564af539ebaf56",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "2b0db836",
+        "resolved_commit": "2b0db836127fb030744fb20104076a343b0a4645",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "6c523dfc",
+        "resolved_commit": "6c523dfcc7873b0dc7d304f5c93cb7eed4dde6ee",
+        "is_ancestor_of_implementation_base": true
+      },
+      {
+        "supplied": "4d08adf9",
+        "resolved_commit": "4d08adf941f85fc41045af8a3de733b9e8379e13",
+        "is_ancestor_of_implementation_base": true
+      }
+    ],
+    "observed_implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "scope": "Resolved owner-cited source/fix commits; base observation is not automatically the introducing fix."
+  }
+}

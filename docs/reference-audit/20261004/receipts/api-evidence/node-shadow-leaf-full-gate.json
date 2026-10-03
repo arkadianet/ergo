@@ -1,0 +1,141 @@
+{
+  "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:16:57.825178+00:00",
+      "duration_seconds": 2.061,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:16:59.886293+00:00",
+      "duration_seconds": 0.432,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:17:00.318922+00:00",
+      "duration_seconds": 28.471,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-clippy.log",
+      "log_sha256": "dc542495990b24f345f4a035a1756a3c32ad02175476b865556eb6b05b32bf74",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:17:28.789785+00:00",
+      "duration_seconds": 296.514,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-workspace-tests.log",
+      "log_sha256": "383b6541d11fe95d37d33384d4038ccc08b8c11072b47450832fbf32eacf041e",
+      "tests_passed": 7893,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:22:25.304153+00:00",
+      "duration_seconds": 43.728,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-rustdoc.log",
+      "log_sha256": "6e9d3b5ea98d2effb8673027f8c9cffc878381a35ce80b96d579e37841dcfa61",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:23:09.032174+00:00",
+      "duration_seconds": 0.03,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+      "started_utc": "2026-10-03T19:23:09.062669+00:00",
+      "duration_seconds": 0.171,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-gate-release-tests.log",
+      "log_sha256": "3a7707e6cc85a53646ed3fe1de4485efb5c3490939d1100ef2389f11264581cf",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

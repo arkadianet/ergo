@@ -1,0 +1,79 @@
+{
+  "group": "06-ser-construction-allocation-contracts",
+  "base": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+  "head": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+  "fixes": [
+    "ES-002",
+    "ES-003",
+    "ES-004",
+    "ES-005",
+    "ES-009"
+  ],
+  "gate": "sigma-evidence/group06-gate.json",
+  "tests": {
+    "passed": 7908,
+    "failed": 0,
+    "ignored": 98,
+    "result_lines": 65
+  },
+  "files": [
+    {
+      "path": "docs/codemap/ergo-ser.md",
+      "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa"
+    },
+    {
+      "path": "ergo-ser/src/address.rs",
+      "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02"
+    },
+    {
+      "path": "ergo-ser/src/batch_merkle_proof.rs",
+      "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4"
+    },
+    {
+      "path": "ergo-ser/src/ergo_box/mod.rs",
+      "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd"
+    },
+    {
+      "path": "ergo-ser/src/ergo_tree/gates.rs",
+      "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea"
+    },
+    {
+      "path": "ergo-ser/src/ergo_tree/mod.rs",
+      "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443"
+    },
+    {
+      "path": "ergo-ser/src/ergo_tree/read.rs",
+      "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458"
+    },
+    {
+      "path": "ergo-ser/src/jvm_utf8.rs",
+      "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994"
+    },
+    {
+      "path": "ergo-ser/src/opcode/tests.rs",
+      "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2"
+    },
+    {
+      "path": "ergo-ser/src/opcode/types.rs",
+      "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b"
+    },
+    {
+      "path": "ergo-ser/src/opcode/write.rs",
+      "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7"
+    },
+    {
+      "path": "ergo-ser/src/scala_hamt.rs",
+      "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177"
+    },
+    {
+      "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+      "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57"
+    }
+  ],
+  "reference": "Reference unsigned-short expression count field and preserved SigmaBoolean children-before-threshold-shape read order; existing external depth/conjecture fixtures pass. No incoming count/depth/acceptance gate changed.",
+  "limits": [
+    "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+    "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+    "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+  ]
+}

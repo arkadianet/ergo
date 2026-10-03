@@ -1,0 +1,2007 @@
+[
+  {
+    "reference": "api-evidence/api-schemas-leaf-full-gate.json",
+    "sha256": "e072d14e699539b7df77d94d828dd24d895a57ba0641f1be41c9a93cebbd8bb4",
+    "bytes": 4576,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "48b4668e9593c0963e2f18add76debc2425f63fa"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/api-schemas-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/dashboard-capabilities-v2-full-gate.json",
+    "sha256": "9618626b13e2c577bb9237b74f7a0b0745c67a02f44de77380ef7aa662193d95",
+    "bytes": 4635,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "d46fd596a82b9c5ae5102d43355bccc8e378ab06"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/dashboard-capabilities-v2-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/dashboard-lookups-v2-full-gate.json",
+    "sha256": "8f23ab40b706719aeb421c1648d3514c1c7abca124098c2c17111d6eda17dae9",
+    "bytes": 4604,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "63edffdb58cead555dff081a826b533b81962740"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/dashboard-lookups-v2-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/dashboard-render-proof-v2.json",
+    "sha256": "3430e1a8fb28fb209d14e57a3dac099e48a13e47adb480e78a8002bc62aea7f4",
+    "bytes": 3363,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": "PASS",
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/dashboard-render-proof-v2.json"
+  },
+  {
+    "reference": "api-evidence/indexer-types-docs-leaf-full-gate.json",
+    "sha256": "b4a42a6e12cb2bea9086b28444c44b7209d8ed6ed9f1b7638d16478cfc2678e3",
+    "bytes": 4627,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "67c99532777a496c9ab127c6250d8d551051233b"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/indexer-types-docs-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-cost-cache-leaf-full-gate.json",
+    "sha256": "fa58aa7456f2f0fac94d0588e992a3d12fecdee098bc2faaeef3afea9640c47c",
+    "bytes": 4625,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "101c1c30f37a26aaf5715e6b57374a8380404537"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-cost-cache-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-diagnostics-leaf-full-gate.json",
+    "sha256": "67fa5eb044cc7cf4fe42c83ed5e1cd48df74cbd289f4fadb25304fad0d3524e5",
+    "bytes": 4633,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "1978058d92c8ec897db49618b7210c8cde0d4803"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-diagnostics-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-frontier-v2-full-gate.json",
+    "sha256": "ac478d0d5e44563a7c3fed733b4120ef3b697c5b925c6dfc95b20bc23f9f0408",
+    "bytes": 4596,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "80bd8c451b307e45cce89bead4b6a3da4cbe6619"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-frontier-v2-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-package-leaf-full-gate.json",
+    "sha256": "6657f825562ecc2b35dcf1c3529c6fa7cca0fa13fd1eb8a26a152680c68e1ab2",
+    "bytes": 4603,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "653c638275f5cee1c719f29e160861d7a9fe333a"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-package-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-package-sources-leaf-full-gate.json",
+    "sha256": "f77a94c9e7d87a16acb49f3195d9c954adaaecdf42647daae65fbcd4399a589c",
+    "bytes": 4674,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "ce71671a7531d0f4fd84de8d00c961a9101c8dba"
+      ],
+      "recorded_result": "RUNNING_OR_FAILED",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        101,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-package-sources-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/mempool-package-sources-v2-full-gate.json",
+    "sha256": "30766d8d4f6d97e5e4cb6fb9555a0b22817d447087e16e80a7f95d73dea4b345",
+    "bytes": 4645,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "ce6b2cffdbf719eacccc461156806f65a1a2ccdd"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/mempool-package-sources-v2-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-config-leaf-full-gate.json",
+    "sha256": "b8fc57430abe63ec87a0411c194eff29b91f6f3db9ca0d65004dafb25af8a76d",
+    "bytes": 4577,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-config-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-cumulative-context-leaf-full-gate.json",
+    "sha256": "9e7491407cfb7e8d920c287662edbdffeaa84a8930a99ef0f77d0b118b12c52f",
+    "bytes": 4659,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "8bf3fe704f3dd9075f8bbb8fe0761346751896da"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-cumulative-context-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-derivation-leaf-full-gate.json",
+    "sha256": "951f02ba8fc1593194a455652d051fe6a233129008e7cadea28a8060138ee93e",
+    "bytes": 4620,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "733f96a367825a40e45763c8b92366a874de8f6c"
+      ],
+      "recorded_result": "RUNNING_OR_FAILED",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        101,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-derivation-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-derivation-v2-full-gate.json",
+    "sha256": "dd2b865c3e9afc4948c984ef29c361dba27c0c242cc18023c9697ffc2d070ee3",
+    "bytes": 4591,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "def9e2403b110edccb53bd7a564349346ef7f2c2"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-derivation-v2-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-info-leaf-full-gate.json",
+    "sha256": "be163523543dc3d3e35a2fa02b5570a05f39055662d00a2a24d40d5179a25026",
+    "bytes": 4563,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "703f8b0a3d84337c1e604143c7353bab727fdc14"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-info-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-pruning-leaf-full-gate.json",
+    "sha256": "15b6f202eb14de4855b506a0c9eee277f785e54260d9cafea2c1dec1f2f6e37f",
+    "bytes": 4583,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "168cd4728a0c446f6a28302f30f735db47d6a731"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-pruning-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-rescan-leaf-full-gate.json",
+    "sha256": "2c19804ee4fd3eea0402041930942b9a12c6f69f00e9d6dd8a557afdb1027aa5",
+    "bytes": 4577,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "a55b270d39cb4d34224a24b84c3846799fb403e9"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-rescan-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-shadow-leaf-full-gate.json",
+    "sha256": "07bd90ea3c4804d523390867deff296c13afc34b5396d90b9c1c5f9939ba6a87",
+    "bytes": 4576,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-shadow-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/node-wallet-writes-leaf-full-gate.json",
+    "sha256": "7e363311ecdbe40757e3f869504cf754d3bada8ad75e7106f15979bade5cc6e8",
+    "bytes": 4625,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "8ab99c994c3b6824c2614cf4764941c2b08ff1ec"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/node-wallet-writes-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/normalized-wallet-stack.json",
+    "sha256": "38187db3726be214e016e0b262b1738ebe9593dd6fb44db604741d50956e9ddd",
+    "bytes": 1208,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/normalized-wallet-stack.json"
+  },
+  {
+    "reference": "api-evidence/openapi-ids-leaf-full-gate.json",
+    "sha256": "f8dd4b2d39a327343b9c9532e4f4a79c97992386f9867b44810d3250cee5948c",
+    "bytes": 4577,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "8d8bf7bc74a644ef2dd3b4f0e97e354beee3ee1c"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/openapi-ids-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/paging-full-gate.json",
+    "sha256": "664bd8742883f8d4885978e979e51d376e684d10112848d0c4488b464db92a87",
+    "bytes": 4507,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "2af7dab5895aaf1da070bf0f0b4f0accece04931"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/paging-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/tree-query-full-gate.json",
+    "sha256": "c0a270e2eb0bdcb628f5f0fd69c1a18a7b1958e6fbc8f6a41c5f779eb6a0d8f3",
+    "bytes": 4532,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c5472e58a47428e295b5a0328ff7130a4afd21fa"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/tree-query-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/tree-query-leaf-full-gate.json",
+    "sha256": "c75dd8cb1f0c0df5ce3014dadb61161cfde0a4a0ec639c5e9f228ffe37788a04",
+    "bytes": 4570,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "7a59aee0d6a8935685d1037772ecfa469cee2fcf"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/tree-query-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-cache-leaf-full-gate.json",
+    "sha256": "bb8beae66bc34bf668a15453d2865fd8a83c1a03377cb33faaa4236aa4fe9a4c",
+    "bytes": 4584,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "18b9272e23783157cfae15ed42b487e559758cee"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-cache-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-custody-leaf-full-gate.json",
+    "sha256": "04ec84e19a9514e6b43b2f3bc7b7c6a243b8c97c6bdeb82dfa0ec0580373b18c",
+    "bytes": 4597,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "32114cc5d14fdb1abfd792acc663a1492b0ad946"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-custody-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-derivation-full-gate.json",
+    "sha256": "6237a42ae705c7bc1cf26ef4ac01290b6b984c526bb9f73809da48a19bd6d37b",
+    "bytes": 4580,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "11ba533603a10ede6f65dda3fc41dd1f1a882a3b"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-derivation-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-secrets-leaf-full-gate.json",
+    "sha256": "89841bb15f8fb022ef8d413bcda6821c87df9208b298b6febf6948205e0104db",
+    "bytes": 4598,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "d8dbf3a2fdb5a198a966f7ea242c696568001e1a"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-secrets-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-selection-leaf-full-gate.json",
+    "sha256": "76c4199e14be462b8b6b09f0183ef1cfdd22d2da3b7145be766b47493205321a",
+    "bytes": 4610,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-selection-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-visibility-leaf-full-gate.json",
+    "sha256": "54e227c99581da3d9931e4ee85c64ffb4a4151c4af60b1f53152c5023a2370da",
+    "bytes": 4634,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "ce71a3cb3bdc58985f1c3e8f38fe55903b581c7d"
+      ],
+      "recorded_result": "RUNNING_OR_FAILED",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        101,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-visibility-leaf-full-gate.json"
+  },
+  {
+    "reference": "api-evidence/wallet-visibility-v2-full-gate.json",
+    "sha256": "63b7c94efb598e9a96bc4410422b6d45c5caf750a0378fe548541d9a492873cc",
+    "bytes": 4604,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "705dd19637f4885d09b80362270f89e61fda8d1b"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/api-evidence/wallet-visibility-v2-full-gate.json"
+  },
+  {
+    "reference": "engineering-evidence/full-gate.json",
+    "sha256": "7f95d913a02eaf3b6c11e13e88ae47e4a664d6f1a74d6b0fd92cc52b8d0d7202",
+    "bytes": 5405,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 11,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/engineering-evidence/full-gate.json"
+  },
+  {
+    "reference": "engineering-evidence/ge-gate/full-gate.json",
+    "sha256": "b1372ab4fd3b9b40bf96a36dfc87a1461e387fc592279caa3f1a9278c70a3c8b",
+    "bytes": 6011,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "38b11f2b68c0892118d7a0ca5bc53faae502e96f"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 12,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/engineering-evidence/ge-gate/full-gate.json"
+  },
+  {
+    "reference": "engineering-evidence/strict-current-gate.json",
+    "sha256": "8089cfd8eb7e387402832f16e1cb723f193da33947f217e0ac606c62cdd2b695",
+    "bytes": 1873,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/engineering-evidence/strict-current-gate.json"
+  },
+  {
+    "reference": "indexer-evidence/checkpoint-gate/full-gate.json",
+    "sha256": "5c0f04b0578ae91805fb1368177ef9041577610edc76eac7d75e102c12c7b8e2",
+    "bytes": 6036,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c398576f1932a7fc748041fb5688dd6967a937cc"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 12,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/indexer-evidence/checkpoint-gate/full-gate.json"
+  },
+  {
+    "reference": "indexer-evidence/checkpoint-ready.json",
+    "sha256": "3670e26a3d3e39d82a49a10943dd53c603fe73b3cb82ec58c501597cf436a8ce",
+    "bytes": 301,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c398576f1932a7fc748041fb5688dd6967a937cc"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/indexer-evidence/checkpoint-ready.json"
+  },
+  {
+    "reference": "indexer-evidence/integrated-gate/full-gate.json",
+    "sha256": "0b65be998df0f9b86a22a846a06edc8c351551b516f83cf7beba635b85d0065e",
+    "bytes": 6035,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "15e010555fb2b942f2ee19d945e63f4fedaffbbf"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 12,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/indexer-evidence/integrated-gate/full-gate.json"
+  },
+  {
+    "reference": "integration-evidence/validation-assurance-tests.json",
+    "sha256": "28a1137b09e66fe13d051ee55256c541977ecc2bdb699f2cd61f162967beeb1e",
+    "bytes": 365,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": "PASS",
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/integration-evidence/validation-assurance-tests.json"
+  },
+  {
+    "reference": "rest-evidence/final-gate/full-gate.json",
+    "sha256": "73ab57d6c040bb95d8eb7e80ef1fa168f01f52c00179879970ccd5d0e885eed0",
+    "bytes": 5933,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "9e9d6f0085f96fd83dc47402c91e021259ed8389"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 12,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/rest-evidence/final-gate/full-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/current-revalidation.json",
+    "sha256": "8d58e5ddb798fd79159bae64705f5a0c8c53b1dc54857a0d1829d591258849fa",
+    "bytes": 19255,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/current-revalidation.json"
+  },
+  {
+    "reference": "sigma-evidence/group01-after.json",
+    "sha256": "057e8aeb99a6bb37f22574e5779940de87b3da6fe9ecd9cfb03fb34c16b0bc49",
+    "bytes": 684,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group01-after.json"
+  },
+  {
+    "reference": "sigma-evidence/group01-before-runtime.json",
+    "sha256": "41c98b3f5cf197e675322602b61d1aded3dd8ff7aaebb94f83f51a7ec3b4d2b5",
+    "bytes": 695,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group01-before-runtime.json"
+  },
+  {
+    "reference": "sigma-evidence/group01-gate-doc.json",
+    "sha256": "179fd33fc03574ac1edea473d803888a4604739f64544dc79385ad05d864c9db",
+    "bytes": 634,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group01-gate-doc.json"
+  },
+  {
+    "reference": "sigma-evidence/group01-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group01-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group01-test-counts.json",
+    "sha256": "160228491dfbfe68e74252098564f67a7fa8cceebbc70eeeeee013c7336d310e",
+    "bytes": 210,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group01-test-counts.json"
+  },
+  {
+    "reference": "sigma-evidence/group02-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group02-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group02-ser.json",
+    "sha256": "e258f06416fc345d25364bd59f7c2b250cb90bc41d08f85542fb4b85c2697037",
+    "bytes": 553,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group02-ser.json"
+  },
+  {
+    "reference": "sigma-evidence/group03-gate-ready-test.json",
+    "sha256": "677621370a56b7aba5f430c1cc6224bb2a09ab980397ee84ac980c4d56caa47d",
+    "bytes": 560,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group03-gate-ready-test.json"
+  },
+  {
+    "reference": "sigma-evidence/group03-gate-ready.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group03-gate-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group03-ser-final.json",
+    "sha256": "db277fe5ded8c3c5dda74deab30f729bc88278bbc80e6e271644289b71c43eb6",
+    "bytes": 561,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group03-ser-final.json"
+  },
+  {
+    "reference": "sigma-evidence/group03-test-counts.json",
+    "sha256": "5261680b5b52998cf7792a3813dd3f34c72a341d14333429bdc3c90f528fe1a6",
+    "bytes": 75,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group03-test-counts.json"
+  },
+  {
+    "reference": "sigma-evidence/group04-after.json",
+    "sha256": "fa166f4f5b2f2b7510004197f911b404f84c5712781a62e45be2ee6374798c7e",
+    "bytes": 635,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group04-after.json"
+  },
+  {
+    "reference": "sigma-evidence/group04-before.json",
+    "sha256": "0bc5eb790fee88f6182b9087e7d606f38dac33a57b645ed496c4ebaf068e95da",
+    "bytes": 639,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group04-before.json"
+  },
+  {
+    "reference": "sigma-evidence/group04-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group04-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group04-ready.json",
+    "sha256": "bea2c086ed537b5a6ed3e62c5e6fb28895fecaf5dbd6f9584f5052d0cc2b392a",
+    "bytes": 2264,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "1387561821eac701aa6639ec240f80e0211a50bd"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group04-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group05-followup-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group05-followup-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group05-gate-02.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group05-gate-02.json"
+  },
+  {
+    "reference": "sigma-evidence/group05-live-typer-02.json",
+    "sha256": "5d012409866fbd7b0b3cf66e20f4df13b221a36586a9d2686b500ee94d254489",
+    "bytes": 1038,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group05-live-typer-02.json"
+  },
+  {
+    "reference": "sigma-evidence/group05-ready-followup.json",
+    "sha256": "c25846c295865dfecd43d69e96b2e30eb4a670ab48526dc5d3f8dd5390a9f671",
+    "bytes": 6292,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group05-ready-followup.json"
+  },
+  {
+    "reference": "sigma-evidence/group05-ready.json",
+    "sha256": "d266b2730db3f212fee099c62f9a02abba28ca277c82338f05a848aa3370a520",
+    "bytes": 5270,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group05-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group06-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group06-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group06-ready.json",
+    "sha256": "98a71d7c91dd34157c81ce8ac83e996c3f95b681e265e8db85300a88753b2595",
+    "bytes": 2909,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "9ae5df91203224189d6bbe989027f2b6b5e5dc02"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group06-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group06-ser.json",
+    "sha256": "04b21c7ac4e686d35f2f90b01165b7c574c8cd5b36f095796f007d55a5f6ffa7",
+    "bytes": 555,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group06-ser.json"
+  },
+  {
+    "reference": "sigma-evidence/group07-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group07-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group07-ready.json",
+    "sha256": "9dcae922221ac6607815e26701ff22422be4f2d1d0f4b3e824f9228bbdfa2bbd",
+    "bytes": 3963,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group07-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group08-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group08-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group08-ready.json",
+    "sha256": "4de923e28dfde96a5df0193c9473c330904318cccfc64a127d0be4a063dd5030",
+    "bytes": 1927,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group08-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group09-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group09-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group09-pinned-runtime.json",
+    "sha256": "3effc449e58264c13be486b67c22d1bbef310e87393e6d061e9c797494fa2039",
+    "bytes": 1006,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group09-pinned-runtime.json"
+  },
+  {
+    "reference": "sigma-evidence/group09-ready.json",
+    "sha256": "218e94565bf2674bd831d2c15bdd332e5df60fc9bf4f361e1166764b099ccc6a",
+    "bytes": 2469,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "5691e0cb3cfb3468b9b684174c8e24e47ca71183"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group09-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group09-scoped-all-oracle.json",
+    "sha256": "36d77fe14c091a9c08eb2d7774fa8b8d75799adb13e1e0808bdc9d97c26d9699",
+    "bytes": 603,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group09-scoped-all-oracle.json"
+  },
+  {
+    "reference": "sigma-evidence/group10-gate.json",
+    "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+    "bytes": 362,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group10-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group10-guard-selftest.json",
+    "sha256": "eaaa3241797dc2a6297cf20b20b63c02766fc3f6e7c866c062909dc51ac32f13",
+    "bytes": 554,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group10-guard-selftest.json"
+  },
+  {
+    "reference": "sigma-evidence/group10-ready.json",
+    "sha256": "17abfbef99c5e1b76281e4873f8df3541028769deaefc324aeef28bff315f007",
+    "bytes": 2378,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group10-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group10-scoped-final.json",
+    "sha256": "e6eb9d46baa17e28f63033eb6cc9377f56a8a5932d2db3676d8109a78b05b04a",
+    "bytes": 568,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group10-scoped-final.json"
+  },
+  {
+    "reference": "sigma-evidence/group11-gate-record-tests.json",
+    "sha256": "0f36876931eae336c3c2d57499b7ad11bc7be9553056b9c89af7f7fea267ac24",
+    "bytes": 627,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group11-gate-record-tests.json"
+  },
+  {
+    "reference": "sigma-evidence/group11-gate.json",
+    "sha256": "cce3f3fdae70bfeab18b929d25254b592dd3ca33ebc87c58007ad55cf674ae1b",
+    "bytes": 419,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 8,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group11-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group11-ready.json",
+    "sha256": "606292d0f350fb4db98c26d13d725f8a85c4b1cbf58b5213ac4745f3f8f46728",
+    "bytes": 1732,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "ba1a66c09354f35ee496fd060658cb84bb69cbe3"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group11-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/mixed-carriers/receipt-typed.json",
+    "sha256": "04be83023c5964d1cd28a2082fe8573abd651306f079f6812530baa6b8c2e3be",
+    "bytes": 1678,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/mixed-carriers/receipt-typed.json"
+  },
+  {
+    "reference": "sigma-evidence/native-fuzz/build.json",
+    "sha256": "3fcbaa8cf356b7052e49e091802a5855a8b4fcdd5d789be71da160ed8328dc0b",
+    "bytes": 1001,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/native-fuzz/build.json"
+  },
+  {
+    "reference": "sigma-evidence/native-fuzz/fixed-seed-manifest.json",
+    "sha256": "c07e14fd5831384f7d09c43e53562d1473dd7277bb6a37d1a16ee7451e34f139",
+    "bytes": 14250,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/native-fuzz/fixed-seed-manifest.json"
+  },
+  {
+    "reference": "sigma-evidence/native-fuzz/fixed-seed-replay.json",
+    "sha256": "dae03f6b3a8802e3141da82e5c91ddda161109e20b7091174de4889291a6e450",
+    "bytes": 91141,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/native-fuzz/fixed-seed-replay.json"
+  },
+  {
+    "reference": "sigma-evidence/native-fuzz/native-symbols.json",
+    "sha256": "70b1eb4b622191c3e5b23709077f1c9507ece77d63aa5dc560d33b3872a09b17",
+    "bytes": 6001,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/native-fuzz/native-symbols.json"
+  },
+  {
+    "reference": "state-evidence/group01-gate-attempt2/results.json",
+    "sha256": "8ea8abd83b9bb0a9e6bc515f50edc700ea03f27cb9f0f01c86191a193a4005dd",
+    "bytes": 4775,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group01-gate-attempt2/results.json"
+  },
+  {
+    "reference": "state-evidence/group02-gate-attempt2/results.json",
+    "sha256": "48d373bd60b21824bb1ede11a315b739c02263d06cf3a1a8eab736b43b3b5cad",
+    "bytes": 4777,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group02-gate-attempt2/results.json"
+  },
+  {
+    "reference": "state-evidence/group02-split-gate/results.json",
+    "sha256": "c5837889dc4624777f738e9ac660fb03727974a0ca9340d857b8ce1e567a9a2c",
+    "bytes": 4753,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group02-split-gate/results.json"
+  },
+  {
+    "reference": "state-evidence/group03-crypto-assurance-gate/results.json",
+    "sha256": "94cd234ec720aa0e17d0e49b170b89ae9687bb7fe3e6403ecd1be0aec135211b",
+    "bytes": 4833,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group03-crypto-assurance-gate/results.json"
+  },
+  {
+    "reference": "state-evidence/group04-testnet-gate/results.json",
+    "sha256": "7a70745d4729758314543cdc6b5653519016ea3d1e98e17712fc6938edd4d860",
+    "bytes": 4770,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group04-testnet-gate/results.json"
+  },
+  {
+    "reference": "state-evidence/group05-07-combined-gate-attempt2/results.json",
+    "sha256": "8078b3ec539974360673173c212a8a17143e8ac4da6196e6ca55935e54fa526a",
+    "bytes": 4859,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group05-07-combined-gate-attempt2/results.json"
+  },
+  {
+    "reference": "state-evidence/group08-09-combined-gate/results.json",
+    "sha256": "49af4173029feb337b5afe606d5bb39ff83a1db5cc40e69f662c6bd559ce0971",
+    "bytes": 4795,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group08-09-combined-gate/results.json"
+  }
+]

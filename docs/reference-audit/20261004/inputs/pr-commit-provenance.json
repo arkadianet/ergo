@@ -1,0 +1,302 @@
+{
+  "498": {
+    "supplied": "9e187e88298c8082cef50cab69672ecb17419dea",
+    "exact_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "499": {
+    "supplied": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+    "exact_commit": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "500": {
+    "supplied": "6c5d125d78dafdc3222011e67c4870f769d85c24",
+    "exact_commit": "6c5d125d78dafdc3222011e67c4870f769d85c24",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "501": {
+    "supplied": "d139da22104843c72adfd70b99ae297d3d4b96dd",
+    "exact_commit": "d139da22104843c72adfd70b99ae297d3d4b96dd",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "502": {
+    "supplied": "11ba533603a10ede6f65dda3fc41dd1f1a882a3b",
+    "exact_commit": "11ba533603a10ede6f65dda3fc41dd1f1a882a3b",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "503": {
+    "supplied": "c4e738db",
+    "exact_commit": "c4e738dba9a751743a8c98fd42a2287d3f4a0547",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "504": {
+    "supplied": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+    "exact_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "505": {
+    "supplied": "7a59aee0d6a8935685d1037772ecfa469cee2fcf",
+    "exact_commit": "7a59aee0d6a8935685d1037772ecfa469cee2fcf",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "506": {
+    "supplied": "1387561821eac701aa6639ec240f80e0211a50bd",
+    "exact_commit": "1387561821eac701aa6639ec240f80e0211a50bd",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "507": {
+    "supplied": "302fb893",
+    "exact_commit": "302fb893c48cde5d1843d633f1e9432b7386b639",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "508": {
+    "supplied": "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4",
+    "exact_commit": "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "509": {
+    "supplied": "ecc21c78114fe775cdf1dd027678b1e8d5e85088",
+    "exact_commit": "ecc21c78114fe775cdf1dd027678b1e8d5e85088",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "510": {
+    "supplied": "fde552a4c50c1965dca01ab15491e2bd4e3ad0e9",
+    "exact_commit": "fde552a4c50c1965dca01ab15491e2bd4e3ad0e9",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "511": {
+    "supplied": "e1670370a4136735b56ec6623792c9e5355d4e4a",
+    "exact_commit": "e1670370a4136735b56ec6623792c9e5355d4e4a",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "512": {
+    "supplied": "d8dbf3a2fdb5a198a966f7ea242c696568001e1a",
+    "exact_commit": "d8dbf3a2fdb5a198a966f7ea242c696568001e1a",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "513": {
+    "supplied": "101c1c30f37a26aaf5715e6b57374a8380404537",
+    "exact_commit": "101c1c30f37a26aaf5715e6b57374a8380404537",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "514": {
+    "supplied": "685649cd3db660d733589c58b9045440c9ec4874",
+    "exact_commit": "685649cd3db660d733589c58b9045440c9ec4874",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "515": {
+    "supplied": "38b11f2b68c0892118d7a0ca5bc53faae502e96f",
+    "exact_commit": "38b11f2b68c0892118d7a0ca5bc53faae502e96f",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "516": {
+    "supplied": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+    "exact_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "517": {
+    "supplied": "7e6a4da39259d01ca56c890722d00431a0564f8b",
+    "exact_commit": "7e6a4da39259d01ca56c890722d00431a0564f8b",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "518": {
+    "supplied": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+    "exact_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "519": {
+    "supplied": "ce6b2cffdbf719eacccc461156806f65a1a2ccdd",
+    "exact_commit": "ce6b2cffdbf719eacccc461156806f65a1a2ccdd",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "520": {
+    "supplied": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+    "exact_commit": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "521": {
+    "supplied": "1978058d92c8ec897db49618b7210c8cde0d4803",
+    "exact_commit": "1978058d92c8ec897db49618b7210c8cde0d4803",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "522": {
+    "supplied": "c6e0f64ae3e7869203d939341040c619fd549e19",
+    "exact_commit": "c6e0f64ae3e7869203d939341040c619fd549e19",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "523": {
+    "supplied": "ba370b793ca6bf2c1704303b162bbbf10c9edee2",
+    "exact_commit": "ba370b793ca6bf2c1704303b162bbbf10c9edee2",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "524": {
+    "supplied": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+    "exact_commit": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "525": {
+    "supplied": "32114cc5d14fdb1abfd792acc663a1492b0ad946",
+    "exact_commit": "32114cc5d14fdb1abfd792acc663a1492b0ad946",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "526": {
+    "supplied": "c398576f1932a7fc748041fb5688dd6967a937cc",
+    "exact_commit": "c398576f1932a7fc748041fb5688dd6967a937cc",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "527": {
+    "supplied": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+    "exact_commit": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "528": {
+    "supplied": "250cd142dd206d9e477f9b8328ca600081d42eb5",
+    "exact_commit": "250cd142dd206d9e477f9b8328ca600081d42eb5",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "529": {
+    "supplied": "f74079dd9c44aab013bd5543b9a4cd5da8b2ae42",
+    "exact_commit": "f74079dd9c44aab013bd5543b9a4cd5da8b2ae42",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "530": {
+    "supplied": "ff383a8ca4c3019e451c6f88385cb8875ec43e1a",
+    "exact_commit": "ff383a8ca4c3019e451c6f88385cb8875ec43e1a",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "531": {
+    "supplied": "025a9cbfcb68891f702d35eadec6801a268890b5",
+    "exact_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "532": {
+    "supplied": "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7",
+    "exact_commit": "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "533": {
+    "supplied": "18b9272e23783157cfae15ed42b487e559758cee",
+    "exact_commit": "18b9272e23783157cfae15ed42b487e559758cee",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "534": {
+    "supplied": "705dd19637f4885d09b80362270f89e61fda8d1b",
+    "exact_commit": "705dd19637f4885d09b80362270f89e61fda8d1b",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "535": {
+    "supplied": "59a63d39399c5c7971df5a77d6939f564a5b4832",
+    "exact_commit": "59a63d39399c5c7971df5a77d6939f564a5b4832",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "536": {
+    "supplied": "703f8b0a3d84337c1e604143c7353bab727fdc14",
+    "exact_commit": "703f8b0a3d84337c1e604143c7353bab727fdc14",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "537": {
+    "supplied": "eaf4f1fa631fa04966825189a6a16983c435693d",
+    "exact_commit": "eaf4f1fa631fa04966825189a6a16983c435693d",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "538": {
+    "supplied": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+    "exact_commit": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "539": {
+    "supplied": "d9a6063fb9f3d6d4bb05e22ed48d6397df9ac263",
+    "exact_commit": "d9a6063fb9f3d6d4bb05e22ed48d6397df9ac263",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "540": {
+    "supplied": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
+    "exact_commit": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "541": {
+    "supplied": "51cd707c24e4711b6488a358adc6b838df3252cb",
+    "exact_commit": "51cd707c24e4711b6488a358adc6b838df3252cb",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "542": {
+    "supplied": "6ac5520a58f187fb9ad435c145d0aaf40a5528eb",
+    "exact_commit": "6ac5520a58f187fb9ad435c145d0aaf40a5528eb",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "543": {
+    "supplied": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+    "exact_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "544": {
+    "supplied": "88e22a71171d2ef37b2bcb803d6dbb86b16f56bd",
+    "exact_commit": "88e22a71171d2ef37b2bcb803d6dbb86b16f56bd",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "545": {
+    "supplied": "ccbb8f81330eb7e07f5eb58fc5374c11ad8dcffa",
+    "exact_commit": "ccbb8f81330eb7e07f5eb58fc5374c11ad8dcffa",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "546": {
+    "supplied": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+    "exact_commit": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "547": {
+    "supplied": "67c99532777a496c9ab127c6250d8d551051233b",
+    "exact_commit": "67c99532777a496c9ab127c6250d8d551051233b",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "548": {
+    "supplied": "8d8bf7bc74a644ef2dd3b4f0e97e354beee3ee1c",
+    "exact_commit": "8d8bf7bc74a644ef2dd3b4f0e97e354beee3ee1c",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "549": {
+    "supplied": "63edffdb58cead555dff081a826b533b81962740",
+    "exact_commit": "63edffdb58cead555dff081a826b533b81962740",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "550": {
+    "supplied": "168cd4728a0c446f6a28302f30f735db47d6a731",
+    "exact_commit": "168cd4728a0c446f6a28302f30f735db47d6a731",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "551": {
+    "supplied": "48b4668e9593c0963e2f18add76debc2425f63fa",
+    "exact_commit": "48b4668e9593c0963e2f18add76debc2425f63fa",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "552": {
+    "supplied": "d46fd596a82b9c5ae5102d43355bccc8e378ab06",
+    "exact_commit": "d46fd596a82b9c5ae5102d43355bccc8e378ab06",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "553": {
+    "supplied": "26aabd7875e76bb84d55811393338a406d1d690e",
+    "exact_commit": "26aabd7875e76bb84d55811393338a406d1d690e",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "554": {
+    "supplied": "8bf3fe704f3dd9075f8bbb8fe0761346751896da",
+    "exact_commit": "8bf3fe704f3dd9075f8bbb8fe0761346751896da",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "555": {
+    "supplied": "e56c29798c7ac7dd8f0aa806c2369e383e81cf64",
+    "exact_commit": "e56c29798c7ac7dd8f0aa806c2369e383e81cf64",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "556": {
+    "supplied": "87b486602bb94a4ef353e12355dc6f5c2ab4e704",
+    "exact_commit": "87b486602bb94a4ef353e12355dc6f5c2ab4e704",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "557": {
+    "supplied": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+    "exact_commit": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  }
+}

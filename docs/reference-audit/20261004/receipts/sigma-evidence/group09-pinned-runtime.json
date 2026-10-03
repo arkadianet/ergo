@@ -1,0 +1,28 @@
+{
+  "command": [
+    "env",
+    "PATH=/home/arkadias/.local/kdex-toolchain/bin:/home/arkadias/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+    "JAVA_HOME=/home/arkadias/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
+    "COURSIER_REPOSITORIES=ivy2Local|https://repo.maven.apache.org/maven2",
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "ergo-difftest",
+    "--lib",
+    "oracle::tests::reduce_diff_serialize_and_flatmap_match_jvm_oracle",
+    "--",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma",
+  "start": "2026-10-03T19:11:36.123271+00:00",
+  "elapsed_seconds": 12.461507011030335,
+  "exit_code": 0,
+  "environment_overrides": {
+    "CARGO_TARGET_DIR": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/targets/sigma",
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group09-pinned-runtime.log"
+}

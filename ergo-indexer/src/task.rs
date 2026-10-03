@@ -11,7 +11,7 @@
 //! `ChainStoreReader`.
 //!
 //! Single-step semantics. `step` is the unit of forward progress: it
-//! either applies one block, rolls one block back, sleeps when caught
+//! either applies one block, rolls one block back, returns idle when caught
 //! up, or surfaces a halt/race condition. The blocking [`IndexerTask::run`]
 //! driver loop turns those outcomes into a long-running task — backing
 //! off on section-missing (5 × 1 s), continuing after committed progress,

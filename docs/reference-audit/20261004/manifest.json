@@ -1,0 +1,1171 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-03T20:30:22.440329+00:00",
+  "source_audit_revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1",
+  "implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+  "live_statuses_frozen": false,
+  "files": [
+    {
+      "path": "inputs/baseline.json",
+      "sha256": "336cacdd85db5a92a24d8f58854a35ccd358a2b1eafe22af6b57185fb0fbdc89",
+      "bytes": 77119,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/baseline.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/findings.json",
+      "sha256": "98436d30bb23d985f7b3b0748f3ae4ed15462e553eb4186c610ecae24823ad86",
+      "bytes": 76726,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/findings.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/api-status.json",
+      "sha256": "f1ebc8f9b15b72f0c1afd247ec196f941d06072da797105d9d0cbdc10588ad28",
+      "bytes": 89204,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-status.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/state-status.json",
+      "sha256": "ce168af9e16d76afbeb27fa11f6d3e104007e6ecac57ad182fbf75505f9d97c1",
+      "bytes": 69252,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-status.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/sigma-status.json",
+      "sha256": "2fee18b9915432f5924604b87673fd5868e6904a09943eb0f95101c12d2cc042",
+      "bytes": 58102,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-status.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/engineering-status.json",
+      "sha256": "c0fa9c46ec450fe578c47e285996d4cffcd681c7d35a94a579add1fe659979bf",
+      "bytes": 7090,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/engineering-status.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/pull-requests.json",
+      "sha256": "e92dbbd357c5c4f985f87eb861b743c650d33d50b663fb7091e98b97261c4336",
+      "bytes": 18719,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/pull-requests.json",
+      "category": "remediation snapshot"
+    },
+    {
+      "path": "inputs/prompt-manifest.json",
+      "sha256": "7854a9f7b0b8f9e06e84128fd34d2e9a0fcee6f15506bcd9930cd657c99cdae7",
+      "bytes": 3657,
+      "source": "/home/arkadias/Coding/remote/ergo/docs/audit-prompts",
+      "category": "exact authored prompt copies"
+    },
+    {
+      "path": "historical/reports/ergo-api.md",
+      "sha256": "998071ebc2a8f00cb7c7e7662fb04382e45255a8026cb4626b5cefd27b6c2161",
+      "bytes": 35397,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-api.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-chain-spec.md",
+      "sha256": "21e5e30c1dd72204c2bdd68fd0a741b14c7596bf13fc7a8524ac3fd4eff8448d",
+      "bytes": 41915,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-chain-spec.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-compiler.md",
+      "sha256": "a4d02e717308c42f2768bb7f6593a44eb40c063bc16f344924203fc485f4fcbe",
+      "bytes": 22864,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-crypto.md",
+      "sha256": "287dade55c2f912446247e60d557f90862c869c2d89c7e44b52dbf3e802c4997",
+      "bytes": 23868,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-crypto.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-difftest-fuzz.md",
+      "sha256": "7523482253289ee56bd41f84c51c035e5fb3d38bc74bb757767957c00ad76221",
+      "bytes": 21562,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-difftest.md",
+      "sha256": "c5ce70671f251a051c3c116dabcdb576d259bded427f163ef6b3a7a33a308dc5",
+      "bytes": 37947,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-indexer-types.md",
+      "sha256": "4e1665caf59981533521943c1a70b949bd91755417d1478447bfec417a54de44",
+      "bytes": 16337,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-indexer-types.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-indexer.md",
+      "sha256": "3f0989ca219bbf76c77da48f6357e3d142320f6f504b15d94870d855db2aea15",
+      "bytes": 20861,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-indexer.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-mempool.md",
+      "sha256": "9caa02d6b313dbf3f32940e36659929271916524e12a1704ed149b9b4bbabe86",
+      "bytes": 31949,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-mempool.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-mining.md",
+      "sha256": "1ef81fa259db020f8732441977463e1f268db2cbd114ecd8a2d61d744efc2bcb",
+      "bytes": 28856,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-mining.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-node.md",
+      "sha256": "f5eb24e1dc4b0970cd37a7b76c08aec7d0c8748ff8d9d007e11576dc2f5683ca",
+      "bytes": 37068,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-node.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-p2p.md",
+      "sha256": "49ab1fa220d8f071e8ed9a3298f6e4f807f265eabaae7565bef1a3133e6be087",
+      "bytes": 31182,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-p2p.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-primitives.md",
+      "sha256": "804aba07b8e8f1180390719a570772aee84ea1992f1112cc909eabe2f6625551",
+      "bytes": 40476,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-primitives.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-rest-json.md",
+      "sha256": "154df7bec2b475515c22f7e87017190ad1b049962a47fb49ed0ae6c84f10d4bd",
+      "bytes": 15440,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-rest-json.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-ser.md",
+      "sha256": "17a7e3921b690cb9eae0168296175b8ecc4daae9b4506926b236594c97d26496",
+      "bytes": 53439,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-sigma.md",
+      "sha256": "71ceb35b41452e638381e238f1fb3d494d5723121f97e073f07c22238b06ba7b",
+      "bytes": 20196,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-state.md",
+      "sha256": "e6f8fb026872609b52b89333ba25782b6764c586a27ea8d97c8a3c164b868725",
+      "bytes": 28224,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-state.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-sync.md",
+      "sha256": "5218d3e3700f75602e192d043904d6ed4f96d13544e7c6e7713b5045faf9e4d2",
+      "bytes": 31192,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-validation.md",
+      "sha256": "158dbbc29c6580213c0906eebc014df2ff59a6e4f2df5ebf6553f57c3584d393",
+      "bytes": 28578,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-validation.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/ergo-wallet.md",
+      "sha256": "3974854318159b8b91c9b994641d342a6a80499c337b407de9bd3a6c558ddaa0",
+      "bytes": 22657,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-wallet.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/reports/workspace.md",
+      "sha256": "cb6bc83936552df58417a763cc6b890f540f0217997d0b897401d0ad60800109",
+      "bytes": 54812,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/workspace.md",
+      "category": "historical audit report, not current source coverage"
+    },
+    {
+      "path": "historical/coverage/completed-coverage-verification.json",
+      "sha256": "fac57c313bdea7072919a1471e6fe8929114ee6e3f3767e5fd9f27ab99a11fda",
+      "bytes": 14888,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/completed-coverage-verification.json",
+      "category": "historical scoped/incomplete coverage receipt"
+    },
+    {
+      "path": "historical/coverage/ergo-difftest-fuzz-coverage.json",
+      "sha256": "d493215108dd2338f1234387267e67481a33e263da16e575400af5bc2e6ce283",
+      "bytes": 37906,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz-coverage.json",
+      "category": "historical scoped/incomplete coverage receipt"
+    },
+    {
+      "path": "historical/coverage/root-shared-coverage.json",
+      "sha256": "5251da216faa7b5aef037b721da0c2a53b804dcd7f00d3f7016bffa8ad52fa24",
+      "bytes": 35217,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/root-shared-coverage.json",
+      "category": "historical scoped/incomplete coverage receipt"
+    },
+    {
+      "path": "inputs/upstream-commit-provenance.json",
+      "sha256": "5cf91345ef87fb552b8880f7e552b0445579802bc569e52ea554a429b585701d",
+      "bytes": 14476,
+      "source": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-record",
+      "category": "local exact Git resolution and base ancestry"
+    },
+    {
+      "path": "inputs/pr-commit-provenance.json",
+      "sha256": "ac5d1992e29aedc2f82e1abd5e99550582374980e1adf1983512fffd756a9028",
+      "bytes": 14819,
+      "source": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-record",
+      "category": "local exact Git resolution of published registry heads"
+    },
+    {
+      "path": "receipts/api-evidence/api-schemas-leaf-full-gate.json",
+      "sha256": "e072d14e699539b7df77d94d828dd24d895a57ba0641f1be41c9a93cebbd8bb4",
+      "bytes": 4576,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/api-schemas-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/dashboard-capabilities-v2-full-gate.json",
+      "sha256": "9618626b13e2c577bb9237b74f7a0b0745c67a02f44de77380ef7aa662193d95",
+      "bytes": 4635,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-capabilities-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/dashboard-lookups-v2-full-gate.json",
+      "sha256": "8f23ab40b706719aeb421c1648d3514c1c7abca124098c2c17111d6eda17dae9",
+      "bytes": 4604,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/dashboard-render-proof-v2.json",
+      "sha256": "3430e1a8fb28fb209d14e57a3dac099e48a13e47adb480e78a8002bc62aea7f4",
+      "bytes": 3363,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-render-proof-v2.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/indexer-types-docs-leaf-full-gate.json",
+      "sha256": "b4a42a6e12cb2bea9086b28444c44b7209d8ed6ed9f1b7638d16478cfc2678e3",
+      "bytes": 4627,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/indexer-types-docs-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-cost-cache-leaf-full-gate.json",
+      "sha256": "fa58aa7456f2f0fac94d0588e992a3d12fecdee098bc2faaeef3afea9640c47c",
+      "bytes": 4625,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-diagnostics-leaf-full-gate.json",
+      "sha256": "67fa5eb044cc7cf4fe42c83ed5e1cd48df74cbd289f4fadb25304fad0d3524e5",
+      "bytes": 4633,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-diagnostics-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-frontier-v2-full-gate.json",
+      "sha256": "ac478d0d5e44563a7c3fed733b4120ef3b697c5b925c6dfc95b20bc23f9f0408",
+      "bytes": 4596,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-package-leaf-full-gate.json",
+      "sha256": "6657f825562ecc2b35dcf1c3529c6fa7cca0fa13fd1eb8a26a152680c68e1ab2",
+      "bytes": 4603,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-package-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-package-sources-leaf-full-gate.json",
+      "sha256": "f77a94c9e7d87a16acb49f3195d9c954adaaecdf42647daae65fbcd4399a589c",
+      "bytes": 4674,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-package-sources-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/mempool-package-sources-v2-full-gate.json",
+      "sha256": "30766d8d4f6d97e5e4cb6fb9555a0b22817d447087e16e80a7f95d73dea4b345",
+      "bytes": 4645,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-package-sources-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-config-leaf-full-gate.json",
+      "sha256": "b8fc57430abe63ec87a0411c194eff29b91f6f3db9ca0d65004dafb25af8a76d",
+      "bytes": 4577,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-config-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-cumulative-context-leaf-full-gate.json",
+      "sha256": "9e7491407cfb7e8d920c287662edbdffeaa84a8930a99ef0f77d0b118b12c52f",
+      "bytes": 4659,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-cumulative-context-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-derivation-leaf-full-gate.json",
+      "sha256": "951f02ba8fc1593194a455652d051fe6a233129008e7cadea28a8060138ee93e",
+      "bytes": 4620,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-derivation-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-derivation-v2-full-gate.json",
+      "sha256": "dd2b865c3e9afc4948c984ef29c361dba27c0c242cc18023c9697ffc2d070ee3",
+      "bytes": 4591,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-derivation-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-info-leaf-full-gate.json",
+      "sha256": "be163523543dc3d3e35a2fa02b5570a05f39055662d00a2a24d40d5179a25026",
+      "bytes": 4563,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-info-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-pruning-leaf-full-gate.json",
+      "sha256": "15b6f202eb14de4855b506a0c9eee277f785e54260d9cafea2c1dec1f2f6e37f",
+      "bytes": 4583,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-pruning-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-rescan-leaf-full-gate.json",
+      "sha256": "2c19804ee4fd3eea0402041930942b9a12c6f69f00e9d6dd8a557afdb1027aa5",
+      "bytes": 4577,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-rescan-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-shadow-leaf-full-gate.json",
+      "sha256": "07bd90ea3c4804d523390867deff296c13afc34b5396d90b9c1c5f9939ba6a87",
+      "bytes": 4576,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-shadow-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/node-wallet-writes-leaf-full-gate.json",
+      "sha256": "7e363311ecdbe40757e3f869504cf754d3bada8ad75e7106f15979bade5cc6e8",
+      "bytes": 4625,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-wallet-writes-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/normalized-wallet-stack.json",
+      "sha256": "38187db3726be214e016e0b262b1738ebe9593dd6fb44db604741d50956e9ddd",
+      "bytes": 1208,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/normalized-wallet-stack.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/openapi-ids-leaf-full-gate.json",
+      "sha256": "f8dd4b2d39a327343b9c9532e4f4a79c97992386f9867b44810d3250cee5948c",
+      "bytes": 4577,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/openapi-ids-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/paging-full-gate.json",
+      "sha256": "664bd8742883f8d4885978e979e51d376e684d10112848d0c4488b464db92a87",
+      "bytes": 4507,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/tree-query-full-gate.json",
+      "sha256": "c0a270e2eb0bdcb628f5f0fd69c1a18a7b1958e6fbc8f6a41c5f779eb6a0d8f3",
+      "bytes": 4532,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/tree-query-leaf-full-gate.json",
+      "sha256": "c75dd8cb1f0c0df5ce3014dadb61161cfde0a4a0ec639c5e9f228ffe37788a04",
+      "bytes": 4570,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-cache-leaf-full-gate.json",
+      "sha256": "bb8beae66bc34bf668a15453d2865fd8a83c1a03377cb33faaa4236aa4fe9a4c",
+      "bytes": 4584,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-cache-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-custody-leaf-full-gate.json",
+      "sha256": "04ec84e19a9514e6b43b2f3bc7b7c6a243b8c97c6bdeb82dfa0ec0580373b18c",
+      "bytes": 4597,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-custody-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-derivation-full-gate.json",
+      "sha256": "6237a42ae705c7bc1cf26ef4ac01290b6b984c526bb9f73809da48a19bd6d37b",
+      "bytes": 4580,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-derivation-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-secrets-leaf-full-gate.json",
+      "sha256": "89841bb15f8fb022ef8d413bcda6821c87df9208b298b6febf6948205e0104db",
+      "bytes": 4598,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-secrets-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-selection-leaf-full-gate.json",
+      "sha256": "76c4199e14be462b8b6b09f0183ef1cfdd22d2da3b7145be766b47493205321a",
+      "bytes": 4610,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-visibility-leaf-full-gate.json",
+      "sha256": "54e227c99581da3d9931e4ee85c64ffb4a4151c4af60b1f53152c5023a2370da",
+      "bytes": 4634,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-visibility-leaf-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/api-evidence/wallet-visibility-v2-full-gate.json",
+      "sha256": "63b7c94efb598e9a96bc4410422b6d45c5caf750a0378fe548541d9a492873cc",
+      "bytes": 4604,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-visibility-v2-full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/engineering-evidence/full-gate.json",
+      "sha256": "7f95d913a02eaf3b6c11e13e88ae47e4a664d6f1a74d6b0fd92cc52b8d0d7202",
+      "bytes": 5405,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/engineering-evidence/full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/engineering-evidence/ge-gate/full-gate.json",
+      "sha256": "b1372ab4fd3b9b40bf96a36dfc87a1461e387fc592279caa3f1a9278c70a3c8b",
+      "bytes": 6011,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/engineering-evidence/ge-gate/full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/engineering-evidence/strict-current-gate.json",
+      "sha256": "8089cfd8eb7e387402832f16e1cb723f193da33947f217e0ac606c62cdd2b695",
+      "bytes": 1873,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/engineering-evidence/strict-current-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/indexer-evidence/checkpoint-gate/full-gate.json",
+      "sha256": "5c0f04b0578ae91805fb1368177ef9041577610edc76eac7d75e102c12c7b8e2",
+      "bytes": 6036,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/checkpoint-gate/full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/indexer-evidence/checkpoint-ready.json",
+      "sha256": "3670e26a3d3e39d82a49a10943dd53c603fe73b3cb82ec58c501597cf436a8ce",
+      "bytes": 301,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/checkpoint-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/indexer-evidence/integrated-gate/full-gate.json",
+      "sha256": "0b65be998df0f9b86a22a846a06edc8c351551b516f83cf7beba635b85d0065e",
+      "bytes": 6035,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/integration-evidence/validation-assurance-tests.json",
+      "sha256": "28a1137b09e66fe13d051ee55256c541977ecc2bdb699f2cd61f162967beeb1e",
+      "bytes": 365,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/validation-assurance-tests.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/rest-evidence/final-gate/full-gate.json",
+      "sha256": "73ab57d6c040bb95d8eb7e80ef1fa168f01f52c00179879970ccd5d0e885eed0",
+      "bytes": 5933,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/rest-evidence/final-gate/full-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/current-revalidation.json",
+      "sha256": "8d58e5ddb798fd79159bae64705f5a0c8c53b1dc54857a0d1829d591258849fa",
+      "bytes": 19255,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/current-revalidation.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group01-after.json",
+      "sha256": "057e8aeb99a6bb37f22574e5779940de87b3da6fe9ecd9cfb03fb34c16b0bc49",
+      "bytes": 684,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group01-after.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group01-before-runtime.json",
+      "sha256": "41c98b3f5cf197e675322602b61d1aded3dd8ff7aaebb94f83f51a7ec3b4d2b5",
+      "bytes": 695,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group01-before-runtime.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group01-gate-doc.json",
+      "sha256": "179fd33fc03574ac1edea473d803888a4604739f64544dc79385ad05d864c9db",
+      "bytes": 634,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group01-gate-doc.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group01-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group01-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group01-test-counts.json",
+      "sha256": "160228491dfbfe68e74252098564f67a7fa8cceebbc70eeeeee013c7336d310e",
+      "bytes": 210,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group01-test-counts.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group02-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group02-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group02-ser.json",
+      "sha256": "e258f06416fc345d25364bd59f7c2b250cb90bc41d08f85542fb4b85c2697037",
+      "bytes": 553,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group02-ser.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group03-gate-ready-test.json",
+      "sha256": "677621370a56b7aba5f430c1cc6224bb2a09ab980397ee84ac980c4d56caa47d",
+      "bytes": 560,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group03-gate-ready-test.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group03-gate-ready.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group03-gate-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group03-ser-final.json",
+      "sha256": "db277fe5ded8c3c5dda74deab30f729bc88278bbc80e6e271644289b71c43eb6",
+      "bytes": 561,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group03-ser-final.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group03-test-counts.json",
+      "sha256": "5261680b5b52998cf7792a3813dd3f34c72a341d14333429bdc3c90f528fe1a6",
+      "bytes": 75,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group03-test-counts.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group04-after.json",
+      "sha256": "fa166f4f5b2f2b7510004197f911b404f84c5712781a62e45be2ee6374798c7e",
+      "bytes": 635,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group04-after.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group04-before.json",
+      "sha256": "0bc5eb790fee88f6182b9087e7d606f38dac33a57b645ed496c4ebaf068e95da",
+      "bytes": 639,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group04-before.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group04-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group04-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group04-ready.json",
+      "sha256": "bea2c086ed537b5a6ed3e62c5e6fb28895fecaf5dbd6f9584f5052d0cc2b392a",
+      "bytes": 2264,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group04-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group05-followup-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group05-followup-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group05-gate-02.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group05-gate-02.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group05-live-typer-02.json",
+      "sha256": "5d012409866fbd7b0b3cf66e20f4df13b221a36586a9d2686b500ee94d254489",
+      "bytes": 1038,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group05-live-typer-02.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group05-ready-followup.json",
+      "sha256": "c25846c295865dfecd43d69e96b2e30eb4a670ab48526dc5d3f8dd5390a9f671",
+      "bytes": 6292,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group05-ready-followup.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group05-ready.json",
+      "sha256": "d266b2730db3f212fee099c62f9a02abba28ca277c82338f05a848aa3370a520",
+      "bytes": 5270,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group05-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group06-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group06-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group06-ready.json",
+      "sha256": "98a71d7c91dd34157c81ce8ac83e996c3f95b681e265e8db85300a88753b2595",
+      "bytes": 2909,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group06-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group06-ser.json",
+      "sha256": "04b21c7ac4e686d35f2f90b01165b7c574c8cd5b36f095796f007d55a5f6ffa7",
+      "bytes": 555,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group06-ser.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group07-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group07-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group07-ready.json",
+      "sha256": "9dcae922221ac6607815e26701ff22422be4f2d1d0f4b3e824f9228bbdfa2bbd",
+      "bytes": 3963,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group07-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group08-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group08-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group08-ready.json",
+      "sha256": "4de923e28dfde96a5df0193c9473c330904318cccfc64a127d0be4a063dd5030",
+      "bytes": 1927,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group08-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group09-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group09-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group09-pinned-runtime.json",
+      "sha256": "3effc449e58264c13be486b67c22d1bbef310e87393e6d061e9c797494fa2039",
+      "bytes": 1006,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group09-pinned-runtime.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group09-ready.json",
+      "sha256": "218e94565bf2674bd831d2c15bdd332e5df60fc9bf4f361e1166764b099ccc6a",
+      "bytes": 2469,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group09-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group09-scoped-all-oracle.json",
+      "sha256": "36d77fe14c091a9c08eb2d7774fa8b8d75799adb13e1e0808bdc9d97c26d9699",
+      "bytes": 603,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group09-scoped-all-oracle.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group10-gate.json",
+      "sha256": "0a7fd0f320ca4caae62f3235c95c6bd6fa3346a9b68d5234dccef563d4007688",
+      "bytes": 362,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group10-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group10-guard-selftest.json",
+      "sha256": "eaaa3241797dc2a6297cf20b20b63c02766fc3f6e7c866c062909dc51ac32f13",
+      "bytes": 554,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group10-guard-selftest.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group10-ready.json",
+      "sha256": "17abfbef99c5e1b76281e4873f8df3541028769deaefc324aeef28bff315f007",
+      "bytes": 2378,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group10-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group10-scoped-final.json",
+      "sha256": "e6eb9d46baa17e28f63033eb6cc9377f56a8a5932d2db3676d8109a78b05b04a",
+      "bytes": 568,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group10-scoped-final.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group11-gate-record-tests.json",
+      "sha256": "0f36876931eae336c3c2d57499b7ad11bc7be9553056b9c89af7f7fea267ac24",
+      "bytes": 627,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group11-gate-record-tests.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group11-gate.json",
+      "sha256": "cce3f3fdae70bfeab18b929d25254b592dd3ca33ebc87c58007ad55cf674ae1b",
+      "bytes": 419,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group11-gate.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/group11-ready.json",
+      "sha256": "606292d0f350fb4db98c26d13d725f8a85c4b1cbf58b5213ac4745f3f8f46728",
+      "bytes": 1732,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/group11-ready.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/mixed-carriers/receipt-typed.json",
+      "sha256": "04be83023c5964d1cd28a2082fe8573abd651306f079f6812530baa6b8c2e3be",
+      "bytes": 1678,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/mixed-carriers/receipt-typed.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/native-fuzz/build.json",
+      "sha256": "3fcbaa8cf356b7052e49e091802a5855a8b4fcdd5d789be71da160ed8328dc0b",
+      "bytes": 1001,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/native-fuzz/build.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/native-fuzz/fixed-seed-manifest.json",
+      "sha256": "c07e14fd5831384f7d09c43e53562d1473dd7277bb6a37d1a16ee7451e34f139",
+      "bytes": 14250,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/native-fuzz/fixed-seed-manifest.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/native-fuzz/fixed-seed-replay.json",
+      "sha256": "dae03f6b3a8802e3141da82e5c91ddda161109e20b7091174de4889291a6e450",
+      "bytes": 91141,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/native-fuzz/fixed-seed-replay.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/sigma-evidence/native-fuzz/native-symbols.json",
+      "sha256": "70b1eb4b622191c3e5b23709077f1c9507ece77d63aa5dc560d33b3872a09b17",
+      "bytes": 6001,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/native-fuzz/native-symbols.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group01-gate-attempt2/results.json",
+      "sha256": "8ea8abd83b9bb0a9e6bc515f50edc700ea03f27cb9f0f01c86191a193a4005dd",
+      "bytes": 4775,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group01-gate-attempt2/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group02-gate-attempt2/results.json",
+      "sha256": "48d373bd60b21824bb1ede11a315b739c02263d06cf3a1a8eab736b43b3b5cad",
+      "bytes": 4777,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-gate-attempt2/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group02-split-gate/results.json",
+      "sha256": "c5837889dc4624777f738e9ac660fb03727974a0ca9340d857b8ce1e567a9a2c",
+      "bytes": 4753,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group03-crypto-assurance-gate/results.json",
+      "sha256": "94cd234ec720aa0e17d0e49b170b89ae9687bb7fe3e6403ecd1be0aec135211b",
+      "bytes": 4833,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group03-crypto-assurance-gate/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group04-testnet-gate/results.json",
+      "sha256": "7a70745d4729758314543cdc6b5653519016ea3d1e98e17712fc6938edd4d860",
+      "bytes": 4770,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group04-testnet-gate/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group05-07-combined-gate-attempt2/results.json",
+      "sha256": "8078b3ec539974360673173c212a8a17143e8ac4da6196e6ca55935e54fa526a",
+      "bytes": 4859,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group05-07-combined-gate-attempt2/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "receipts/state-evidence/group08-09-combined-gate/results.json",
+      "sha256": "49af4173029feb337b5afe606d5bb39ff83a1db5cc40e69f662c6bd559ce0971",
+      "bytes": 4795,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group08-09-combined-gate/results.json",
+      "category": "remediation receipt, with original head/scope"
+    },
+    {
+      "path": "inputs/evidence-catalog.json",
+      "sha256": "b2f8280430a5edba036f738c2b43bca34fdd688b5301b7aea212817a564eeb2c",
+      "bytes": 59700,
+      "source": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit",
+      "category": "referenced evidence inventory; missing and large captures remain explicit"
+    }
+  ],
+  "coverage_catalog": [
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/completed-coverage-verification.json",
+      "sha256": "fac57c313bdea7072919a1471e6fe8929114ee6e3f3767e5fd9f27ab99a11fda",
+      "bytes": 14888,
+      "status_occurrences": {
+        "HASH_ONLY": 26
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": true,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-api-coverage.json",
+      "sha256": "af130d491f9f3f5b0ba8e3da3a24ec49777e41b46aafe13b0dbf5db7b486c27d",
+      "bytes": 247245,
+      "status_occurrences": {
+        "BINARY_VALIDATED": 2,
+        "FULL_READ": 274,
+        "GENERATED_VALIDATED": 2,
+        "SCOPED_READ": 1,
+        "SHARED_GENERATED_CHECKED": 4
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler-coverage.json",
+      "sha256": "5fb38461a0ae1fe035533c5e51a8cccdfe66756e1b72ad986a5579a328c06d40",
+      "bytes": 184885,
+      "status_occurrences": {
+        "FULL_READ": 200,
+        "FULL_READ_REUSED": 8,
+        "FULL_READ_REUSED_PREVIOUS_SHARED_PHASE": 3,
+        "STRUCTURE_VALIDATED": 6,
+        "TEXT_INTEGRITY_VALIDATED": 2
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-crypto-coverage.json",
+      "sha256": "d80c0c970c3753584b695a0d434bf2b23e8da3c7487feb5b10b886909f2300ff",
+      "bytes": 38152,
+      "status_occurrences": {
+        "FULL_READ": 39,
+        "SCOPED_READ": 17
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-coverage.json",
+      "sha256": "f7bd8d1fd962879a154e1c955752598ad2c30f338ba4574150e5dddce9a445c9",
+      "bytes": 792333,
+      "status_occurrences": {
+        "FULLY_READ": 127,
+        "GENERATED_DATA_VALIDATED": 221
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz-coverage.json",
+      "sha256": "d493215108dd2338f1234387267e67481a33e263da16e575400af5bc2e6ce283",
+      "bytes": 37906,
+      "status_occurrences": {
+        "FULL_READ": 31,
+        "HASH_ONLY": 26,
+        "SCOPED_READ": 2
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": true,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-indexer-coverage.json",
+      "sha256": "54a965aa996b00517fa25b03ced465b1187bbed749c46f5d59f00ca4218fae74",
+      "bytes": 55621,
+      "status_occurrences": {
+        "FULL_READ": 71
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-indexer-types-coverage.json",
+      "sha256": "d147ce4d03701b2abf13820c5b35f57e690220c28fa71977694b73f9ac2d7ec2",
+      "bytes": 74705,
+      "status_occurrences": {
+        "FULL_READ": 10,
+        "FULL_READ_REUSED": 66,
+        "SCOPED_READ": 3,
+        "STRUCTURE_AND_ID_VALIDATED": 2
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-mempool-coverage.json",
+      "sha256": "b18f913a970a601a1b1f7ae528bf4bdd9010e2ccd675dc6e24f2c0d42c6f18ba",
+      "bytes": 44950,
+      "status_occurrences": {
+        "FULL_READ": 38,
+        "FULL_READ_REUSED": 15,
+        "STRUCTURE_VALIDATED": 1
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-mining-coverage.json",
+      "sha256": "9bebdee6cb51ea6c28c573c4c99b14bcf048d424ac09aeb4ed362788d6d39de2",
+      "bytes": 112216,
+      "status_occurrences": {
+        "FULL_READ": 27,
+        "FULL_READ_REUSED": 22,
+        "PARTIAL_READ": 2,
+        "STRUCTURE_VALIDATED": 64
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-node-coverage.json",
+      "sha256": "c8a9c41543b07d4593c886a94b05c11bed7ad2e1f9bae3ba0c7cbd8fbd8eaf4e",
+      "bytes": 128769,
+      "status_occurrences": {
+        "FULL_READ": 139,
+        "PARTIAL_READ": 8,
+        "STRUCTURED_SCOPED_REVIEW": 2
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-p2p-coverage.json",
+      "sha256": "283bd93d9844c889a47b3867e0ca86aec9860a6220ec13eb498c2fa1d47147c9",
+      "bytes": 42744,
+      "status_occurrences": {
+        "FULL_READ": 47,
+        "SCOPED_READ": 12
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-rest-json-coverage.json",
+      "sha256": "8465ac0af201a517c0d900e34bace5ca73ce8d0e798e1706c05b6d2a554c7bca",
+      "bytes": 42674,
+      "status_occurrences": {
+        "BINARY_SEMANTIC_VALIDATED": 1,
+        "FULL_READ": 24,
+        "FULL_READ_REUSED": 13,
+        "SCOPED_READ": 1,
+        "STRUCTURE_VALIDATED": 11
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser-coverage.json",
+      "sha256": "be71eb6d039212c4ad6c825df59c2d7b76f1b6ebd1896917dbcc793c5f63378d",
+      "bytes": 129849,
+      "status_occurrences": {
+        "FULL_READ": 86,
+        "GENERATED_DATA_CHECKED": 6,
+        "PARTIAL_READ": 2,
+        "UNAVAILABLE": 12
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma-coverage.json",
+      "sha256": "39af8ff744ec9b3ba24eeb66b8efeeef0f6b341ec6f56578dadde75b4865fb3f",
+      "bytes": 69414,
+      "status_occurrences": {
+        "FULL_READ": 73,
+        "FULL_READ_REUSED_PREVIOUS_SHARED_PHASE": 10
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-state-coverage.json",
+      "sha256": "6ce46ec5f1c5f336629eeb4d4377bbbe497cbfc3644c4711d145d6cc43038edf",
+      "bytes": 102152,
+      "status_occurrences": {
+        "FULL_READ": 133,
+        "SCOPED_BOUNDARY": 7,
+        "SCOPED_BOUNDARY_READ": 6
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync-coverage.json",
+      "sha256": "8576feebbf3b2bbc7213af78d5eaa7a5cfc824392ca1f6963247e134824f82bd",
+      "bytes": 28524,
+      "status_occurrences": {
+        "FULL_READ": 46,
+        "SCOPED_READ": 5
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-validation-coverage.json",
+      "sha256": "180720549e551c3188f39892fd68f661962cca932a203b9a4c25ee759885a8c1",
+      "bytes": 94669,
+      "status_occurrences": {
+        "FULL_READ": 107,
+        "SCOPED_READ": 8
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-wallet-coverage.json",
+      "sha256": "bc7e55fa9f199ff360a50021a4c80b0bb0e6f4cee2db48b2216f6e97480ae940",
+      "bytes": 130335,
+      "status_occurrences": {
+        "FULL_READ": 118,
+        "STRUCTURE_VALIDATED_AND_CONSUMER_REVIEWED": 4
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/root-shared-coverage.json",
+      "sha256": "5251da216faa7b5aef037b721da0c2a53b804dcd7f00d3f7016bffa8ad52fa24",
+      "bytes": 35217,
+      "status_occurrences": {
+        "FULL_READ": 24,
+        "PARTIAL_READ": 37
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": true,
+      "scope": "Historical 5d62fd58 coverage only."
+    },
+    {
+      "source": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/workspace-coverage.json",
+      "sha256": "0165f53fbcc5ceb0a002d284783b37eecfc1075b9baf2a6d2fd947b958298fbb",
+      "bytes": 1153959,
+      "status_occurrences": {
+        "BINARY_VALIDATED": 1,
+        "FULL_READ": 271,
+        "FULL_READ_REUSED": 248,
+        "GENERATED_DATA_CHECKED": 2,
+        "GENERATED_DATA_VALIDATED": 2,
+        "RENDER_VALIDATED": 1,
+        "STRUCTURE_VALIDATED": 751,
+        "TEXT_INTEGRITY_VALIDATED": 41
+      },
+      "count_scope": "Status occurrences, including any repeated history; not unique full-read counts.",
+      "archived": false,
+      "scope": "Historical 5d62fd58 coverage only."
+    }
+  ],
+  "additional_receipts": [
+    "integration-evidence/validation-assurance-tests.json"
+  ]
+}

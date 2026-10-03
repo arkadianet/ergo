@@ -1,0 +1,47 @@
+{
+  "revision": "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4",
+  "producer_exit": 0,
+  "strict_check_exit": 0,
+  "strict_check_output": "rows: 299 {'CLOSED': 274, 'N-A': 25}",
+  "provenance": {
+    "schema": 1,
+    "revision": "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4",
+    "inputs_sha256": "cb0b3be06ed8626db31e9a988133cb713f06b5fc43351ca362595c0a237d9414",
+    "commands": [
+      [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "--workspace",
+        "--features",
+        "ergo-validation/diagnostics",
+        "--no-fail-fast",
+        "-E",
+        "not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))",
+        "--message-format",
+        "libtest-json"
+      ],
+      [
+        "cargo",
+        "nextest",
+        "run",
+        "--locked",
+        "-p",
+        "ergo-validation",
+        "--features",
+        "diagnostics",
+        "--no-fail-fast",
+        "--run-ignored",
+        "only",
+        "-E",
+        "test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)",
+        "--message-format",
+        "libtest-json"
+      ]
+    ],
+    "results_sha256": "25b9704139b0b2ab84b82107a5d3c816a129acc135f0153c22772a1573e0f198",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+    "nextest": "cargo-nextest 0.9.146 (8af696ddc 2026-09-21)\nrelease: 0.9.146\ncommit-hash: 8af696ddcce8fff2962d6a5168b6d138b8616a35\ncommit-date: 2026-09-21\nhost: x86_64-unknown-linux-gnu"
+  }
+}

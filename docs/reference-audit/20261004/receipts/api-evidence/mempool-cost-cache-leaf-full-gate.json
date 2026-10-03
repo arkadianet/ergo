@@ -1,0 +1,141 @@
+{
+  "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:32:00.157526+00:00",
+      "duration_seconds": 2.064,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:32:02.221551+00:00",
+      "duration_seconds": 0.415,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:32:02.636659+00:00",
+      "duration_seconds": 26.322,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-clippy.log",
+      "log_sha256": "9e3799563b2bb767b115aaf57aa03725240e442f1c0b256498eb8fe114aca108",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:32:28.958580+00:00",
+      "duration_seconds": 292.84,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-workspace-tests.log",
+      "log_sha256": "e7eb5ce0ffb21e231f2e0d239263058d08f442f44e3834b5e494596030482937",
+      "tests_passed": 7903,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:37:21.799510+00:00",
+      "duration_seconds": 15.445,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-rustdoc.log",
+      "log_sha256": "1eef22423eaac661cebda5b05d760cd3b03da83b57917a3d0c61b4a9931f59fe",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:37:37.244400+00:00",
+      "duration_seconds": 0.038,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "101c1c30f37a26aaf5715e6b57374a8380404537",
+      "started_utc": "2026-10-03T17:37:37.282339+00:00",
+      "duration_seconds": 0.188,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-cost-cache-leaf-gate-release-tests.log",
+      "log_sha256": "a56d357fa0322e719a4385e1a9e35893cfc823e85059b13c81fdd7c75859b277",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

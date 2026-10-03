@@ -1,0 +1,141 @@
+{
+  "revision": "63edffdb58cead555dff081a826b533b81962740",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:43:06.454776+00:00",
+      "duration_seconds": 2.256,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:43:08.710498+00:00",
+      "duration_seconds": 0.441,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:43:09.153207+00:00",
+      "duration_seconds": 38.07,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-clippy.log",
+      "log_sha256": "17c92fc3f92478067e3cb4889cd6b2b01908f50043b706e53ba5723a3fb2883e",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:43:47.222945+00:00",
+      "duration_seconds": 497.183,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-workspace-tests.log",
+      "log_sha256": "6d58c8f676fa2437550deffca056dcda40169f883f7e290f62135bd2a2086340",
+      "tests_passed": 7889,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:52:04.406666+00:00",
+      "duration_seconds": 90.792,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-rustdoc.log",
+      "log_sha256": "56793e5c3e92ed122c1864fa3d05363592af756b0e201948eecad354d807f51e",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:53:35.199421+00:00",
+      "duration_seconds": 0.056,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "63edffdb58cead555dff081a826b533b81962740",
+      "started_utc": "2026-10-03T19:53:35.261072+00:00",
+      "duration_seconds": 0.685,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/dashboard-lookups-v2-gate-release-tests.log",
+      "log_sha256": "606439cc9004a3c3486fd018e3281c33f3c41488fd1726ed1ba14fb7cb28e4bf",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

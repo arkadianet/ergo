@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/fuzz-tools/bin/cargo-fuzz",
+    "fuzz",
+    "build",
+    "--sanitizer",
+    "address",
+    "--target-dir",
+    "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/targets/sigma-native-fuzz"
+  ],
+  "cwd": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/native-fuzz/source/ergo-difftest",
+  "environment": {
+    "RUSTUP_TOOLCHAIN": "nightly-2026-09-30",
+    "CARGO_BUILD_JOBS": "4",
+    "CARGO_NET_OFFLINE": "true"
+  },
+  "rustc_wrapper": "unset for explicit native instrumentation",
+  "start": "2026-10-03T19:22:19.975694+00:00",
+  "elapsed_seconds": 82.18704892700771,
+  "exit_code": 0,
+  "lock_before": "e2b6aea8be990a5092ebaa7423eba24b1d44410404f49a01100c957d40f03805",
+  "lock_after": "e2b6aea8be990a5092ebaa7423eba24b1d44410404f49a01100c957d40f03805",
+  "scope": "instrumented build only; no native seed replay/campaign/crash-export claim"
+}

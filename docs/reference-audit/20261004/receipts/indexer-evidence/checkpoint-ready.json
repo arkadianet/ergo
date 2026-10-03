@@ -1,0 +1,14 @@
+{
+  "head": "c398576f1932a7fc748041fb5688dd6967a937cc",
+  "base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+  "gate": "indexer-evidence/checkpoint-gate/full-gate.json",
+  "findings": [
+    "INDEXER001",
+    "INDEXER002"
+  ],
+  "tests": {
+    "passed": 7895,
+    "failed": 0,
+    "ignored": 98
+  }
+}

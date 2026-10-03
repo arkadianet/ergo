@@ -1,0 +1,141 @@
+{
+  "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:21:32.656799+00:00",
+      "duration_seconds": 2.179,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:21:34.835522+00:00",
+      "duration_seconds": 0.587,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:21:35.422765+00:00",
+      "duration_seconds": 31.258,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-clippy.log",
+      "log_sha256": "8c5a902885b98a2cdad6de794d42fe8c9a9b9a4059367d99bf41687089f7d026",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:22:06.681444+00:00",
+      "duration_seconds": 320.296,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-workspace-tests.log",
+      "log_sha256": "a6f6658a2d5fdb30cdd81408928e68080758f975d546841126bac54487bc8038",
+      "tests_passed": 7894,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:27:26.978129+00:00",
+      "duration_seconds": 12.204,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-rustdoc.log",
+      "log_sha256": "28a1313fd8c04050b5edbdf53d1a14e67776b71772e96717813848270b713eac",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:27:39.181865+00:00",
+      "duration_seconds": 0.031,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+      "started_utc": "2026-10-03T16:27:39.213529+00:00",
+      "duration_seconds": 0.164,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/paging-gate-release-tests.log",
+      "log_sha256": "d8ce0444daf0e4877fce5f07057b3f36a939db47f56dc7f3d87488cb36c6bf0c",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}
