@@ -115,7 +115,7 @@ fn mined_and_conflicted_items_recover_after_rollback() {
         queue.entry(&item.tx_id).unwrap().state,
         PrivateTransactionState::Mined
     );
-    assert!(queue.reserved_inputs().is_empty());
+    assert_eq!(queue.reserved_inputs(), BTreeSet::from([[1; 32]]));
     queue
         .reconcile(
             101,
@@ -290,4 +290,51 @@ fn first_admission_persists_branch_identity_before_lifecycle_tick() {
         .unwrap();
     let restarted = PrivateTransactionQueue::open(&path).unwrap();
     assert_eq!(restarted.observation_cursor(), (100, Some(tip)));
+}
+
+#[test]
+fn mined_and_conflicted_inputs_remain_reserved_before_history_catchup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let queue = PrivateTransactionQueue::open(&path).unwrap();
+    let item = queue
+        .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
+        .unwrap();
+    let applied = BTreeMap::from([(item.tx_id.clone(), (101, "old-block".into()))]);
+    queue
+        .reconcile(
+            101,
+            "old-block".into(),
+            &applied,
+            |_, _| true,
+            |_| false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    let restarted = PrivateTransactionQueue::open(&path).unwrap();
+    // This reservation is already present if chain state restores the input,
+    // before any lifecycle tick or deep ancestor scan has run.
+    assert_eq!(restarted.reserved_inputs(), BTreeSet::from([[1; 32]]));
+    let cursor = restarted.observation_cursor();
+    restarted
+        .reopen_rolled_back(&BTreeSet::from([item.tx_id.clone()]))
+        .unwrap();
+    assert_eq!(restarted.observation_cursor(), cursor);
+    assert_eq!(
+        restarted.entry(&item.tx_id).unwrap().state,
+        PrivateTransactionState::Queued
+    );
+    restarted
+        .reconcile(
+            101,
+            "competing-block".into(),
+            &BTreeMap::new(),
+            |_, _| false,
+            |_| false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    assert_eq!(restarted.reserved_inputs(), BTreeSet::from([[1; 32]]));
+    restarted.cancel(&item.tx_id).unwrap();
+    assert!(restarted.reserved_inputs().is_empty());
 }

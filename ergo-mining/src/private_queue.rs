@@ -48,6 +48,13 @@ impl PrivateTransactionState {
     pub fn is_active(self) -> bool {
         matches!(self, Self::Queued | Self::InCandidate)
     }
+
+    /// Mined and conflicted transactions can return after rollback. Holding
+    /// their original input ids closes the interval before chain catch-up;
+    /// spent inputs are absent from ordinary wallet selection anyway.
+    pub fn reserves_inputs(self) -> bool {
+        !matches!(self, Self::Cancelled | Self::Expired)
+    }
 }
 
 /// Owner-only metadata. Signed bytes intentionally have a separate record.
@@ -148,12 +155,13 @@ impl PrivateTransactionQueue {
         self.lock().records.get(tx_id).map(|r| r.entry.clone())
     }
 
-    /// Active inputs are reserved even before a candidate has included them.
+    /// Inputs stay reserved across restart, conflict, and rollback until an
+    /// explicit cancellation or expiry withdraws the transaction permanently.
     pub fn reserved_inputs(&self) -> BTreeSet<[u8; 32]> {
         self.lock()
             .records
             .values()
-            .filter(|r| r.entry.state.is_active())
+            .filter(|r| r.entry.state.reserves_inputs())
             .flat_map(|r| &r.entry.input_ids)
             .filter_map(|id| decode_id(id).ok())
             .collect()
@@ -253,7 +261,8 @@ impl PrivateTransactionQueue {
             .map(|id| hex::encode(id.as_bytes()))
             .collect();
         if store.records.values().any(|r| {
-            r.entry.state.is_active() && r.entry.input_ids.iter().any(|id| input_ids.contains(id))
+            r.entry.state.reserves_inputs()
+                && r.entry.input_ids.iter().any(|id| input_ids.contains(id))
         }) {
             return Err("an input is already reserved by another private transaction".into());
         }
@@ -342,6 +351,30 @@ impl PrivateTransactionQueue {
     pub fn observation_cursor(&self) -> (u32, Option<String>) {
         let store = self.lock();
         (store.observed_height, store.observed_tip.clone())
+    }
+
+    /// Reopen definitely orphaned confirmations before bounded ancestry work.
+    /// The cursor is untouched so exact applied confirmations still catch up.
+    pub fn reopen_rolled_back(&self, tx_ids: &BTreeSet<String>) -> Result<bool, String> {
+        if tx_ids.is_empty() {
+            return Ok(false);
+        }
+        self.update(|store| {
+            let mut changed = false;
+            for id in tx_ids {
+                if let Some(record) = store.records.get_mut(id) {
+                    if record.entry.state == PrivateTransactionState::Mined {
+                        record.entry.state = PrivateTransactionState::Queued;
+                        record.entry.mined_height = None;
+                        record.entry.mined_block_id = None;
+                        record.entry.reason =
+                            Some("mined block rolled back; confirming applied history".into());
+                        changed = true;
+                    }
+                }
+            }
+            Ok(changed)
+        })
     }
 
     /// Persist incremental ancestry progress during a deep rollback.

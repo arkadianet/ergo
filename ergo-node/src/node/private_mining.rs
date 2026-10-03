@@ -221,6 +221,29 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
     let Some((height, tip)) = reader.committed_tip().map_err(|e| e.to_string())? else {
         return Ok(false);
     };
+    let mut rolled_back = BTreeSet::new();
+    for entry in queue
+        .list()
+        .into_iter()
+        .filter(|e| e.state == PrivateTransactionState::Mined)
+    {
+        if let Some((mined_height, mined_id)) =
+            entry.mined_height.zip(entry.mined_block_id.as_deref())
+        {
+            let definitely_orphaned = mined_height > height
+                || reader
+                    .applied_header_id_at_height(mined_height)
+                    .map_err(|e| e.to_string())?
+                    .is_some_and(|id| hex::encode(id) != mined_id);
+            if definitely_orphaned {
+                rolled_back.insert(entry.tx_id);
+            }
+        }
+    }
+    if !rolled_back.is_empty() {
+        handle.invalidate_operator_generation();
+        queue.reopen_rolled_back(&rolled_back)?;
+    }
     let (mut cursor, previous_tip) = queue.observation_cursor();
     let mut previous_id = previous_tip
         .and_then(|id| hex::decode(id).ok())

@@ -61,7 +61,9 @@ The queue is bounded to 1,024 retained records and 16 MiB of transaction bytes.
 Applied transaction IDs and their exact block identities determine confirmation.
 If a mined block is rolled back and inputs become available, pending work can
 return to the queue. A competing spend produces `conflicted`; a rollback can
-recover it. Cancelled and expired work stays withdrawn across rollback. Deep or
+recover it. Original input IDs stay reserved for conflicted and mined entries
+until cancellation or expiry; already-spent IDs do not affect current wallet
+selection, while restored inputs are protected immediately after rollback. Cancelled and expired work stays withdrawn across rollback. Deep or
 offline history is inspected in bounded batches. If necessary applied history is
 unavailable on a pruned node, confirmation classification waits for that history
 instead of guessing that a spent input proves your transaction was mined.
