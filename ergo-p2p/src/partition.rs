@@ -22,7 +22,8 @@
 //! — no generics.
 //!
 //! # Invariants (enforced by tests)
-//! - Within one call, no modifier ID appears in more than one bucket.
+//! - With unique input IDs, no modifier ID appears in more than one bucket.
+//!   The caller deduplicates pending IDs; this function partitions occurrences.
 //! - Within a (peer, type) bucket, IDs retain input order.
 //! - Bucket emission order: types ascending (tx 102 before ext 108),
 //!   within a type peers in rotated sorted order.
