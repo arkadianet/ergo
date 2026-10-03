@@ -4205,6 +4205,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prover_rejects_invalid_parameters_before_archive_reads() {
+        let (store, _directory) = fresh_store();
+        for (m, k, expected) in [
+            (0, 1, "prove_with_db: m must be >= 1"),
+            (1, 0, "prove_with_db: k must be >= 1"),
+            (u32::MAX, 1, "prove_with_db: k + m overflows u32"),
+        ] {
+            assert!(matches!(store.prove_with_db(m, k, None),
+                Err(StateError::InvalidPrecondition { what }) if what == expected));
+        }
+    }
+
+    #[test]
     fn legacy_zero_based_snapshot_is_refused_before_allocator_migration() {
         let (mut store, _directory) = fresh_store();
         let path = store.db_path.clone();
