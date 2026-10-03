@@ -102,7 +102,8 @@ pub trait ChainView {
     }
     /// Check if a header is marked invalid.
     fn is_invalid(&self, header_id: &[u8; 32]) -> bool;
-    /// Recent header IDs on the best chain (newest first, for SyncInfo V1).
+    /// Recent best-chain IDs, newest first. The V1 wire builder reverses them
+    /// to its canonical oldest-first order and adds pregenesis if appropriate.
     fn recent_header_ids(&self, count: usize) -> Vec<[u8; 32]>;
     /// Recent serialized headers on the best chain (newest first, for SyncInfo V2).
     fn recent_header_bytes(&self, count: usize) -> Vec<Vec<u8>>;

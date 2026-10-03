@@ -33,6 +33,7 @@ struct MockChain {
     id_to_height: std::collections::HashMap<[u8; 32], u32>,
     best_header_score: Vec<u8>,
     id_to_score: std::collections::HashMap<[u8; 32], Vec<u8>>,
+    recent_ids: Vec<[u8; 32]>,
 }
 
 impl MockChain {
@@ -47,6 +48,7 @@ impl MockChain {
             id_to_height: std::collections::HashMap::new(),
             best_header_score: vec![1],
             id_to_score: std::collections::HashMap::new(),
+            recent_ids: Vec::new(),
         }
     }
 
@@ -83,8 +85,8 @@ impl ChainView for MockChain {
     fn is_invalid(&self, _id: &[u8; 32]) -> bool {
         false
     }
-    fn recent_header_ids(&self, _count: usize) -> Vec<[u8; 32]> {
-        Vec::new()
+    fn recent_header_ids(&self, count: usize) -> Vec<[u8; 32]> {
+        self.recent_ids.iter().take(count).copied().collect()
     }
     fn recent_header_bytes(&self, _count: usize) -> Vec<Vec<u8>> {
         Vec::new()
@@ -3590,4 +3592,128 @@ fn serialization_failure_does_not_stamp_sync_sent() {
     // The failure path must NOT stamp the peer: not_synced_or_outdated
     // stays true so the next inbound SyncInfo retries the reply.
     assert!(coord.sync_state_mut().not_synced_or_outdated(p, now));
+}
+
+fn height_id(height: u32) -> [u8; 32] {
+    let mut id = [0; 32];
+    id[28..].copy_from_slice(&height.to_be_bytes());
+    id
+}
+
+#[test]
+fn v1_producer_matches_pinned_scala_counts_endpoints_and_order() {
+    let data = include_str!("../../../test-vectors/ergo-p2p/sync-v1/observations.tsv");
+    let mut checked = 0;
+    for line in data.lines().filter(|line| line.starts_with("producer\t")) {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 5);
+        let height: u32 = fields[1].parse().unwrap();
+        let mut chain = MockChain::new(height, 0);
+        chain.best_header_id = height_id(height);
+        for h in 1..=height {
+            chain.add_best_chain_header(h, height_id(h));
+        }
+        chain.recent_ids = (1..=height).rev().map(height_id).collect();
+        let payload = build_sync_info_payload(SyncVersion::V1, &chain).unwrap();
+        let SyncInfo::V1 { header_ids } = message::deserialize_sync_info(&payload).unwrap() else {
+            panic!("V1 payload")
+        };
+        assert_eq!(header_ids.len(), fields[2].parse::<usize>().unwrap());
+        assert_eq!(
+            header_ids
+                .first()
+                .map(hex::encode)
+                .unwrap_or_else(|| "-".into()),
+            fields[3]
+        );
+        assert_eq!(
+            header_ids
+                .last()
+                .map(hex::encode)
+                .unwrap_or_else(|| "-".into()),
+            fields[4]
+        );
+        assert!(header_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        checked += 1;
+    }
+    assert_eq!(checked, 4);
+}
+
+#[test]
+fn v1_inbound_common_point_uses_newest_known_id() {
+    let mut chain = MockChain::new(3, 0);
+    chain.best_header_id = height_id(3);
+    for h in 1..=3 {
+        chain.add_best_chain_header(h, height_id(h));
+    }
+    let p = peer(9030);
+    let mut coord = SyncCoordinator::new(0);
+    let actions = coord.on_sync_info(
+        p,
+        SyncVersion::V1,
+        &SyncInfo::V1 {
+            header_ids: vec![[0; 32], height_id(1), height_id(2)],
+        },
+        &chain,
+        Instant::now(),
+    );
+    assert_eq!(coord.peer_sync[&p].peer_height, Some(2));
+    let inventories: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendToPeer { code, payload, .. } if *code == message::CODE_INV => {
+                Some(message::deserialize_inv(payload).unwrap().ids)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inventories, vec![vec![height_id(3)]]);
+}
+
+#[test]
+fn v1_empty_and_pregenesis_peers_receive_initial_continuation() {
+    let mut chain = MockChain::new(3, 0);
+    chain.best_header_id = height_id(3);
+    for h in 1..=3 {
+        chain.add_best_chain_header(h, height_id(h));
+    }
+    for ids in [Vec::new(), vec![[0; 32], [99; 32]]] {
+        let mut coord = SyncCoordinator::new(0);
+        let actions = coord.on_sync_info(
+            peer(9030),
+            SyncVersion::V1,
+            &SyncInfo::V1 { header_ids: ids },
+            &chain,
+            Instant::now(),
+        );
+        let inventories: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::SendToPeer { code, payload, .. } if *code == message::CODE_INV => {
+                    Some(message::deserialize_inv(payload).unwrap().ids)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            inventories,
+            vec![vec![height_id(1), height_id(2), height_id(3)]]
+        );
+    }
+    let mut coord = SyncCoordinator::new(0);
+    let empty_chain = MockChain::new(0, 0);
+    let p = peer(9030);
+    coord.on_sync_info(
+        p,
+        SyncVersion::V1,
+        &SyncInfo::V1 {
+            header_ids: Vec::new(),
+        },
+        &empty_chain,
+        Instant::now(),
+    );
+    assert_eq!(
+        coord.peer_sync[&p].status,
+        ergo_p2p::sync::PeerChainStatus::Equal
+    );
 }

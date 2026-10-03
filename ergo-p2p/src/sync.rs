@@ -501,11 +501,9 @@ fn score_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 
 /// SyncInfo V1 comparison — Scala `ErgoHistoryReader.compareV1`.
 ///
-/// Tip may be at either end of `peer_header_ids`: Scala emits
-/// oldest-first (tip = last), Rust outbound is newest-first (tip =
-/// first). Equal if our tip matches either end; Older if our tip is
-/// elsewhere in their list; Fork if we know any of their ids; else Older
-/// (far ahead / unknown).
+/// V1 IDs are oldest-first: only the last ID is the peer tip. A local
+/// tip elsewhere in the list means Older. A known ID or the zero-ID
+/// pregenesis sentinel establishes Fork; otherwise assume Older.
 ///
 /// `we_contain` is any known header (not only best-chain) — matches
 /// Scala `historyStorage.contains`.
@@ -519,15 +517,17 @@ pub fn compare_sync_info_v1(
         // handled by the caller when we also have no tip.)
         return PeerChainStatus::Younger;
     }
-    let tip_first = peer_header_ids.first().copied();
     let tip_last = peer_header_ids.last().copied();
-    if tip_first == Some(*our_best_id) || tip_last == Some(*our_best_id) {
+    if tip_last == Some(*our_best_id) {
         return PeerChainStatus::Equal;
     }
     if peer_header_ids.iter().any(|id| id == our_best_id) {
         return PeerChainStatus::Older;
     }
-    if peer_header_ids.iter().any(&we_contain) {
+    if peer_header_ids
+        .iter()
+        .any(|id| *id == [0; 32] || we_contain(id))
+    {
         PeerChainStatus::Fork
     } else {
         // No overlap — assume far ahead (Scala compareV1).
@@ -922,17 +922,17 @@ mod tests {
     }
 
     #[test]
-    fn compare_v1_tip_at_either_end_is_equal() {
+    fn compare_v1_tip_last_is_equal_but_oldest_endpoint_is_older() {
         let our = mk_id(5);
         // Scala oldest-first: tip last.
         assert_eq!(
             compare_sync_info_v1(&[mk_id(1), our], &our, |_| false),
             PeerChainStatus::Equal
         );
-        // Rust newest-first: tip first.
+        // A local tip at the oldest endpoint is not the peer's newer tip.
         assert_eq!(
-            compare_sync_info_v1(&[our, mk_id(1)], &our, |_| false),
-            PeerChainStatus::Equal
+            compare_sync_info_v1(&[our, mk_id(9)], &our, |_| false),
+            PeerChainStatus::Older
         );
     }
 
@@ -943,6 +943,32 @@ mod tests {
             compare_sync_info_v1(&[mk_id(9), our, mk_id(1)], &our, |_| false),
             PeerChainStatus::Older
         );
+    }
+
+    #[test]
+    fn compare_v1_matches_pinned_selected_scala_method() {
+        let data = include_str!("../../test-vectors/ergo-p2p/sync-v1/observations.tsv");
+        let parse_id = |id: &str| -> [u8; 32] { hex::decode(id).unwrap().try_into().unwrap() };
+        let mut checked = 0;
+        for line in data.lines().filter(|line| !line.starts_with("producer\t")) {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 5);
+            let ids: Vec<_> = fields[1]
+                .split(',')
+                .filter(|id| !id.is_empty())
+                .map(parse_id)
+                .collect();
+            let our = parse_id(fields[2]);
+            let known: Vec<_> = fields[3]
+                .split(',')
+                .filter(|id| !id.is_empty())
+                .map(parse_id)
+                .collect();
+            let actual = compare_sync_info_v1(&ids, &our, |id| known.contains(id));
+            assert_eq!(format!("{actual:?}"), fields[4], "{}", fields[0]);
+            checked += 1;
+        }
+        assert_eq!(checked, 7);
     }
 
     #[test]
