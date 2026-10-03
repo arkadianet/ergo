@@ -1,4 +1,4 @@
-//! [`WebhookEngine`] — the durable-ish registry + delivery-log + retry/backoff
+//! [`WebhookEngine`] — the durable registry + delivery-log + retry/backoff
 //! state machine.
 //!
 //! This is the load-bearing, **transport-free** core. It owns all state behind
@@ -9,16 +9,18 @@
 //! global in-flight caps), and [`record_result`](WebhookEngine::record_result)
 //! (apply one attempt outcome — success resets the failure counter, failure
 //! schedules an exponential-backoff retry or parks/auto-disables). Because the
-//! clock and the transport are both injected, the entire at-least-once retry
+//! clock and the transport are both injected, the entire bounded retry
 //! discipline is unit-testable with **no network and no wall-clock**.
 //!
-//! **Persistence is DEFERRED.** State is in-memory and bounded; a node restart
-//! loses all registrations and the delivery log. Durable-across-restart
-//! registration needs a `*-db` schema and is intentionally NOT invented here.
+//! Production uses an atomically committed, versioned snapshot. Registry CRUD,
+//! enqueue, attempt reservations and acknowledgements become durable before
+//! callers receive success or a transport request. A storage failure rolls back
+//! the mutation and stops management/delivery until restart.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::model::{
@@ -121,8 +123,11 @@ pub enum RegisterError {
     LimitReached,
     /// The webhook lists more channels than `MAX_CHANNELS_PER_WEBHOOK`.
     TooManyChannels,
+    /// Durable state could not be committed; no mutation was acknowledged.
+    StorageUnavailable,
 }
 
+#[derive(Clone)]
 struct Inner {
     subs: HashMap<String, Subscription>,
     /// Global bounded delivery log, oldest at front.
@@ -133,16 +138,51 @@ struct Inner {
     inflight: HashSet<String>,
     next_wh: u64,
     next_dl: u64,
+    highest_seq: u64,
+    storage_failed: bool,
     /// The bus pre-filter shared with the worker's subscription: the union of
     /// all active webhooks' channel keys. Kept in sync on every mutation so the
     /// worker is only woken for events some webhook wants (the cost governor).
     filter: Option<Arc<RwLock<HashSet<String>>>>,
 }
 
+/// Opaque, atomically committed storage seam. Production supplies a private
+/// redb-backed store; API tests can inject storage failures without filesystem IO.
+pub trait WebhookStore: Send + Sync {
+    /// The last committed versioned snapshot, or None for a fresh store.
+    fn load(&self) -> Result<Option<Vec<u8>>, String>;
+    /// Atomically replace the snapshot and make it durable before returning.
+    fn commit(&self, snapshot: &[u8]) -> Result<(), String>;
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredState {
+    version: u32,
+    subs: HashMap<String, Subscription>,
+    deliveries: VecDeque<Delivery>,
+    next_wh: u64,
+    next_dl: u64,
+    highest_seq: u64,
+}
+
+impl StoredState {
+    fn capture(inner: &Inner) -> Self {
+        Self {
+            version: 1,
+            subs: inner.subs.clone(),
+            deliveries: inner.deliveries.clone(),
+            next_wh: inner.next_wh,
+            next_dl: inner.next_dl,
+            highest_seq: inner.highest_seq,
+        }
+    }
+}
+
 /// The webhook subsystem's state + delivery state machine.
 pub struct WebhookEngine {
     inner: Mutex<Inner>,
     config: WebhookEngineConfig,
+    store: Option<Arc<dyn WebhookStore>>,
 }
 
 impl WebhookEngine {
@@ -156,10 +196,133 @@ impl WebhookEngine {
                 inflight: HashSet::new(),
                 next_wh: 1,
                 next_dl: 1,
+                highest_seq: 0,
+                storage_failed: false,
                 filter: None,
             }),
             config,
+            store: None,
         }
+    }
+
+    /// Load persisted subscriptions and obligations. In-flight requests are
+    /// retried with their original delivery IDs/bodies after restart; a remote
+    /// acknowledgement lost during a crash can therefore produce a duplicate.
+    pub fn durable(
+        config: WebhookEngineConfig,
+        store: Arc<dyn WebhookStore>,
+    ) -> Result<Self, String> {
+        let mut engine = Self::new(config);
+        if let Some(bytes) = store.load()? {
+            let saved: StoredState = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("invalid webhook snapshot: {e}"))?;
+            if saved.version != 1
+                || saved.subs.len() > MAX_WEBHOOKS
+                || saved.deliveries.len() > DELIVERY_RING_CAP
+                || saved.next_wh == 0
+                || saved.next_wh == u64::MAX
+                || saved.next_dl == 0
+                || saved.next_dl == u64::MAX
+                || saved.highest_seq >= u64::MAX - 1
+            {
+                return Err("unsupported or out-of-bounds webhook snapshot".into());
+            }
+            let inner = engine.inner.get_mut().unwrap_or_else(|e| e.into_inner());
+            let valid_id = |id: &str, prefix: &str, next: u64| {
+                id.strip_prefix(prefix)
+                    .filter(|hex| hex.len() == 16)
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                    .is_some_and(|number| number > 0 && number < next)
+            };
+            for (id, sub) in &saved.subs {
+                if &sub.webhook_id != id
+                    || sub.channels.len() > MAX_CHANNELS_PER_WEBHOOK
+                    || !valid_id(id, "wh_", saved.next_wh)
+                {
+                    return Err("invalid webhook subscription snapshot".into());
+                }
+            }
+            let mut delivery_ids = HashSet::new();
+            for delivery in &saved.deliveries {
+                if !valid_id(&delivery.delivery_id, "dl_", saved.next_dl)
+                    || !delivery_ids.insert(&delivery.delivery_id)
+                    || delivery.status.is_open() != delivery.next_retry_at_unix_ms.is_some()
+                    || !saved.subs.contains_key(&delivery.webhook_id)
+                    || delivery.event_seq > saved.highest_seq
+                    || delivery.attempts > MAX_ATTEMPTS
+                    || !inner
+                        .dedupe
+                        .insert((delivery.webhook_id.clone(), delivery.event_seq))
+                {
+                    return Err("invalid webhook delivery snapshot".into());
+                }
+            }
+            inner.subs = saved.subs;
+            inner.deliveries = saved.deliveries;
+            inner.next_wh = saved.next_wh;
+            inner.next_dl = saved.next_dl;
+            inner.highest_seq = saved.highest_seq;
+        }
+        engine.store = Some(store);
+        // Prove the store is writable before accepting any registrations.
+        let snapshot = serde_json::to_vec(&StoredState::capture(
+            engine.inner.get_mut().unwrap_or_else(|e| e.into_inner()),
+        ))
+        .map_err(|e| e.to_string())?;
+        engine
+            .store
+            .as_ref()
+            .expect("durable store installed")
+            .commit(&snapshot)?;
+        Ok(engine)
+    }
+
+    /// False after a durable write failure. Management routes and the scheduler
+    /// fail closed until restart. RAM rolls back; a failed durable commit may
+    /// leave either atomic snapshot on disk, so reconcile after reopening.
+    pub fn is_available(&self) -> bool {
+        !self.lock().storage_failed
+    }
+
+    pub(crate) fn fail_closed_after_panic(&self) {
+        self.lock().storage_failed = true;
+    }
+
+    /// Highest cursor included in durable delivery state. Seed the realtime bus
+    /// above this value at boot so a restart cannot alias a dedupe key.
+    pub fn highest_event_seq(&self) -> u64 {
+        self.lock().highest_seq
+    }
+
+    fn mutate<R>(&self, action: impl FnOnce(&mut Inner) -> R) -> Result<R, String> {
+        let mut inner = self.lock();
+        if inner.storage_failed {
+            return Err("webhook store is unavailable".into());
+        }
+        let previous = self.store.as_ref().map(|_| inner.clone());
+        let result = action(&mut inner);
+        if let Some(store) = &self.store {
+            if previous.as_ref().is_some_and(|before| {
+                before.subs == inner.subs
+                    && before.deliveries == inner.deliveries
+                    && before.next_wh == inner.next_wh
+                    && before.next_dl == inner.next_dl
+                    && before.highest_seq == inner.highest_seq
+            }) {
+                return Ok(result);
+            }
+            let saved = serde_json::to_vec(&StoredState::capture(&inner))
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| store.commit(&bytes));
+            if let Err(error) = saved {
+                *inner = previous.expect("durable mutations snapshot their previous state");
+                inner.storage_failed = true;
+                Self::resync_filter(&inner);
+                tracing::error!(%error, "webhook persistence failed; delivery and management disabled until restart");
+                return Err(error);
+            }
+        }
+        Ok(result)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -189,28 +352,33 @@ impl WebhookEngine {
         if channels.len() > MAX_CHANNELS_PER_WEBHOOK {
             return Err(RegisterError::TooManyChannels);
         }
-        let mut g = self.lock();
-        if g.subs.len() >= MAX_WEBHOOKS {
-            return Err(RegisterError::LimitReached);
-        }
-        let id = format!("wh_{:016x}", g.next_wh);
-        g.next_wh += 1;
-        let sub = Subscription {
-            webhook_id: id.clone(),
-            url,
-            channels,
-            secret,
-            active: true,
-            min_confirmations,
-            created_at_unix_ms: now_unix_ms,
-            consecutive_failures: 0,
-            health: WebhookHealth::Delivered,
-            last_delivery_at_unix_ms: None,
-            auto_disabled_reason: None,
-        };
-        g.subs.insert(id.clone(), sub.clone());
-        Self::resync_filter(&g);
-        Ok(sub)
+        self.mutate(|g| {
+            if g.subs.len() >= MAX_WEBHOOKS {
+                return Err(RegisterError::LimitReached);
+            }
+            let Some(next_wh) = g.next_wh.checked_add(1).filter(|next| *next != u64::MAX) else {
+                return Err(RegisterError::LimitReached);
+            };
+            let id = format!("wh_{:016x}", g.next_wh);
+            g.next_wh = next_wh;
+            let sub = Subscription {
+                webhook_id: id.clone(),
+                url,
+                channels,
+                secret,
+                active: true,
+                min_confirmations,
+                created_at_unix_ms: now_unix_ms,
+                consecutive_failures: 0,
+                health: WebhookHealth::Delivered,
+                last_delivery_at_unix_ms: None,
+                auto_disabled_reason: None,
+            };
+            g.subs.insert(id.clone(), sub.clone());
+            Self::resync_filter(g);
+            Ok(sub)
+        })
+        .map_err(|_| RegisterError::StorageUnavailable)?
     }
 
     /// Fetch one subscription by id.
@@ -237,33 +405,38 @@ impl WebhookEngine {
     /// Deregister a subscription and drop its pending deliveries. Returns
     /// whether it existed.
     pub fn delete(&self, webhook_id: &str) -> bool {
-        let mut g = self.lock();
-        let existed = g.subs.remove(webhook_id).is_some();
-        if existed {
-            g.deliveries.retain(|d| d.webhook_id != webhook_id);
-            g.dedupe.retain(|(w, _)| w != webhook_id);
-            Self::resync_filter(&g);
-        }
-        existed
+        self.mutate(|g| {
+            let existed = g.subs.remove(webhook_id).is_some();
+            if existed {
+                g.deliveries.retain(|d| d.webhook_id != webhook_id);
+                g.dedupe.retain(|(w, _)| w != webhook_id);
+                Self::resync_filter(g);
+            }
+            existed
+        })
+        .unwrap_or(false)
     }
 
     /// Pause / resume a subscription (PATCH). Resuming resets the failure
     /// counter + health so a re-enabled hook starts clean. Returns the
     /// updated subscription, or `None` if unknown.
     pub fn set_active(&self, webhook_id: &str, active: bool) -> Option<Subscription> {
-        let mut g = self.lock();
-        let updated = {
-            let sub = g.subs.get_mut(webhook_id)?;
-            sub.active = active;
-            if active {
-                sub.consecutive_failures = 0;
-                sub.health = WebhookHealth::Delivered;
-                sub.auto_disabled_reason = None;
-            }
-            sub.clone()
-        };
-        Self::resync_filter(&g);
-        Some(updated)
+        self.mutate(|g| {
+            let updated = {
+                let sub = g.subs.get_mut(webhook_id)?;
+                sub.active = active;
+                if active {
+                    sub.consecutive_failures = 0;
+                    sub.health = WebhookHealth::Delivered;
+                    sub.auto_disabled_reason = None;
+                }
+                sub.clone()
+            };
+            Self::resync_filter(g);
+            Some(updated)
+        })
+        .ok()
+        .flatten()
     }
 
     /// Recent deliveries for a webhook, newest-first, offset-paginated. Returns
@@ -289,139 +462,175 @@ impl WebhookEngine {
     /// delivery (deduped on `(webhook_id, event_seq)`). Returns the number of
     /// deliveries enqueued. Called by the worker for every bus event.
     pub fn enqueue_matches(&self, event: &RealtimeEvent, now_unix_ms: u64) -> usize {
-        let mut g = self.lock();
-        // Snapshot the matching subs first (immutable borrow) to avoid holding
-        // a mutable borrow of `subs` while mutating `deliveries`.
-        let hits: Vec<(String, String)> = g
-            .subs
-            .values()
-            .filter(|s| s.matches(&event.routes, event.confirmed))
-            .map(|s| {
-                let channel = matched_channel(s, &event.routes);
-                (s.webhook_id.clone(), channel)
-            })
-            .collect();
-        let mut enqueued = 0;
-        for (webhook_id, channel) in hits {
-            let key = (webhook_id.clone(), event.seq);
-            if g.dedupe.contains(&key) {
-                continue;
+        self.mutate(|g| {
+            if event.seq >= u64::MAX - 1 {
+                return 0;
             }
-            let delivery_id = format!("dl_{:016x}", g.next_dl);
-            g.next_dl += 1;
-            let body = render_body(&webhook_id, &delivery_id, &channel, event);
-            let delivery = Delivery {
-                delivery_id,
-                webhook_id,
-                event_seq: event.seq,
-                channel,
-                event_kind: event.event,
-                body,
-                event_unix_ms: event.emitted_at_unix_ms,
-                status: DeliveryStatus::Pending,
-                attempts: 0,
-                last_attempt_at_unix_ms: None,
-                response_code: None,
-                next_retry_at_unix_ms: Some(now_unix_ms),
-            };
-            let inner = &mut *g;
-            inner.dedupe.insert(key);
-            push_bounded(&mut inner.deliveries, &mut inner.dedupe, delivery);
-            enqueued += 1;
-        }
-        enqueued
+            // Snapshot the matching subs first (immutable borrow) to avoid holding
+            // a mutable borrow of `subs` while mutating `deliveries`.
+            let hits: Vec<(String, String)> = g
+                .subs
+                .values()
+                .filter(|s| s.matches(&event.routes, event.confirmed))
+                .map(|s| {
+                    let channel = matched_channel(s, &event.routes);
+                    (s.webhook_id.clone(), channel)
+                })
+                .collect();
+            let mut enqueued = 0;
+            for (webhook_id, channel) in hits {
+                let key = (webhook_id.clone(), event.seq);
+                if g.dedupe.contains(&key) {
+                    continue;
+                }
+                let Some(next_dl) = g.next_dl.checked_add(1).filter(|next| *next != u64::MAX)
+                else {
+                    continue;
+                };
+                let delivery_id = format!("dl_{:016x}", g.next_dl);
+                let body = render_body(&webhook_id, &delivery_id, &channel, event);
+                let delivery = Delivery {
+                    delivery_id,
+                    webhook_id,
+                    event_seq: event.seq,
+                    channel,
+                    event_kind: event.event.into(),
+                    body,
+                    event_unix_ms: event.emitted_at_unix_ms,
+                    status: DeliveryStatus::Pending,
+                    attempts: 0,
+                    last_attempt_at_unix_ms: None,
+                    response_code: None,
+                    next_retry_at_unix_ms: Some(now_unix_ms),
+                };
+                let inner = &mut *g;
+                inner.dedupe.insert(key);
+                if push_bounded(&mut inner.deliveries, &mut inner.dedupe, delivery) {
+                    inner.next_dl = next_dl;
+                    enqueued += 1;
+                }
+            }
+            if enqueued > 0 {
+                g.highest_seq = g.highest_seq.max(event.seq);
+            }
+            enqueued
+        })
+        .unwrap_or(0)
     }
 
     /// The scheduler: collect deliveries that are due now (`next_retry_at <=
     /// now`, still open, owning sub active), respecting the per-webhook and
     /// global in-flight caps, mark them in-flight, count the attempt, and
-    /// return the signed requests to POST. Never blocks; a saturated cap simply
-    /// leaves work for the next tick.
+    /// return the signed requests to POST. A saturated cap leaves work for the
+    /// next tick. Durable engines synchronously commit their reservation;
+    /// production calls this through the blocking executor.
     pub fn take_due(&self, now_unix_ms: u64) -> Vec<PreparedRequest> {
-        let mut g = self.lock();
-        if g.inflight.len() >= MAX_INFLIGHT_GLOBAL {
-            return Vec::new();
-        }
-        // Per-webhook current in-flight tally.
-        let mut per_wh: HashMap<String, usize> = HashMap::new();
-        for id in &g.inflight {
-            if let Some(d) = g.deliveries.iter().find(|d| &d.delivery_id == id) {
+        self.take_due_bounded(now_unix_ms, MAX_INFLIGHT_GLOBAL)
+    }
+
+    pub(crate) fn take_due_bounded(
+        &self,
+        now_unix_ms: u64,
+        max_requests: usize,
+    ) -> Vec<PreparedRequest> {
+        self.mutate(|g| {
+            // A crash after the final committed reservation still consumes
+            // that attempt. Park the unknown outcome instead of exceeding
+            // the same outbound budget on every restart.
+            for delivery in &mut g.deliveries {
+                if delivery.status.is_open()
+                    && delivery.attempts >= MAX_ATTEMPTS
+                    && !g.inflight.contains(&delivery.delivery_id)
+                {
+                    delivery.status = DeliveryStatus::Failed;
+                    delivery.next_retry_at_unix_ms = None;
+                }
+            }
+            if g.inflight.len() >= MAX_INFLIGHT_GLOBAL {
+                return Vec::new();
+            }
+            // Per-webhook current in-flight tally.
+            let mut per_wh: HashMap<String, usize> = HashMap::new();
+            for id in &g.inflight {
+                if let Some(d) = g.deliveries.iter().find(|d| &d.delivery_id == id) {
+                    *per_wh.entry(d.webhook_id.clone()).or_insert(0) += 1;
+                }
+            }
+
+            // Pick due delivery ids in FIFO (fair) order without holding a borrow.
+            let mut picks: Vec<String> = Vec::new();
+            let mut global_room = (MAX_INFLIGHT_GLOBAL - g.inflight.len()).min(max_requests);
+            for d in g.deliveries.iter() {
+                if global_room == 0 {
+                    break;
+                }
+                if !d.status.is_open() {
+                    continue;
+                }
+                if g.inflight.contains(&d.delivery_id) {
+                    continue;
+                }
+                match d.next_retry_at_unix_ms {
+                    Some(t) if t <= now_unix_ms => {}
+                    _ => continue,
+                }
+                // Owning sub must exist and be active.
+                let active = g.subs.get(&d.webhook_id).map(|s| s.active).unwrap_or(false);
+                if !active {
+                    continue;
+                }
+                let used = per_wh.get(&d.webhook_id).copied().unwrap_or(0);
+                if used >= MAX_INFLIGHT_PER_WEBHOOK {
+                    continue;
+                }
                 *per_wh.entry(d.webhook_id.clone()).or_insert(0) += 1;
+                picks.push(d.delivery_id.clone());
+                global_room -= 1;
             }
-        }
 
-        // Pick due delivery ids in FIFO (fair) order without holding a borrow.
-        let mut picks: Vec<String> = Vec::new();
-        let mut global_room = MAX_INFLIGHT_GLOBAL - g.inflight.len();
-        for d in g.deliveries.iter() {
-            if global_room == 0 {
-                break;
+            let mut out = Vec::with_capacity(picks.len());
+            let inner = &mut *g;
+            for id in picks {
+                inner.inflight.insert(id.clone());
+                // Build the request from a snapshot, then bump the attempt counter.
+                let (webhook_id, url, secret, body, event_seq, attempt) = {
+                    let d = inner
+                        .deliveries
+                        .iter_mut()
+                        .find(|d| d.delivery_id == id)
+                        .expect("picked delivery exists");
+                    d.attempts += 1;
+                    d.status = DeliveryStatus::Retrying;
+                    let sub = g_subs_lookup(&inner.subs, &d.webhook_id);
+                    (
+                        d.webhook_id.clone(),
+                        sub.as_ref().map(|s| s.url.clone()).unwrap_or_default(),
+                        sub.as_ref().and_then(|s| s.secret.clone()),
+                        d.body.clone(),
+                        d.event_seq,
+                        d.attempts,
+                    )
+                };
+                let headers = build_headers(
+                    &webhook_id,
+                    &id,
+                    event_seq,
+                    now_unix_ms,
+                    attempt,
+                    secret.as_deref(),
+                    &body,
+                );
+                out.push(PreparedRequest {
+                    delivery_id: id,
+                    webhook_id,
+                    url,
+                    headers,
+                    body,
+                });
             }
-            if !d.status.is_open() {
-                continue;
-            }
-            if g.inflight.contains(&d.delivery_id) {
-                continue;
-            }
-            match d.next_retry_at_unix_ms {
-                Some(t) if t <= now_unix_ms => {}
-                _ => continue,
-            }
-            // Owning sub must exist and be active.
-            let active = g.subs.get(&d.webhook_id).map(|s| s.active).unwrap_or(false);
-            if !active {
-                continue;
-            }
-            let used = per_wh.get(&d.webhook_id).copied().unwrap_or(0);
-            if used >= MAX_INFLIGHT_PER_WEBHOOK {
-                continue;
-            }
-            *per_wh.entry(d.webhook_id.clone()).or_insert(0) += 1;
-            picks.push(d.delivery_id.clone());
-            global_room -= 1;
-        }
-
-        let mut out = Vec::with_capacity(picks.len());
-        let inner = &mut *g;
-        for id in picks {
-            inner.inflight.insert(id.clone());
-            // Build the request from a snapshot, then bump the attempt counter.
-            let (webhook_id, url, secret, body, event_seq, attempt) = {
-                let d = inner
-                    .deliveries
-                    .iter_mut()
-                    .find(|d| d.delivery_id == id)
-                    .expect("picked delivery exists");
-                d.attempts += 1;
-                d.status = DeliveryStatus::Retrying;
-                let sub = g_subs_lookup(&inner.subs, &d.webhook_id);
-                (
-                    d.webhook_id.clone(),
-                    sub.as_ref().map(|s| s.url.clone()).unwrap_or_default(),
-                    sub.as_ref().and_then(|s| s.secret.clone()),
-                    d.body.clone(),
-                    d.event_seq,
-                    d.attempts,
-                )
-            };
-            let headers = build_headers(
-                &webhook_id,
-                &id,
-                event_seq,
-                now_unix_ms,
-                attempt,
-                secret.as_deref(),
-                &body,
-            );
-            out.push(PreparedRequest {
-                delivery_id: id,
-                webhook_id,
-                url,
-                headers,
-                body,
-            });
-        }
-        out
+            out
+        })
+        .unwrap_or_default()
     }
 
     /// Apply one attempt outcome to its delivery + the owning subscription's
@@ -430,74 +639,77 @@ impl WebhookEngine {
     /// `MAX_ATTEMPTS`, and auto-disables the subscription at
     /// `MAX_CONSECUTIVE_FAILURES`.
     pub fn record_result(&self, delivery_id: &str, outcome: DeliveryOutcome, now_unix_ms: u64) {
-        let mut g = self.lock();
-        g.inflight.remove(delivery_id);
-
-        let (webhook_id, attempts) = {
-            let Some(d) = g
-                .deliveries
-                .iter_mut()
-                .find(|d| d.delivery_id == delivery_id)
-            else {
+        let _ = self.mutate(|g| {
+            if !g.inflight.remove(delivery_id) {
                 return;
+            }
+
+            let (webhook_id, attempts) = {
+                let Some(d) = g
+                    .deliveries
+                    .iter_mut()
+                    .find(|d| d.delivery_id == delivery_id)
+                else {
+                    return;
+                };
+                d.last_attempt_at_unix_ms = Some(now_unix_ms);
+                match outcome {
+                    DeliveryOutcome::Success(code) => {
+                        d.status = DeliveryStatus::Delivered;
+                        d.response_code = Some(code);
+                        d.next_retry_at_unix_ms = None;
+                    }
+                    DeliveryOutcome::HttpError(code) => {
+                        d.response_code = Some(code);
+                    }
+                    DeliveryOutcome::TransportError => {
+                        d.response_code = None;
+                    }
+                }
+                (d.webhook_id.clone(), d.attempts)
             };
-            d.last_attempt_at_unix_ms = Some(now_unix_ms);
-            match outcome {
-                DeliveryOutcome::Success(code) => {
-                    d.status = DeliveryStatus::Delivered;
-                    d.response_code = Some(code);
-                    d.next_retry_at_unix_ms = None;
-                }
-                DeliveryOutcome::HttpError(code) => {
-                    d.response_code = Some(code);
-                }
-                DeliveryOutcome::TransportError => {
-                    d.response_code = None;
-                }
-            }
-            (d.webhook_id.clone(), d.attempts)
-        };
 
-        let jitter_frac = self.config.retry_jitter_frac.clamp(0.0, 1.0);
-        let failed = !matches!(outcome, DeliveryOutcome::Success(_));
+            let jitter_frac = self.config.retry_jitter_frac.clamp(0.0, 1.0);
+            let failed = !matches!(outcome, DeliveryOutcome::Success(_));
 
-        if failed {
-            let delay = base_backoff_ms(attempts);
-            let jitter = jitter_for(delivery_id, delay, jitter_frac);
-            let parked = attempts >= MAX_ATTEMPTS;
-            if let Some(d) = g
-                .deliveries
-                .iter_mut()
-                .find(|d| d.delivery_id == delivery_id)
-            {
-                if parked {
-                    d.status = DeliveryStatus::Failed;
-                    d.next_retry_at_unix_ms = None;
-                } else {
-                    d.status = DeliveryStatus::Retrying;
-                    d.next_retry_at_unix_ms = Some(now_unix_ms.saturating_add(delay + jitter));
-                }
-            }
-        }
-
-        if let Some(sub) = g.subs.get_mut(&webhook_id) {
-            sub.last_delivery_at_unix_ms = Some(now_unix_ms);
             if failed {
-                sub.consecutive_failures = sub.consecutive_failures.saturating_add(1);
-                if sub.health != WebhookHealth::Disabled {
-                    sub.health = WebhookHealth::Failing;
+                let delay = base_backoff_ms(attempts);
+                let jitter = jitter_for(delivery_id, delay, jitter_frac);
+                let parked = attempts >= MAX_ATTEMPTS;
+                if let Some(d) = g
+                    .deliveries
+                    .iter_mut()
+                    .find(|d| d.delivery_id == delivery_id)
+                {
+                    if parked {
+                        d.status = DeliveryStatus::Failed;
+                        d.next_retry_at_unix_ms = None;
+                    } else {
+                        d.status = DeliveryStatus::Retrying;
+                        d.next_retry_at_unix_ms = Some(now_unix_ms.saturating_add(delay + jitter));
+                    }
                 }
-                if sub.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    sub.active = false;
-                    sub.health = WebhookHealth::Disabled;
-                    sub.auto_disabled_reason = Some(AutoDisabledReason::MaxConsecutiveFailures);
-                }
-            } else {
-                sub.consecutive_failures = 0;
-                sub.health = WebhookHealth::Delivered;
             }
-        }
-        Self::resync_filter(&g);
+
+            if let Some(sub) = g.subs.get_mut(&webhook_id) {
+                sub.last_delivery_at_unix_ms = Some(now_unix_ms);
+                if failed {
+                    sub.consecutive_failures = sub.consecutive_failures.saturating_add(1);
+                    if sub.health != WebhookHealth::Disabled {
+                        sub.health = WebhookHealth::Failing;
+                    }
+                    if sub.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        sub.active = false;
+                        sub.health = WebhookHealth::Disabled;
+                        sub.auto_disabled_reason = Some(AutoDisabledReason::MaxConsecutiveFailures);
+                    }
+                } else {
+                    sub.consecutive_failures = 0;
+                    sub.health = WebhookHealth::Delivered;
+                }
+            }
+            Self::resync_filter(g);
+        });
     }
 
     /// In-flight send count (diagnostics / tests).
@@ -582,7 +794,7 @@ fn push_bounded(
     deliveries: &mut VecDeque<Delivery>,
     dedupe: &mut HashSet<(String, u64)>,
     delivery: Delivery,
-) {
+) -> bool {
     if deliveries.len() >= DELIVERY_RING_CAP {
         match deliveries.iter().position(|d| !d.status.is_open()) {
             Some(i) => {
@@ -594,11 +806,12 @@ fn push_bounded(
                 // Ring saturated with unsent work — reject the newcomer
                 // rather than silently dropping an open delivery.
                 dedupe.remove(&(delivery.webhook_id, delivery.event_seq));
-                return;
+                return false;
             }
         }
     }
     deliveries.push_back(delivery);
+    true
 }
 
 /// Render the delivery JSON body. Stable across retries of the same
@@ -696,6 +909,309 @@ mod tests {
         .expect("register ok")
     }
 
+    #[derive(Default)]
+    struct MemoryStore {
+        snapshot: Mutex<Option<Vec<u8>>>,
+        fail: std::sync::atomic::AtomicBool,
+        commits: std::sync::atomic::AtomicUsize,
+    }
+    impl WebhookStore for MemoryStore {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+        fn commit(&self, snapshot: &[u8]) -> Result<(), String> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("injected IO failure".into());
+            }
+            *self.snapshot.lock().unwrap() = Some(snapshot.to_vec());
+            self.commits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    fn durable(store: Arc<MemoryStore>) -> WebhookEngine {
+        WebhookEngine::durable(
+            WebhookEngineConfig {
+                retry_jitter_frac: 0.0,
+            },
+            store,
+        )
+        .unwrap()
+    }
+
+    // ----- round-trips -----
+
+    #[test]
+    fn durable_inflight_restart_retries_same_id_and_ignores_duplicate_ack() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let subscription = register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(17, true), 0);
+        let first = engine.take_due(0).remove(0);
+        drop(engine); // crash with request outcome unknown
+        let recovered = durable(store.clone());
+        assert_eq!(
+            recovered
+                .get(&subscription.webhook_id)
+                .unwrap()
+                .secret
+                .as_deref(),
+            Some("whsec_test")
+        );
+        assert_eq!(recovered.enqueue_matches(&blocks_event(17, true), 0), 0);
+        let retry = recovered.take_due(0).remove(0);
+        assert_eq!(retry.delivery_id, first.delivery_id);
+        assert_eq!(retry.body, first.body);
+        recovered.record_result(&retry.delivery_id, DeliveryOutcome::Success(204), 10);
+        recovered.record_result(&retry.delivery_id, DeliveryOutcome::HttpError(500), 11);
+        drop(recovered);
+        let recovered = durable(store);
+        assert!(recovered.take_due(u64::MAX).is_empty());
+        assert_eq!(
+            recovered.deliveries_for(&subscription.webhook_id, 0, 1)[0].status,
+            DeliveryStatus::Delivered
+        );
+        assert_eq!(
+            recovered
+                .get(&subscription.webhook_id)
+                .unwrap()
+                .consecutive_failures,
+            0
+        );
+    }
+
+    #[test]
+    fn durable_unknown_final_attempt_does_not_exceed_retry_budget() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let subscription = register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(1, true), 0);
+        for attempt in 1..MAX_ATTEMPTS {
+            let request = engine.take_due(u64::MAX).remove(0);
+            engine.record_result(&request.delivery_id, DeliveryOutcome::HttpError(503), 0);
+            assert_eq!(
+                engine.deliveries_for(&subscription.webhook_id, 0, 1)[0].attempts,
+                attempt
+            );
+            // Keep this subscription active while testing the per-delivery cap.
+            engine.set_active(&subscription.webhook_id, true).unwrap();
+        }
+        let final_attempt = engine.take_due(u64::MAX).remove(0);
+        assert_eq!(final_attempt.delivery_id, "dl_0000000000000001");
+        drop(engine);
+        let recovered = durable(store.clone());
+        assert!(recovered.take_due(u64::MAX).is_empty());
+        assert_eq!(
+            recovered.deliveries_for(&subscription.webhook_id, 0, 1)[0].status,
+            DeliveryStatus::Failed
+        );
+        drop(recovered);
+        assert!(durable(store).take_due(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn durable_pause_delete_and_counters_survive_restart() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let first = register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(9, true), 0);
+        engine.set_active(&first.webhook_id, false).unwrap();
+        drop(engine);
+        let engine = durable(store.clone());
+        assert!(engine.take_due(0).is_empty());
+        engine.set_active(&first.webhook_id, true).unwrap();
+        let pending = engine.take_due(0).remove(0);
+        assert_eq!(pending.delivery_id, "dl_0000000000000001");
+        assert!(engine.delete(&first.webhook_id));
+        drop(engine);
+        let engine = durable(store);
+        assert_eq!(engine.count(), 0);
+        assert_eq!(engine.delivery_count(), 0);
+        assert_eq!(engine.highest_event_seq(), 9);
+        let second = register_blocks(&engine);
+        assert_eq!(second.webhook_id, "wh_0000000000000002");
+        engine.enqueue_matches(&blocks_event(10, true), 0);
+        assert_eq!(engine.take_due(0)[0].delivery_id, "dl_0000000000000002");
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn durable_failed_registration_not_acknowledged_or_visible_after_restart() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        store.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            engine.register(
+                "https://example.com/hook".into(),
+                vec!["blocks".into()],
+                None,
+                0,
+                0
+            ),
+            Err(RegisterError::StorageUnavailable)
+        ));
+        assert!(!engine.is_available());
+        assert_eq!(engine.count(), 0);
+        assert!(engine.take_due(u64::MAX).is_empty());
+        drop(engine);
+        store.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = durable(store);
+        assert_eq!(
+            register_blocks(&recovered).webhook_id,
+            "wh_0000000000000001"
+        );
+    }
+
+    #[test]
+    fn durable_failed_acknowledgement_retries_last_committed_obligation() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let subscription = register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(1, true), 0);
+        let first = engine.take_due(0).remove(0);
+        store.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.record_result(&first.delivery_id, DeliveryOutcome::Success(204), 1);
+        assert!(!engine.is_available());
+        assert_eq!(
+            engine.deliveries_for(&subscription.webhook_id, 0, 1)[0].status,
+            DeliveryStatus::Retrying
+        );
+        drop(engine);
+        store.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = durable(store);
+        let retried = recovered.take_due(1).remove(0);
+        assert_eq!(retried.delivery_id, first.delivery_id);
+        assert_eq!(retried.body, first.body);
+    }
+
+    #[test]
+    fn durable_invalid_snapshot_counters_and_retry_bounds_fail_closed() {
+        let source = Arc::new(MemoryStore::default());
+        let engine = durable(source.clone());
+        register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(1, true), 0);
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&source.load().unwrap().unwrap()).unwrap();
+        for field in [
+            "version",
+            "next_wh",
+            "next_dl",
+            "highest_seq",
+            "attempts",
+            "exhausted_wh",
+            "exhausted_dl",
+            "exhausted_seq",
+        ] {
+            let mut corrupt = snapshot.clone();
+            match field {
+                "version" => corrupt[field] = json!(2),
+                "next_wh" | "next_dl" => corrupt[field] = json!(1),
+                "highest_seq" => corrupt[field] = json!(0),
+                "attempts" => corrupt["deliveries"][0][field] = json!(MAX_ATTEMPTS + 1),
+                "exhausted_wh" => corrupt["next_wh"] = json!(u64::MAX),
+                "exhausted_dl" => corrupt["next_dl"] = json!(u64::MAX),
+                "exhausted_seq" => corrupt["highest_seq"] = json!(u64::MAX - 1),
+                _ => unreachable!(),
+            }
+            let store = Arc::new(MemoryStore::default());
+            store
+                .commit(&serde_json::to_vec(&corrupt).unwrap())
+                .unwrap();
+            assert!(
+                WebhookEngine::durable(Default::default(), store).is_err(),
+                "accepted corrupt {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_failed_attempt_reservation_never_reaches_transport() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        register_blocks(&engine);
+        engine.enqueue_matches(&blocks_event(1, true), 0);
+        store.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(engine.take_due(0).is_empty());
+        assert!(!engine.is_available());
+        drop(engine);
+        store.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        let recovered = durable(store);
+        assert_eq!(
+            recovered.take_due(0)[0]
+                .headers
+                .iter()
+                .find(|(key, _)| *key == "X-Ergo-Delivery-Attempt")
+                .unwrap()
+                .1,
+            "1"
+        );
+    }
+
+    #[test]
+    fn durable_bounded_backlog_preserves_pending_obligations_after_restart() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let subscription = register_blocks(&engine);
+        // Fill through the same bounded admission helper in one durable commit.
+        engine
+            .mutate(|inner| {
+                for seq in 1..=DELIVERY_RING_CAP as u64 {
+                    let event = blocks_event(seq, true);
+                    let id = format!("dl_{seq:016x}");
+                    inner.dedupe.insert((subscription.webhook_id.clone(), seq));
+                    push_bounded(
+                        &mut inner.deliveries,
+                        &mut inner.dedupe,
+                        Delivery {
+                            delivery_id: id.clone(),
+                            webhook_id: subscription.webhook_id.clone(),
+                            event_seq: seq,
+                            channel: "blocks".into(),
+                            event_kind: "block_applied".into(),
+                            body: render_body(&subscription.webhook_id, &id, "blocks", &event),
+                            event_unix_ms: event.emitted_at_unix_ms,
+                            status: DeliveryStatus::Pending,
+                            attempts: 0,
+                            last_attempt_at_unix_ms: None,
+                            response_code: None,
+                            next_retry_at_unix_ms: Some(0),
+                        },
+                    );
+                }
+                inner.next_dl = DELIVERY_RING_CAP as u64 + 1;
+                inner.highest_seq = DELIVERY_RING_CAP as u64;
+            })
+            .unwrap();
+        let before_rejection = store.load().unwrap();
+        let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            engine.enqueue_matches(&blocks_event(DELIVERY_RING_CAP as u64 + 1, true), 0),
+            0
+        );
+        assert_eq!(engine.highest_event_seq(), DELIVERY_RING_CAP as u64);
+        assert_eq!(store.load().unwrap(), before_rejection);
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before_commits
+        );
+        drop(engine);
+        let recovered = durable(store.clone());
+        assert_eq!(recovered.delivery_count(), DELIVERY_RING_CAP);
+        let requests = recovered.take_due(0);
+        assert_eq!(requests[0].delivery_id, "dl_0000000000000001");
+        recovered.record_result(&requests[0].delivery_id, DeliveryOutcome::Success(200), 1);
+        assert_eq!(
+            recovered.enqueue_matches(&blocks_event(DELIVERY_RING_CAP as u64 + 2, true), 1),
+            1
+        );
+        assert_eq!(recovered.delivery_count(), DELIVERY_RING_CAP);
+        let before_idle = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        recovered.take_due(0); // only pending requests fill remaining per-hook slots
+        recovered.take_due(0); // no mutation once cap is reached
+        assert!(store.commits.load(std::sync::atomic::Ordering::SeqCst) <= before_idle + 1);
+    }
+
     // ----- backoff (pure) -----
 
     #[test]
@@ -749,6 +1265,48 @@ mod tests {
     }
 
     // ----- enqueue + dedupe -----
+
+    #[test]
+    fn durable_unadmitted_events_leave_cursor_and_snapshot_unchanged() {
+        let store = Arc::new(MemoryStore::default());
+        let engine = durable(store.clone());
+        let assert_unadmitted = |event: &RealtimeEvent| {
+            let before_snapshot = store.load().unwrap();
+            let before_cursor = engine.highest_event_seq();
+            let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(engine.enqueue_matches(event, 0), 0);
+            assert_eq!(engine.highest_event_seq(), before_cursor);
+            assert_eq!(store.load().unwrap(), before_snapshot);
+            assert_eq!(
+                store.commits.load(std::sync::atomic::Ordering::SeqCst),
+                before_commits
+            );
+        };
+
+        assert_unadmitted(&blocks_event(10, true)); // No registrations.
+        let subscription = register_blocks(&engine);
+        assert_unadmitted(&blocks_event(11, false)); // Confirmation gate.
+        let mut nonmatching = blocks_event(12, true);
+        nonmatching.routes = vec!["mempool".into()];
+        assert_unadmitted(&nonmatching);
+        engine.set_active(&subscription.webhook_id, false).unwrap();
+        assert_unadmitted(&blocks_event(13, true)); // Paused registration.
+        engine.set_active(&subscription.webhook_id, true).unwrap();
+
+        let before_commits = store.commits.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(engine.enqueue_matches(&blocks_event(20, true), 0), 1);
+        assert_eq!(engine.highest_event_seq(), 20);
+        assert_eq!(
+            store.commits.load(std::sync::atomic::Ordering::SeqCst),
+            before_commits + 1
+        );
+        assert_unadmitted(&blocks_event(20, true)); // Duplicate delivery.
+        assert_eq!(engine.enqueue_matches(&blocks_event(19, true), 0), 1);
+        assert_eq!(engine.highest_event_seq(), 20); // Never move backwards.
+
+        engine.mutate(|inner| inner.next_dl = u64::MAX - 1).unwrap();
+        assert_unadmitted(&blocks_event(21, true)); // Exhausted delivery IDs.
+    }
 
     #[test]
     fn enqueue_matches_creates_one_delivery_and_dedupes() {

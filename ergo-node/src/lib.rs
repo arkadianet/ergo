@@ -28,3 +28,5 @@ pub mod snapshot;
 pub mod wallet_boot;
 
 pub use node::{run, run_inner, RunHandle};
+
+pub(crate) mod webhook_store;

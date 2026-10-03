@@ -16,6 +16,14 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- Persist webhook registrations, signing secrets and admitted delivery retries
+  in a private `webhooks.redb` database. Restarts retain delivery IDs and retry
+  state; consumers must deduplicate retries and reconcile events missed before
+  admission. Storage failures disable webhooks while public API routes remain
+  available. See [`docs/configuration.md`](docs/configuration.md#webhook-state).
+
 ### Changed
 
 - Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases

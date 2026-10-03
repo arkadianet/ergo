@@ -1,4 +1,4 @@
-//! Webhook data model: the durable-ish subscription + delivery records, their
+//! Webhook data model: the durable subscription + delivery records, their
 //! wire DTOs, the HMAC-SHA256 signing recipe, and the SSRF URL policy.
 //!
 //! A [`Subscription`] is the operator-registered target: a URL, the set of
@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use utoipa::ToSchema;
 
 use hmac::{Mac, SimpleHmac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 
@@ -32,7 +32,7 @@ use crate::v1::routes::dto::unix_ms_to_iso;
 pub const SIGNATURE_PREFIX: &str = "sha256=";
 
 /// Live delivery-health of a subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookHealth {
     /// Last delivery succeeded (or none attempted yet).
@@ -44,7 +44,7 @@ pub enum WebhookHealth {
 }
 
 /// Status of one delivery attempt-group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     /// Enqueued, not yet attempted.
@@ -65,16 +65,15 @@ impl DeliveryStatus {
 }
 
 /// The reason a subscription was auto-disabled. `None` while active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoDisabledReason {
     /// `consecutive_failures` crossed `MAX_CONSECUTIVE_FAILURES`.
     MaxConsecutiveFailures,
 }
 
-/// An operator-registered webhook subscription (in-memory; durable
-/// persistence is DEFERRED — see the module docs on `super`).
-#[derive(Debug, Clone)]
+/// An operator-registered webhook subscription, including persisted signing and retry state.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     /// Server-assigned stable id (`wh_<hex>`).
     pub webhook_id: String,
@@ -84,7 +83,8 @@ pub struct Subscription {
     /// event's routes intersect this set.
     pub channels: Vec<String>,
     /// The HMAC signing secret. `None` = unsigned deliveries (allowed, but the
-    /// signature header is then omitted). Never serialized after creation.
+    /// signature header is then omitted). Persisted privately; omitted from public DTOs
+    /// after the creation response.
     pub secret: Option<String>,
     /// `false` when paused (by the operator) or auto-disabled.
     pub active: bool,
@@ -102,6 +102,15 @@ pub struct Subscription {
     pub last_delivery_at_unix_ms: Option<u64>,
     /// Set when `active` was flipped off automatically.
     pub auto_disabled_reason: Option<AutoDisabledReason>,
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Public DTOs expose only whether a secret is set, never its value.
+        f.debug_struct("Subscription")
+            .field("public", &self.to_dto())
+            .finish()
+    }
 }
 
 impl Subscription {
@@ -140,7 +149,7 @@ impl Subscription {
 
     /// The registration/rotation response DTO: the public DTO **plus** the
     /// secret, echoed exactly once. Callers use this ONLY on the
-    /// create/rotate path and never persist the returned value server-side.
+    /// create/rotate path. Durable storage serializes the private subscription directly.
     pub fn to_dto_with_secret(&self) -> serde_json::Value {
         let mut v = self.to_dto();
         if let (Some(obj), Some(secret)) = (v.as_object_mut(), self.secret.as_ref()) {
@@ -151,7 +160,7 @@ impl Subscription {
 }
 
 /// One delivery attempt-group for one matched (webhook, event) pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
     /// Stable id across retries (`dl_<hex>`); the consumer dedupe key.
     pub delivery_id: String,
@@ -162,7 +171,7 @@ pub struct Delivery {
     /// The channel key this delivery fired on (the first matched route).
     pub channel: String,
     /// The event-kind token (`block_applied`, `box_spent`, …).
-    pub event_kind: &'static str,
+    pub event_kind: String,
     /// The rendered JSON body (stable across retries).
     pub body: String,
     /// Wall-clock of the source event, unix ms (signed into the payload).
@@ -624,7 +633,7 @@ mod tests {
             webhook_id: "wh_1".into(),
             event_seq: 42,
             channel: "blocks".into(),
-            event_kind: "block_applied",
+            event_kind: "block_applied".into(),
             body: "{}".into(),
             event_unix_ms: 1,
             status: DeliveryStatus::Retrying,

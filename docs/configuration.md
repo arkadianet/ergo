@@ -174,6 +174,37 @@ beyond loopback.
 | `local_reverse_proxy` | bool | `false` | Declares a reverse proxy terminating on loopback in front of the API. When `true`, loopback peers lose the v1 rate-limit exemption, Admin requests use the remote warn-and-allow policy, and API transaction submissions use the public mempool budget. Proxied clients share limits by peer IP; see the security notes below. `X-Forwarded-For` is not trusted. |
 | `allowed_hosts` | array of string | `[]` | Extra `Host` header values the DNS-rebinding guard accepts, beyond `localhost` / `127.0.0.1` / `::1` / the literal `bind` address (always accepted on a loopback bind). An entry may include a port (`"example.com:9099"`) to pin it, or omit one to match any port. On a non-loopback bind, the guard only activates when this list is non-empty — see the security note below. |
 
+### Webhook state
+
+Operator webhook registrations, HMAC secrets, bounded delivery history and pending
+retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
+permissions on Unix. Back up this private database with the node data directory.
+A failed open, corrupt snapshot or failed commit disables webhook management and
+outbound deliveries until restart; other API routes remain available.
+On a commit error, RAM changes are rolled back, but a failed disk flush may leave
+either atomic snapshot visible after restart. A failed API request can therefore
+have persisted; reconcile registrations and delivery history after reopening.
+
+Webhook storage and response serialization run on one owned blocking thread,
+started on first use. Up to eight management operations are admitted, including
+the running operation; additional requests receive `503 overloaded` with
+`Retry-After: 1`. Accepted work finishes even if its HTTP caller disconnects.
+Scheduling has separate admission, and each of the 64 possible in-flight sends
+reserves capacity for its outcome. Graceful node shutdown joins these writes
+and releases the database before returning.
+
+Delivery attempt reservations and acknowledgements commit before they are
+reported. After a crash, an attempt whose outcome is unknown may be retried with
+the same delivery ID and body, within the 12-attempt delivery budget. A crash
+on the final reserved attempt parks its unknown outcome as failed. Consumers
+should deduplicate on `delivery_id`.
+The delivery ring retains at most 4,096 entries, evicts terminal entries first,
+and rejects new deliveries when every retained entry is pending. Realtime cursors
+resume above persisted delivery cursors, but event backfill remains in memory;
+WS clients receive backfill gap reports. Webhook consumers receive no marker
+for pre-admission fanout drops or a saturated backlog, and should periodically
+reconcile their state through REST queries.
+
 ### `[api.peer_details]`
 
 The Peers dashboard shows handshake identity and mode, sync relationship,
@@ -238,7 +269,7 @@ retail ISP. These display-only details never affect peer selection or scoring.
 Realtime subscriptions, mempool-depth sampling, and the webhook registry belong
 to one node, including when several nodes run in one process. Router construction
 starts no background workers; the API listener owns them and stops them at
-shutdown. Webhook registrations remain in memory. Delivery permits only public
+shutdown. Delivery permits only public
 DNS destinations by default, checks every resolved address before connecting,
 and disables redirects and environment HTTP proxies so those checks also apply
 to retries and cannot be bypassed by alternate routing.

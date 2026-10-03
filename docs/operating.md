@@ -276,6 +276,7 @@ or the top-level `data_dir` key. The node creates the following under it:
 | `peers.redb` | Peer address book (known peers + bans); independent of the consensus DB | Always |
 | `wallet/` | Encrypted (AES-GCM) wallet secret storage | When the wallet is initialized |
 | `indexer.redb` | Extra-index (address / token / template) DB | Only when `[indexer] enabled = true` |
+| `webhooks.redb` | Private webhook registrations, signing secrets, delivery history and pending retries | When the API listener is enabled |
 | `logs/` (or the configured `[logging.file].dir`) | Rotated log files | Only when `[logging.file]` is configured |
 | `ergo-node.toml` | Config file, when you keep it in the data dir | Operator-placed |
 
@@ -294,6 +295,9 @@ Otherwise, stop the node first:
 cp -rp ./ergo-data /backup/ergo-data.$(date +%Y%m%d)
 # restart the node
 ```
+
+Keep backups private: `webhooks.redb` contains unencrypted HMAC signing secrets,
+and `wallet/` contains encrypted wallet secrets. Preserve their permissions.
 
 **Restore.** Stop the node, drop the backed-up directory back into place,
 and start. Note that the recorded `state_type` is pinned in the data
@@ -340,7 +344,7 @@ the peer address book also preserves unsupported files rather than quarantining
 them as corruption. The offline command below upgrades **a new copy**, preserves
 the original, and verifies table schemas and every key/value row with both the
 legacy and current readers. It applies to UTXO and digest `state.redb`, the
-embedded wallet tables, the peer book, and the optional indexer database.
+embedded wallet tables, the peer book, and optional indexer and webhook databases.
 It does not change application schemas, consensus bytes, or encrypted seeds.
 
 1. Stop the old node gracefully and disable its automatic restart. Keep its
@@ -356,7 +360,8 @@ It does not change application schemas, consensus bytes, or encrypted seeds.
 3. Using the **new** binary, migrate each database from the same stopped source
    directory. The destination parent must already exist. Adjust the indexer
    filename if `[indexer] db_filename` overrides the default; omit that command
-   when no indexer database exists.
+   when no indexer database exists. Migrate `webhooks.redb` too if it was created
+   by a legacy binary; omit that command when the file does not exist.
 
    ```bash
    mkdir ./ergo-data-redb4
@@ -364,6 +369,7 @@ It does not change application schemas, consensus bytes, or encrypted seeds.
    ./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
    ./ergo-node migrate-redb ./ergo-data/peers.redb ./ergo-data-redb4/peers.redb
    ./ergo-node migrate-redb ./ergo-data/indexer.redb ./ergo-data-redb4/indexer.redb
+   ./ergo-node migrate-redb ./ergo-data/webhooks.redb ./ergo-data-redb4/webhooks.redb
    ```
 
    This command never loads node configuration or starts networking. It takes
@@ -379,8 +385,9 @@ It does not change application schemas, consensus bytes, or encrypted seeds.
    `--data-dir ./ergo-data-redb4`. The wallet path is always `wallet/` inside that
    directory; ensure it was copied there. Check any independently configured
    absolute paths. Validate the resumed
-   state mode, chain tip/root, wallet scan/balances and indexer progress before
-   restoring automatic restart. Keep the original directory and backup.
+   state mode, chain tip/root, wallet scan/balances, indexer progress and webhook
+   registrations before restoring automatic restart. Keep the original directory
+   and backup.
 
 **Failure and recovery.** Failure before publication removes the temporary
 copy and leaves source bytes unchanged, including on malformed input or repair
@@ -774,8 +781,9 @@ The drain fires the action-loop shutdown signal, stops indexer and anchor work,
 drains accepted API compute and tracked service tasks, drains the persistence
 pipeline and performs the final durable flush. Realtime, sampler and webhook
 services belong to the running node and are joined or aborted on shutdown;
-restarting a node in the same process creates fresh service state. A failed
-persistence batch is terminal for that worker, and later dependent writes are
+restarting a node creates fresh workers and restores durable webhook
+registrations and admitted retries. A failed persistence batch is terminal for
+that worker, and later dependent writes are
 refused until recovery against committed state.
 
 Under a process supervisor (systemd, Docker), prefer sending SIGTERM and
@@ -845,13 +853,14 @@ followed by a climb on the new chain. A reorg approaching the ~200-block
 rollback window is unusual — investigate peer quality before assuming a
 node-side fault.
 
-**Memory.** Each redb database uses its own 1 GiB page-cache budget by
-default, and that is separate from the AVL arena budget logged at startup.
+**Memory.** State, indexer and peer redb databases each use a 1 GiB page-cache
+budget by default, separate from the AVL arena budget logged at startup.
 When budgeting memory, account for `state.redb` plus, when enabled,
 `indexer.redb` and `peers.redb`. `[store] cache_bytes` (or `--cache-bytes`)
 tunes the AVL arena cache. Set `[store] state_redb_cache_bytes`,
 `indexer_redb_cache_bytes` and `peers_redb_cache_bytes` independently to tune
-redb page caches; defaults preserve 1 GiB each. These limits exclude dirty and
+redb page caches; defaults preserve 1 GiB each. The private webhook snapshot
+database uses a fixed 16 MiB clean-page cache. These limits exclude dirty and
 pinned nodes, queues and mining graphs, so their sum does not bound process RSS.
 Startup logs and CSV samples expose budgets, and per-database eviction counters
 are enabled. For IBD memory profiling, setting

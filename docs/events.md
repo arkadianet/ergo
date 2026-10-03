@@ -105,8 +105,11 @@ produce these box/token observations.
 ## Sequence + resume semantics
 
 - Every bus event has a global, monotonically increasing `seq`
-  (session-scoped; resets on restart — persist nothing across a `welcome`
-  with a lower `latest_seq` than you remember).
+  within one node session. On restart, the bus starts above event cursors
+  retained in durable webhook deliveries when that store is available; the
+  event backfill itself is not persisted. A cursor can therefore reset or
+  skip historical events. Reconcile from REST after a restart or resume gap,
+  and discard an old cursor when `welcome.latest_seq` is lower.
 - `{"op":"resume","since":<seq>,"channels":[…]}` replays retained events
   with `seq > since` that match your channels, oldest-first, capped at
   **1024** per resume. More retained than the cap ⇒ the server answers

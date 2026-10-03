@@ -386,7 +386,31 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    let api_services = Arc::new(ergo_api::ApiServices::new());
+    let security = api_security(config)?;
+    // Restore admitted delivery obligations before node-owned realtime observers
+    // and the API listener start. An unavailable store disables webhooks rather
+    // than acknowledging registrations that would disappear at restart.
+    let webhook_path = config.data_dir.join("webhooks.redb");
+    let api_services = tokio::task::spawn_blocking(move || {
+        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
+            .and_then(|store| {
+                ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
+            })
+            .map(Arc::new);
+        let webhook_engine = match webhook_engine {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
+                None
+            }
+        };
+        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
+        Arc::new(ergo_api::ApiServices::with_webhooks(None))
+    });
     // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
@@ -447,7 +471,6 @@ pub(super) async fn bind(
         services: api_services.clone(),
         script_config: config.api_script.clone(),
     };
-    let security = api_security(config)?;
     let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
         api_ctx,
         listener,

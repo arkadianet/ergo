@@ -385,6 +385,14 @@ impl RunHandle {
             }
         }
         self.api_handle.take();
+        // The API task may have been aborted while draining its workers. Keep
+        // their ownership here until every delivery child and blocking job has
+        // finished, then release the durable webhook database before returning.
+        if let Some(services) = &self.api_services {
+            services.shutdown_blocking().await;
+            services.shutdown_background().await;
+        }
+        self.api_services.take();
     }
 }
 
@@ -442,6 +450,7 @@ impl Drop for RunHandle {
                 }
                 if let Some(services) = api_services {
                     services.shutdown_blocking().await;
+                    services.shutdown_background().await;
                 }
                 if let Some(tx) = loop_shutdown {
                     let _ = tx.send(());

@@ -1,6 +1,6 @@
 //! The delivery worker: a [`RealtimeBus`] subscriber that fans matched events
 //! into per-webhook deliveries and drives the injected transport
-//! ([`WebhookSink`]) under the [`WebhookEngine`]'s at-least-once retry
+//! ([`WebhookSink`]) under the [`WebhookEngine`]'s bounded retry
 //! discipline.
 //!
 //! **Transport seam.** The concrete outbound HTTP(S) client is abstracted
@@ -11,21 +11,22 @@
 //! `ergo-api/Cargo.toml`), constructed once and spawned at the server seam
 //! (`server.rs`) exactly like the O4 depth sampler / realtime-bridge feeder —
 //! when a listener starts. Router construction does not spawn workers; the
-//! server owns the worker and all its delivery children until shutdown. Deliveries now actually reach operator-registered
-//! URLs; **persistence is the one remaining deferral** — the registry +
-//! delivery log are in-memory and bounded, so a node restart loses all
-//! registrations until a durable `*-db` schema lands.
+//! server owns the worker and all its delivery children until shutdown.
+//! The production engine persists the registry and bounded delivery log before
+//! it hands any request to this worker.
 //!
 //! **Never stalls the bus.** The worker owns a bounded [`crate::v1::realtime::BusSubscription`]; a
 //! slow endpoint only backs up that webhook's own deliveries (bounded ring +
 //! per-webhook in-flight cap in the engine), and the bus's own slow-consumer
-//! drop policy protects the fan-out if the worker itself falls behind.
+//! drop policy protects the fan-out if the worker itself falls behind. Those
+//! pre-admission drops do not create durable obligations or webhook gap markers.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
+use super::blocking::WebhookExecutor;
 use super::engine::{DeliveryOutcome, PreparedRequest, WebhookEngine};
 use crate::v1::realtime::RealtimeBus;
 
@@ -65,11 +66,74 @@ pub fn spawn_webhook_worker(
     sink: Arc<dyn WebhookSink>,
     tick: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_worker(
+        bus,
+        Arc::new(WebhookExecutor::new(engine)),
+        sink,
+        tick,
+        None,
+        true,
+    )
+}
+
+/// Production worker with cooperative shutdown. It cancels and joins every
+/// outbound request before returning, completing cancellation accounting and
+/// releasing each request's durable store handle before the server exits.
+pub fn spawn_webhook_worker_with_shutdown(
+    bus: Arc<RealtimeBus>,
+    engine: Arc<WebhookEngine>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_worker(
+        bus,
+        Arc::new(WebhookExecutor::new(engine)),
+        sink,
+        tick,
+        Some(shutdown),
+        true,
+    )
+}
+
+/// Worker sharing the node's bounded persistence lane with its management
+/// routes. Stopping a listener drains its accepted outcomes without closing
+/// the lane, so the same node services can start another listener.
+pub(crate) fn spawn_webhook_worker_with_executor(
+    bus: Arc<RealtimeBus>,
+    executor: Arc<WebhookExecutor>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_worker(bus, executor, sink, tick, Some(shutdown), false)
+}
+
+fn spawn_worker(
+    bus: Arc<RealtimeBus>,
+    executor: Arc<WebhookExecutor>,
+    sink: Arc<dyn WebhookSink>,
+    tick: Duration,
+    mut shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    owns_executor: bool,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut sub = bus.subscribe();
         // The engine keeps this filter synced to the union of active webhooks'
-        // channels; the bus only fans matching events to us.
-        engine.attach_filter(sub.filter.clone());
+        // channels. Expose the subscription only after the lane has seeded the
+        // filter, so subscriber readiness does not hide a startup loss window.
+        let filter = Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
+        let engine_filter = filter.clone();
+        if let Err(error) = executor
+            .run_worker(move |engine| engine.attach_filter(engine_filter))
+            .await
+        {
+            tracing::error!(%error, "webhook filter initialization failed");
+            if owns_executor {
+                executor.shutdown().await;
+            }
+            return;
+        }
+        let mut sub = bus.subscribe_with_filter(filter);
 
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -77,6 +141,12 @@ pub fn spawn_webhook_worker(
         let mut deliveries = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                _ = async {
+                    match &mut shutdown {
+                        Some(signal) => { let _ = signal.await; }
+                        None => std::future::pending().await,
+                    }
+                } => break,
                 Some(result) = deliveries.join_next(), if !deliveries.is_empty() => {
                     if let Err(error) = result {
                         tracing::error!(%error, "webhook send task failed");
@@ -85,15 +155,39 @@ pub fn spawn_webhook_worker(
                 event = sub.rx.recv() => {
                     match event {
                         Some(ev) => {
-                            engine.enqueue_matches(&ev, now_unix_ms());
+                            // Accepted persistence work runs to completion even
+                            // when the stop signal becomes ready in the meantime.
+                            let now = now_unix_ms();
+                            if let Err(error) = executor.run_worker(move |engine| engine.enqueue_matches(&ev, now)).await {
+                                tracing::error!(%error, "webhook event admission failed");
+                                break;
+                            }
                         }
                         None => break, // bus dropped (shutdown)
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_due(&engine, &sink, &mut deliveries);
+                    if let Err(error) = drain_due(&executor, &sink, &mut deliveries).await {
+                        tracing::error!(%error, "webhook delivery reservation failed");
+                        break;
+                    }
                 }
             }
+        }
+        deliveries.abort_all();
+        while let Some(result) = deliveries.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::error!(%error, "webhook send task failed during shutdown");
+                }
+            }
+        }
+        // Dropping cancelled attempts only enqueues their reserved completion
+        // jobs. Observe those writes before returning or releasing the store.
+        if owns_executor {
+            executor.shutdown().await;
+        } else if let Err(error) = executor.drain().await {
+            tracing::error!(%error, "webhook outcomes failed to drain");
         }
     })
 }
@@ -101,49 +195,26 @@ pub fn spawn_webhook_worker(
 /// Take every due request and spawn a bounded send task per request; each task
 /// awaits the sink and records the outcome. Kept separate so the scheduling
 /// step is unit-testable without the bus loop.
-fn drain_due(
-    engine: &Arc<WebhookEngine>,
+async fn drain_due(
+    executor: &Arc<WebhookExecutor>,
     sink: &Arc<dyn WebhookSink>,
     deliveries: &mut tokio::task::JoinSet<()>,
-) {
-    let due = engine.take_due(now_unix_ms());
-    for req in due {
-        let engine = engine.clone();
+) -> Result<(), super::blocking::WebhookExecutionError> {
+    // Do not select cancellation against this await: reservations acknowledged
+    // by the store must be handed to guards before cooperative shutdown.
+    let due = executor.take_due(now_unix_ms()).await?;
+    for attempt in due {
         let sink = sink.clone();
-        let attempt = DeliveryAttempt {
-            engine,
-            id: req.delivery_id.clone(),
-            completed: false,
-        };
+        // The attempt guard exists before the child is spawned, covering an
+        // abort before that future's first poll without doing I/O in Drop.
         deliveries.spawn(async move {
-            let outcome = sink.post(&req).await;
-            attempt.complete(outcome);
+            let outcome = sink.post(attempt.request()).await;
+            if let Err(error) = attempt.complete(outcome, now_unix_ms()).await {
+                tracing::error!(%error, "webhook outcome persistence failed");
+            }
         });
     }
-}
-
-/// Cancellation must release the engine's in-flight admission too. Keeping
-/// this guard outside the child future also covers abort-before-first-poll.
-struct DeliveryAttempt {
-    engine: Arc<WebhookEngine>,
-    id: String,
-    completed: bool,
-}
-
-impl DeliveryAttempt {
-    fn complete(mut self, outcome: DeliveryOutcome) {
-        self.engine.record_result(&self.id, outcome, now_unix_ms());
-        self.completed = true;
-    }
-}
-
-impl Drop for DeliveryAttempt {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.engine
-                .record_result(&self.id, DeliveryOutcome::TransportError, now_unix_ms());
-        }
-    }
+    Ok(())
 }
 
 /// Per-request timeout bound, covering the whole request lifecycle — DNS,
@@ -470,10 +541,12 @@ mod tests {
             now_unix_ms(),
         );
         let sink: Arc<dyn WebhookSink> = FakeSink::new(DeliveryOutcome::Success(200));
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
         let mut deliveries = tokio::task::JoinSet::new();
-        drain_due(&engine, &sink, &mut deliveries);
-        // Let the spawned send task run.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        drain_due(&executor, &sink, &mut deliveries).await.unwrap();
+        while let Some(result) = deliveries.join_next().await {
+            result.unwrap();
+        }
         let id = {
             let d = engine.deliveries_for(&engine.list(0, 1).remove(0).webhook_id, 0, 1);
             d[0].clone()
@@ -481,6 +554,55 @@ mod tests {
         assert_eq!(id.status, super::super::model::DeliveryStatus::Delivered);
         assert_eq!(id.response_code, Some(200));
         assert_eq!(engine.inflight_count(), 0);
+        executor.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_delivery_before_first_poll_persists_unknown_outcome() {
+        let engine = Arc::new(WebhookEngine::new(WebhookEngineConfig {
+            retry_jitter_frac: 0.0,
+        }));
+        register_blocks(&engine);
+        engine.enqueue_matches(
+            &crate::v1::realtime::RealtimeEvent {
+                seq: 1,
+                emitted_at_unix_ms: 1_000,
+                routes: vec!["blocks".into()],
+                event: "block_applied",
+                confirmed: true,
+                height: Some(1),
+                data: serde_json::json!({"height": 1}),
+                previous_seq: None,
+            },
+            now_unix_ms(),
+        );
+        let sink = FakeSink::new(DeliveryOutcome::Success(200));
+        let transport: Arc<dyn WebhookSink> = sink.clone();
+        let executor = Arc::new(WebhookExecutor::new(engine.clone()));
+        let mut deliveries = tokio::task::JoinSet::new();
+        drain_due(&executor, &transport, &mut deliveries)
+            .await
+            .unwrap();
+        // No await between spawning and aborting: this current-thread runtime
+        // cannot poll the transport before its owned guard is cancelled.
+        deliveries.abort_all();
+        while let Some(result) = deliveries.join_next().await {
+            assert!(result.unwrap_err().is_cancelled());
+        }
+        executor.drain().await.unwrap();
+        assert!(sink.seen.lock().unwrap().is_empty());
+        assert_eq!(engine.inflight_count(), 0);
+        let subscription = engine.list(0, 1).remove(0);
+        let delivery = engine
+            .deliveries_for(&subscription.webhook_id, 0, 1)
+            .remove(0);
+        assert_eq!(
+            delivery.status,
+            super::super::model::DeliveryStatus::Retrying
+        );
+        assert_eq!(delivery.attempts, 1);
+        assert!(delivery.next_retry_at_unix_ms.is_some());
+        executor.shutdown().await;
     }
 
     // ----- end-to-end over the real bus -----
@@ -494,14 +616,21 @@ mod tests {
         register_blocks(&engine);
         let sink = FakeSink::new(DeliveryOutcome::Success(200));
         let sink_dyn: Arc<dyn WebhookSink> = sink.clone();
-        let handle = spawn_webhook_worker(
+        let (shutdown, signal) = tokio::sync::oneshot::channel();
+        let handle = spawn_webhook_worker_with_shutdown(
             bus.clone(),
             engine.clone(),
             sink_dyn,
             Duration::from_millis(20),
+            signal,
         );
-        // Give the worker a moment to subscribe + attach its filter.
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while bus.subscriber_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
 
         bus.publish(crate::v1::realtime::RealtimeEventBody::block_applied(
             42,
@@ -510,9 +639,18 @@ mod tests {
             7,
             4096,
         ));
-        // Enqueue tick + send task + record.
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        handle.abort();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while sink.seen.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
 
         let seen = sink.seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "one delivery posted");
