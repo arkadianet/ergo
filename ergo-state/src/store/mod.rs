@@ -2270,6 +2270,86 @@ impl StateStore {
         Ok(())
     }
 
+    /// Repair the legacy header-only pruning floor before any UTXO block has
+    /// been applied. A fresh UTXO tree must replay from height 1; headers alone
+    /// do not supply the missing parent state. This exception cannot lower a
+    /// floor belonging to applied or snapshot-installed state.
+    ///
+    /// Requires both live and committed full tips/AVL metadata at height 0 and
+    /// no permanent snapshot-install or first-epoch trust marker. Checks and
+    /// the floor reset share one quick-repair transaction. Returns `false`
+    /// for an absent/already-1 floor. The ordinary setter remains monotonic.
+    pub fn repair_unapplied_pruning_floor(&mut self) -> Result<bool, StateError> {
+        const REFUSAL: &str =
+            "pruning floor repair requires committed unapplied UTXO genesis without snapshot trust";
+        if self.height != 0 || self.chain_state.best_full_block_height != 0 {
+            return Err(StateError::InvalidPrecondition { what: REFUSAL });
+        }
+        self.flush_persist_pipeline()?;
+        let txn = crate::begin_write_qr(&self.db)?;
+        {
+            let chain = txn.open_table(CHAIN_STATE_META)?;
+            if chain.get(MODE2_TRUST_FIRST_EPOCH_KEY)?.is_some() {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            let durable = chain
+                .get("chain_state")?
+                .ok_or(StateError::InvalidPrecondition { what: REFUSAL })?;
+            let durable = ChainStateMeta::deserialize(durable.value()).map_err(|error| {
+                StateError::DbCorruption {
+                    table: "chain_state_meta",
+                    key: hex::encode("chain_state"),
+                    reason: error.to_string(),
+                }
+            })?;
+            if durable.best_full_block_height != 0
+                || durable.best_full_block_id != self.chain_state.best_full_block_id
+            {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+        }
+        {
+            let mut meta = txn.open_table(STATE_META)?;
+            if meta.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some() {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            let root = meta
+                .get("root")?
+                .ok_or(StateError::InvalidPrecondition { what: REFUSAL })?;
+            if StateMeta::deserialize(root.value())?.height != 0 {
+                return Err(StateError::InvalidPrecondition { what: REFUSAL });
+            }
+            drop(root);
+            let floor = meta
+                .get(MINIMAL_FULL_BLOCK_HEIGHT_KEY)?
+                .map(|row| row.value().to_vec());
+            let Some(floor) = floor else { return Ok(false) };
+            let floor: [u8; 4] =
+                floor
+                    .try_into()
+                    .map_err(|bytes: Vec<u8>| StateError::DbCorruption {
+                        table: "state_meta",
+                        key: hex::encode(MINIMAL_FULL_BLOCK_HEIGHT_KEY.as_bytes()),
+                        reason: format!(
+                            "minimal_full_block_height payload has unexpected length: {}",
+                            bytes.len()
+                        ),
+                    })?;
+            let floor = u32::from_le_bytes(floor);
+            if floor == 1 {
+                return Ok(false);
+            }
+            if floor == 0 {
+                return Err(StateError::InvalidPrecondition {
+                    what: "pruning floor must be positive",
+                });
+            }
+            meta.insert(MINIMAL_FULL_BLOCK_HEIGHT_KEY, 1u32.to_le_bytes().as_slice())?;
+        }
+        txn.commit()?;
+        Ok(true)
+    }
+
     /// Side-effect-free section eligibility read for network serving/relay.
     /// Section tables commit independently of the AVL persist pipeline. Never
     /// drain its results here: the next apply must still observe PersistFailed.
@@ -4322,6 +4402,102 @@ mod tests {
         ));
         assert!(store.ibd_mode());
         assert_eq!(store.ibd_flush_interval, 50);
+    }
+
+    #[test]
+    fn pruning_floor_repair_preserves_monotonic_setter_and_clean_reopen() {
+        let (mut store, directory) = fresh_store();
+        store.initialize_genesis(&[]).unwrap();
+        assert!(!store.repair_unapplied_pruning_floor().unwrap());
+        store.write_minimal_full_block_height(951).unwrap();
+        assert!(matches!(
+            store.write_minimal_full_block_height(1),
+            Err(StateError::PruneSentinelMonotonicity {
+                current: 951,
+                attempted: 1
+            })
+        ));
+        assert!(store.repair_unapplied_pruning_floor().unwrap());
+        assert_eq!(
+            store.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(1)
+        );
+        assert!(!store.repair_unapplied_pruning_floor().unwrap());
+        drop(store);
+        let reopened = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        assert_eq!(
+            reopened.try_read_minimal_full_block_height_raw().unwrap(),
+            Some(1)
+        );
+        assert_eq!(reopened.chain_state().best_full_block_height, 0);
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_live_or_committed_applied_state() {
+        for live in [false, true] {
+            let (mut store, _directory) = fresh_store();
+            store.initialize_genesis(&[]).unwrap();
+            store.write_minimal_full_block_height(951).unwrap();
+            if live {
+                store.height = 1;
+            } else {
+                let txn = crate::begin_write_qr(&store.db).unwrap();
+                {
+                    let mut table = txn.open_table(CHAIN_STATE_META).unwrap();
+                    let mut committed = store.chain_state.to_persisted();
+                    committed.best_full_block_height = 1;
+                    table
+                        .insert("chain_state", committed.serialize().as_slice())
+                        .unwrap();
+                }
+                txn.commit().unwrap();
+            }
+            assert!(matches!(
+                store.repair_unapplied_pruning_floor(),
+                Err(StateError::InvalidPrecondition { .. })
+            ));
+            assert_eq!(
+                store.try_read_minimal_full_block_height_raw().unwrap(),
+                Some(951)
+            );
+        }
+    }
+
+    #[test]
+    fn pruning_floor_repair_refuses_snapshot_markers_and_committed_avl_height() {
+        for guard in 0..3 {
+            let (mut store, _directory) = fresh_store();
+            store.initialize_genesis(&[]).unwrap();
+            store.write_minimal_full_block_height(951).unwrap();
+            let txn = crate::begin_write_qr(&store.db).unwrap();
+            match guard {
+                0 => {
+                    let mut table = txn.open_table(STATE_META).unwrap();
+                    table
+                        .insert(UTXO_BOOTSTRAP_INSTALLED_V1_KEY, &[1u8][..])
+                        .unwrap();
+                }
+                1 => open::write_mode2_trust_sentinel(&txn).unwrap(),
+                _ => {
+                    let mut table = txn.open_table(STATE_META).unwrap();
+                    let mut meta = {
+                        let root = table.get("root").unwrap().unwrap();
+                        StateMeta::deserialize(root.value()).unwrap()
+                    };
+                    meta.height = 1;
+                    table.insert("root", meta.serialize().as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+            assert!(matches!(
+                store.repair_unapplied_pruning_floor(),
+                Err(StateError::InvalidPrecondition { .. })
+            ));
+            assert_eq!(
+                store.try_read_minimal_full_block_height_raw().unwrap(),
+                Some(951)
+            );
+        }
     }
 
     #[test]

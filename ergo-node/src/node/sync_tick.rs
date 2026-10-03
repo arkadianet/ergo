@@ -169,22 +169,10 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
         info!("headers chain synced — caught up to peers (level-triggered fallback)");
     }
 
-    // 2.6 Mode 3 activation parity — seed the prune sentinel at the
-    // headers-synced flip. Scala does this inside
-    // `ToDownloadProcessor.toDownload` on the header that flips the
-    // latch (`ToDownloadProcessor.scala:110-118`); our latch has two
-    // flip points (the `on_header` freshness edge and the
-    // caught-up-to-peers fallback just above), so the seed is
-    // level-triggered here and one-shot inside the helper. Archive /
-    // Mode 6 / any store that already holds full blocks return before
-    // touching redb.
-    //
-    // A fresh seed also rebuilds the coordinator's pending range: if an
-    // earlier flip observation latched `recovery_done` while the seed
-    // write failed (retried here), the queue holds heights below the
-    // sentinel that `blocks_to_download` will never emit. Re-running the
-    // walk above the seeded floor is what unsticks it. On a tick where
-    // the seed is a no-op nothing changes and step 3 below owns recovery.
+    // 2.6 A fresh UTXO node must download from its applied parent at genesis.
+    // Repair a header-only floor left by older boot activation and rebuild the
+    // pending range after the guarded reset. Applied/snapshot stores keep their
+    // floors; forward apply owns subsequent pruning. No-op on a valid floor.
     if let Err(e) = super::prune_activation::seed_prune_sentinel_and_rebuild_pending(
         &mut state.store,
         &mut state.executor,
