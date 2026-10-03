@@ -1404,6 +1404,11 @@ async fn pool_unconfirmed_by_tx_ids_batch_filters_unresolved() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    super::published_schema::assert_response(
+        "/transactions/unconfirmed/byTransactionIds",
+        "post",
+        &parsed,
+    );
     let arr = parsed.as_array().unwrap();
     assert_eq!(arr.len(), 1, "only the resolvable id is returned");
 }
@@ -1796,6 +1801,7 @@ async fn peers_sync_info_returns_observed_peers_only() {
 async fn peers_track_info_returns_counter_envelope() {
     let (s, v) = json_get(build_compat_app(), "/peers/trackInfo").await;
     assert_eq!(s, StatusCode::OK);
+    super::published_schema::assert_response("/peers/trackInfo", "get", &v);
     // Pin the Scala serde rename direction.
     assert_eq!(v.get("numRequested").and_then(|x| x.as_u64()), Some(12));
     assert_eq!(v.get("numReceived").and_then(|x| x.as_u64()), Some(100));
@@ -1806,6 +1812,7 @@ async fn peers_track_info_returns_counter_envelope() {
 async fn peers_status_returns_freshness_probe() {
     let (s, v) = json_get(build_compat_app(), "/peers/status").await;
     assert_eq!(s, StatusCode::OK);
+    super::published_schema::assert_response("/peers/status", "get", &v);
     // Scala field names exactly: `lastIncomingMessage` /
     // `currentSystemTime`. Pin the rename so a future serde
     // refactor doesn't drift.
