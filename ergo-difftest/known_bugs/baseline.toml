@@ -1,19 +1,15 @@
 # Accepted baseline for the standing consensus guard (scripts/difftest-guard.sh).
 #
-# A guard that is red on day one teaches nobody anything: a NEW finding is
-# indistinguishable from the ones already known, and the red becomes wallpaper.
-# Every entry here is a divergence that IS present on `main` right now, has been
-# triaged by a human, and has a tracking issue or PR. The guard fails only on a
-# PENDING record whose key is NOT listed here; baselined pendings are printed in
-# their own table so they stay visible without being fatal.
+# Historical tracked entries are preserved below. Their 16-character input
+# identities do not bind source/context/reference authority and cannot mute
+# new authority-bound records. They are reported as stale until reviewed.
 #
-# `key` is the record's content-addressed identity, exactly as
-# `ergo-difftest/src/regressions.rs::auto_file` computes it:
-#
-#     key = "<surface>/" + sha256(record.input_hex)[..16]
-#
-# which is also the path the record lands at:
-# `<regressions_dir>/<surface>/<sha256hex[..16]>.json`.
+# New entries use the semantic key stored in record.execution.baseline_key:
+#     key = "<surface>/<64-character semantic SHA-256>"
+# It binds surface, kind, input, verdicts and the validated comparison contract.
+# The immutable JSON filename separately hashes the complete record, preserving
+# iteration, processing errors and execution evidence without overwrites.
+# Never infer current main-branch behavior from these historical entries alone.
 #
 # RULES
 #  * `ref` is REQUIRED and must match `(PR|issue) #<number>`. An entry without a

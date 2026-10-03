@@ -352,6 +352,7 @@ jobs:
           printf 'seed=%s\niters=%s\nsource=%s\nreference=ergo-core-6.0.6\n' \
             "$GUARD_SEED" "$GUARD_ITERS" "$GITHUB_SHA" > "$RUNNER_TEMP/consensus-guard-run.txt"
           scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS" \
+            --regressions-dir "$RUNNER_TEMP/consensus-guard-regressions" \
             2>&1 | tee "$RUNNER_TEMP/consensus-guard.log"
 
       - name: summarize consensus guard
@@ -380,7 +381,7 @@ jobs:
         with:
           name: consensus-guard-regressions
           path: |
-            ergo-difftest/regressions/
+            ${{ runner.temp }}/consensus-guard-regressions/
             ${{ runner.temp }}/consensus-guard-run.txt
             ${{ runner.temp }}/consensus-guard.log
             ${{ runner.temp }}/oracle-warm.txt

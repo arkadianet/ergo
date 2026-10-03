@@ -445,6 +445,7 @@ jobs:
         run: |
           python -m unittest discover -s scripts -p 'test_release*.py'
           python -m unittest discover -s scripts -p 'test_evaluated_probe.py'
+          python -m unittest discover -s scripts -p 'test_difftest_records.py'
       - name: Strict public documentation (all features)
         env:
           RUSTDOCFLAGS: -D warnings

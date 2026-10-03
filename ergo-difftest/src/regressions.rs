@@ -13,20 +13,22 @@
 //! ## Auto-filing
 //! [`auto_file`] writes the record to content-addressed paths under a
 //! caller-supplied `regressions_dir`:
-//! * **Pending** → `<dir>/<surface>/<sha256hex[..16]>.json`, entry appended to
+//! * **Pending** → `<dir>/<surface>/<full-record-sha256>.json`, derived entry in
 //!   `<dir>/QUEUE.md`.
-//! * **KnownArtifact** → `<dir>/artifacts/<surface>/<sha256hex[..16]>.json`,
+//! * **KnownArtifact** → `<dir>/artifacts/<surface>/<full-record-sha256>.json`,
 //!   **not** appended to `QUEUE.md` (so the queue stays signal, not noise).
 //!
-//! Filing is idempotent: same `input_hex` → same path → overwrite is fine.
+//! Filing is serialized and atomic. Identical complete records are idempotent;
+//! differing evidence is never overwritten. QUEUE.md is a derived view.
 
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::oracle::{Divergence, DivergenceKind, Oracle, SurfaceSpec, Verdict};
+
+pub(crate) mod storage;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema (§4)
@@ -56,6 +58,9 @@ pub struct DivergenceRecord {
     /// Failed processing remains evidence and makes the campaign incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processing_error: Option<String>,
+    /// Immutable execution metadata reference and stable comparison contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<serde_json::Value>,
     /// How this input was produced: `"structured-gen"`, `"oracle-mutation"`,
     /// `"replay:h<height>"`, etc.
     pub provenance: String,
@@ -181,6 +186,7 @@ pub fn build_record(
         seed,
         minimized: true,
         processing_error: None,
+        execution: None,
         provenance: provenance.to_string(),
         triage: triage.to_field(),
     }
@@ -213,69 +219,16 @@ pub fn record_after_minimization(
 // Auto-file
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Write a [`DivergenceRecord`] to disk and (for `Pending` records only) append
-/// a line to `QUEUE.md`.
+/// Atomically publish a complete immutable record under its full JSON SHA-256.
 ///
-/// **Path scheme:**
-/// * `Pending`      → `<regressions_dir>/<surface>/<sha256hex[..16]>.json`
-/// * `KnownArtifact`→ `<regressions_dir>/artifacts/<surface>/<sha256hex[..16]>.json`
-///
-/// **QUEUE.md** — one entry per `Pending` record, format:
-/// `- [PENDING] <surface>/<hash16> — <repro_command>`.
-/// `KnownArtifact` records are NOT appended to the queue.
-///
-/// **Idempotent**: same `input_hex` → same path; overwriting is fine.
-///
-/// Returns the path the record was written to.
+/// Pending records use `<dir>/<surface>/<hash>.json`; explicit artifacts use
+/// `<dir>/artifacts/<surface>/<hash>.json`. A cross-process filing lock protects
+/// publication and regeneration of the derived pending `QUEUE.md`. An identical
+/// record is idempotent; conflicting/corrupt files cause an error, never overwrite.
+/// Legacy short-input-hash records require a fresh output directory, preserving
+/// their original evidence. This is diagnostic integrity, not a power-loss proof.
 pub fn auto_file(record: &DivergenceRecord, regressions_dir: &Path) -> io::Result<PathBuf> {
-    // Content-addressed filename: SHA-256 of the input hex, first 16 hex chars.
-    let hash = {
-        let mut h = Sha256::new();
-        h.update(record.input_hex.as_bytes());
-        format!("{:x}", h.finalize())
-    };
-    let short_hash = &hash[..16];
-
-    let is_pending = record.triage == "PENDING";
-
-    // Choose directory.
-    let dir = if is_pending {
-        regressions_dir.join(&record.surface)
-    } else {
-        regressions_dir.join("artifacts").join(&record.surface)
-    };
-    std::fs::create_dir_all(&dir)?;
-
-    // Write JSON.
-    let path = dir.join(format!("{short_hash}.json"));
-    let json = serde_json::to_string_pretty(record)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json.as_bytes())?;
-
-    // Append to QUEUE.md only for Pending.
-    if is_pending {
-        let queue_path = regressions_dir.join("QUEUE.md");
-        let entry = format!(
-            "- [PENDING] {}/{short_hash} — {}\n",
-            record.surface, record.repro
-        );
-        // Idempotent like the record file: skip if this record's content-addressed
-        // key is already queued, so re-filing the same divergence doesn't duplicate
-        // its QUEUE.md line.
-        let key = format!("{}/{short_hash} —", record.surface);
-        let already_queued = std::fs::read_to_string(&queue_path)
-            .map(|q| q.contains(&key))
-            .unwrap_or(false);
-        if !already_queued {
-            let mut f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&queue_path)?;
-            f.write_all(entry.as_bytes())?;
-        }
-    }
-
-    Ok(path)
+    storage::file(record, regressions_dir)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

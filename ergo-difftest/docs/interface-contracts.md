@@ -173,6 +173,11 @@ campaign):
   "seed":      { "seed": 7, "iter": 12345 } | null,
   "minimized": true | false,
   "processing_error": "…",             // optional; failed processing, harness exit3
+  "execution": {                       // CLI oracle producer; optional for legacy records
+    "metadata": "runs/<sha256>.json", "metadata_sha256": "…",
+    "comparison_contract": { "…": "source/compiler/oracle/context identity" },
+    "authority_complete": true, "baseline_key": "…"
+  },
   "provenance":"structured-gen|oracle-mutation|replay:h<height>",
   "triage":    "PENDING"              // never auto-resolved; a human sets the verdict
 }
@@ -180,14 +185,28 @@ campaign):
 
 **Minimization:** greedy byte-ndelta shrink that preserves the divergence
 predicate (same `kind` + same rust/jvm verdict split). Auto-file writes the
-minimized record to `ergo-difftest/regressions/<surface>/<hash>.json` and appends
-a line to `ergo-difftest/regressions/QUEUE.md`. **The which-side-is-right call is
+minimized record to `<output>/<surface>/<full-record-sha256>.json` and regenerates
+the derived `<output>/QUEUE.md` under a filing lock. **The which-side-is-right call is
 never made by the harness** — new records stay `triage: PENDING`. Agreement
 in one dummy reduction context cannot automatically mark a difference benign.
 Any minimization failure retains the original input/verdicts and marks the
 campaign incomplete, even when fallback filing succeeds. Campaign records retain
 the first concrete generating iteration and distinguish structured generation
 from mutation.
+
+CLI oracle execution archives exact primary and verify-sidecar Scala sources
+and immutable journals under `<output>/runs/`. Build-time source/compiler
+metadata and the running binary hash are recorded separately. Actual JVM
+properties and resolved JAR hashes identify reference execution; unavailable
+identity is an incomplete run. Repro commands select the archived sources.
+The guard decodes records and validates full JSON, source archive and journal
+identities before considering a baseline. Its separate semantic key binds the
+input/verdicts to source/compiler/oracle/context authority, excluding volatile
+seed/iteration/path evidence. Legacy short input keys cannot mute new records.
+Output initialization preserves existing files; the default is a fresh
+`regressions-run.*` directory. These are diagnostic integrity guarantees, not
+signed build attestations or power-loss durability certification. Replay block
+reports use the replay driver's block-specific schema rather than `auto_file`.
 
 ---
 
