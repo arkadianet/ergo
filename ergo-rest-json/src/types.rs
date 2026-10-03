@@ -95,10 +95,9 @@ pub struct ScalaPowSolutions {
 ///
 /// Shared by the two such fields on the REST surface: the mining target
 /// `b` (`WorkMessage`) and the Autolykos v1 PoW distance `d`
-/// (`AutolykosSolution`). Both are UNSIGNED magnitudes on the wire — `d`
-/// is what `BigIntegers.asUnsignedByteArray` writes, with no sign byte —
-/// so a negative or fractional value is malformed input rather than
-/// something to reinterpret.
+/// (`AutolykosSolution`). These fields use a nonnegative magnitude policy.
+/// Header wire serialization of `d` separately applies the signed BigInt
+/// leading-zero convention; this helper does not choose that wire encoding.
 ///
 /// `arbitrary_precision` retains the decimal spelling without an f64 round trip.
 /// Nonzero results are limited to the reference's 2^18 decimal digits before
@@ -115,7 +114,7 @@ pub(crate) fn unsigned_bigint_from_json(field: &str, value: &JsonValue) -> Resul
             ))
         }
     }
-    .map_err(|reason| format!("{field}: {reason}"))
+    .map_err(|reason| format!("{field} is not a valid unsigned decimal: {reason}"))
 }
 
 // Circe 0.14.15 BiggerDecimal.MaxBigIntegerDigits. Check the resulting length,
