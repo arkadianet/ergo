@@ -272,6 +272,9 @@ async function fullRefresh() {
     const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
     const loadStatus = root.querySelector('[data-load-status]');
     if (!summary || !Array.isArray(txWrap?.items)) {
+      // A failed read cannot establish that the current pool is empty.
+      root.querySelector('[data-empty]').hidden = true;
+      root.querySelector('[data-count]').textContent = 'Unavailable';
       loadStatus.className = 'banner banner--warn';
       loadStatus.textContent = 'Could not refresh mempool data. Any visible values are from the last successful read. Try Refresh mempool.';
       loadStatus.hidden = false;
