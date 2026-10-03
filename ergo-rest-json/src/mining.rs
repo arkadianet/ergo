@@ -37,32 +37,6 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::types::unsigned_bigint_from_json;
-use crate::types::ScalaTransactionInput;
-
-/// Scala's explicit-key candidate request. Transactions are decoded directly
-/// from the request stream so spending-proof extension insertion order survives.
-#[derive(Debug, Clone, Deserialize)]
-pub struct CandidateWithTxsAndPkRequest {
-    pub txs: Vec<ScalaTransactionInput>,
-    pub pk: String,
-}
-
-/// Proof binding the supplied transactions to the exact candidate header.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CandidateProofJson {
-    #[serde(rename = "msgPreimage")]
-    pub msg_preimage: String,
-    #[serde(rename = "txProofs")]
-    pub tx_proofs: Vec<TransactionMembershipProofJson>,
-}
-
-/// Scala's Merkle proof encoding: each level is hex(side byte || sibling digest).
-/// A missing sibling is encoded as the side byte alone.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TransactionMembershipProofJson {
-    pub leaf: String,
-    pub levels: Vec<String>,
-}
 
 /// JSON payload returned by `GET /mining/candidate` and
 /// `POST /mining/candidateWithTxs`.
@@ -95,11 +69,11 @@ pub struct WorkMessageJson {
     /// Hex-encoded 33-byte compressed secp256k1 miner pubkey.
     pub pk: String,
 
-    /// Proof-of-upcoming-transactions for supplied-transaction candidates.
-    /// Ordinary candidates omit this entirely (matches Scala's
-    /// `collect { case (n, Some) => ... }` pattern).
+    /// Proof-of-upcoming-transactions for mandatory-tx candidates.
+    /// Omitted entirely when no mandatory transactions are present
+    /// (matches Scala's `collect { case (n, Some) => ... }` pattern).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub proof: Option<CandidateProofJson>,
+    pub proof: Option<serde_json::Value>,
 
     /// Node-specific pool extension (not part of Scala's WorkMessage):
     /// monotonic per-publish template sequence. A Stratum proxy uses this to

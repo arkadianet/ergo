@@ -1,8 +1,9 @@
 //! Encryption primitives for the encrypted-secret-file format.
 //!
-//! Scala/Appkit defaults use PBKDF2-HMAC-SHA256 with 128,000 iterations
-//! and a 32-byte key. HMAC-SHA512 remains supported for existing Rust
-//! wallets. AES-256-GCM uses a fresh 96-bit IV per encryption.
+//! Scala parity: `AES.scala:62` defines the cipher parameters we
+//! match byte-for-byte. PBKDF2-HMAC-SHA512 with 128,000 iterations
+//! produces a 32-byte key; AES-256-GCM with a fresh 96-bit IV per
+//! encryption produces the ciphertext + 16-byte auth tag.
 //!
 //! All intermediate buffers (derived key, plaintext while encrypted,
 //! plaintext after decrypt) are wrapped in `zeroize::Zeroizing` so
@@ -11,54 +12,29 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use pbkdf2::pbkdf2_hmac;
-use sha2::{Sha256, Sha512};
+use sha2::Sha512;
 use zeroize::Zeroizing;
 
-/// Supported PBKDF2 pseudorandom functions in encrypted wallet files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pbkdf2Prf {
-    HmacSha256,
-    HmacSha512,
-}
-
-impl Pbkdf2Prf {
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "HmacSHA256" => Some(Self::HmacSha256),
-            "HmacSHA512" => Some(Self::HmacSha512),
-            _ => None,
-        }
-    }
-}
-
-/// PBKDF2-HMAC-SHA512 password → key derivation for legacy Rust callers.
-/// New keystore files use [`derive_key_pbkdf2_with_prf`] with HMAC-SHA256.
+/// PBKDF2-HMAC-SHA512 password → key derivation. Matches Scala
+/// `AES.scala:62` parameters: 128,000 iterations (typically), 32-byte
+/// output. The caller passes the iteration count explicitly so this
+/// helper is reusable for both encryption (uses 128k) and the
+/// `cipherParams.c` field of the encrypted secret file (which the
+/// loader respects).
 ///
 /// Returns a `Zeroizing<[u8; 32]>` so the derived key is zeroed when
 /// it goes out of scope. Callers MUST NOT copy this out into a plain
 /// `[u8; 32]` without re-wrapping.
 pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
-    derive_key_pbkdf2_with_prf(password, salt, iterations, Pbkdf2Prf::HmacSha512)
-}
-
-/// Derive the 256-bit AES key using the file's PBKDF2 PRF and iteration count.
-pub fn derive_key_pbkdf2_with_prf(
-    password: &[u8],
-    salt: &[u8],
-    iterations: u32,
-    prf: Pbkdf2Prf,
-) -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
-    match prf {
-        Pbkdf2Prf::HmacSha256 => pbkdf2_hmac::<Sha256>(password, salt, iterations, key.as_mut()),
-        Pbkdf2Prf::HmacSha512 => pbkdf2_hmac::<Sha512>(password, salt, iterations, key.as_mut()),
-    }
+    pbkdf2_hmac::<Sha512>(password, salt, iterations, key.as_mut());
     key
 }
 
 /// Encrypt under AES-256-GCM. Returns `(ciphertext, auth_tag)` as
-/// separate byte vectors in the conventional trailing-tag layout.
-/// Scala keystore files use [`encrypt_scala`] instead.
+/// separate byte vectors — matching Scala `EncryptedSecret.scala:18-19`
+/// wire shape where `cipherText` and `authTag` are stored as separate
+/// JSON fields, NOT concatenated.
 ///
 /// **IV reuse warning**: the caller MUST pass a freshly random 96-bit
 /// IV. AES-256-GCM under IV reuse leaks plaintext correlations and
@@ -93,37 +69,6 @@ pub fn encrypt(
     let mut tag_arr = [0u8; 16];
     tag_arr.copy_from_slice(tag);
     Ok((ct.to_vec(), tag_arr))
-}
-
-/// Encrypt using Scala `AES.encrypt`'s keystore field layout: `authTag`
-/// holds the first 16 bytes of the JVM GCM output, and `cipherText` holds
-/// the remainder (including the actual trailing GCM authentication tag).
-pub fn encrypt_scala(
-    key: &Zeroizing<[u8; 32]>,
-    iv: &[u8; 12],
-    plaintext: &[u8],
-) -> Result<(Vec<u8>, [u8; 16]), crate::error::WalletError> {
-    let (mut ciphertext, tag) = encrypt(key, iv, plaintext)?;
-    ciphertext.extend_from_slice(&tag);
-    let mut prefix = [0u8; 16];
-    prefix.copy_from_slice(&ciphertext[..16]);
-    Ok((ciphertext[16..].to_vec(), prefix))
-}
-
-/// Decrypt Scala's keystore layout, reconstructing the JVM GCM output
-/// as `authTag ++ cipherText` before authenticating it.
-pub fn decrypt_scala(
-    key: &Zeroizing<[u8; 32]>,
-    iv: &[u8; 12],
-    ciphertext: &[u8],
-    prefix: &[u8; 16],
-) -> Result<Zeroizing<Vec<u8>>, crate::error::WalletError> {
-    let mut combined = Vec::with_capacity(ciphertext.len() + 16);
-    combined.extend_from_slice(prefix);
-    combined.extend_from_slice(ciphertext);
-    let (ct, tag) = combined.split_at(combined.len() - 16);
-    let tag: &[u8; 16] = tag.try_into().expect("split off exactly 16 bytes");
-    decrypt(key, iv, ct, tag)
 }
 
 /// Decrypt under AES-256-GCM. Returns the plaintext wrapped in

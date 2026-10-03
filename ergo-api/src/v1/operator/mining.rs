@@ -3,7 +3,7 @@
 //! PoW/candidate machinery — mapping its [`MiningApiError`] onto the standard
 //! error envelope. `miner-stats` (T0) folds the same headers the compat handler
 //! reads; `status` (T0) composes existing snapshot reads. `candidate-with-txs`
-//! uses the same bounded transaction-candidate seam as the Scala API.
+//! has no trait seam yet, so it answers the honest `route_unavailable`.
 
 use axum::{
     extract::{Query, State},
@@ -315,55 +315,19 @@ pub(crate) async fn reward_pubkey(State(s): State<OperatorState>) -> Response {
     }
 }
 
-/// `POST /api/v1/mining/candidate-with-txs` — T1. Accepts either a Scala
-/// transaction array (configured miner key) or `{txs, pk}` (explicit miner key).
-/// Decodes directly from the body to preserve context extension ordering.
+/// `POST /api/v1/mining/candidate-with-txs` — T1, seam-deferred. The wire shape
+/// is documented but no `NodeMining::candidate_with_txs` seam exists,
+/// so this answers the honest `route_unavailable` rather than silently ignoring
+/// the forced-tx set. Still gated at `Tier::Operator`.
 #[utoipa::path(
     post, path = "/api/v1/mining/candidate-with-txs", tag = "mining",
-    request_body(content = serde_json::Value, description = "A transaction array, or {txs: [...], pk: compressed secp256k1 key hex}. At most 1024 transactions and 2 MiB. Request order and context-extension insertion order are preserved. Returns proofs only for supplied transactions admitted to the candidate."),
-    responses(
-        (status = 200, description = "WorkMessageJson with header preimage and transaction inclusion proofs", body = serde_json::Value),
-        (status = 400, description = "Malformed transactions, invalid miner key, or request limit exceeded", body = V1Error),
-        (status = 409, description = "Mining disabled on this node", body = V1Error),
-        (status = 503, description = "Candidate unavailable", body = V1Error),
-        (status = 504, description = "Candidate build timed out", body = V1Error),
-    ),
+    responses((status = 503, description = "Forced-transaction candidate building not wired on this node", body = V1Error)),
     security(("ApiKeyAuth" = [])),
 )]
-pub(crate) async fn candidate_with_txs(
-    State(s): State<OperatorState>,
-    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
-) -> Response {
-    let mining = match s.mining() {
-        Ok(m) => m,
-        Err(e) => return *e,
-    };
-    let body = match body {
-        Ok(body) => body,
-        Err(e) => {
-            return map_mining_error(
-                MiningApiError::BadRequest(e.to_string()),
-                Reason::CandidateUnavailable,
-            )
-        }
-    };
-    let request = if body.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
-        crate::mining::decode_candidate_with_pk(&body)
-            .map(|request| (request.txs, Some(request.pk)))
-    } else {
-        crate::mining::decode_candidate_transactions(&body).map(|txs| (txs, None))
-    };
-    let (txs, pk) = match request {
-        Ok(request) => request,
-        Err(e) => return map_mining_error(e, Reason::CandidateUnavailable),
-    };
-    match mining.candidate_with_txs(txs, pk).await {
-        Ok(Some(work)) => Json(work).into_response(),
-        Ok(None) => v1_error(
-            Reason::CandidateUnavailable,
-            "no candidate could be built (not synced or generation race)",
-            "retry once the node reports at_tip",
-        ),
-        Err(e) => map_mining_error(e, Reason::CandidateUnavailable),
-    }
+pub(crate) async fn candidate_with_txs(State(_s): State<OperatorState>) -> Response {
+    v1_error(
+        Reason::RouteUnavailable,
+        "forced-transaction candidate building is not wired on this node",
+        "POST /mining/candidate-with-txs needs a NodeMining::candidate_with_txs seam (Phase-1 machinery exists; the trait method does not)",
+    )
 }

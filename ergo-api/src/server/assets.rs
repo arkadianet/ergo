@@ -35,27 +35,16 @@ pub(super) async fn swagger_v1() -> Html<&'static str> {
     Html(rust_swagger_html())
 }
 
-pub(super) async fn openapi_yaml(allow_legacy_mining: bool) -> Response {
-    static LEGACY_MINING: std::sync::LazyLock<String> =
-        std::sync::LazyLock::new(|| super::openapi::mining_policy_openapi_yaml(OPENAPI_YAML));
-    let yaml = if allow_legacy_mining {
-        LEGACY_MINING.as_str()
-    } else {
-        OPENAPI_YAML
-    };
-    ([(header::CONTENT_TYPE, "application/yaml")], yaml).into_response()
+pub(super) async fn openapi_yaml() -> Response {
+    ([(header::CONTENT_TYPE, "application/yaml")], OPENAPI_YAML).into_response()
 }
 
-pub(super) async fn openapi_scala_yaml(allow_legacy_mining: bool) -> Response {
-    static LEGACY_MINING: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        super::openapi::mining_policy_openapi_yaml(scala_openapi_yaml())
-    });
-    let yaml = if allow_legacy_mining {
-        LEGACY_MINING.as_str()
-    } else {
-        scala_openapi_yaml()
-    };
-    ([(header::CONTENT_TYPE, "application/yaml")], yaml).into_response()
+pub(super) async fn openapi_scala_yaml() -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/yaml")],
+        scala_openapi_yaml(),
+    )
+        .into_response()
 }
 
 pub(super) async fn openapi_rust_yaml() -> Response {

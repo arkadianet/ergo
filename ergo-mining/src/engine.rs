@@ -27,23 +27,18 @@ use ergo_ser::ergo_box::ErgoBox;
 use ergo_state::reader::ChainStoreReader;
 use ergo_state::store::{BaseDisposition, CommittedSnapshot, DryRunBase};
 
-use crate::candidate::{
-    generate_candidate_with_transactions_cancellable, BuildMode, Candidate, PhaseTimings,
-};
+use crate::candidate::{generate_candidate_cancellable, BuildMode, Candidate, PhaseTimings};
 use crate::error::MiningError;
 use crate::handle::MiningHandle;
 use crate::state_view::{
     CachedSnapshotView, CandidateProofCache, CandidateStateView, ProofCachingView,
 };
 use crate::work_message::WorkMessage;
-use ergo_ser::transaction::Transaction;
 
 /// Why a build was requested. Recorded on the template identity for metrics;
 /// the pool-facing `clean_jobs` signal derives from `chain_seq`, not this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildReason {
-    /// An authenticated external client supplied transactions and/or a reward key.
-    Requested,
     /// Best-full tip advanced (extension or reorg).
     Tip,
     /// Same tip, mempool changed (debounced).
@@ -267,8 +262,6 @@ pub fn build_and_publish(
         handle,
         intent,
         mode,
-        &[],
-        None,
         base,
         None,
         now_ms,
@@ -299,38 +292,6 @@ pub fn build_and_publish_cached(
         handle,
         intent,
         mode,
-        &[],
-        None,
-        base,
-        Some(proof_cache),
-        now_ms,
-        resolve_rent,
-        disposition_out,
-    )
-}
-
-/// Build an external client's ordered transaction package on the same serial
-/// worker and committed-state boundary used for ordinary mining candidates.
-#[allow(clippy::too_many_arguments)]
-pub fn build_requested_and_publish_cached(
-    reader: &ChainStoreReader,
-    handle: &MiningHandle,
-    intent: &BuildIntent,
-    requested: &[Transaction],
-    caller_cancelled: &dyn Fn() -> bool,
-    base: Option<&mut Option<DryRunBase>>,
-    proof_cache: &mut CandidateProofCache,
-    now_ms: impl Fn() -> u64,
-    resolve_rent: impl FnOnce(&CommittedSnapshot, u32) -> Vec<ErgoBox>,
-    disposition_out: &mut Option<BaseDisposition>,
-) -> Result<BuildOutcome, MiningError> {
-    build_and_publish_inner(
-        reader,
-        handle,
-        intent,
-        BuildMode::Full,
-        requested,
-        Some(caller_cancelled),
         base,
         Some(proof_cache),
         now_ms,
@@ -345,8 +306,6 @@ fn build_and_publish_inner(
     handle: &MiningHandle,
     intent: &BuildIntent,
     mode: BuildMode,
-    requested: &[Transaction],
-    caller_cancelled: Option<&dyn Fn() -> bool>,
     base: Option<&mut Option<DryRunBase>>,
     proof_cache: Option<&mut CandidateProofCache>,
     now_ms: impl Fn() -> u64,
@@ -406,9 +365,7 @@ fn build_and_publish_inner(
     // candidate: allowing it to publish prevents starvation under steady load.
     let should_cancel = || {
         let tip = handle.best_tip();
-        !tip.synced
-            || tip.parent_id != intent.expected_parent
-            || caller_cancelled.is_some_and(|cancelled| cancelled())
+        !tip.synced || tip.parent_id != intent.expected_parent
     };
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
@@ -479,7 +436,6 @@ fn build_and_publish_inner(
                 intent,
                 mode,
                 mempool,
-                requested,
                 &eligible_rent_boxes,
                 &voting_targets,
                 &custom_extension_fields,
@@ -497,7 +453,6 @@ fn build_and_publish_inner(
             intent,
             mode,
             mempool,
-            requested,
             &eligible_rent_boxes,
             &voting_targets,
             &custom_extension_fields,
@@ -567,7 +522,6 @@ fn generate_from_view<V: CandidateStateView>(
     intent: &BuildIntent,
     mode: BuildMode,
     mempool: &MempoolReadSnapshot,
-    requested: &[Transaction],
     eligible_rent_boxes: &[ErgoBox],
     voting_targets: &std::collections::BTreeMap<u8, i64>,
     custom_extension_fields: &[([u8; 2], Vec<u8>)],
@@ -576,12 +530,11 @@ fn generate_from_view<V: CandidateStateView>(
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     macro_rules! generate {
         ($view:expr) => {
-            generate_candidate_with_transactions_cancellable(
+            generate_candidate_cancellable(
                 $view,
                 handle.network(),
                 mode,
                 mempool,
-                requested,
                 &intent.miner_pk,
                 handle.monetary(),
                 handle.reemission_ref(),

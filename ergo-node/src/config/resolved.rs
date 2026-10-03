@@ -200,9 +200,6 @@ pub struct NodeConfig {
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
     pub api_key_hash: Option<String>,
-    /// Explicit Scala-compatible access for the four legacy mining routes.
-    /// Supplied-transaction candidates and all v1 routes remain authenticated.
-    pub allow_unauthenticated_legacy_mining: bool,
     /// `[api] allowed_hosts` — extra `Host` header values the DNS-
     /// rebinding guard accepts, beyond `localhost` / `127.0.0.1` /
     /// `::1` / the literal bind address (which are always allowed on a

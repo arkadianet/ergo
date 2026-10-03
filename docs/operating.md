@@ -642,20 +642,26 @@ The default posture is **safe by default for a single-host operator**:
 - The API binds to loopback (`127.0.0.1:9099`) by default. A non-loopback
   bind is **rejected at config-load** unless you also set
   `[api] public_bind = true` — the node will not start otherwise.
-- `[api.security] api_key_hash` is optional; without it, public routes remain
-  available and privileged routes are closed. A supplied hash must be exactly
-  64 lowercase hex characters. Requests authenticate by sending the secret in
-  the `api_key` header. A missing or wrong key returns `403`.
+- `[api.security] api_key_hash` is **mandatory** whenever the API server is
+  enabled. It is the lowercase Base16 of `Blake2b256(secret)` and must be
+  exactly 64 lowercase hex characters; the node refuses to start with a
+  malformed or missing hash. The only way to omit it is `[api] disabled =
+  true`. Requests authenticate by sending the secret in the `api_key`
+  request header (lowercase, underscore — not `Authorization`, not
+  `X-Api-Key`); the node Blake2b-256-hashes it and compares against the
+  configured hash in constant time. A missing or wrong key returns `403`.
 
-Wallet, scan, mining, block submission and operator controls require a key by
-default; public reads and transaction submission remain unauthenticated. See the
-[complete route inventory](configuration.md#security-notes-for-the-api).
-
-Current Lithos clients omit credentials on solo-candidate reads and solution
-submission. `[api.security] allow_unauthenticated_legacy_mining = true` explicitly
-opens the four legacy mining routes while supplied-transaction candidates and
-v1 operator routes retain authentication. This option still requires a configured
-hash. See [Lithos integration](lithos.md) for configuration and wallet-file setup.
+What the `api_key` actually gates is **narrow, by design** (Scala parity):
+only the `/wallet/*` JSON subtree and `POST /node/shutdown` (and its
+`/api/v1/node/shutdown` alias) require the key. The gate covers those
+whole path prefixes — an unknown subpath under `/wallet/` or `/node/`
+still rejects on the key first, mirroring Scala's
+`pathPrefix(...) & withAuth`; every other unmatched path is a plain,
+ungated `404`. **Everything else is public**
+regardless of `public_bind` — including transaction submission
+(`POST /transactions*`, `POST /api/v1/mempool/{submit,check}`),
+`POST /blocks`, `/mining/solution`, all reads, `/blockchain/*`,
+`/emission/*`, `/peers/*`, `/utils/*`, the dashboard, and `/metrics`.
 
 **Before exposing the node beyond localhost:**
 

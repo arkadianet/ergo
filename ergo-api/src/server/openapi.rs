@@ -704,23 +704,10 @@ fn exclude_from_scala_openapi(path: &str) -> bool {
                 | "/transactions/unconfirmed/outputs/byErgoTree"
                 | "/transactions/unconfirmed/outputs/byTokenId/{tokenId}"
                 | "/transactions/unconfirmed/outputs/byRegisters"
+                | "/mining/candidateWithTxs"
                 | "/utxo/getBoxesBinaryProof"
                 | "/script/executeWithContext"
         )
-}
-
-pub(super) fn mining_policy_openapi_yaml(source: &'static str) -> String {
-    let mut document: serde_json::Value =
-        serde_norway::from_str(source).expect("OpenAPI document parses");
-    for (path, method) in [
-        ("/mining/candidate", "get"),
-        ("/mining/solution", "post"),
-        ("/mining/rewardAddress", "get"),
-        ("/mining/rewardPublicKey", "get"),
-    ] {
-        document["paths"][path][method]["security"] = serde_json::json!([]);
-    }
-    serde_norway::to_string(&document).expect("OpenAPI document serializes")
 }
 
 pub fn scala_openapi_yaml() -> &'static str {

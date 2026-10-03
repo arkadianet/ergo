@@ -5,9 +5,9 @@
 //! work-message construction.
 //!
 //! Scope / invariants:
-//! - The block carries the coinbase (emission), caller-supplied transactions,
-//!   storage-rent claim, mempool transactions, then a single fee-collecting tx.
-//!   Selection uses an evolving in-block overlay. A fee
+//! - The block carries the coinbase (emission) tx, then mempool user
+//!   transactions selected over an in-block overlay, then a single
+//!   fee-collecting tx — block order `[emission, ...user txs, fee]`. A fee
 //!   tx is emitted only when an included user tx produces a fee-proposition
 //!   output.
 //! - Cost and size are enforced at selection so the assembled block stays
@@ -57,10 +57,7 @@ use std::collections::BTreeMap;
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
-use crate::candidate_proof::upcoming_transactions_proof;
-use crate::candidate_selection::{
-    select_prioritized_txs_cancellable, select_user_txs_cancellable, CandidateOverlay,
-};
+use crate::candidate_selection::{select_user_txs_cancellable, CandidateOverlay};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
@@ -107,7 +104,7 @@ pub struct PhaseTimings {
 /// What a candidate build includes. `Minimal` is the consensus-complete
 /// emission-only template published the instant a new tip lands (forfeits
 /// only fees for the seconds until the enriched refresh); `Full` adds the
-/// requested transactions, rent self-claim, mempool selection, and the fee tx.
+/// rent self-claim, mempool selection, and the fee tx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildMode {
     Minimal,
@@ -241,88 +238,6 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     // engine forwards these to the node, which re-validates each against the live
     // tip and evicts the still-invalid ones. A side-output (not part of the
     // Candidate) because suspects are diagnostic, not consensus artifacts.
-    suspects_out: &mut Vec<Digest32>,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
-    generate_candidate_with_transactions_cancellable(
-        view,
-        network,
-        mode,
-        mempool,
-        &[],
-        miner_pk,
-        monetary,
-        reemission,
-        reemission_rules,
-        chain_config,
-        eligible_rent_boxes,
-        voting_targets,
-        voting_settings,
-        custom_extension_fields,
-        suspects_out,
-        should_cancel,
-    )
-}
-
-/// Caller-supplied transactions are validated in order before rent and mempool
-/// selection. They use block policy, including zero fees, and membership proofs
-/// describe only those that survive final assembly. A requested package always
-/// takes the full path so an emission-only preview cannot discard its genesis.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_candidate_with_transactions<V: CandidateStateView>(
-    view: &V,
-    network: ergo_chain_spec::Network,
-    mode: BuildMode,
-    mempool: &MempoolReadSnapshot,
-    prioritized: &[Transaction],
-    miner_pk: &[u8; 33],
-    monetary: &MonetarySettings,
-    reemission: Option<&ReemissionSettings>,
-    reemission_rules: Option<&ReemissionRuleInputs>,
-    chain_config: &DifficultyParams,
-    eligible_rent_boxes: &[ErgoBox],
-    voting_targets: &BTreeMap<u8, i64>,
-    voting_settings: &VotingSettings,
-    custom_extension_fields: &[([u8; 2], Vec<u8>)],
-    suspects_out: &mut Vec<Digest32>,
-) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
-    generate_candidate_with_transactions_cancellable(
-        view,
-        network,
-        mode,
-        mempool,
-        prioritized,
-        miner_pk,
-        monetary,
-        reemission,
-        reemission_rules,
-        chain_config,
-        eligible_rent_boxes,
-        voting_targets,
-        voting_settings,
-        custom_extension_fields,
-        suspects_out,
-        &|| false,
-    )
-}
-
-/// Cooperatively cancel a supplied-transaction build when its applied parent changes.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
-    view: &V,
-    network: ergo_chain_spec::Network,
-    mode: BuildMode,
-    mempool: &MempoolReadSnapshot,
-    prioritized: &[Transaction],
-    miner_pk: &[u8; 33],
-    monetary: &MonetarySettings,
-    reemission: Option<&ReemissionSettings>,
-    reemission_rules: Option<&ReemissionRuleInputs>,
-    chain_config: &DifficultyParams,
-    eligible_rent_boxes: &[ErgoBox],
-    voting_targets: &BTreeMap<u8, i64>,
-    voting_settings: &VotingSettings,
-    custom_extension_fields: &[([u8; 2], Vec<u8>)],
     suspects_out: &mut Vec<Digest32>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
@@ -630,10 +545,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     //        overlay, no rent claim, no mempool selection, no fee tx. The
     //        minimal template is the strict [emission] prefix of a full
     //        block — same shape, same consensus pipeline below.
-    let mut prioritized_count = 0;
-    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal
-        && prioritized.is_empty()
-    {
+    let (checked_rent, user_checked, checked_fee) = if mode == BuildMode::Minimal {
         (None, Vec::new(), None)
     } else {
         // 9b. Seed an in-block overlay (over the committed state tip — the same
@@ -657,47 +569,19 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         let max_block_cost = active_params.max_block_cost as u64;
         let safety_gap = block_cost_safety_gap(max_block_cost);
         let max_block_size = active_params.max_block_size as u64;
-        let priority = select_prioritized_txs_cancellable(
-            &mut overlay,
-            prioritized,
-            &ctx,
-            &params,
-            last_headers.as_slice(),
-            max_block_cost
-                .saturating_sub(safety_gap)
-                .saturating_sub(emission_cost),
-            max_block_size
-                .saturating_sub(emission_size)
-                .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE),
-            reemission_rules,
-            should_cancel,
-        )?;
-        prioritized_count = priority.checked.len();
         let phase_start = std::time::Instant::now();
         let rent_cost_ceiling = max_block_cost
             .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
-            .saturating_sub(priority.total_cost)
             .saturating_sub(max_block_cost / 16);
         let rent_size_ceiling = max_block_size
             .saturating_sub(emission_size)
-            .saturating_sub(priority.total_size)
             .saturating_sub(max_block_size / 16);
-        let available_rent_boxes = (!priority.checked.is_empty()).then(|| {
-            eligible_rent_boxes
-                .iter()
-                .filter(|ergo_box| ergo_box.box_id().is_ok_and(|id| !overlay.is_spent(&id)))
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        let rent_boxes = available_rent_boxes
-            .as_deref()
-            .unwrap_or(eligible_rent_boxes);
         let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim(
-            rent_boxes,
+            eligible_rent_boxes,
             candidate_height,
             &params,
-            rent_boxes.len(),
+            eligible_rent_boxes.len(),
             miner_pk,
             &ctx,
             last_headers.as_slice(),
@@ -723,11 +607,9 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         let cost_budget = max_block_cost
             .saturating_sub(safety_gap)
             .saturating_sub(emission_cost)
-            .saturating_sub(priority.total_cost)
             .saturating_sub(rent_cost);
         let size_budget = max_block_size
             .saturating_sub(emission_size)
-            .saturating_sub(priority.total_size)
             .saturating_sub(rent_size)
             .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
@@ -758,8 +640,7 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind.
-        let mut user_checked = priority.checked;
-        user_checked.extend(selected.checked);
+        let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
             check_build_cancelled(should_cancel)?;
@@ -776,14 +657,10 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             if let Some(tx) = &checked_emission {
                 fee_overlay.apply_checked(tx);
             }
-            for (c, _) in user_checked.iter().take(prioritized_count) {
-                check_build_cancelled(should_cancel)?;
-                fee_overlay.apply_checked(c);
-            }
             if let Some(cr) = &checked_rent {
                 fee_overlay.apply_checked(cr);
             }
-            for (c, _) in user_checked.iter().skip(prioritized_count) {
+            for (c, _) in &user_checked {
                 check_build_cancelled(should_cancel)?;
                 fee_overlay.apply_checked(c);
             }
@@ -838,11 +715,10 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
 
             let mut probe: Vec<Transaction> = Vec::with_capacity(3 + user_raw.len());
             probe.extend(emission_tx.iter().cloned());
-            probe.extend(user_raw.iter().take(prioritized_count).cloned());
             if let Some(cr) = &checked_rent {
                 probe.push(cr.transaction().clone());
             }
-            probe.extend(user_raw.into_iter().skip(prioritized_count));
+            probe.extend(user_raw);
             if let Some(ft) = &fee_tx_opt {
                 probe.push(ft.clone());
             }
@@ -853,18 +729,11 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
             if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
-                if total_cost > cost_ceiling || section_size > max_block_size as usize {
-                    return Err(MiningError::IdComputation {
-                        op: "candidate_block_budget",
-                        reason: "pinned block transactions exceed the block budget".into(),
-                    });
-                }
                 final_validation_cost = total_cost;
                 final_section_size = Some(section_size as u64);
                 break checked_fee;
             }
             user_checked.pop();
-            prioritized_count = prioritized_count.min(user_checked.len());
         };
         timings.select = phase_start.elapsed();
 
@@ -872,8 +741,8 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     };
 
     // 9f. Assemble the final tx list in block order:
-    //     emission, supplied transactions, rent, mempool transactions, fee.
-    let selected_transaction_count = user_checked.len().saturating_sub(prioritized_count) as u32;
+    //     emission, rent, user txs, fee.
+    let selected_transaction_count = user_checked.len() as u32;
     let fees_nano_erg = checked_fee.as_ref().map_or(0, |fee| {
         fee.transaction()
             .output_candidates
@@ -883,10 +752,6 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
     });
     let mut checked: Vec<CheckedTransaction> = Vec::with_capacity(3 + user_checked.len());
     checked.extend(checked_emission);
-    let mut user_checked = user_checked.into_iter();
-    for (c, _) in user_checked.by_ref().take(prioritized_count) {
-        checked.push(c);
-    }
     if let Some(cr) = checked_rent {
         checked.push(cr);
     }
@@ -993,7 +858,6 @@ pub fn generate_candidate_with_transactions_cancellable<V: CandidateStateView>(
         target: target.clone(),
         height: candidate_height,
         pk: *miner_pk,
-        proof: upcoming_transactions_proof(&header, &raw_txs, prioritized)?,
         metrics: CandidateMetrics {
             transaction_count: raw_txs.len() as u32,
             selected_transaction_count,

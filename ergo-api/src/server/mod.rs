@@ -715,9 +715,6 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     let v1_op_chain = compat.clone();
     let v1_op_admin = admin.clone();
     let v1_op_mining = mining.clone();
-    let allow_legacy_mining = security
-        .as_ref()
-        .is_some_and(|s| s.allow_unauthenticated_legacy_mining());
     let operator: Router = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
@@ -784,14 +781,8 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         .route("/swagger", get(swagger))
         .route("/swagger/native", get(swagger_native))
         .route("/swagger/v1", get(swagger_v1))
-        .route(
-            "/api-docs/openapi.yaml",
-            get(move || openapi_yaml(allow_legacy_mining)),
-        )
-        .route(
-            "/api-docs/openapi-scala.yaml",
-            get(move || openapi_scala_yaml(allow_legacy_mining)),
-        )
+        .route("/api-docs/openapi.yaml", get(openapi_yaml))
+        .route("/api-docs/openapi-scala.yaml", get(openapi_scala_yaml))
         .route("/api-docs/openapi-rust.yaml", get(openapi_rust_yaml))
         .route("/api-docs/openapi-rust.json", get(openapi_rust_json))
         .route("/api-docs/openapi-native.yaml", get(openapi_native_yaml))

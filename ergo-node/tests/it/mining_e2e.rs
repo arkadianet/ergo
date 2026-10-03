@@ -279,10 +279,6 @@ fn v2_launch_params() -> ergo_validation::ActiveProtocolParameters {
 /// The store is dropped before returning so the node can reopen the same redb
 /// path. Returns the parent (tip) header id at `PARENT_HEIGHT`.
 fn seed_synced_chain(db: &std::path::Path) -> [u8; 32] {
-    seed_synced_chain_with_boxes(db, &[])
-}
-
-fn seed_synced_chain_with_boxes(db: &std::path::Path, extra_boxes: &[ErgoBox]) -> [u8; 32] {
     let mut store = StateStore::open_with_launch_params(db, v2_launch_params()).unwrap();
 
     let em_tx = parent_emission_tx();
@@ -290,13 +286,9 @@ fn seed_synced_chain_with_boxes(db: &std::path::Path, extra_boxes: &[ErgoBox]) -
     let em_box_id = *em_box.box_id().expect("emission box id").as_bytes();
     let em_box_bytes = write_box_bytes(&em_box);
 
-    let mut genesis = vec![(em_box_id, em_box_bytes)];
-    genesis.extend(
-        extra_boxes
-            .iter()
-            .map(|b| (*b.box_id().unwrap().as_bytes(), write_box_bytes(b))),
-    );
-    store.initialize_genesis(&genesis).unwrap();
+    store
+        .initialize_genesis(&[(em_box_id, em_box_bytes)])
+        .unwrap();
     let committed_root = store.root_digest();
 
     // Parent header roots are chosen freely (they only key the stored
@@ -405,24 +397,11 @@ async fn boot_synced_mining_node() -> (tempfile::TempDir, RunHandle, [u8; 32]) {
 async fn boot_synced_mining_node_with_cache(
     candidate_base_cache: bool,
 ) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
-    boot_synced_mining_node_with_packages(candidate_base_cache, &[], false).await
-}
-
-async fn boot_synced_mining_node_with_packages(
-    candidate_base_cache: bool,
-    boxes: &[ErgoBox],
-    legacy_mining: bool,
-) -> (tempfile::TempDir, RunHandle, [u8; 32]) {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("state.redb");
-    let parent_tip = if boxes.is_empty() {
-        seed_synced_chain(&db)
-    } else {
-        seed_synced_chain_with_boxes(&db, boxes)
-    };
+    let parent_tip = seed_synced_chain(&db);
 
     let mut config = make_test_config(dir.path().to_path_buf());
-    config.allow_unauthenticated_legacy_mining = legacy_mining;
     config.mining_config.enabled = true;
     config.mining_config.miner_public_key_hex = Some(hex::encode(MINER_PK));
     config.mining_config.candidate_base_cache = candidate_base_cache;
@@ -459,32 +438,17 @@ async fn http_request(
     path: &str,
     body: Option<&str>,
 ) -> HttpResponse {
-    http_request_with_key(addr, method, path, body, true).await
-}
-
-async fn http_request_with_key(
-    addr: std::net::SocketAddr,
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-    authenticated: bool,
-) -> HttpResponse {
     let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .expect("connect to bound api port");
-    let key_header = if authenticated {
-        "api_key: hello\r\n"
-    } else {
-        ""
-    };
     let req = match body {
         Some(b) => format!(
             "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
-             Content-Length: {len}\r\n{key_header}Connection: close\r\n\r\n{b}",
+             Content-Length: {len}\r\napi_key: hello\r\nConnection: close\r\n\r\n{b}",
             len = b.len(),
         ),
         None => format!(
-            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{key_header}Connection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\napi_key: hello\r\nConnection: close\r\n\r\n"
         ),
     };
     stream
@@ -1119,198 +1083,4 @@ async fn info_reports_is_mining_true_on_a_mining_node() {
     );
 
     handle.shutdown().await.expect("clean shutdown");
-}
-
-/// Drive Lithos's actual request shape with independently signed Scala
-/// transactions. The input script checks the candidate's miner key; the child
-/// spends the parent's in-block output and both intentionally pay no fee.
-#[tokio::test]
-async fn lithos_requested_package_proves_and_applies_with_lender_key() {
-    for cache_enabled in [false, true] {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
-        ))
-        .unwrap();
-        let boxes: Vec<_> = ["input_box", "independent_input_box"]
-            .iter()
-            .map(|name| {
-                let bytes = hex::decode(fixture[name].as_str().unwrap()).unwrap();
-                ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap()
-            })
-            .collect();
-        let (_dir, handle, parent_tip) =
-            boot_synced_mining_node_with_packages(cache_enabled, &boxes, true).await;
-        let addr = handle.api_addr.unwrap();
-        let solo = poll_candidate(addr).await;
-        assert_eq!(solo.pk, hex::encode(MINER_PK));
-        let txs = fixture["transactions_json"].as_array().unwrap();
-        let package = txs
-            .iter()
-            .take(2)
-            .map(|tx| tx.as_str().unwrap())
-            .collect::<Vec<_>>()
-            .join(",");
-        let body = format!(
-            r#"{{"txs":[{package}],"pk":"{}"}}"#,
-            fixture["miner_pk"].as_str().unwrap()
-        );
-        let unauthorized = http_request_with_key(
-            addr,
-            "POST",
-            "/mining/candidateWithTxsAndPk",
-            Some(&body),
-            false,
-        )
-        .await;
-        assert_eq!(
-            unauthorized.status, 403,
-            "insertion remains privileged in compatibility mode"
-        );
-        let response =
-            http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&body)).await;
-        assert_eq!(response.status, 200, "{}", response.body);
-        let work: ergo_rest_json::mining::WorkMessageJson =
-            serde_json::from_str(&response.body).unwrap();
-        assert_eq!(work.pk, fixture["miner_pk"].as_str().unwrap());
-        assert_eq!(work.h, Some(CANDIDATE_HEIGHT));
-        let proof = work
-            .proof
-            .as_ref()
-            .expect("Lithos requires membership proofs");
-        assert_eq!(proof.tx_proofs.len(), 2);
-        let preimage = hex::decode(&proof.msg_preimage).unwrap();
-        assert_eq!(
-            hex::encode(ergo_primitives::digest::blake2b256(&preimage).as_bytes()),
-            work.msg
-        );
-        // Decode the pre-PoW header using the actual solution layout and verify
-        // membership against its committed transactionsRoot, like Lithos does.
-        let mut header_bytes = preimage;
-        header_bytes.extend(hex::decode(&work.pk).unwrap());
-        header_bytes.extend([0u8; 8]);
-        let header = ergo_ser::header::read_header(&mut VlqReader::new(&header_bytes)).unwrap();
-        assert_eq!(header.parent_id.as_bytes(), &parent_tip);
-        for (proof, raw_tx) in proof
-            .tx_proofs
-            .iter()
-            .zip(fixture["transactions"].as_array().unwrap())
-        {
-            let bytes = hex::decode(raw_tx.as_str().unwrap()).unwrap();
-            let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
-            assert_eq!(
-                proof.leaf,
-                hex::encode(
-                    ergo_ser::transaction::transaction_id(&tx)
-                        .unwrap()
-                        .as_bytes()
-                )
-            );
-            let decoded = ergo_crypto::merkle::MerkleProofRaw {
-                leaf_data: hex::decode(&proof.leaf).unwrap(),
-                levels: proof
-                    .levels
-                    .iter()
-                    .map(|level| {
-                        let bytes = hex::decode(level).unwrap();
-                        (bytes[1..].to_vec(), bytes[0])
-                    })
-                    .collect(),
-            };
-            assert!(ergo_crypto::merkle::merkle_proof_verify(
-                &decoded,
-                header.transactions_root.as_bytes()
-            ));
-        }
-        // A new request using the same transactions and another valid key must
-        // validate them anew. The miner-key-sensitive genesis cannot be proven.
-        let wrong = format!(
-            r#"{{"txs":[{package}],"pk":"{}"}}"#,
-            fixture["wrong_miner_pk"].as_str().unwrap()
-        );
-        let response =
-            http_request(addr, "POST", "/mining/candidateWithTxsAndPk", Some(&wrong)).await;
-        assert_eq!(response.status, 200, "{}", response.body);
-        let other: ergo_rest_json::mining::WorkMessageJson =
-            serde_json::from_str(&response.body).unwrap();
-        assert_eq!(other.pk, fixture["wrong_miner_pk"].as_str().unwrap());
-        assert!(other.proof.unwrap().tx_proofs.is_empty());
-        let fallback = http_request_with_key(addr, "GET", "/mining/candidate", None, false).await;
-        assert_eq!(fallback.status, 200);
-        let fallback: ergo_rest_json::mining::WorkMessageJson =
-            serde_json::from_str(&fallback.body).unwrap();
-        assert_eq!(
-            fallback.pk, solo.pk,
-            "solo fallback never pays the previous lender"
-        );
-        assert!(fallback.proof.is_none());
-        let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
-        let solution = format!(r#"{{"pk":"{}","n":"{}"}}"#, work.pk, hex::encode(nonce));
-        // Current Lithos submits solutions without credentials. Its explicit
-        // key must select the retained requested job, despite subsequent builds.
-        let result =
-            http_request_with_key(addr, "POST", "/mining/solution", Some(&solution), false).await;
-        assert_eq!(result.status, 200, "{}", result.body);
-        assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
-        let next = poll_candidate_at_height(addr, CANDIDATE_HEIGHT + 1).await;
-        assert_eq!(next.pk, solo.pk);
-        let stale =
-            http_request_with_key(addr, "POST", "/mining/solution", Some(&solution), false).await;
-        assert_eq!(stale.status, 400, "{}", stale.body);
-        assert!(stale.body.contains("stale_candidate"));
-        handle.shutdown().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn requested_transactions_using_operator_key_accept_nonce_only_solution() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../test-vectors/mining/requested_transactions_scala_6_0_6.json"
-    ))
-    .unwrap();
-    let bytes = hex::decode(fixture["independent_input_box"].as_str().unwrap()).unwrap();
-    let input = ergo_ser::ergo_box::read_ergo_box(&mut VlqReader::new(&bytes)).unwrap();
-    let (_dir, handle, _) = boot_synced_mining_node_with_packages(false, &[input], false).await;
-    let addr = handle.api_addr.unwrap();
-    poll_candidate(addr).await;
-    let raw_json = fixture["transactions_json"][3].as_str().unwrap();
-    let response = http_request(
-        addr,
-        "POST",
-        "/mining/candidateWithTxs",
-        Some(&format!("[{raw_json}]")),
-    )
-    .await;
-    assert_eq!(response.status, 200, "{}", response.body);
-    let work: ergo_rest_json::mining::WorkMessageJson =
-        serde_json::from_str(&response.body).unwrap();
-    assert_eq!(work.pk, hex::encode(MINER_PK));
-    assert_eq!(work.proof.as_ref().unwrap().tx_proofs.len(), 1);
-    let nonce = solve(&msg_bytes(&work), CANDIDATE_HEIGHT, &work.b);
-    let solution = format!(r#"{{"n":"{}"}}"#, hex::encode(nonce));
-    let response = http_request(addr, "POST", "/mining/solution", Some(&solution)).await;
-    assert_eq!(response.status, 200, "{}", response.body);
-    assert!(poll_best_full_height(&handle, CANDIDATE_HEIGHT).await);
-    let bytes = hex::decode(fixture["transactions"][3].as_str().unwrap()).unwrap();
-    let tx = ergo_ser::transaction::read_transaction(&mut VlqReader::new(&bytes)).unwrap();
-    let output = ErgoBox {
-        candidate: tx.output_candidates[0].clone(),
-        transaction_id: ergo_ser::transaction::transaction_id(&tx).unwrap(),
-        index: 0,
-    };
-    let output_response = http_request(
-        addr,
-        "GET",
-        &format!(
-            "/utxo/byId/{}",
-            hex::encode(output.box_id().unwrap().as_bytes())
-        ),
-        None,
-    )
-    .await;
-    assert_eq!(
-        output_response.status, 200,
-        "the requested transaction must have applied: {}",
-        output_response.body
-    );
-    handle.shutdown().await.unwrap();
 }
