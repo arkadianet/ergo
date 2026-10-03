@@ -1,0 +1,49 @@
+{
+  "reference_repository": "https://github.com/ergoplatform/ergo",
+  "reference_tag": "v6.0.5",
+  "reference_revision": "5528ef569a41ebccbc8658212e6ee3c97d990b96",
+  "reference_source": "src/main/scala/org/ergoplatform/nodeView/history/extra/IndexedToken.scala",
+  "reference_source_sha256": "ebe165b4ebfcc34b32170c73b94366d860982f457e50ed66d33d9fde8456f4d3",
+  "argv": [
+    "/home/arkadias/.local/kdex-toolchain/scala-cli",
+    "--skip-cli-updates",
+    "run",
+    "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/token-text-oracle/Capture.scala",
+    "--server=false",
+    "--jvm",
+    "system",
+    "--main-class",
+    "Capture",
+    "--suppress-outdated-dependency-warning"
+  ],
+  "started_utc": "2026-10-03T18:54:44.320036+00:00",
+  "completed_utc": "2026-10-03T18:54:46.303045+00:00",
+  "exit_code": 0,
+  "runtime": {
+    "java.runtime.version": "17.0.17+10-LTS",
+    "java.vendor": "Amazon.com Inc.",
+    "java.class.path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/token-text-oracle/.scala-build/token-text-oracle_4cbaf03b62-cc1b44a3e7/classes/main:/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar",
+    "file.encoding": "UTF-8"
+  },
+  "resolved_jars": [
+    {
+      "name": "scala-library-2.12.20.jar",
+      "path": "/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar",
+      "bytes": 5436770,
+      "sha256": "4d8a8f984cce31a329a24f10b0bf336f042cb62aeb435290a1b20243154cfccb"
+    }
+  ],
+  "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
+  "java_launcher_sha256": "138bc91ab0eeb394dae476ae812b5b05fdfeccf763987f4f0b615778aa629660",
+  "cases": 26,
+  "bmp_scan_code_units": 65536,
+  "bmp_digit_pairs": 370,
+  "scope": "Exact JVM/Scala expressions used by fromBox; not compiled full IndexedToken class or node execution, no canonical chain occurrence claim.",
+  "files": {
+    "Capture.scala": "42f1b2296d641a8107ffbd2cc00b55863a2a0058a0b1eee53bffdcda923eee28",
+    "IndexedToken.scala": "ebe165b4ebfcc34b32170c73b94366d860982f457e50ed66d33d9fde8456f4d3",
+    "REFERENCE-LICENSE": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+    "stdout.json": "d0f5d396db1ebec01bf4faa370793bd70142152e1c026d6312eaae641af141d3",
+    "stderr.log": "0aad495183366a2226b5b360a5b550e7d7412398ed3494c96cd9ea32a0da6a66"
+  }
+}
