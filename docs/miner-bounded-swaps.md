@@ -41,6 +41,16 @@ transaction stays fixed: changing a pool input changes the signing message and
 requires another signature. This scheduler signs with the node wallet only.
 A locked node wallet waits without spending its retry allowance.
 
+The durable journal holds at most 128 intent records, with a 512 KiB limit per
+serialized record. When it is full, a new approval can replace cancelled,
+expired, failed, or unsigned conflicted history. Mined records and conflicted
+records that retain a signed generation remain stored and keep their pinned
+funding reservations for reorg recovery. Signed conflicts can be cancelled to
+retire their private work and release that slot. Mined work cannot be undone.
+There is currently no archival or record-deletion API: after 128 retained mined
+intents, further approvals are rejected. This is an operator capacity limit of
+the current draft feature, separate from the 128-block scan allowance below.
+
 The serialized wallet writer checks intents every two seconds and attempts at
 most one generation/admission per applied height. It reads private metadata once
 per wake with a one-second bound. Queue errors retain exact journaled signed
