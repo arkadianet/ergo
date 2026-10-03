@@ -754,6 +754,86 @@ paths:
                 $ref: '#/components/schemas/WalletJob'
       security:
       - ApiKeyAuth: []
+  /api/v1/wallet/mining-swaps:
+    get:
+      tags:
+      - wallet
+      operationId: list
+      responses:
+        '200':
+          description: Bounded private swap intents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningSwaps'
+      security:
+      - ApiKeyAuth: []
+    post:
+      tags:
+      - wallet
+      operationId: create
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MiningSwapRequest'
+        required: true
+      responses:
+        '200':
+          description: Approved bounded swap intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningSwap'
+        '400':
+          description: Invalid pool, owned funding or price bounds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeWalletError'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/mining-swaps/preview:
+    post:
+      tags:
+      - wallet
+      operationId: preview
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MiningSwapRequest'
+        required: true
+      responses:
+        '200':
+          description: Frozen canonical pool quote and unsigned transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningSwapPreview'
+      security:
+      - ApiKeyAuth: []
+  /api/v1/wallet/mining-swaps/{swap_id}/cancel:
+    post:
+      tags:
+      - wallet
+      operationId: cancel
+      parameters:
+      - name: swap_id
+        in: path
+        description: Durable decimal intent ID
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Cancelled intent and retired private templates, or already mined status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MiningSwap'
+      security:
+      - ApiKeyAuth: []
   /api/v1/wallet/mnemonic/verify:
     post:
       tags:
@@ -3852,6 +3932,182 @@ components:
         `auto` = wallet box selection (the default); `boxIds` = explicit wallet box
         ids; `boxes` = explicit serialized boxes (hex). Manual `Deserialize` for strict
         rejection.
+    MiningSwap:
+      type: object
+      required:
+      - id
+      - request
+      - state
+      - createdAtMs
+      - updatedAtMs
+      - attempts
+      - generation
+      - currentPoolBoxId
+      properties:
+        attempts:
+          type: integer
+          format: int32
+          minimum: 0
+        createdAtMs:
+          type: integer
+          format: int64
+          minimum: 0
+        currentPoolBoxId:
+          type: string
+        detail:
+          type:
+          - string
+          - 'null'
+        generation:
+          type: integer
+          format: int32
+          minimum: 0
+        id:
+          type: string
+        quotedOutputAmount:
+          type:
+          - string
+          - 'null'
+        request:
+          $ref: '#/components/schemas/MiningSwapRequest'
+        state:
+          $ref: '#/components/schemas/WalletJobState'
+        txId:
+          type:
+          - string
+          - 'null'
+        updatedAtMs:
+          type: integer
+          format: int64
+          minimum: 0
+    MiningSwapDirection:
+      type: string
+      enum:
+      - ergToToken
+      - tokenToErg
+    MiningSwapPreview:
+      type: object
+      required:
+      - poolBoxId
+      - poolNft
+      - poolTreeHash
+      - tradeTokenId
+      - direction
+      - inputAmount
+      - quotedOutputAmount
+      - effectiveMinOutputAmount
+      - feeNumerator
+      - snapshotHeight
+      - unsignedTransaction
+      properties:
+        direction:
+          $ref: '#/components/schemas/MiningSwapDirection'
+        effectiveMinOutputAmount:
+          type: string
+        feeNumerator:
+          type: integer
+          format: int32
+          minimum: 0
+        inputAmount:
+          type: string
+        poolBoxId:
+          type: string
+        poolNft:
+          type: string
+        poolTreeHash:
+          type: string
+        quotedOutputAmount:
+          type: string
+        snapshotHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        tradeTokenId:
+          type: string
+        unsignedTransaction:
+          $ref: '#/components/schemas/TxRepr'
+          description: Complete unsigned transaction for inspection; it is not submitted.
+    MiningSwapRequest:
+      type: object
+      description: |-
+        Explicit approval pins the pool identity, owned funding and price bounds.
+        Amounts are raw asset units; ERG amounts are nanoERG.
+      required:
+      - label
+      - poolBoxId
+      - poolNft
+      - poolTreeHash
+      - fundingBoxIds
+      - receivingAddress
+      - direction
+      - inputAmount
+      - maxInputAmount
+      - minOutputAmount
+      - approvedQuoteOutput
+      - maxSlippageBasisPoints
+      - notBeforeHeight
+      - expiresAtHeight
+      - maxAttempts
+      properties:
+        approvedQuoteOutput:
+          type: string
+          description: |-
+            Quote explicitly approved by the owner. Refreshes must remain within
+            maxSlippageBasisPoints of this value AND the explicit minimum output.
+        direction:
+          $ref: '#/components/schemas/MiningSwapDirection'
+        expiresAtHeight:
+          type: integer
+          format: int32
+          description: Last allowed containing-block height, enforced by the private queue.
+          minimum: 0
+        fundingBoxIds:
+          type: array
+          items:
+            type: string
+        inputAmount:
+          type: string
+        label:
+          type: string
+        maxAttempts:
+          type: integer
+          format: int32
+          minimum: 0
+        maxInputAmount:
+          type: string
+        maxSlippageBasisPoints:
+          type: integer
+          format: int32
+          minimum: 0
+        minOutputAmount:
+          type: string
+        notBeforeHeight:
+          type: integer
+          format: int32
+          minimum: 0
+        poolBoxId:
+          type: string
+        poolNft:
+          type: string
+        poolTreeHash:
+          type: string
+        receivingAddress:
+          type: string
+      additionalProperties: false
+    MiningSwaps:
+      type: object
+      required:
+      - items
+      - maxSwaps
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MiningSwap'
+        maxSwaps:
+          type: integer
+          format: int32
+          minimum: 0
     MnemonicVerifyRequest:
       type: object
       description: '`POST /api/v1/wallet/mnemonic/verify` request. Body-only secrets, never logged.'
