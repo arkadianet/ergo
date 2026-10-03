@@ -17,7 +17,7 @@
 //!   editing the corpus or the oracle to refresh/verify `verdicts.json`:
 //!
 //!   ```text
-//!   cargo test -p ergo-compiler --test corpus_smoke -- --ignored --nocapture
+//!   cargo test -p ergo-compiler --test it corpus_smoke:: -- --ignored --nocapture
 //!   ```
 //!
 //!   It needs `scala-cli` on PATH and (first run) network to resolve

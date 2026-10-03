@@ -46,7 +46,8 @@ pub(crate) use types::*;
 
 /// Maximum parser recursion and constructed expression/type depth.
 ///
-/// `expr()` and `type_()` share a recursion counter. Independently, structural
+/// Expressions, types, discarded patterns and nested type-parameter lists share
+/// a recursion counter. Independently, structural
 /// checks cover their results and every iterative operator/selector/type fold:
 /// a flat source expression can produce a deep AST without recursive parsing.
 /// Each fold checks its result before another layer can be added, keeping error
@@ -59,7 +60,8 @@ pub(crate) use types::*;
 /// in the `tree` module). Set conservatively ABOVE that consensus bound --
 /// source text can legitimately nest a little deeper than the
 /// assembled/segregated tree before the transform passes fold/fuse it down --
-/// while staying far below any real stack-overflow threshold. No vendored
+/// with representative boundary/error-cleanup tests on a 512KiB thread stack.
+/// Actual stack use depends on platform and caller stack size. No vendored
 /// corpus contract (`test-vectors/ergoscript/corpus`, ~79 real deployed
 /// scripts) comes anywhere close: the deepest, `rosen-bridge/RwtRepo.es`,
 /// bottoms out around a dozen levels of structural nesting (see
