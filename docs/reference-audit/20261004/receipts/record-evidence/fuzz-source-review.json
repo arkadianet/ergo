@@ -1,0 +1,342 @@
+{
+  "kind": "independent_read_only_scoped_source_review",
+  "reviewed_head": "10b4ccac72972beb74cd13abfaf96c679109b05c",
+  "reviewed_tree": "ada3cf5214ff17962871607d48cddb29a18b7abd",
+  "source_access": "Immutable git blobs at the requested frozen source, not moving worktree HEAD. Truncated tool output was not counted as full; missed workflow tail re-read separately. Shared dependency reads are scoped.",
+  "captured_utc": "2026-10-03T21:19:26.333700+00:00",
+  "files": [
+    {
+      "path": "scripts/fuzz-evidence.py",
+      "sha256": "81b5f11c3f6c98b68d15f0b88abe9d919453cb26c0df3c4a53441bceee64e2ee",
+      "bytes": 12591,
+      "lines": 249,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          249
+        ]
+      ]
+    },
+    {
+      "path": "scripts/fuzz-step.sh",
+      "sha256": "8ed19d350b98213d2299768dfcb45ece22a54feff9cf4b548b5fbf711ad055f8",
+      "bytes": 932,
+      "lines": 32,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          32
+        ]
+      ]
+    },
+    {
+      "path": "scripts/test_fuzz_evidence.py",
+      "sha256": "48dc3c96d9020e874a1b21d47b0684c21a860069644e2c6df29150d719d9d2fe",
+      "bytes": 7815,
+      "lines": 150,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          150
+        ]
+      ]
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+      "bytes": 18718,
+      "lines": 418,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          418
+        ]
+      ]
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+      "bytes": 20190,
+      "lines": 454,
+      "status": "SCOPED_READ",
+      "ranges": [
+        [
+          399,
+          451
+        ]
+      ]
+    },
+    {
+      "path": ".github/ci-tools.toml",
+      "sha256": "1eafef49a312043b45e4ca8124f72d457b9f862b922d02a3f5bdfa17a9b5847a",
+      "bytes": 307,
+      "lines": 13,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          13
+        ]
+      ]
+    },
+    {
+      "path": ".github/actions/rust/action.yml",
+      "sha256": "b9ec01f3de9b86e230ff567aefc672ebc152ab9d28bd6b5de09ef62756580bac",
+      "bytes": 1743,
+      "lines": 51,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          51
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/fuzz/Cargo.toml",
+      "sha256": "9a71f76a5fcb75d66bc10671f0da894ecfe49c21bf72d444cdebcf27fe7b59aa",
+      "bytes": 2315,
+      "lines": 99,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          99
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/fuzz/README.md",
+      "sha256": "5a308fda7d559f42a3ef54b1f12522e90f6280aeb206a6d38ccc950ca71a8e48",
+      "bytes": 12684,
+      "lines": 237,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          237
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/README.md",
+      "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+      "bytes": 19586,
+      "lines": 345,
+      "status": "SCOPED_READ",
+      "ranges": [
+        [
+          300,
+          310
+        ],
+        [
+          322,
+          345
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/docs/interface-contracts.md",
+      "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+      "bytes": 16463,
+      "lines": 300,
+      "status": "AUTHORED_DIFF_AND_SCOPED_READ",
+      "ranges": [
+        [
+          1,
+          33
+        ],
+        [
+          40,
+          72
+        ],
+        [
+          227,
+          280
+        ]
+      ]
+    },
+    {
+      "path": "docs/codemap/ergo-difftest.md",
+      "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+      "bytes": 7166,
+      "lines": 112,
+      "status": "AUTHORED_DIFF_REVIEW",
+      "ranges": []
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "697be95f064ebcff4e24ec8c3ee1942e75f0db9c2c5758fb7039f0062a733b5c",
+      "bytes": 3070,
+      "lines": 83,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          83
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/.gitignore",
+      "sha256": "bf59dc5a3e91038871e9226634d7705396a6f97592a3721b2c201fb02da71a63",
+      "bytes": 29,
+      "lines": 2,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "path": "ergo-difftest/fuzz/.gitignore",
+      "sha256": "7025d1e379742546ca6ea280e14460000d14064e9febf47fa7858228c4a1429a",
+      "bytes": 155,
+      "lines": 4,
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          4
+        ]
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/options/run.rs",
+      "sha256": "a899419ed149385cfd743d004b07d35bdf15702b0e729ed618331c92f8b259db",
+      "status": "FULL_READ",
+      "ranges": [
+        [
+          1,
+          42
+        ]
+      ],
+      "scope": "Local primary source of pinned cargo-fuzz0.13.1; no binary executed."
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/project.rs",
+      "sha256": "e4b604e921af6d85994d5f5a2ce7c7c1cf55aae76d4abfbf270ab6fa27c4e27e",
+      "status": "SCOPED_READ",
+      "ranges": [
+        [
+          116,
+          160
+        ],
+        [
+          334,
+          407
+        ],
+        [
+          482,
+          563
+        ],
+        [
+          920,
+          965
+        ]
+      ],
+      "scope": "Local primary source of pinned cargo-fuzz0.13.1; no binary executed."
+    }
+  ],
+  "manifest_checks": {
+    "matrix_target_count": 12,
+    "tracked_seed_files_by_target": {
+      "bounded_evaluator": 2,
+      "compiler_source": 2,
+      "constant": 4,
+      "ergo_box_candidate": 9,
+      "ergo_tree": 10,
+      "header": 1,
+      "p2p_delivery": 5,
+      "p2p_frame": 6,
+      "p2p_handshake": 2,
+      "p2p_message": 16,
+      "sigma_expr": 8,
+      "transaction": 3
+    },
+    "special_symlink_or_submodule_modes_at_reviewed_tree": 0,
+    "checks": "Read-only git tree enumeration only; no native build or campaign."
+  },
+  "findings": [],
+  "result": "No new blocking source defect identified within reviewed collection/wrapper/workflow and declared pure-filesystem unit scope. This is not a native campaign/detector/upload certification.",
+  "confirmed_source_contracts": [
+    {
+      "paths": [
+        "scripts/fuzz-step.sh:22",
+        "scripts/fuzz-step.sh:26"
+      ],
+      "claim": "argv is executed without eval; PIPESTATUS preserves command and tee exits, record retains both; command nonzero remains the wrapper result."
+    },
+    {
+      "paths": [
+        "scripts/fuzz-evidence.py:127",
+        "scripts/fuzz-evidence.py:150",
+        "scripts/fuzz-evidence.py:193"
+      ],
+      "claim": "Fresh start refuses existing output; duplicate phases refuse overwrites; absent start produces NOT_RUN; files copy with byte/hash comparisons and ordinary symlink refusal."
+    },
+    {
+      "paths": [
+        "scripts/fuzz-evidence.py:167"
+      ],
+      "claim": "COMMANDS_COMPLETED requires all four zero phases/logger exits, matching requested pins, observed selected compiler/tool identities, unchanged source/locks and a single unchanged build/run binary."
+    },
+    {
+      "paths": [
+        ".github/workflows/fuzz.yml:202",
+        ".github/workflows/fuzz.yml:213",
+        ".github/workflows/fuzz.yml:243",
+        ".github/workflows/fuzz.yml:250"
+      ],
+      "claim": "Scheduled native legs wire start, locked precheck, build, run, always-postcheck/finalizer/upload; build/run request the same sanitizer, triple, target directory and ASAN_OPTIONS. Artifact-upload execution remains unproved."
+    },
+    {
+      "paths": [
+        "scripts/fuzz-evidence.py:84",
+        "scripts/fuzz-evidence.py:142",
+        "scripts/fuzz-evidence.py:209"
+      ],
+      "claim": "Repo inventory includes tracked and nonignored untracked files, excluding mutable target corpus paths; initial/final seed and artifact inventories remain separate. Script/Rust/TOML/lock snapshots copy exact bytes. Dependency source, ignored generated inputs, signed attestation and atomic concurrent-source snapshot are outside this claim."
+    },
+    {
+      "paths": [
+        "cargo-fuzz0.13.1/src/project.rs:135",
+        "cargo-fuzz0.13.1/src/project.rs:336",
+        "cargo-fuzz0.13.1/src/project.rs:509"
+      ],
+      "claim": "Pinned primary source forwards target-dir to build/run, release mode uses release target layout, positional corpus paths pass through, target-specific artifact_prefix is established; collector release/<target> glob fits requested layout."
+    },
+    {
+      "paths": [
+        "scripts/test_fuzz_evidence.py:1"
+      ],
+      "claim": "11 authored test methods exercise ordinary filesystem/manifest behavior using fixtures and mocks; neither their presence nor prior root test receipts establish native Bug/artifact/replay/upload proof."
+    }
+  ],
+  "execution_limits": {
+    "source_mutations": false,
+    "unit_tests_executed_in_this_review": false,
+    "collector_start_finish_record_executed": false,
+    "tool_version_queries_executed": false,
+    "cargo_build_or_native_campaign_executed": false,
+    "detector_or_diagnostic_executed": false,
+    "jvm_guard_or_reinjection_executed": false,
+    "artifact_upload_executed": false,
+    "live_services_or_wallets_accessed": false,
+    "allowed_work_done": "Only ordinary read-only git/file reads and this control receipt."
+  },
+  "remaining_assurance": [
+    "Actual scheduled campaign completion, ASan/runtime detector behavior and native Bug-to-nonzero-to-matching-artifact chain remain separate evidence obligations.",
+    "Saved input replay, actual workflow artifact export/upload and independent JVM/guard/reinjection execution were not undertaken.",
+    "Unchanged guard/replay job source and prose are context only here; this review does not establish their runtime authority or replace their owner ledger dispositions.",
+    "Inventory/static identities detect observations at capture boundaries; they are not signed build attestation, dependency-source reconstruction or a cross-file atomic snapshot."
+  ]
+}

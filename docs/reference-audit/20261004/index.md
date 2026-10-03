@@ -1,6 +1,6 @@
 # Reference audit review record
 
-Snapshot: 2026-10-03T20:30:22.440329+00:00.
+Snapshot: 2026-10-03T21:50:12.833122+00:00.
 
 This record connects 160 original findings to 157 causes, owner dispositions and published draft PRs. It is a remediation record, not a current full source review or a reference-node certification.
 
@@ -11,8 +11,8 @@ The historical audit reviewed `5d62fd5851e74fcb965b4aba50e1b423127f46f1`. Remedi
 | Reported status | Original findings |
 |---|---:|
 | already_fixed | 28 |
-| fixed | 111 |
-| remaining_evidence | 21 |
+| fixed | 128 |
+| remaining_evidence | 4 |
 
 Statuses are copied from the owners. `remaining_evidence` can mean partial evidence, an external fixture prerequisite, or work still in progress; the full owner record preserves that distinction. A published draft is not merged work. Missing receipt fields do not imply a PASS.
 
@@ -31,21 +31,21 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | ECSP003 | ECSP003 | fixed | [ergo-chain-spec](historical/reports/ergo-chain-spec.md) | [#517](https://github.com/arkadianet/ergo/pull/517) |
 | ECSP004 | ECSP004 | fixed | [ergo-chain-spec](historical/reports/ergo-chain-spec.md) | [#517](https://github.com/arkadianet/ergo/pull/517) |
 | DIFF01 | DIFF01 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#543](https://github.com/arkadianet/ergo/pull/543) |
-| DIFF02 | DIFF02 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF03 | DIFF03 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
+| DIFF02 | DIFF02 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | [#562](https://github.com/arkadianet/ergo/pull/562) |
+| DIFF03 | DIFF03 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | [#562](https://github.com/arkadianet/ergo/pull/562) |
 | DIFF04 | DIFF04 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#531](https://github.com/arkadianet/ergo/pull/531) |
 | DIFF05 | DIFF05 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#531](https://github.com/arkadianet/ergo/pull/531) |
 | DIFF06 | DIFF06 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#531](https://github.com/arkadianet/ergo/pull/531) |
 | DIFF07 | DIFF07 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#531](https://github.com/arkadianet/ergo/pull/531) |
 | DIFF08 | DIFF08 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#540](https://github.com/arkadianet/ergo/pull/540) |
 | DIFF09 | DIFF09 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#543](https://github.com/arkadianet/ergo/pull/543) |
-| DIFF10 | DIFF10 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF11 | DIFF11 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF12 | DIFF12 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF13 | DIFF13 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF14 | DIFF14 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
+| DIFF10 | DIFF10 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#558](https://github.com/arkadianet/ergo/pull/558) |
+| DIFF11 | DIFF11 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#558](https://github.com/arkadianet/ergo/pull/558) |
+| DIFF12 | DIFF12 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#564](https://github.com/arkadianet/ergo/pull/564) |
+| DIFF13 | DIFF13 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#564](https://github.com/arkadianet/ergo/pull/564) |
+| DIFF14 | DIFF14 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#558](https://github.com/arkadianet/ergo/pull/558) |
 | DIFF15 | DIFF15 | already_fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
-| DIFF16 | DIFF16 | remaining_evidence | [ergo-difftest](historical/reports/ergo-difftest.md) | — |
+| DIFF16 | DIFF16 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#568](https://github.com/arkadianet/ergo/pull/568) |
 | DIFF17 | DIFF17 | fixed | [ergo-difftest](historical/reports/ergo-difftest.md) | [#531](https://github.com/arkadianet/ergo/pull/531) |
 | ES006 | ES006 | fixed | [ergo-ser](historical/reports/ergo-ser.md) | [#500](https://github.com/arkadianet/ergo/pull/500) |
 | ES007 | ES007 | fixed | [ergo-ser](historical/reports/ergo-ser.md) | [#504](https://github.com/arkadianet/ergo/pull/504) |
@@ -79,8 +79,8 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | ST005 | ST005 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#509](https://github.com/arkadianet/ergo/pull/509) |
 | ST006 | ST006 | already_fixed | [ergo-state](historical/reports/ergo-state.md) | — |
 | ST008 | ST008 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#509](https://github.com/arkadianet/ergo/pull/509) |
-| ST009 | ST009 | remaining_evidence | [ergo-state](historical/reports/ergo-state.md) | [#541](https://github.com/arkadianet/ergo/pull/541) |
-| ST007 | ST007 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#541](https://github.com/arkadianet/ergo/pull/541) |
+| ST009 | ST009 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#541](https://github.com/arkadianet/ergo/pull/541), [#561](https://github.com/arkadianet/ergo/pull/561), [#570](https://github.com/arkadianet/ergo/pull/570) |
+| ST007 | ST007 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#541](https://github.com/arkadianet/ergo/pull/541), [#561](https://github.com/arkadianet/ergo/pull/561) |
 | ST010 | ST010 | fixed | [ergo-state](historical/reports/ergo-state.md) | [#541](https://github.com/arkadianet/ergo/pull/541) |
 | SIG001 | SIG001 | fixed | [ergo-sigma](historical/reports/ergo-sigma.md) | [#498](https://github.com/arkadianet/ergo/pull/498), [#506](https://github.com/arkadianet/ergo/pull/506) |
 | SIG002 | SIG002 | fixed | [ergo-sigma](historical/reports/ergo-sigma.md) | [#498](https://github.com/arkadianet/ergo/pull/498) |
@@ -107,12 +107,12 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | EC007 | EC007 | fixed | [ergo-compiler](historical/reports/ergo-compiler.md) | [#516](https://github.com/arkadianet/ergo/pull/516) |
 | EV001 | EV001 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#511](https://github.com/arkadianet/ergo/pull/511) |
 | EV002 | EV002 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#511](https://github.com/arkadianet/ergo/pull/511) |
-| EV003 | EV003 | remaining_evidence | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
-| EV004 | EV004 | remaining_evidence | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
+| EV003 | EV003 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
+| EV004 | EV004 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
 | EV005 | ECSP003 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#517](https://github.com/arkadianet/ergo/pull/517) |
 | EV006 | EV006 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#553](https://github.com/arkadianet/ergo/pull/553), [#554](https://github.com/arkadianet/ergo/pull/554) |
 | EV007 | EV007 | already_fixed | [ergo-validation](historical/reports/ergo-validation.md) | — |
-| EV008 | EV008 | remaining_evidence | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
+| EV008 | EV008 | fixed | [ergo-validation](historical/reports/ergo-validation.md) | [#557](https://github.com/arkadianet/ergo/pull/557) |
 | WALLET001 | WALLET001 | fixed | [ergo-wallet](historical/reports/ergo-wallet.md) | [#502](https://github.com/arkadianet/ergo/pull/502) |
 | WALLET002 | WALLET002 | fixed | [ergo-wallet](historical/reports/ergo-wallet.md) | [#502](https://github.com/arkadianet/ergo/pull/502) |
 | WALLET003 | WALLET003 | already_fixed | [ergo-wallet](historical/reports/ergo-wallet.md) | — |
@@ -132,15 +132,15 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | EP2P008 | EP2P008 | fixed | [ergo-p2p](historical/reports/ergo-p2p.md) | [#529](https://github.com/arkadianet/ergo/pull/529) |
 | EP2P009 | EP2P009 | fixed | [ergo-p2p](historical/reports/ergo-p2p.md) | [#528](https://github.com/arkadianet/ergo/pull/528) |
 | EP2P010 | EP2P010 | fixed | [ergo-p2p](historical/reports/ergo-p2p.md) | [#528](https://github.com/arkadianet/ergo/pull/528) |
-| ESY001 | ESY001 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY002 | ESY002 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY003 | ESY003 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY004 | ESY004 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY005 | ESY005 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY006 | ESY006 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY007 | ESY007 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY008 | ESY008 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
-| ESY009 | ESY009 | remaining_evidence | [ergo-sync](historical/reports/ergo-sync.md) | — |
+| ESY001 | ESY001 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY002 | ESY002 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559), [#560](https://github.com/arkadianet/ergo/pull/560) |
+| ESY003 | ESY003 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559), [#565](https://github.com/arkadianet/ergo/pull/565) |
+| ESY004 | ESY004 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY005 | ESY005 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY006 | ESY006 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY007 | ESY007 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY008 | ESY008 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
+| ESY009 | ESY009 | fixed | [ergo-sync](historical/reports/ergo-sync.md) | [#559](https://github.com/arkadianet/ergo/pull/559) |
 | MP001 | MP001 | fixed | [ergo-mempool](historical/reports/ergo-mempool.md) | [#513](https://github.com/arkadianet/ergo/pull/513) |
 | MP002 | MP002 | fixed | [ergo-mempool](historical/reports/ergo-mempool.md) | [#520](https://github.com/arkadianet/ergo/pull/520) |
 | MP003 | MP003 | fixed | [ergo-mempool](historical/reports/ergo-mempool.md) | [#519](https://github.com/arkadianet/ergo/pull/519) |
@@ -156,11 +156,11 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | INDEXER001 | INDEXER001 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#526](https://github.com/arkadianet/ergo/pull/526) |
 | INDEXER002 | INDEXER002 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#526](https://github.com/arkadianet/ergo/pull/526) |
 | INDEXER003 | INDEXER003 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#546](https://github.com/arkadianet/ergo/pull/546) |
-| INDEXER004 | INDEXER004 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#546](https://github.com/arkadianet/ergo/pull/546) |
+| INDEXER004 | INDEXER004 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#546](https://github.com/arkadianet/ergo/pull/546), [#567](https://github.com/arkadianet/ergo/pull/567), [#569](https://github.com/arkadianet/ergo/pull/569) |
 | INDEXER005 | INDEXER005 | already_fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | — |
 | INDEXER006 | INDEXER006 | already_fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | — |
 | INDEXER007 | INDEXER007 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#544](https://github.com/arkadianet/ergo/pull/544) |
-| INDEXER008 | INDEXER008 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#544](https://github.com/arkadianet/ergo/pull/544) |
+| INDEXER008 | INDEXER008 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#544](https://github.com/arkadianet/ergo/pull/544), [#566](https://github.com/arkadianet/ergo/pull/566) |
 | INDEXER009 | INDEXER009 | fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | [#545](https://github.com/arkadianet/ergo/pull/545) |
 | INDEXER010 | INDEXER010 | already_fixed | [ergo-indexer](historical/reports/ergo-indexer.md) | — |
 | ECR001 | ECR001 | fixed | [ergo-crypto](historical/reports/ergo-crypto.md) | [#530](https://github.com/arkadianet/ergo/pull/530) |
@@ -174,8 +174,8 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | REST004 | REST004 | fixed | [ergo-rest-json](historical/reports/ergo-rest-json.md) | [#523](https://github.com/arkadianet/ergo/pull/523) |
 | REST005 | REST005 | already_fixed | [ergo-rest-json](historical/reports/ergo-rest-json.md) | — |
 | EFF001 | EFF001 | remaining_evidence | [ergo-difftest-fuzz](historical/reports/ergo-difftest-fuzz.md) | — |
-| EFF002 | EFF002 | remaining_evidence | [ergo-difftest-fuzz](historical/reports/ergo-difftest-fuzz.md) | — |
-| EFF003 | EFF003 | remaining_evidence | [ergo-difftest-fuzz](historical/reports/ergo-difftest-fuzz.md) | — |
+| EFF002 | EFF002 | remaining_evidence | [ergo-difftest-fuzz](historical/reports/ergo-difftest-fuzz.md) | [#568](https://github.com/arkadianet/ergo/pull/568) |
+| EFF003 | EFF003 | fixed | [ergo-difftest-fuzz](historical/reports/ergo-difftest-fuzz.md) | [#568](https://github.com/arkadianet/ergo/pull/568) |
 | WS001 | WS001 | already_fixed | [workspace](historical/reports/workspace.md) | — |
 | WS002 | WS002 | already_fixed | [workspace](historical/reports/workspace.md) | — |
 | WS003 | WS003 | fixed | [workspace](historical/reports/workspace.md) | [#503](https://github.com/arkadianet/ergo/pull/503) |

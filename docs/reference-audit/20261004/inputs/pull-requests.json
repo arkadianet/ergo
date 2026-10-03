@@ -61,7 +61,7 @@
     "url": "https://github.com/arkadianet/ergo/pull/503",
     "head": "codex/reference-audit-20261004-operator-docs",
     "base": "main",
-    "commit": "c4e738db",
+    "commit": "c4e738dba9a751743a8c98fd42a2287d3f4a0547",
     "findings": [
       "WS003"
     ]
@@ -102,7 +102,7 @@
     "url": "https://github.com/arkadianet/ergo/pull/507",
     "head": "codex/reference-audit-20261004-ledger-evidence",
     "base": "codex/reference-audit-20261004-operator-docs",
-    "commit": "302fb893",
+    "commit": "302fb893c48cde5d1843d633f1e9432b7386b639",
     "findings": [
       "WS004",
       "WS005"
@@ -658,5 +658,161 @@
     ],
     "url": "https://github.com/arkadianet/ergo/pull/557",
     "number": 557
+  },
+  {
+    "head": "codex/reference-audit-20261004-difftest-authority",
+    "base": "codex/reference-audit-20261004-difftest-pending-evidence",
+    "commit": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+    "findings": [
+      "DIFF10",
+      "DIFF11",
+      "DIFF14"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/558",
+    "number": 558
+  },
+  {
+    "head": "codex/reference-audit-20261004-sync-contracts",
+    "base": "codex/reference-audit-20261004-crypto-difficulty",
+    "commit": "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0",
+    "findings": [
+      "ESY001",
+      "ESY002",
+      "ESY003",
+      "ESY004",
+      "ESY005",
+      "ESY006",
+      "ESY007",
+      "ESY008",
+      "ESY009"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/559",
+    "number": 559,
+    "previous_published_commit": "18af68210620c024e1a462c6db374fb7990b635c"
+  },
+  {
+    "head": "codex/reference-audit-20261004-node-header-errors",
+    "base": "codex/reference-audit-20261004-sync-contracts",
+    "commit": "14a8223c3776dc642425620ef2bae846aab4b3b7",
+    "findings": [
+      "ESY002"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/560",
+    "number": 560,
+    "previous_published_commit": "69f48016b8dd038c2f254b4b128b720cd8929cbc"
+  },
+  {
+    "head": "codex/reference-audit-20261004-state-context-assurance",
+    "base": "codex/reference-audit-20261004-state-assurance",
+    "commit": "a79e52a6589cf4a4a1fd214b9ccddded5f01f052",
+    "findings": [
+      "ST007",
+      "ST009"
+    ],
+    "partial_findings": [
+      "ST009"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/561",
+    "number": 561
+  },
+  {
+    "head": "codex/reference-audit-20261004-difftest-reinject-source",
+    "base": "codex/reference-audit-20261004-difftest-authority",
+    "commit": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+    "findings": [
+      "DIFF02",
+      "DIFF03"
+    ],
+    "partial_findings": [
+      "DIFF02",
+      "DIFF03"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/562",
+    "number": 562
+  },
+  {
+    "head": "codex/reference-audit-20261004-record",
+    "base": "codex/reference-audit-20261004-ge-scan",
+    "commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+    "findings": [],
+    "url": "https://github.com/arkadianet/ergo/pull/563",
+    "number": 563
+  },
+  {
+    "head": "codex/reference-audit-20261004-difftest-replay",
+    "base": "codex/reference-audit-20261004-difftest-reinject-source",
+    "commit": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+    "findings": [
+      "DIFF12",
+      "DIFF13"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/564",
+    "number": 564
+  },
+  {
+    "head": "codex/reference-audit-20261004-sync-index",
+    "base": "codex/reference-audit-20261004-sync-contracts",
+    "commit": "25803fc9731eaa2d7b4d74e1e898e4618c15d4c6",
+    "findings": [
+      "ESY003"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/565",
+    "number": 565,
+    "previous_published_commit": "b463b76e5de95086fada799ce4c5e889b87e8187"
+  },
+  {
+    "head": "codex/reference-audit-20261004-indexer-bounds-followup",
+    "base": "codex/reference-audit-20261004-indexer-chain-source",
+    "commit": "6c71dc7cf633ed8743ac699b2d8154d90b671777",
+    "findings": [
+      "INDEXER008"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/566",
+    "number": 566
+  },
+  {
+    "head": "codex/reference-audit-20261004-indexer-applied-chain",
+    "base": "codex/reference-audit-20261004-indexer-bounds-followup",
+    "commit": "90191a99fc1d9463e845cc3b6b3229f5318b1a7a",
+    "findings": [
+      "INDEXER004"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/567",
+    "number": 567
+  },
+  {
+    "head": "codex/reference-audit-20261004-fuzz-evidence",
+    "base": "codex/reference-audit-20261004-difftest-replay",
+    "commit": "c361b104c74f8009b55b6a682b4b069405149d95",
+    "findings": [
+      "EFF002",
+      "EFF003",
+      "DIFF16"
+    ],
+    "partial_findings": [
+      "EFF002"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/568",
+    "number": 568
+  },
+  {
+    "head": "codex/reference-audit-20261004-indexer-zero-tip-review",
+    "base": "codex/reference-audit-20261004-indexer-applied-chain",
+    "commit": "efb1358367de1802804bfe71f523676051e3f32c",
+    "findings": [
+      "INDEXER004"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/569",
+    "number": 569
+  },
+  {
+    "head": "codex/reference-audit-20261004-state-historical-costs",
+    "base": "codex/reference-audit-20261004-validation-context",
+    "commit": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
+    "findings": [
+      "ST009"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/570",
+    "number": 570
   }
 ]

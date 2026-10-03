@@ -1,0 +1,18 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "ergo-state",
+    "--test",
+    "it",
+    "historical_activation_costs",
+    "--",
+    "--nocapture"
+  ],
+  "exit_code": 0,
+  "seconds": 4.203922146989498,
+  "source": "uncommitted historical initial-only fixture consumer atop d71daf6648571c202e0b11a86633b68f056de057",
+  "log_sha256": "d35725b4327c53d90d8c3966f0067e04d8d6bb848392662eeb9a345a57b18590"
+}

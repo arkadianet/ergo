@@ -1,0 +1,74 @@
+{
+  "group": 14,
+  "base_commit": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+  "head": "c361b104c74f8009b55b6a682b4b069405149d95",
+  "full_gate_commit": "10b4ccac72972beb74cd13abfaf96c679109b05c",
+  "commits": [
+    "10b4ccac72972beb74cd13abfaf96c679109b05c",
+    "26df859a6d9a9a9260edecced86b88a5d447547e",
+    "c361b104c74f8009b55b6a682b4b069405149d95"
+  ],
+  "original_ids": [
+    "EFF002",
+    "EFF003",
+    "DIFF-16"
+  ],
+  "gate": [
+    {
+      "check": "fmt",
+      "exit_code": 0
+    },
+    {
+      "check": "fragments",
+      "exit_code": 0
+    },
+    {
+      "check": "clippy",
+      "exit_code": 0
+    },
+    {
+      "check": "test",
+      "exit_code": 0
+    },
+    {
+      "check": "doc",
+      "exit_code": 0
+    },
+    {
+      "check": "policy",
+      "exit_code": 0
+    },
+    {
+      "check": "release-tests",
+      "exit_code": 0
+    },
+    {
+      "check": "fuzz-evidence-tests",
+      "exit_code": 0
+    },
+    {
+      "check": "fuzz-step-syntax",
+      "exit_code": 0
+    },
+    {
+      "check": "record-tests",
+      "exit_code": 0
+    },
+    {
+      "check": "detector-result-tests",
+      "exit_code": 0
+    }
+  ],
+  "workspace_totals": {
+    "passed": 7944,
+    "failed": 0,
+    "ignored": 98
+  },
+  "collector_python_units": 11,
+  "record_python_units": 10,
+  "saved_log_python_units": 6,
+  "exact_scope": "All full-gate receipts start/end clean10b4ccac;26df859a changes only fuzz/README corpus-output wording. Final doc-followup fragments,policy and eleven collector units start/end clean26df859a. Root final cumulative gate will bind combined current head.",
+  "read_only_cli_proof": "group14-cargo-fuzz-options.json supports target-dir build/run and positional corpus at pinned0.13.1",
+  "remaining_assurance": "EFF002 source repaired; actual workflow/artifact upload NOT_RUN. EFF001 native Bug\u2192nonzero\u2192matching raw artifact\u2192replay/upload and DIFF02/03 independent detector/generated rediscovery remain unclosed. No stopped native diagnostic/injection/reinjection/JVM differential/guard/upload action repeated.",
+  "documentation_followup_scope": "26df859a and c361b104 alter only fuzz/README corpus wording and the CI config link. Source/workflow/helpers identical to full-gated10b4ccac; final fragments/policy start/end cleanc361;11 collector units were also checked clean26df. Root cumulative gate binds final combined head."
+}
