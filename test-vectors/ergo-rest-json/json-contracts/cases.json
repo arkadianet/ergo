@@ -1,0 +1,287 @@
+{
+  "reference": "sigma-state6.0.6/Scala2.12.20/Circe0.14.5",
+  "numeric": [
+    {
+      "kind": "number",
+      "input": "100",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "1e2",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "100.0",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "1.000000",
+      "bigint": "1",
+      "long": "1"
+    },
+    {
+      "kind": "number",
+      "input": "100e-2",
+      "bigint": "1",
+      "long": "1"
+    },
+    {
+      "kind": "number",
+      "input": "1000e-2",
+      "bigint": "10",
+      "long": "10"
+    },
+    {
+      "kind": "number",
+      "input": "1e-2",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "1.5",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "9007199254740993",
+      "bigint": "9007199254740993",
+      "long": "9007199254740993"
+    },
+    {
+      "kind": "number",
+      "input": "9007199254740993.0",
+      "bigint": "9007199254740993",
+      "long": "9007199254740993"
+    },
+    {
+      "kind": "number",
+      "input": "9223372036854775806",
+      "bigint": "9223372036854775806",
+      "long": "9223372036854775806"
+    },
+    {
+      "kind": "number",
+      "input": "9223372036854775807",
+      "bigint": "9223372036854775807",
+      "long": "9223372036854775807"
+    },
+    {
+      "kind": "number",
+      "input": "9223372036854775808",
+      "bigint": "9223372036854775808",
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "18446744073709551615",
+      "bigint": "18446744073709551615",
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "1e80",
+      "bigint": "100000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "0",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "-0",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "-0.0",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "0e100",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "0e-100",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "-1",
+      "bigint": "-1",
+      "long": "-1"
+    },
+    {
+      "kind": "number",
+      "input": "\"100\"",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "\"+100\"",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "\"100.0\"",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "\"1e2\"",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "\"-0\"",
+      "bigint": "0",
+      "long": "0"
+    },
+    {
+      "kind": "number",
+      "input": "\"00100\"",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "\" 100\"",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "\"100 \"",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "\"1E+2\"",
+      "bigint": "100",
+      "long": "100"
+    },
+    {
+      "kind": "number",
+      "input": "\"1.\"",
+      "bigint": null,
+      "long": null
+    },
+    {
+      "kind": "number",
+      "input": "\"01.0\"",
+      "bigint": "1",
+      "long": "1"
+    },
+    {
+      "kind": "number",
+      "input": "\"1e+002\"",
+      "bigint": "100",
+      "long": "100"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "boundary",
+      "input": "1e262143",
+      "digits": 262144
+    },
+    {
+      "kind": "boundary",
+      "input": "1e262144",
+      "digits": null
+    },
+    {
+      "kind": "boundary",
+      "input": "0e999999999999999999999",
+      "digits": 1
+    },
+    {
+      "kind": "boundary",
+      "input": "1e999999999999999999999",
+      "digits": null
+    },
+    {
+      "kind": "boundary",
+      "input": "1e-999999999999999999999",
+      "digits": null
+    }
+  ],
+  "values": [
+    {
+      "kind": "value",
+      "input": "0101",
+      "canonical": "0101"
+    },
+    {
+      "kind": "value",
+      "input": "0100",
+      "canonical": "0100"
+    },
+    {
+      "kind": "value",
+      "input": "0105",
+      "canonical": "0101"
+    },
+    {
+      "kind": "value",
+      "input": "010101",
+      "canonical": "0101"
+    },
+    {
+      "kind": "value",
+      "input": "01",
+      "canonical": null
+    },
+    {
+      "kind": "value",
+      "input": "0402",
+      "canonical": "0402"
+    },
+    {
+      "kind": "value",
+      "input": "040201",
+      "canonical": "0402"
+    },
+    {
+      "kind": "value",
+      "input": "860201010402",
+      "canonical": "860201010402"
+    },
+    {
+      "kind": "value",
+      "input": "86020101040201",
+      "canonical": "860201010402"
+    },
+    {
+      "kind": "value",
+      "input": "86020101",
+      "canonical": null
+    },
+    {
+      "kind": "value",
+      "input": "9800",
+      "canonical": null
+    }
+  ]
+}

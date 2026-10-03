@@ -89,11 +89,9 @@ pub struct ScalaPowSolutions {
     pub d: JsonValue,
 }
 
-/// Read an unsigned Scala `BigInt` field out of JSON, accepting exactly
-/// what circe's `Decoder[BigInt]` accepts: a bare JSON number — the form
-/// Scala's own encoders emit, so a Scala-shaped payload must never be
-/// rejected at the door — or a decimal string, which keeps any client
-/// still sending the older string form working.
+/// Read a nonnegative Scala `BigInt` magnitude from a JSON number or numeric
+/// string. Exact integral decimal/exponent forms follow pinned Circe0.14.5;
+/// negative nonzero values are refused by this field's unsigned policy.
 ///
 /// Shared by the two such fields on the REST surface: the mining target
 /// `b` (`WorkMessage`) and the Autolykos v1 PoW distance `d`
@@ -102,23 +100,96 @@ pub struct ScalaPowSolutions {
 /// so a negative or fractional value is malformed input rather than
 /// something to reinterpret.
 ///
-/// The number arm is exact only because this crate enables serde_json's
-/// `arbitrary_precision`: these values run past f64's exact-integer
-/// range, and a lossy parse would silently corrupt a header id.
+/// `arbitrary_precision` retains the decimal spelling without an f64 round trip.
+/// Nonzero results are limited to the reference's 2^18 decimal digits before
+/// materializing exponent zeros. Zero needs no exponent expansion.
 ///
 /// `field` names the JSON path in the error, e.g. `"powSolutions.d"`.
 pub(crate) fn unsigned_bigint_from_json(field: &str, value: &JsonValue) -> Result<BigUint, String> {
-    let decimal = match value {
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => s.clone(),
+    match value {
+        JsonValue::Number(n) => exact_unsigned_decimal(&n.to_string()),
+        JsonValue::String(s) => exact_unsigned_decimal(s),
         other => {
             return Err(format!(
                 "{field} must be a JSON number or decimal string, got {other}"
             ))
         }
+    }
+    .map_err(|reason| format!("{field}: {reason}"))
+}
+
+// Circe0.14.5 BiggerDecimal.MaxBigIntegerDigits. Check the resulting length,
+// not the exponent alone: significant digits and scale can cancel each other.
+const MAX_BIGINT_DECIMAL_DIGITS: usize = 1 << 18;
+
+fn exact_unsigned_decimal(decimal: &str) -> Result<BigUint, &'static str> {
+    let (mantissa, exponent) = decimal
+        .split_once(['e', 'E'])
+        .map_or((decimal, None), |(m, e)| (m, Some(e)));
+    let (negative, magnitude) = mantissa
+        .strip_prefix('-')
+        .map_or((false, mantissa), |m| (true, m));
+    let (integer, fractional) = magnitude
+        .split_once('.')
+        .map_or((magnitude, None), |(i, f)| (i, Some(f)));
+    let digits_only = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits_only(integer) || fractional.is_some_and(|f| !digits_only(f)) {
+        return Err("invalid decimal syntax");
+    }
+    if let Some(exponent) = exponent {
+        let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if !digits_only(digits) {
+            return Err("invalid exponent syntax");
+        }
+    }
+    let fractional = fractional.unwrap_or("");
+    let mut digits = String::with_capacity(integer.len() + fractional.len());
+    digits.push_str(integer);
+    digits.push_str(fractional);
+    let nonzero = digits.trim_matches('0');
+    if nonzero.is_empty() {
+        return Ok(BigUint::default());
+    }
+    if negative {
+        return Err("negative value is outside the unsigned magnitude domain");
+    }
+    let trailing_zeros = digits.len() - digits.trim_end_matches('0').len();
+    let exponent: i64 = match exponent {
+        None => 0,
+        Some(e) => e
+            .parse()
+            .map_err(|_| "nonzero exponent is outside the integral digit bound")?,
     };
-    BigUint::parse_bytes(decimal.as_bytes(), 10)
-        .ok_or_else(|| format!("{field} {decimal:?} is not a valid unsigned decimal"))
+    let fractional_len =
+        i64::try_from(fractional.len()).map_err(|_| "decimal scale is too large")?;
+    let trailing_zeros = i64::try_from(trailing_zeros).map_err(|_| "decimal scale is too large")?;
+    let zeros = exponent
+        .checked_sub(fractional_len)
+        .and_then(|v| v.checked_add(trailing_zeros))
+        .ok_or("decimal scale is too large")?;
+    let zeros = usize::try_from(zeros).map_err(|_| "fractional value is not an integer")?;
+    let result_len = nonzero
+        .len()
+        .checked_add(zeros)
+        .ok_or("decimal digit count overflow")?;
+    if result_len > MAX_BIGINT_DECIMAL_DIGITS {
+        return Err("nonzero integer exceeds the reference's 2^18 decimal digit bound");
+    }
+    let mut integer = Vec::with_capacity(result_len);
+    integer.extend_from_slice(nonzero.as_bytes());
+    integer.resize(result_len, b'0');
+    BigUint::parse_bytes(&integer, 10).ok_or("invalid unsigned decimal magnitude")
+}
+
+fn deserialize_nonnegative_long<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let value = JsonValue::deserialize(deserializer)?;
+    let magnitude = unsigned_bigint_from_json("nonnegative Scala Long", &value)
+        .map_err(serde::de::Error::custom)?;
+    let value = u64::try_from(magnitude).map_err(serde::de::Error::custom)?;
+    i64::try_from(value).map_err(serde::de::Error::custom)?;
+    Ok(value)
 }
 
 /// `BlockTransactions.jsonEncoder` shape:
@@ -188,6 +259,7 @@ pub struct ScalaDataInput {
 pub struct ScalaOutput {
     #[serde(rename = "boxId")]
     pub box_id: String,
+    #[serde(deserialize_with = "deserialize_nonnegative_long")]
     pub value: u64,
     #[serde(rename = "ergoTree")]
     pub ergo_tree: String,
@@ -209,6 +281,7 @@ pub struct ScalaOutput {
 pub struct ScalaAsset {
     #[serde(rename = "tokenId")]
     pub token_id: String,
+    #[serde(deserialize_with = "deserialize_nonnegative_long")]
     pub amount: u64,
 }
 
@@ -240,6 +313,7 @@ pub struct ScalaTransactionInput {
 /// rationale as [`ScalaTransactionInput`].
 #[derive(Clone, Debug, Deserialize)]
 pub struct ScalaOutputInput {
+    #[serde(deserialize_with = "deserialize_nonnegative_long")]
     pub value: u64,
     #[serde(rename = "ergoTree")]
     pub ergo_tree: String,
