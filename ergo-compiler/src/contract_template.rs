@@ -64,6 +64,13 @@ pub struct Parameter {
 /// bytes (`ValueSerializer.serialize` of the graph-built body, with inline
 /// `ConstantPlaceholder(index)` nodes for params). `tree_version` is always
 /// `None` here (`ContractTemplate.apply`, ContractTemplate.scala:204-211).
+///
+/// Manual construction is trusted: parameter indices must address `const_types`,
+/// defaults must have the same count/types as that table, and expression
+/// placeholders/child types must agree with it. All types/values/expressions must
+/// satisfy the wire writers' bounds. Serialization does not validate these
+/// relationships; invalid manual fields can panic or emit inconsistent bytes.
+/// Prefer [`compile_contract`] for validated source input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractTemplate {
     pub name: String,
@@ -388,6 +395,11 @@ impl ContractTemplate {
     /// (`ValueSerializer.serialize(expressionTree, w)`), the natural byte-exact
     /// oracle target (ContractTemplate JSON `expressionTree` field / binary
     /// serializer's inner block).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a manually constructed expression violates the wire writer's
+    /// invariants or bounds. See [`ContractTemplate`] for construction requirements.
     pub fn expression_tree_bytes(&self) -> Vec<u8> {
         let mut w = VlqWriter::new();
         // The graph-built root already holds inline constants + placeholders; the
@@ -399,6 +411,12 @@ impl ContractTemplate {
 
     /// Full `ContractTemplate.serializer` bytes (ContractTemplate.scala:227-260),
     /// the canonical wire form used for byte-exact oracle parity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if manually constructed types, default values or the expression
+    /// cannot serialize. This method trusts the table/parameter relationships
+    /// documented on [`ContractTemplate`]; it is not a validating constructor.
     pub fn serialize(&self) -> Vec<u8> {
         let mut w = VlqWriter::new();
         // putOption(treeVersion)(putUByte) — always None here → 0x00.

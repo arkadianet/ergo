@@ -400,22 +400,13 @@ fn compile_inner(
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
 
-    // Post-write self-check (compiler-design-ledger.md D-C6): the bytes about to be used to
-    // derive addresses must round-trip through our own deserializer. A
-    // failure means compile() would hand out a P2S address whose script no
-    // deserializer accepts — funds sent there would be stranded.
-    //
-    // The re-read runs under the ACTIVATED-version axis (`tree_version`), NOT
-    // the emitted header version (always 0). Scala gates V6-embeddable TYPE
-    // codes (`SUnsignedBigInt`, …) on the ACTIVATED version
-    // (`TypeSerializer.getEmbeddableType` → `VersionContext.isV6Activated`,
-    // `VersionContext.scala:33`; deser under `withVersions(activatedVersion,
-    // treeVersion)`, `ErgoTreeSerializer.scala:148-154`), so a header-v0 tree
-    // carrying a code-9 type that a `tree_version >= 3` compile produces DOES
-    // re-parse on a V6-activated network — `read_ergo_tree_with_activated_version`
-    // mirrors that. A genuinely unrepresentable emission (a real serializer
-    // failure) still rejects reject-side-safely: a wrong-reject surfaces a
-    // user error, a wrong-accept strands funds.
+    // Post-write self-check: reject outputs our header-scoped reader refuses
+    // before deriving addresses. The frontend version sets ambient activation;
+    // it cannot replace the emitted header0 type table. Pinned6.0.6 examples
+    // in compiled-reader compile successfully in Scala but their header0 type9
+    // outputs fail its independent reader. This local validation policy refuses
+    // those outputs without changing the header or incoming consensus gates.
+    // A local successful parse is not a proof of arbitrary spendability.
     {
         use ergo_primitives::reader::VlqReader;
         use ergo_ser::ergo_tree::read_ergo_tree_with_activated_version;
@@ -425,7 +416,7 @@ fn compile_inner(
             return Err(CompileError::Serializer {
                 what: format!(
                     "emitted tree is not self-readable ({e:?}): refusing to derive an \
-                     address for a script no deserializer accepts"
+                     address for a locally unreadable script"
                 ),
             });
         }
@@ -542,15 +533,6 @@ mod tests {
     fn reparse(bytes: &[u8]) -> ErgoTree {
         let mut r = VlqReader::new(bytes);
         read_ergo_tree(&mut r).expect("compiled tree must reparse")
-    }
-
-    /// Reparse under a V6-activated deserializer — the axis the compile
-    /// self-check uses for a `tree_version >= 3` build. Mirrors Scala
-    /// re-reading a header-v0 tree on a V6-activated network.
-    fn reparse_v6(bytes: &[u8]) -> ErgoTree {
-        let mut r = VlqReader::new(bytes);
-        ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut r, 3)
-            .expect("compiled tree must reparse under V6 activation")
     }
 
     // ----- happy path -----
@@ -1602,85 +1584,26 @@ mod tests {
     }
 
     #[test]
-    fn compile_v6_embeddable_type_code_under_v0_header_accepts_at_tv3_matching_oracle() {
-        // The post-write self-check (D-C6) re-reads compile()'s own bytes and
-        // refuses to derive an address for a script no deserializer accepts.
-        // Scala gates the V6-embeddable TYPE codes (`SUnsignedBigInt` = code
-        // 9, …) on the ACTIVATED version (`TypeSerializer.getEmbeddableType` →
-        // `VersionContext.isV6Activated`, `VersionContext.scala:33`; deser
-        // under `withVersions(activatedVersion, treeVersion)`,
-        // `ErgoTreeSerializer.scala:148-154`), NOT the tree header (always 0).
-        // The self-check reads via
-        // `read_ergo_tree_with_activated_version(tree_version)` and ACCEPTS
-        // these at tv=3, byte-identical to the oracle (verified live vs
-        // sigma-state 6.0.2, ORACLE_TREE_VERSION=3).
-        //
-        // All 7 captured blast-radius shapes (bare + val-bound; every target
-        // type + Coll/tuple/Option container) accept byte-exact at tv=3:
-        for (src, want) in [
-            (
-                "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
-                "1000d1e6c6a70409",
-            ),
-            (
-                "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
-                "1000d1e6e30109",
-            ),
-            (
-                "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
-                "1000d1e6c6a70415",
-            ),
-            (
-                "sigmaProp(SELF.R4[(UnsignedBigInt,Int)].isDefined)",
-                "1000d1e6c6a7044504",
-            ),
-            (
-                "sigmaProp(SELF.R4[Option[UnsignedBigInt]].isDefined)",
-                "1000d1e6c6a7042d",
-            ),
-            (
-                "sigmaProp(getVar[Coll[UnsignedBigInt]](1).isDefined)",
-                "1000d1e6e30115",
-            ),
-            (
-                "sigmaProp(SELF.R4[(Int,UnsignedBigInt)].isDefined)",
-                "1000d1e6c6a7044009",
-            ),
-        ] {
-            let r = compile(&ScriptEnv::new(), src, 3, NetworkPrefix::Testnet)
-                .unwrap_or_else(|e| panic!("{src}: self-check must accept at tv=3: {e:?}"));
-            assert_eq!(hex::encode(&r.tree_bytes), want, "{src}");
-            // The accepted bytes must round-trip through the SAME activated-version
-            // reader (defends the self-check's own invariant).
-            assert_eq!(reparse_v6(&r.tree_bytes), r.ergo_tree, "{src}");
+    fn compiled_header0_v6_type_outputs_refused_by_pinned_reader_do_not_get_addresses() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/cases.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            assert_eq!(case["compile_outcome"], "COMPILE_ACCEPT");
+            for result in case["reader_results"].as_array().unwrap() {
+                assert_eq!(result["outcome"], "READ_ERROR");
+            }
+            let source = case["source"].as_str().unwrap();
+            let result = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet);
+            assert!(
+                matches!(result, Err(CompileError::Serializer { .. })),
+                "{}: {result:?}",
+                case["id"]
+            );
         }
-
-        // At tree_version 0 these shapes reject at the PARSER on BOTH sides —
-        // `UnsignedBigInt` is not a known type name under v5 (oracle:
-        // `REJECT <pos> ParserException`; parity holds, the self-check axis is
-        // never reached). Class-exact.
-        for src in [
-            "sigmaProp(SELF.R4[UnsignedBigInt].isDefined)",
-            "sigmaProp(getVar[UnsignedBigInt](1).isDefined)",
-            "sigmaProp(SELF.R4[Coll[UnsignedBigInt]].isDefined)",
-        ] {
-            let err = compile(&ScriptEnv::new(), src, 0, NetworkPrefix::Testnet)
-                .expect_err("v6 type name must reject at tv=0");
-            assert_eq!(err.class(), "ParserException", "{src}");
-        }
-
-        // A VAL-BOUND
-        // `Coll[UnsignedBigInt]()` under `.size` folds the UBI data OFF the wire
-        // before the self-check ever sees a code-9 type, so it stays byte- and
-        // address-identical to the oracle (`10010400d1937e730005c1a7`).
-        let r = compile(
-            &ScriptEnv::new(),
-            "{ val u = Coll[UnsignedBigInt](); sigmaProp(u.size.toLong == SELF.value) }",
-            3,
-            NetworkPrefix::Testnet,
-        )
-        .expect("val-inline + SizeOf fold erases the UBI data before the v0 gate");
-        assert_eq!(hex::encode(&r.tree_bytes), "10010400d1937e730005c1a7");
     }
 
     #[test]

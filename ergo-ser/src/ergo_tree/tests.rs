@@ -1610,39 +1610,19 @@ fn pre_v3_unsigned_bigint_embeddable_type_wraps_unparsed() {
     assert_eq!(w.result(), bytes);
 }
 
-/// F1: a SIZELESS header-v0 tree whose body carries a V6-embeddable TYPE code
-/// (`SUnsignedBigInt` = code 9, here `SELF.R4[UnsignedBigInt].isDefined` →
-/// `1000d1e6c6a70409`) is REJECTED by the default header-version-gated
-/// [`read_ergo_tree`] but ACCEPTED by
-/// [`read_ergo_tree_with_activated_version`] at activated version 3 — mirroring
-/// Scala `getEmbeddableType` gating on the ACTIVATED version, not the header.
-/// The compile self-check uses the activated-version reader so a
-/// `tree_version >= 3` compile's header-v0 output round-trips (oracle:
-/// `cc sigmaProp(SELF.R4[UnsignedBigInt].isDefined)`, ORACLE_TREE_VERSION=3 →
-/// `OK 1000d1e6c6a70409`; sigma-state 6.0.2).
+/// The independently captured6.0.6 compiler emits this header0 type9 tree,
+/// but its reader refuses it at every tested activation. Activation cannot
+/// replace the header's embeddable table; the full seven-case fixture is also
+/// checked in the activated reader tests.
 #[test]
-fn sizeless_v0_v6_embeddable_type_accepts_only_under_activated_v6() {
+fn sizeless_v0_v6_type_is_not_certified_by_an_activated_table_override() {
     let bytes = hex::decode("1000d1e6c6a70409").unwrap();
-    // Default reader: header-version (0) gate rejects code 9.
-    let err = read_ergo_tree(&mut VlqReader::new(&bytes))
-        .expect_err("header-v0 reader must reject the v6 embeddable code");
-    assert!(
-        matches!(&err, ReadError::SigmaValidation { rule_id: 1007, args, .. } if args == &[9]),
-        "{err:?}"
-    );
-    // Activated-version reader at v3: accepts, round-trips byte-identically.
-    let mut r = VlqReader::new(&bytes);
-    let tree = read_ergo_tree_with_activated_version(&mut r, 3)
-        .expect("activated-v6 reader must accept the v6 embeddable code");
-    assert!(r.is_empty(), "no trailing bytes");
-    let mut w = VlqWriter::new();
-    write_ergo_tree(&mut w, &tree).unwrap();
-    assert_eq!(w.result(), bytes, "re-serialize is byte-identical");
-    // Below-v3 activated override stays strict (an activated < V6 network).
-    assert!(
-        read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), 2).is_err(),
-        "activated v2 must still reject code 9"
-    );
+    assert!(read_ergo_tree(&mut VlqReader::new(&bytes)).is_err());
+    for activation in 1..=3 {
+        assert!(
+            read_ergo_tree_with_activated_version(&mut VlqReader::new(&bytes), activation).is_err()
+        );
+    }
 }
 
 /// `check_tree_version_supported` is Scala's `VersionContext` require
