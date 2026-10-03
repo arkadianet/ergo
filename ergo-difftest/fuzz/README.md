@@ -7,54 +7,38 @@
 ## Quick start
 
 ```bash
-# From the repository root, install the pinned nightly toolchain and cargo-fuzz.
-# Keep rust-toolchain.toml pinned to stable 1.95.0 for the rest of the workspace.
-FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
-FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
-rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
-cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
+# Install a nightly toolchain (do NOT touch rust-toolchain.toml — it stays
+# pinned to stable 1.95.0 for the rest of the workspace) and cargo-fuzz.
+rustup toolchain install nightly --profile minimal
+cargo install cargo-fuzz --locked
 
 # From ergo-difftest/fuzz/ (or ergo-difftest/, cargo-fuzz finds the sibling
 # fuzz/ dir either way):
 cd ergo-difftest/fuzz
 
 # Resolve this separate workspace against its committed dependency lock.
-cargo +"$FUZZ_TOOLCHAIN" metadata --locked --format-version 1 > /dev/null
+cargo +nightly metadata --locked --format-version 1 > /dev/null
 
 # Build every target (ASan-instrumented, release).
-cargo +"$FUZZ_TOOLCHAIN" fuzz build
+cargo +nightly fuzz build
 
 # Run one target with the committed seed corpus for a bounded time budget
 # (seconds) or a bounded run count — either works, pick one:
-cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree -- -max_total_time=60
-cargo +"$FUZZ_TOOLCHAIN" fuzz run constant -- -runs=20000
+cargo +nightly fuzz run ergo_tree -- -max_total_time=60
+cargo +nightly fuzz run constant -- -runs=20000
 
 # cargo-fuzz has no --locked flag; check that its build preserved the lock.
 # CI performs this check even when a fuzz target reports a crash.
 git diff --exit-code -- Cargo.lock
 
 # All surface/target names
-cargo +"$FUZZ_TOOLCHAIN" fuzz list
+cargo +nightly fuzz list
 
 # If a run finds a crash, minimize the failing input before filing an issue:
-cargo +"$FUZZ_TOOLCHAIN" fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
+cargo +nightly fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
 # (run from ergo-difftest/, so the artifact path above is
 #  ergo-difftest/fuzz/artifacts/<target>/crash-<hash>)
 ```
-
-The tool versions come from [`.github/ci-tools.toml`](../../../.github/ci-tools.toml).
-When a workspace dependency changes, update this detached lock with Cargo from
-the repository root, then rerun the locked precheck and affected targets:
-
-```bash
-cargo +"$FUZZ_TOOLCHAIN" update --manifest-path ergo-difftest/fuzz/Cargo.toml \
-  -p num-bigint --precise 0.5.1
-cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
-  --locked --format-version 1 > /dev/null
-```
-
-Use the changed dependency's package and version in the update command. Commit
-both workspace lockfiles together; do not edit lockfile package entries by hand.
 
 `fuzz/artifacts/` and `fuzz/target/` are gitignored — crash inputs never get
 committed by accident. When a crash reproduces, do not fix the underlying
@@ -148,11 +132,38 @@ help libFuzzer find interesting coverage quickly.
 
 ```bash
 # Seed from a larger set of real vectors (mutation basis, not committed)
-cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree -- \
+cargo +nightly fuzz run ergo_tree -- \
   -seed_inputs=corpus/ergo_tree            \
   -corpus=corpus/ergo_tree                 \
   -jobs=4
 ```
+
+## Pinned CI setup and lock maintenance
+
+Use the versions in [`.github/ci-tools.toml`](../../../.github/ci-tools.toml)
+to reproduce CI. From the repository root:
+
+```bash
+FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
+FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
+rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  --locked --format-version 1 > /dev/null
+```
+
+When a workspace dependency changes, update the detached lock with Cargo,
+then rerun the locked precheck and affected targets. For example:
+
+```bash
+cargo +"$FUZZ_TOOLCHAIN" update --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  -p num-bigint --precise 0.5.1
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  --locked --format-version 1 > /dev/null
+```
+
+Use the changed dependency's package and version in the update command. Commit
+both workspace lockfiles together; do not edit lockfile package entries by hand.
 
 ## PR CI gates
 
