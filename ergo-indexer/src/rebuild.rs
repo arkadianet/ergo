@@ -393,7 +393,7 @@ fn rebuild_box_chunk(
             if let Some(template_hash) = template_hash_for_box_bytes(tree_bytes)? {
                 let t =
                     load_template_into_map(&template_table, &mut touched_templates, template_hash)?;
-                append_box_entry(&t.template_hash, &mut t.segment, gi_i64, &mut staged);
+                append_box_entry(&t.template_hash, &mut t.segment, gi_i64, &mut staged)?;
                 if spent {
                     flip_box_segment_entry(
                         &t.template_hash,
@@ -414,7 +414,7 @@ fn rebuild_box_chunk(
                     token.token_id,
                 )?;
                 let parent = token_unique_id(&rec_t.token_id);
-                append_box_entry(&parent, &mut rec_t.segment, gi_i64, &mut staged);
+                append_box_entry(&parent, &mut rec_t.segment, gi_i64, &mut staged)?;
                 if spent {
                     flip_box_segment_entry(
                         &parent,

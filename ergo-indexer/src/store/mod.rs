@@ -806,3 +806,65 @@ mod repair_exclusion_tests {
         assert!(store.acquire_repair().is_ok());
     }
 }
+
+#[cfg(test)]
+mod spill_topology_tests {
+    use super::*;
+    use crate::address::write_indexed_address;
+    use crate::segment_id::token_unique_id;
+    use crate::template::write_indexed_template;
+    use crate::token::write_indexed_token;
+    use ergo_primitives::writer::VlqWriter;
+
+    // ----- error paths -----
+    #[test]
+    fn small_parent_rows_report_missing_first_spill_for_every_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = IndexerStore::open(&dir.path().join("indexer.redb")).unwrap();
+        let id = Digest32::from_bytes([7; 32]);
+        let mut address = IndexedAddress::empty(id);
+        address.segment.box_segment_count = 3;
+        address.segment.tx_segment_count = 3;
+        let mut template = IndexedTemplate::empty(id);
+        template.segment.box_segment_count = 3;
+        let mut token = IndexedToken::empty(id);
+        token.segment.box_segment_count = 3;
+        let write = store.begin_write().unwrap();
+        let mut writer = VlqWriter::new();
+        write_indexed_address(&mut writer, &address);
+        write
+            .open_table(tables::INDEXED_ADDRESS)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_template(&mut writer, &template);
+        write
+            .open_table(tables::INDEXED_TEMPLATE)
+            .unwrap()
+            .insert(id.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        writer.clear();
+        write_indexed_token(&mut writer, &token);
+        let token_key = token_unique_id(&id);
+        write
+            .open_table(tables::INDEXED_TOKEN)
+            .unwrap()
+            .insert(token_key.as_bytes().as_slice(), writer.as_slice())
+            .unwrap();
+        write.commit().unwrap();
+        // Keep the fixture count small. Production readers start with Vec::new
+        // and only grow after a decoded spill, independently of this count.
+        for result in [
+            store.read_address_box_entries(&id),
+            store.read_address_tx_entries(&id),
+            store.read_template_box_entries(&id),
+            store.read_token_box_entries(&id),
+        ] {
+            assert!(matches!(
+                result,
+                Err(IndexerError::SpillMissingFromParent { seg_num: 0, .. })
+            ));
+        }
+    }
+}
