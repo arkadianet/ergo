@@ -20,8 +20,10 @@ import { createWalletBuilder } from './wallet-builder.js';
 import { createPrivateMiningQueue } from './wallet-private.js';
 import { createWalletMaintenance } from './wallet-maintenance.js';
 import { decimal } from './wallet-transaction.js';
+import { mountMiningSwaps } from './wallet-swaps.js';
 
 let root = null;
+let miningSwaps = null;
 let authUnsub = null;
 // True while a recovery phrase is on screen (init flow): polling is suspended
 // and navigation is guarded so a background refresh / accidental nav can't
@@ -166,6 +168,7 @@ export function mount(el_) {
     el('button', { class: 'btn btn--primary', type: 'button', text: '↗ Build transaction', onclick: () => selectTab('build') }),
     el('button', { class: 'btn', type: 'button', text: '↓ Receive', onclick: () => selectTab('receive') }),
   );
+  miningSwaps = mountMiningSwaps(q('[data-keys-panel]'));
   const prompt = q('[data-wallet-prompt]');
   prompt.append(
     el('span', { text: 'Authorize with the operator api_key to use the wallet.' }),
@@ -174,11 +177,13 @@ export function mount(el_) {
 }
 
 export function onShow() {
+  miningSwaps?.onShow();
   // subscribe() fires immediately with the current auth state, gating the view.
   authUnsub = subscribe(renderAuthGate);
 }
 
 export function onHide() {
+  miningSwaps?.onHide();
   if (authUnsub) {
     authUnsub();
     authUnsub = null;
@@ -193,6 +198,7 @@ export function isBusy() {
 }
 
 export function onSlow() {
+  void miningSwaps?.refresh();
   if (isBusy()) return;
   if (!q('[data-wallet-app]') || q('[data-wallet-app]').hidden) return;
   return refresh();
@@ -237,6 +243,7 @@ function renderAuthGate(s) {
 }
 
 function scrubSecrets() {
+  miningSwaps?.update(null);
   if (!root) return;
   generation++;
   privateQueue?.dispose(); privateQueue = null;
@@ -365,6 +372,7 @@ function renderScanBanner(s) {
 
 // ── reads: balances + addresses ──────────────────────────────────────────────
 function lockedNotes() {
+  miningSwaps?.update(null);
   builder?.dispose(); builder = null;
   maintenance?.dispose(); maintenance = null;
   walletBalance = null; myAssets = []; assetsRendered = false;
@@ -855,11 +863,12 @@ async function refresh() {
     const res = await api.wallet.status();
     if (epoch !== generation || res.status === 403) return;
     if (!res.ok) {
-      walletStatus = null; unlockRendered = false;
+      walletStatus = null; miningSwaps?.update(null); unlockRendered = false;
       q('[data-status-body]').replaceChildren(el('p', { class: 'banner banner--warn', text: 'Wallet status unavailable. Reconnecting…' }));
       return;
     }
     walletStatus = res.data;
+    miningSwaps?.update(walletStatus);
     renderScanBanner(walletStatus);
     if (activeTab === 'private') showPrivateQueue();
     if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }

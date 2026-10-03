@@ -431,6 +431,37 @@ pub trait WalletAdmin: Send + Sync {
         ))
     }
 
+    /// Bounded canonical direct swaps, authorized by the wallet owner.
+    async fn mining_swaps(&self) -> Result<native::dto::MiningSwaps, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining swaps not implemented".into(),
+        ))
+    }
+    async fn preview_mining_swap(
+        &self,
+        _request: native::dto::MiningSwapRequest,
+    ) -> Result<native::dto::MiningSwapPreview, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining swaps not implemented".into(),
+        ))
+    }
+    async fn create_mining_swap(
+        &self,
+        _request: native::dto::MiningSwapRequest,
+    ) -> Result<native::dto::MiningSwap, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining swaps not implemented".into(),
+        ))
+    }
+    async fn cancel_mining_swap(
+        &self,
+        _swap_id: String,
+    ) -> Result<native::dto::MiningSwap, WalletAdminError> {
+        Err(WalletAdminError::Internal(
+            "wallet mining swaps not implemented".into(),
+        ))
+    }
+
     /// Owner-approved finite maintenance jobs, always delivered to private mining.
     async fn mining_jobs(&self) -> Result<native::dto::WalletJobs, WalletAdminError> {
         Err(WalletAdminError::Internal(

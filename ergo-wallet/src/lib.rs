@@ -17,6 +17,7 @@ pub mod mnemonic;
 pub mod proving;
 pub mod scan;
 pub mod secret;
+pub mod spectrum_n2t;
 pub mod state;
 pub mod storage;
 pub mod tx_builder;

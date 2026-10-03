@@ -5,7 +5,7 @@
 //!
 //! 1. **Script gate**: reject any input whose ErgoTree is not in the
 //!    currently-supported set (bare ProveDlog/ProveDHTuple or matured
-//!    miner-reward wrapper). Context-sensitive scripts verified against a
+//!    miner-reward wrapper, and canonical Spectrum N2T v1 pool). Context-sensitive scripts verified against a
 //!    synthetic context could self-verify against a different context than
 //!    the chain uses, producing proofs that the chain rejects.
 //! 2. Build a per-input `ReductionContext` from the frozen
@@ -80,6 +80,9 @@ impl Prover {
     /// - Canonical miner-reward wrapper `{ HEIGHT >= R_4 && proveDlog(R_5) }`
     ///   (detected by `ergo_state::wallet::miner_reward::extract_miner_reward_pubkey`).
     ///
+    /// - Canonical Spectrum N2T v1 pool (exact proposition hash). Its
+    ///   reduction depends on transaction boxes, not the synthetic pre-header.
+    ///
     /// Context-sensitive scripts could self-verify against the synthetic
     /// pre-header but fail on the chain's real context. This gate can be
     /// lifted once the context is derived from committed chain state.
@@ -120,11 +123,13 @@ impl Prover {
                 input_box.candidate.ergo_tree_bytes(),
             )
             .is_some();
-            if !is_trivially_reducible && !is_miner_reward {
+            let is_pool =
+                crate::spectrum_n2t::is_supported_tree(input_box.candidate.ergo_tree_bytes());
+            if !is_trivially_reducible && !is_miner_reward && !is_pool {
                 return Err(WalletError::TxBuild(format!(
                     "input {idx} has an unsupported script family; \
-                     only bare ProveDlog/ProveDHTuple and matured miner-reward \
-                     boxes are currently spendable"
+                     only bare ProveDlog/ProveDHTuple, matured miner-reward \
+                     boxes and canonical Spectrum N2T v1 pools are currently spendable"
                 )));
             }
         }

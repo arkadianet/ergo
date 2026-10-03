@@ -207,3 +207,36 @@ async fn wallet_mining_jobs_require_operator_key_before_body_parsing() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn bounded_swap_routes_require_operator_key_before_parsing_private_intents() {
+    for (method, path) in [
+        ("GET", "/api/v1/wallet/mining-swaps"),
+        ("POST", "/api/v1/wallet/mining-swaps"),
+        ("POST", "/api/v1/wallet/mining-swaps/preview"),
+        ("POST", "/api/v1/wallet/mining-swaps/1/cancel"),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(
+            app().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/wallet/mining-swaps/preview")
+        .header(API_KEY_HEADER, PLAINTEXT_KEY)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(
+        app().oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}

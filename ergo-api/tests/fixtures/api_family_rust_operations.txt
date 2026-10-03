@@ -168,6 +168,10 @@ post /api/v1/wallet/lock
 get /api/v1/wallet/mining-jobs
 post /api/v1/wallet/mining-jobs
 post /api/v1/wallet/mining-jobs/{job_id}/cancel
+get /api/v1/wallet/mining-swaps
+post /api/v1/wallet/mining-swaps
+post /api/v1/wallet/mining-swaps/preview
+post /api/v1/wallet/mining-swaps/{swap_id}/cancel
 post /api/v1/wallet/mnemonic/verify
 post /api/v1/wallet/rescan
 post /api/v1/wallet/restore

@@ -13,6 +13,7 @@ mod jobs;
 mod lifecycle;
 mod rewards;
 mod status;
+mod swaps;
 mod transactions;
 mod tx_construction;
 
@@ -23,5 +24,6 @@ pub use jobs::*;
 pub use lifecycle::*;
 pub use rewards::*;
 pub use status::*;
+pub use swaps::*;
 pub use transactions::*;
 pub use tx_construction::*;

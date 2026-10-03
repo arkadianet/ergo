@@ -154,6 +154,7 @@ async fn wallet_js_module_carries_spa_security_headers() {
     assert_spa_security_headers("/js/wallet.js").await;
     assert_spa_security_headers("/js/wallet-builder.js").await;
     assert_spa_security_headers("/js/wallet-transaction.js").await;
+    assert_spa_security_headers("/js/wallet-swaps.js").await;
 }
 
 #[tokio::test]
