@@ -14,7 +14,6 @@ use ergo_ser::header::read_header;
 use ergo_state::{ChainStateRead, HeaderSectionStore};
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::SyncExecutor;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::NodeConfig;
@@ -113,6 +112,8 @@ fn check_configured_genesis(
 /// Everything [`setup`] produces, threaded into [`super::run_inner_with_backend`]'s
 /// `NodeState` construction and (for `chain_meta`/`bootstrap_kind`) the
 /// handshake + identity building that follows.
+type ShadowFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 pub(super) struct SyncSetup {
     pub coordinator: SyncCoordinator,
     pub executor: SyncExecutor,
@@ -122,7 +123,7 @@ pub(super) struct SyncSetup {
         Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     pub indexer_cancel: Arc<AtomicBool>,
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
-    pub shadow_task_handle: Option<JoinHandle<()>>,
+    pub shadow_future: Option<ShadowFuture>,
     pub chain_meta: ergo_state::chain::ChainStateMeta,
     pub backend_is_utxo: bool,
     pub bootstrap_kind: crate::node::identity::BootstrapKind,
@@ -406,9 +407,9 @@ pub(super) fn setup(
     // touches the apply path — it reads through its own `ChainStoreReader`
     // and writes only the shared `ShadowState` the snapshot emitter / event
     // differ project out.
-    let (shadow_state, shadow_task_handle): (
+    let (shadow_state, shadow_future): (
         Option<Arc<super::super::shadow_watch::ShadowState>>,
-        Option<JoinHandle<()>>,
+        Option<ShadowFuture>,
     ) = if config.shadow_config.enabled {
         match super::super::shadow_watch::HttpShadowReference::new(
             &config.shadow_config.reference_url,
@@ -447,7 +448,10 @@ pub(super) fn setup(
                     lag_tolerance = config.shadow_config.lag_tolerance,
                     "shadow validation enabled"
                 );
-                let task = tokio::spawn(super::super::shadow_watch::run(
+                // Retain an unpolled future until all fallible boot phases
+                // finish. Dropping failed setup releases these store readers
+                // without leaving a detached reference worker.
+                let task = Box::pin(super::super::shadow_watch::run(
                     config.shadow_config.clone(),
                     reference,
                     local,
@@ -624,7 +628,7 @@ pub(super) fn setup(
         indexer_event_observer,
         indexer_cancel,
         shadow_state,
-        shadow_task_handle,
+        shadow_future,
         chain_meta,
         backend_is_utxo,
         bootstrap_kind,
@@ -677,6 +681,34 @@ mod tests {
             )
             .unwrap();
         (dir, store, actual)
+    }
+
+    #[tokio::test]
+    async fn failed_late_setup_drops_unstarted_shadow_store_readers() {
+        let (dir, store, _) = store_with_genesis_header();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+        let mut config = NodeConfig::load(cli).unwrap();
+        config.nipopow_bootstrap = true;
+        config.indexer_config.enabled = false;
+        config.shadow_config.enabled = true;
+        // The reference future remains unpolled; no service is contacted.
+        config.shadow_config.reference_url = "http://127.0.0.1:1".into();
+        let mut store = StateBackendKind::Utxo(store);
+        let error = match setup(&config, &mut store, 0) {
+            Ok(_) => panic!("partial NiPoPoW header progress must fail late setup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("cannot resume from partial"),
+            "{error}"
+        );
+        drop(store);
+        StateStore::open(&dir.path().join("state.redb"))
+            .expect("failed setup must not retain a detached shadow database owner");
     }
 
     #[test]
