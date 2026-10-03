@@ -5,6 +5,52 @@ use redb::ReadableDatabase;
 
 use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError, WriterConfig};
 
+fn next_tracked_index(existing: &[(u64, [u8; 33], Vec<u32>)]) -> Result<u64, WalletAdminError> {
+    existing
+        .iter()
+        .map(|(index, _, _)| *index)
+        .max()
+        .map_or(Ok(0), |index| {
+            index
+                .checked_add(1)
+                .ok_or_else(|| WalletAdminError::Internal("tracked key index exhausted".into()))
+        })
+}
+
+/// Reconcile the native EIP-3 external-address counter with manually tracked
+/// paths in the same account, retaining the existing fixed-account policy.
+fn next_eip3_address_index(
+    head: u64,
+    existing: &[(u64, [u8; 33], Vec<u32>)],
+) -> Result<u32, WalletAdminError> {
+    use ergo_wallet::derivation::HARDENED_OFFSET;
+    let prefix = [
+        HARDENED_OFFSET | 44,
+        HARDENED_OFFSET | 429,
+        HARDENED_OFFSET,
+        0,
+    ];
+    let tracked_head = existing
+        .iter()
+        .filter_map(|(_, _, path)| {
+            if path.len() == 5 && path.starts_with(&prefix) && path[4] < HARDENED_OFFSET {
+                Some(u64::from(path[4]))
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    let next = head
+        .max(tracked_head)
+        .checked_add(1)
+        .filter(|next| *next < u64::from(HARDENED_OFFSET))
+        .ok_or_else(|| {
+            WalletAdminError::BadRequest("non-hardened EIP-3 address index space exhausted".into())
+        })?;
+    Ok(next as u32)
+}
+
 /// Render a BIP32 path (raw u32 component slice) as a `m/...` string.
 /// Mirrors `DerivationPath::Display` without constructing the struct.
 pub(crate) fn render_derivation_path(components: &[u32]) -> String {
@@ -34,10 +80,9 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 /// advance when `new_derivation_head` is `Some`. This matters for
 /// `derive_next_key_impl`: folding the head advance into this same commit
 /// means a crash can never leave a tracked pubkey persisted without its
-/// corresponding head advance (which would otherwise wedge future
-/// `deriveNextKey` calls permanently, since the head is the sole source for
-/// the next path and is never independently reconciled against the tracked
-/// set). `derive_key_impl` passes `None` — it has no head to advance.
+/// corresponding head advance. The next-key path also reconciles that counter
+/// with manually tracked paths in the same account. `derive_key_impl` passes
+/// `None` because it may derive an unrelated path.
 ///
 /// WALLET_VISIBLE_ADDRESSES is rebuilt using the ordered paths: hide the master
 /// only when the next tracked entry has the EIP-3 account prefix.
@@ -177,12 +222,7 @@ pub(crate) async fn derive_key_impl(
     }
 
     // Compute next derivation_path_index = max existing + 1.
-    let next_idx = existing
-        .iter()
-        .map(|(idx, _, _)| *idx)
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0);
+    let next_idx = next_tracked_index(&existing)?;
 
     // Derive the pubkey.
     let pubkey = unlocked
@@ -229,8 +269,8 @@ pub(crate) async fn derive_key_impl(
 /// [`persist_tracked_pubkey`] (tracked pubkey + `WALLET_VISIBLE_ADDRESSES`
 /// rebuild), passing `Some(new_head)` so the `WALLET_DERIVATION_HEAD` advance
 /// commits in the SAME transaction — a crash can never persist the tracked
-/// pubkey without also advancing the head (which would otherwise wedge every
-/// future call, since the head is the sole source for the next path).
+/// pubkey without also advancing the head. Manually tracked paths in the same
+/// native EIP-3 account are included when choosing the next index.
 pub(crate) async fn derive_next_key_impl(
     storage: &RwLock<ergo_wallet::storage::SecretStorage>,
     state: &RwLock<ergo_wallet::state::WalletState>,
@@ -262,21 +302,8 @@ pub(crate) async fn derive_next_key_impl(
         }
     };
 
-    let new_head = head + 1;
-
-    // Build path: m/44'/429'/0'/0/{new_head}
-    // new_head is the non-hardened address index (sequential counter).
-    let path_components = vec![
-        HARDENED_OFFSET | 44,
-        HARDENED_OFFSET | 429,
-        HARDENED_OFFSET,
-        0u32,
-        new_head as u32,
-    ];
-    let path = DerivationPath::from_components(path_components.clone());
-    let path_str = render_derivation_path(&path_components);
-
-    // Dedup check (same as derive_key).
+    // Read tracked paths before choosing the next address so manual derivation
+    // cannot leave the persisted sequential counter behind an existing path.
     let read_txn = db
         .begin_read()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
@@ -284,18 +311,23 @@ pub(crate) async fn derive_next_key_impl(
     let existing: Vec<(u64, [u8; 33], Vec<u32>)> = wallet_reader
         .tracked_pubkeys_with_paths()
         .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let new_head = next_eip3_address_index(head, &existing)?;
+    let path_components = vec![
+        HARDENED_OFFSET | 44,
+        HARDENED_OFFSET | 429,
+        HARDENED_OFFSET,
+        0,
+        new_head,
+    ];
+    let path = DerivationPath::from_components(path_components.clone());
+    let path_str = render_derivation_path(&path_components);
     for (_, _, existing_path) in &existing {
         if existing_path.as_slice() == path.components() {
             return Err(WalletAdminError::DerivationPathExists);
         }
     }
 
-    let next_idx = existing
-        .iter()
-        .map(|(idx, _, _)| *idx)
-        .max()
-        .map(|m| m + 1)
-        .unwrap_or(0);
+    let next_idx = next_tracked_index(&existing)?;
 
     // Derive the pubkey.
     let pubkey = unlocked.master.derive_pubkey_at_path(&path).map_err(|e| {
@@ -314,7 +346,7 @@ pub(crate) async fn derive_next_key_impl(
 
     // Persist WALLET_TRACKED_PUBKEYS + WALLET_VISIBLE_ADDRESSES, shared with
     // derive_key_impl so the two paths can never drift on this logic.
-    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, Some(new_head))?;
+    persist_tracked_pubkey(db, next_idx, &pubkey, &meta, Some(u64::from(new_head)))?;
     drop(storage_guard);
 
     // Update in-memory WalletState.
@@ -407,6 +439,106 @@ pub(crate) async fn get_private_key_impl(
 mod tests {
     use super::*;
     use ergo_state::wallet::hydration::HydrationSource;
+
+    struct EmptyChain;
+    impl ChainStateAccessor for EmptyChain {
+        fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(0)
+        }
+        fn tip_height(&self) -> Result<u32, ergo_state::store::StateError> {
+            Ok(0)
+        }
+        fn is_pruned(&self) -> bool {
+            false
+        }
+        fn read_block_at(
+            &self,
+            _: u32,
+        ) -> Result<
+            Option<ergo_state::wallet::scan::RescanBlock>,
+            ergo_state::wallet::scan::RescanReadError,
+        > {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn derivation_indices_reject_exhaustion_without_wrapping_or_hardening() {
+        let prefix = vec![
+            44 | 0x8000_0000,
+            429 | 0x8000_0000,
+            0x8000_0000,
+            0,
+            0x7fff_ffff,
+        ];
+        assert!(next_eip3_address_index(0, &[(1, [0; 33], prefix)]).is_err());
+        assert!(next_eip3_address_index(u64::MAX, &[]).is_err());
+        assert!(next_tracked_index(&[(u64::MAX, [0; 33], vec![])]).is_err());
+    }
+
+    #[tokio::test]
+    async fn manual_eip3_derivation_reconciles_next_key_across_reopen() {
+        let reference: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-vectors/wallet/path-visibility/scala_6_0_6.json"
+        )))
+        .unwrap();
+        let case = reference["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "master-eip3-three")
+            .unwrap();
+        let expected = case["nextPath"].as_str().unwrap();
+        assert_eq!(expected, "m/44'/429'/0'/0/2");
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("wallet.redb");
+        let db = redb::Database::create(&database_path).unwrap();
+        let mut storage = ergo_wallet::storage::SecretStorage::open(dir.path().join("secret"));
+        storage.restore("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", "", "pw", false).unwrap();
+        let mut state = ergo_wallet::state::WalletState::empty(false);
+        let network = ergo_ser::address::NetworkPrefix::Mainnet;
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage,
+            &mut state,
+            &db,
+            network,
+            "pw",
+        )
+        .unwrap();
+        let storage = RwLock::new(storage);
+        let state = RwLock::new(state);
+        let request = ergo_api::wallet::admin_advanced::DeriveKeyRequest {
+            derivation_path: "m/44'/429'/0'/0/1".into(),
+        };
+        let manual = derive_key_impl(&request, &storage, &state, &db, &EmptyChain, network)
+            .await
+            .unwrap();
+        let next = derive_next_key_impl(&storage, &state, &db, &EmptyChain, network)
+            .await
+            .unwrap();
+        assert_eq!(next.derivation_path, expected);
+        assert_ne!(manual.address, next.address);
+        assert_eq!(state.read().visible_addresses().len(), 3);
+        let addresses = state.read().visible_addresses().to_vec();
+        drop(db);
+        let reopened = redb::Database::open(&database_path).unwrap();
+        let mut after = ergo_wallet::state::WalletState::empty(false);
+        crate::wallet_boot::WalletBootService::unlock_and_sync(
+            &mut storage.write(),
+            &mut after,
+            &reopened,
+            network,
+            "pw",
+        )
+        .unwrap();
+        assert_eq!(after.visible_addresses(), addresses);
+        let after = RwLock::new(after);
+        let next = derive_next_key_impl(&storage, &after, &reopened, &EmptyChain, network)
+            .await
+            .unwrap();
+        assert_eq!(next.derivation_path, "m/44'/429'/0'/0/3");
+    }
 
     #[test]
     fn persisted_visibility_and_live_hydration_follow_pinned_paths() {
