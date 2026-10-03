@@ -151,6 +151,29 @@ fn save(db: &redb::Database, id: u64, record: &Record) -> Result<(), WalletAdmin
         .map_err(internal)?;
     write.commit().map_err(internal)
 }
+fn follower_cursor(db: &redb::Database) -> Result<u64, WalletAdminError> {
+    let read = db.begin_read().map_err(internal)?;
+    let table = match read.open_table(META) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+        Err(error) => return Err(internal(error)),
+    };
+    Ok(table
+        .get("last_followed_id")
+        .map_err(internal)?
+        .map(|guard| guard.value())
+        .unwrap_or(0))
+}
+fn mark_followed(db: &redb::Database, id: u64) -> Result<(), WalletAdminError> {
+    let write = db.begin_write().map_err(internal)?;
+    write
+        .open_table(META)
+        .map_err(internal)?
+        .insert("last_followed_id", id)
+        .map_err(internal)?;
+    write.commit().map_err(internal)
+}
+
 fn transition(record: &mut Record, state: WalletJobState, detail: Option<String>) {
     record.swap.state = state;
     record.swap.detail = detail;
@@ -187,7 +210,9 @@ pub(super) fn list(db: &redb::Database) -> Result<MiningSwaps, WalletAdminError>
 pub(crate) fn reserved_inputs(db: &redb::Database) -> Result<BTreeSet<[u8; 32]>, WalletAdminError> {
     let mut result = BTreeSet::new();
     for (_, record) in records(db)? {
-        if record.swap.state.terminal() || record.swap.state == WalletJobState::Preparing {
+        if (record.swap.state.terminal() && record.swap.state != WalletJobState::Mined)
+            || record.swap.state == WalletJobState::Preparing
+        {
             continue;
         }
         for value in &record.swap.request.funding_box_ids {
@@ -537,8 +562,10 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         return Ok(());
     }
     let height = ctx.chain.tip_height().map_err(internal)?;
-    let pending = records(ctx.db)?;
-    if pending.is_empty() {
+    let mut pending = records(ctx.db)?;
+    if pending.iter().all(|(_, record)| {
+        record.swap.state.terminal() && record.swap.state != WalletJobState::Mined
+    }) {
         return Ok(());
     }
     // One bounded authoritative read per wake. Unavailable metadata is never
@@ -547,10 +574,19 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         Ok(entries) => entries,
         Err(_) => return Ok(()),
     };
+    // Rotate the bounded follower workload. One missing-history intent cannot
+    // repeatedly consume the whole scan allowance and starve later approvals.
+    let cursor = follower_cursor(ctx.db)?;
+    let start = pending.iter().position(|(id, _)| *id > cursor).unwrap_or(0);
+    pending.rotate_left(start);
     let mut followed_pool = false;
+    let mut retirement_slot = Some(());
     for (id, mut record) in pending {
         macro_rules! retire_generation {
-            () => {
+            () => {{
+                if retirement_slot.take().is_none() {
+                    continue;
+                }
                 match retire(ctx, &mut record, &metadata).await {
                     Ok(retired) => retired,
                     Err(error) => {
@@ -563,7 +599,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                         return Ok(());
                     }
                 }
-            };
+            }};
         }
         if record.swap.state.terminal() && record.swap.state != WalletJobState::Mined {
             continue;
@@ -660,6 +696,9 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             .lookup_utxo(&bytes32(&old_pool)?)
             .map_err(internal)?
             .is_none();
+        if pool_spent && followed_pool {
+            continue;
+        }
         if pool_spent && record.signed_hex.is_some() {
             if !record.retiring_for_rebuild {
                 record.retiring_for_rebuild = true;
@@ -683,6 +722,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 continue;
             }
             followed_pool = true;
+            mark_followed(ctx.db, id)?;
             let before_follow = record.clone();
             match follow_pool(ctx, &mut record) {
                 Ok(true) => {}
@@ -745,12 +785,14 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             return Ok(());
         }
         if record.signed_hex.is_none() && ctx.storage.read().unlocked().is_none() {
-            transition(
-                &mut record,
-                WalletJobState::WaitingForWallet,
-                Some("unlock node wallet to sign approved swap".into()),
-            );
-            save(ctx.db, id, &record)?;
+            if record.swap.state != WalletJobState::WaitingForWallet {
+                transition(
+                    &mut record,
+                    WalletJobState::WaitingForWallet,
+                    Some("unlock node wallet to sign approved swap".into()),
+                );
+                save(ctx.db, id, &record)?;
+            }
             continue;
         }
         record.swap.attempts += 1;
@@ -1150,6 +1192,59 @@ mod tests {
     }
 
     // ----- error paths -----
+    #[tokio::test]
+    async fn swap_bounded_follower_rotates_past_missing_history_intents() {
+        let queue = queue("queued", false, false);
+        let mut harness = Harness::new(queue, 10);
+        harness.signed();
+        committed_inputs(&mut harness);
+        let (id, mut first) = records(&harness.db).unwrap().remove(0);
+        first.swap.tx_id = None;
+        first.signed_hex = None;
+        first.swap.current_pool_box_id = "55".repeat(32);
+        transition(&mut first, WalletJobState::Waiting, None);
+        save(&harness.db, id, &first).unwrap();
+        let second = create(&harness.db, first.swap.request.clone(), 10, [1; 32]).unwrap();
+        let (_, mut other) = records(&harness.db)
+            .unwrap()
+            .into_iter()
+            .find(|(id, _)| *id == 2)
+            .unwrap();
+        other.swap.current_pool_box_id = "66".repeat(32);
+        save(&harness.db, 2, &other).unwrap();
+        tick(&harness.ctx()).await.unwrap();
+        assert_eq!(follower_cursor(&harness.db).unwrap(), 1);
+        assert!(list(&harness.db)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == second.id)
+            .unwrap()
+            .detail
+            .is_none());
+        tick(&harness.ctx()).await.unwrap();
+        assert_eq!(follower_cursor(&harness.db).unwrap(), 2);
+        assert!(list(&harness.db)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == second.id)
+            .unwrap()
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("history"));
+    }
+    #[test]
+    fn swap_mined_intent_keeps_funding_reserved_before_rollback_reconciliation() {
+        let (_dir, db) = database();
+        create(&db, request(), 10, [1; 32]).unwrap();
+        let (id, mut record) = records(&db).unwrap().remove(0);
+        transition(&mut record, WalletJobState::Mined, None);
+        save(&db, id, &record).unwrap();
+        assert!(reserved_inputs(&db).unwrap().contains(&[0x33; 32]));
+    }
+
     #[tokio::test]
     async fn swap_uncertain_admission_recovers_authoritative_queue_before_exhausted_attempts() {
         let queue = queue("in_candidate", false, false);
