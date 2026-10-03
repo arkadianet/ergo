@@ -35,13 +35,13 @@ use ergo_sync::executor::SyncExecutor;
 use ergo_validation::context::ProtocolParams;
 
 /// Seeded chain tip: the fed headers descend from it, so it is the only
-/// ancestor the pipeline has to resolve.
-const SEED_HEIGHT: u32 = 1_795_073;
+/// ancestor required for difficulty. Seed its 50-header cache ancestry too.
+const SEED_HEIGHT: u32 = 1_795_121;
 /// First fed header.
-const FEED_LO: u32 = 1_795_074;
+const FEED_LO: u32 = 1_795_122;
 /// Last fed header. `FEED_LO ..= FEED_HI` all have parents strictly
 /// inside the 128-block epoch that starts at `1_795_072`.
-const FEED_HI: u32 = 1_795_083;
+const FEED_HI: u32 = 1_795_131;
 
 // ----- helpers -----
 
@@ -97,24 +97,30 @@ fn seeded_digest_backend(
     .expect("open digest store");
 
     let seed_bytes = &headers[&SEED_HEIGHT];
-    let seed_header = parse_header(seed_bytes);
     let seed_id = header_id(seed_bytes);
     // Linear extension: each fed header adds its own decoded difficulty on
     // top of this, so `is_new_best` holds all the way down the range.
     let seed_score = (SEED_HEIGHT as u64).to_be_bytes().to_vec();
-    let meta = HeaderMeta {
-        parent_id: *seed_header.parent_id.as_bytes(),
-        height: SEED_HEIGHT,
-        cumulative_score: seed_score.clone(),
-        pow_validity: 1,
-        timestamp: seed_header.timestamp,
-    };
-    store
-        .store_validated_header(&seed_id, seed_bytes, &meta, None)
-        .expect("store seed header");
-    store
-        .seed_header_chain_index_for_test(SEED_HEIGHT, &seed_id)
-        .expect("seed chain index");
+    // The actual executor advertises a 50-header best-branch cache. Seed
+    // that complete local window, not just the single difficulty parent.
+    for height in (SEED_HEIGHT - 49)..=SEED_HEIGHT {
+        let bytes = &headers[&height];
+        let header = parse_header(bytes);
+        let id = header_id(bytes);
+        let meta = HeaderMeta {
+            parent_id: *header.parent_id.as_bytes(),
+            height,
+            cumulative_score: (height as u64).to_be_bytes().to_vec(),
+            pow_validity: 1,
+            timestamp: header.timestamp,
+        };
+        store
+            .store_validated_header(&id, bytes, &meta, None)
+            .expect("store cache ancestor");
+        store
+            .seed_header_chain_index_for_test(height, &id)
+            .expect("seed chain index");
+    }
     // Header-first IBD shape: headers are validated and persisted while the
     // full-block tip is still 0 and the root is still the genesis digest.
     // That is what a live Mode 5 node looks like during header sync, and it
@@ -272,7 +278,7 @@ fn mode5_validation_verdict_durably_invalidates_the_branch() {
     // header-by-header after every restart — the node would never converge.
     //
     // The verdict classes the executor routes to `invalidate_validation_branch`
-    // (`Validation`, `HeaderMeta`, `EpochExtension`, `AdProofsHashMismatch`)
+    // (`Validation`, `EpochExtension`, `AdProofsHashMismatch`)
     // are mode-independent, so this path IS reachable in Mode 5; only the
     // stale-root-ambiguous digest apply failure takes the session-mark path.
     let tmp = tempfile::tempdir().expect("tempdir");

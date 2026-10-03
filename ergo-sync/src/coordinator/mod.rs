@@ -2,8 +2,9 @@
 //!
 //! Takes incoming events (messages received, timeouts, state changes) and
 //! produces outgoing actions (send messages, persist data, validate headers).
-//! Pure logic — no I/O or async beyond `tracing` diagnostics; every other
-//! effect is an emitted `Action`. The caller (network loop) executes actions.
+//! Decisions emit `Action`s; the caller executes their network and state
+//! mutations. Read-only `ChainView` queries may access the backing store,
+//! and diagnostics are emitted directly through `tracing`.
 //!
 //! Integrates: DeliveryTracker, AssemblyTracker, SyncState, PeerChainStatus.
 //!

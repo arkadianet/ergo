@@ -838,9 +838,9 @@ fn orphan_drain_checkpoint_mismatch_penalizes_sending_peer() {
 }
 
 #[test]
-fn process_header_rejects_height_mismatch() {
-    // Process header 2 but with a parent whose metadata claims height 5
-    // instead of 1. Header 2 (height=2) should fail: expected 6, got 2.
+fn process_header_reports_local_parent_metadata_mismatch() {
+    // Parent metadata disagrees with its canonical bytes. This is local
+    // integrity failure, not evidence that the incoming child is invalid.
     use ergo_sync::header_proc::process_header;
 
     let dir = tempfile::tempdir().unwrap();
@@ -870,16 +870,20 @@ fn process_header_rejects_height_mismatch() {
         .test_force_set_best_header_unsafe(h1_id, 5, vec![1])
         .unwrap();
 
-    // Try to process header 2 (height=2, but parent claims height=5 → expects 6)
+    // Try to process header 2 using the inconsistent local parent row.
     let h2_bytes = get_header_bytes(&headers, 2);
     let result = process_header(&mut store, &h2_bytes);
     match result {
-        Err(HeaderProcessError::HeightMismatch {
-            expected: 6,
-            got: 2,
-        }) => {} // correct
-        Err(e) => panic!("expected HeightMismatch, got: {e}"),
-        Ok(_) => panic!("should have rejected height mismatch"),
+        Err(HeaderProcessError::LocalHeaderIntegrity {
+            source:
+                ergo_validation::header::HeaderValidationError::MetaHeightMismatch {
+                    meta: 5,
+                    header: 1,
+                },
+            ..
+        }) => {}
+        Err(e) => panic!("expected local parent integrity failure, got: {e}"),
+        Ok(_) => panic!("should have refused inconsistent local metadata"),
     }
 }
 
