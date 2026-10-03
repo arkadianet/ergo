@@ -70,12 +70,14 @@ pub struct TxValidationCtx<'a> {
     pub rules: TxValidationRules<'a>,
 }
 
-/// A transaction that has passed all validation checks.
+/// A transaction accepted by a transaction-validation entry point.
 ///
-/// Fields are private — construction only through `validate_transaction()`
-/// or `validate_transaction_parsed()`. This makes it unforgeable from
-/// outside ergo-validation, so downstream crates can trust it as a
-/// validated artifact.
+/// Private fields preserve the checked transaction and resolved boxes.
+/// Parsed entry points may skip script evaluation and its cost accounting
+/// under a caller-authorized checkpoint. Their caller also owns the parse
+/// context and, for the sideband variant, the exact group-element list.
+/// A checked value therefore records the checks performed on that path;
+/// it does not certify that scripts ran when `skip_scripts` was true.
 ///
 /// `tx_id` is computed internally during validation (blake2b256 of
 /// bytes_to_sign). It is NOT accepted as a parameter from callers.
@@ -222,9 +224,10 @@ pub fn validate_transaction(
 /// Composable validation for callers that already have parsed Transaction
 /// and resolved inputs (e.g. block validation with batch UTXO resolution).
 ///
-/// Defensively verifies that `resolved_inputs` match the transaction's
-/// input box IDs and lengths. This prevents constructing a CheckedTransaction
-/// from mismatched state.
+/// Verifies the lengths and IDs of both resolved box lists and checks the
+/// transaction's canonical bytes against `original_bytes`. The caller owns
+/// the original parse's version context and authorizes `skip_scripts`;
+/// skipping scripts also skips their init-cost and evaluator charges.
 pub fn validate_transaction_parsed(
     tx: Transaction,
     original_bytes: &[u8],

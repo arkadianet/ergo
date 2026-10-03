@@ -52,8 +52,8 @@ impl<'a> BlockUtxoOverlay<'a> {
 impl BlockUtxoOverlay<'_> {
     /// Look up a box for data-input resolution.
     ///
-    /// Resolves through the union of pre-block UTXO + intra-block
-    /// creates, ignoring intra-block spends. This differs from regular
+    /// Resolves through the union of the base view and outputs already
+    /// committed to this overlay, ignoring intra-block spends. This differs from regular
     /// input resolution (`UtxoView::get_box`) which both surfaces
     /// in-block creates AND filters out in-block spends.
     ///
@@ -66,12 +66,12 @@ impl BlockUtxoOverlay<'_> {
     ///    an earlier tx). Scala accepts this block — the box must be
     ///    found via `in_block_outputs`.
     ///
-    /// An earlier version of this helper went to `base` only, citing
-    /// "Scala parity: ErgoState.stateChanges resolves data inputs from
-    /// the original state". That reading was wrong — Scala's stateful
-    /// validation runs over a sequentially-applied per-block view, so
-    /// a tx's data inputs see what earlier txs in the same block have
-    /// already added. Mainnet block 422179 is the proof.
+    /// These captures establish visibility of spent pre-block boxes and
+    /// earlier-created boxes. They do not establish forward-data semantics:
+    /// pinned Scala UtxoState supplies all block outputs to its lookup
+    /// callback. This overlay has only completed lower layers (or earlier
+    /// sequential transactions); the base view may supply more. A whole-block
+    /// forward-data reference verdict remains a separate compatibility check.
     pub(super) fn get_box_from_base(&self, box_id: &Digest32) -> Option<ErgoBox> {
         if let Some(b) = self.in_block_outputs.get(box_id) {
             return Some(b.clone());

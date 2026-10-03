@@ -29,17 +29,19 @@ use ergo_primitives::reader::VlqReader;
 use ergo_ser::header::{read_header, Header};
 use thiserror::Error;
 
-/// A header that has passed all validation checks (PoW, difficulty,
-/// parent linkage, timestamp monotonicity).
+/// A header accepted by the header-validation path, or rehydrated from a
+/// previously validated storage row.
 ///
-/// Construction in production code is through [`validate_header()`] or
+/// Fresh validation checks PoW, difficulty, parent linkage, timestamp
+/// monotonicity, and non-deactivatable vote rules. The caller supplies the
+/// header ID and chain context, binds them to the parsed bytes, and checks
+/// the parse's group-element sideband. Clock-dependent and activated-setting
+/// checks run at their ingress or block-validation boundaries.
+///
+/// Construction in production code is through [`validate_header`],
+/// [`validate_header_after_pow`], or
 /// [`CheckedHeader::from_persisted_parts()`] (for headers already validated
 /// and stored by the header pipeline).
-///
-/// Design note: a `Header<Checked>` phantom-generic typestate was considered
-/// and rejected in favor of a concrete proof object. `CheckedHeader` carries
-/// `header_id` (the computed Blake2b256 hash), which a phantom marker could
-/// not.
 #[derive(Debug, Clone)]
 pub struct CheckedHeader {
     header: Header,
@@ -51,8 +53,8 @@ impl CheckedHeader {
     pub fn header(&self) -> &Header {
         &self.header
     }
-    /// 32-byte header identifier (`Blake2b256` of the canonical
-    /// header bytes), computed once during validation.
+    /// Header identifier supplied to fresh validation, or checked against
+    /// the exact stored bytes during rehydration.
     pub fn header_id(&self) -> &[u8; 32] {
         &self.header_id
     }
@@ -65,7 +67,7 @@ impl CheckedHeader {
     ///
     /// This is a controlled trust escape hatch for headers that were already
     /// validated by `process_header()` and stored in the header table. It
-    /// re-derives the canonical header id from the bytes, checks that it
+    /// derives the header id from the exact stored bytes, checks that it
     /// matches the caller-supplied `expected_id` (typically the storage
     /// key), parses the header, and checks metadata consistency. It does
     /// NOT re-verify PoW or difficulty — PoW validity is trusted from the
@@ -308,10 +310,10 @@ pub enum HeaderValidationError {
 /// proof via [`validate_header_after_pow`] to produce a
 /// [`CheckedHeader`].
 ///
-/// This type exists so the batch header pipeline can parallelize PoW
-/// verification in rayon (phase 1) and pass the unforgeable proof
-/// into the sequential finalize phase (phase 2) without repeating the
-/// expensive PoW call.
+/// The batch header pipeline can parallelize PoW verification in rayon
+/// and pass this immutable result into sequential finalization. The caller
+/// must bind `header_id` to the parsed bytes and curve-check the reader's
+/// group-element sideband; this type does not perform those checks.
 #[derive(Debug, Clone)]
 pub struct PowCheckedHeader {
     header: Header,
@@ -328,7 +330,8 @@ impl PowCheckedHeader {
 
     /// Verify the Autolykos PoW solution and return a proof. Dispatch
     /// is on the solution variant (Scala parity — see `pow.rs` doc), so
-    /// no `DifficultyParams` is needed here.
+    /// no `DifficultyParams` is needed here. `header_id` is retained as
+    /// supplied; it is not computed or compared with serialized bytes.
     pub fn verify_pow(header: Header, header_id: [u8; 32]) -> Result<Self, HeaderValidationError> {
         pow::verify_pow_solution(&header)?;
         Ok(Self { header, header_id })
@@ -369,8 +372,10 @@ pub fn validate_header_group_elements(points: &[[u8; 33]]) -> Result<(), HeaderV
 /// Validate a header against its parent and chain context, consuming a
 /// PoW proof so PoW is not re-verified.
 ///
-/// Returns a [`CheckedHeader`] that proves all checks passed — parent
-/// linkage, timestamp monotonicity, PoW (from the proof), and difficulty.
+/// Checks parent linkage, timestamp monotonicity, non-deactivatable vote
+/// rules, and difficulty, retaining the PoW result and caller-supplied ID.
+/// The caller is responsible for the ID/bytes relation, parsed group
+/// elements, and the ancestry represented by `parent` and `epoch_headers`.
 ///
 /// Callers that don't have a PoW proof should use [`validate_header`]
 /// which constructs the proof internally (one PoW call).
@@ -403,9 +408,9 @@ pub fn validate_header_after_pow(
 /// Validate a header against its parent and chain context under the
 /// supplied [`DifficultyParams`].
 ///
-/// Returns a [`CheckedHeader`] that proves all checks passed. This is the
-/// only way to construct a `CheckedHeader` from raw inputs, making it an
-/// unforgeable proof-of-validation artifact.
+/// Runs PoW and [`validate_header_after_pow`]. It does not compute
+/// `header_id`, curve-check the reader sideband, check the current clock,
+/// or apply activated-setting vote rules. Callers own those boundaries.
 ///
 /// - `header_id`: computed Blake2b256 ID of this header (caller provides)
 /// - `parent_id`: computed Blake2b256 ID of the parent header
