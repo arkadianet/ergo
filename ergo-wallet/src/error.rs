@@ -62,6 +62,11 @@ pub enum WalletError {
     #[error("wallet uninitialized — call POST /wallet/init or /wallet/restore first")]
     WalletUninitialized,
 
+    /// Initialization or restore was requested for storage that already has a
+    /// wallet. Existing encrypted and unlocked state remains unchanged.
+    #[error("wallet already initialized")]
+    WalletAlreadyInitialized,
+
     /// Restoring a wallet from a mnemonic requires the chain to be
     /// fully archived (`blocks_to_keep = -1`). Pruned nodes can't
     /// rescan from genesis. Matches Scala
