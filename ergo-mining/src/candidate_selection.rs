@@ -33,10 +33,9 @@ use std::collections::{HashMap, HashSet};
 use ergo_mempool::MempoolReadSnapshot;
 use ergo_primitives::digest::{Digest32, ModifierId};
 use ergo_primitives::reader::VlqReader;
-use ergo_primitives::writer::VlqWriter;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::Header;
-use ergo_ser::transaction::{read_transaction, transaction_id, write_transaction, Transaction};
+use ergo_ser::transaction::{read_transaction, transaction_id, Transaction};
 use ergo_validation::{
     validate_transaction_parsed, CheckedTransaction, CostAccumulator, JitCost, ProtocolParams,
     ReemissionRuleInputs, TransactionContext, TxValidationCtx, TxValidationRules, UtxoView,
@@ -174,97 +173,6 @@ pub struct Selected {
     /// NOT collected — they are in-block ordering / fit losses, not tx
     /// invalidity, and would be re-validated as non-hard-invalid (kept) anyway.
     pub suspects: Vec<Digest32>,
-}
-
-/// Validate caller-supplied transactions in their original dependency order.
-/// This is a block-building path, so no relay fee or mempool admission policy
-/// applies. Invalid, conflicting and oversized transactions are skipped;
-/// descendants can only resolve when their parent was actually included.
-#[allow(clippy::too_many_arguments)]
-pub fn select_prioritized_txs_cancellable(
-    overlay: &mut CandidateOverlay,
-    transactions: &[Transaction],
-    ctx: &TransactionContext,
-    params: &ProtocolParams,
-    last_headers: &[Header],
-    cost_budget: u64,
-    size_budget: u64,
-    reemission_rules: Option<&ReemissionRuleInputs>,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<Selected, MiningError> {
-    let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
-        MiningError::IdComputation {
-            op: "priority_block_cap",
-            reason: format!("{e:?}"),
-        }
-    })?;
-    let mut selected = Selected::default();
-    let minimum_tx_cost = INTERPRETER_INIT_COST
-        .saturating_add(params.input_cost)
-        .saturating_add(params.output_cost);
-    for tx in transactions {
-        check_build_cancelled(should_cancel)?;
-        let remaining_cost = cost_budget.saturating_sub(selected.total_cost);
-        if remaining_cost < minimum_tx_cost {
-            break;
-        }
-        let structural_cost = INTERPRETER_INIT_COST
-            .saturating_add((tx.inputs.len() as u64).saturating_mul(params.input_cost))
-            .saturating_add((tx.data_inputs.len() as u64).saturating_mul(params.data_input_cost))
-            .saturating_add((tx.output_candidates.len() as u64).saturating_mul(params.output_cost));
-        if structural_cost > remaining_cost {
-            continue;
-        }
-        if tx
-            .inputs
-            .iter()
-            .any(|input| overlay.is_spent(&input.box_id))
-        {
-            continue;
-        }
-        let mut writer = VlqWriter::new();
-        if write_transaction(&mut writer, tx).is_err() {
-            continue;
-        }
-        let bytes = writer.result();
-        if selected.total_size.saturating_add(bytes.len() as u64) > size_budget {
-            continue;
-        }
-        let Some((inputs, data_inputs)) = overlay.resolve_tx(tx) else {
-            continue;
-        };
-        check_build_cancelled(should_cancel)?;
-        let mut cost = CostAccumulator::new(block_cap);
-        let mut validation = TxValidationCtx {
-            ctx,
-            params,
-            cost: &mut cost,
-            last_headers,
-            rules: TxValidationRules {
-                reemission: reemission_rules,
-            },
-        };
-        let Ok(checked) = validate_transaction_parsed(
-            tx.clone(),
-            &bytes,
-            inputs,
-            data_inputs,
-            false,
-            &mut validation,
-        ) else {
-            continue;
-        };
-        check_build_cancelled(should_cancel)?;
-        let tx_cost = cost.total_block_cost();
-        if selected.total_cost.saturating_add(tx_cost) > cost_budget {
-            continue;
-        }
-        overlay.apply_checked(&checked);
-        selected.total_cost = selected.total_cost.saturating_add(tx_cost);
-        selected.total_size = selected.total_size.saturating_add(bytes.len() as u64);
-        selected.checked.push((checked, tx_cost));
-    }
-    Ok(selected)
 }
 
 /// Greedily select mempool transactions into the candidate.

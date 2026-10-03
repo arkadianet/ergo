@@ -236,7 +236,6 @@ pub(super) async fn action_loop(
                     &mut state,
                     mining.as_ref().map(|m| &m.handle),
                     mining.as_ref().is_some_and(|m| m.offline_generation),
-                    mining.as_ref().map(|m| &m.request_tx),
                     req,
                 );
             }
@@ -319,7 +318,7 @@ pub(super) async fn action_loop(
                         mining_last_mempool_signal = Some(now);
                     }
                     // Startup is only used at the prime call above, never here.
-                    BuildReason::Startup | BuildReason::Requested => {}
+                    BuildReason::Startup => {}
                 }
             } else {
                 // Header-only transitions do not regenerate an unchanged
@@ -359,9 +358,6 @@ pub(super) async fn action_loop(
     // the abort-API-first ordering in `RunHandle::shutdown()`.
     drop(submit_rx);
     drop(mining_submit_rx);
-    // Release the on-demand worker sender before the persistence drain so
-    // shutdown can join the worker as soon as its active build completes.
-    drop(mining);
     let cs_shutdown = state.store.chain_state_meta();
     shutdown_log!(
         "[node] tip at shutdown: h={} bh={}, peers={}",
@@ -686,7 +682,6 @@ mod tests {
         let wiring = MiningWiring {
             handle,
             intent_tx,
-            request_tx: std::sync::mpsc::channel().0,
             refresh_debounce: Duration::from_millis(250),
             block_interval_ms: 120_000,
             offline_generation: false,

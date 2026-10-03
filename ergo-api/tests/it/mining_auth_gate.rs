@@ -69,10 +69,6 @@ impl NodeReadState for UnusedReadState {
 }
 
 fn app() -> axum::Router {
-    app_with_legacy(false)
-}
-
-fn app_with_legacy(allow: bool) -> axum::Router {
     let ctx = ServerCtx {
         read: Arc::new(UnusedReadState),
         compat: None,
@@ -92,9 +88,7 @@ fn app_with_legacy(allow: bool) -> axum::Router {
         None,
         Arc::new(NoopWalletAdmin),
         Some(Arc::new(
-            ApiSecurity::new(SCALA_HELLO_HASH.to_string())
-                .expect("valid hex hash")
-                .with_unauthenticated_legacy_mining(allow),
+            ApiSecurity::new(SCALA_HELLO_HASH.to_string()).expect("valid hex hash"),
         )),
     )
 }
@@ -187,60 +181,4 @@ async fn mining_reward_pubkey_gated() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-}
-
-#[tokio::test]
-async fn transaction_candidates_always_require_key_and_reach_handler_with_key() {
-    const PK: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    for allow in [false, true] {
-        for (path, body) in [
-            ("/mining/candidateWithTxs", "[]".to_owned()),
-            (
-                "/mining/candidateWithTxsAndPk",
-                format!(r#"{{"txs":[],"pk":"{PK}"}}"#),
-            ),
-        ] {
-            let resp = app_with_legacy(allow)
-                .oneshot(post_json(path, &body))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-            let resp = app_with_legacy(allow)
-                .oneshot(with_key(post_json(path, &body)))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        }
-    }
-}
-
-#[tokio::test]
-async fn legacy_opt_in_opens_existing_routes_and_updates_served_docs() {
-    for request in [
-        get("/mining/candidate"),
-        get("/mining/rewardAddress"),
-        get("/mining/rewardPublicKey"),
-        post_json("/mining/solution", r#"{"n":"0001020304050607"}"#),
-    ] {
-        let resp = app_with_legacy(true).oneshot(request).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-    for allow in [false, true] {
-        let resp = app_with_legacy(allow)
-            .oneshot(get("/api-docs/openapi-scala.yaml"))
-            .await
-            .unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let document: serde_json::Value = serde_norway::from_slice(&bytes).unwrap();
-        let legacy = &document["paths"]["/mining/solution"]["post"]["security"];
-        assert_eq!(legacy.as_array().unwrap().is_empty(), allow);
-        assert!(
-            !document["paths"]["/mining/candidateWithTxsAndPk"]["post"]["security"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-    }
 }
