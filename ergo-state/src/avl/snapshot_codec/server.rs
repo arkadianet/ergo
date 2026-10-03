@@ -26,7 +26,7 @@ use super::{enumerate_chunk_roots, serialize_chunk, serialize_manifest};
 ///
 /// Manifest depth is fixed at construction. Mainnet uses
 /// [`super::MAINNET_MANIFEST_DEPTH`] (= 14). Shallower depths produce
-/// fewer chunks but larger manifest bytes.
+/// fewer chunks and smaller manifests, with larger chunk subtrees.
 pub struct SnapshotServer {
     /// AVL+ root label at the snapshot height. Same value the
     /// reference-node `Manifest` message uses as its on-the-wire

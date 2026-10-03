@@ -281,16 +281,16 @@ fn pipeline_archive_to_pruned_transition_preserves_historical_prefix() {
 }
 
 #[test]
-fn pipeline_batch_spanning_voting_epoch_snap_matches_sync() {
-    // Deterministically force a single persist batch to span a
-    // voting-epoch snap and assert the terminal state matches
-    // the synchronous-seam outcome. A naive batch-wide range
+fn pipeline_crossing_voting_epoch_snap_matches_sync() {
+    // Enqueue a sequence crossing a voting-epoch snap and compare terminal
+    // state with the synchronous seam. Scheduler timing does not establish
+    // that any single persist batch spans the boundary. A naive batch-wide range
     // `[new_min - batch_size, new_min)` would over-evict heights
     // that the sync seam keeps on disk (snap-skip semantics);
     // per-job iteration inside `execute_batch` preserves the
     // Scala-parity behavior.
     //
-    // Setup: queue a multi-block batch crossing the snap (e.g.
+    // Setup: queue multiple blocks crossing the snap (e.g.
     // 8→9 with voting_length=4), then flush. Compare to a sync
     // store that received the same blocks one at a time.
     let dir_a = tempfile::tempdir().expect("tempdir pipe");
@@ -313,7 +313,7 @@ fn pipeline_batch_spanning_voting_epoch_snap_matches_sync() {
     .unwrap();
     pipe.initialize_genesis(&[]).unwrap();
     pipe.set_blocks_to_keep(2);
-    pipe.enable_persist_pipeline(64).unwrap(); // large queue ⇒ one big batch on flush
+    pipe.enable_persist_pipeline(64).unwrap(); // capacity is not an observed batch size
 
     // Sync-path store — pipeline NOT enabled, same config.
     let mut sync_store = StateStore::open_with_cache_launch_voting(

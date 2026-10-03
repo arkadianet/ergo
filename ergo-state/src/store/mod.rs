@@ -1189,7 +1189,7 @@ impl StateStore {
     /// Mode 2 consume-side terminal step: takes the
     /// `ReconstructedTree` produced by [`crate::avl::snapshot_codec::reconstruct_tree`]
     /// and bulk-writes it into `AVL_NODES`, sets `STATE_META`
-    /// (`root_node_id=0`, `tree_height`, `root_digest=manifest_id`),
+    /// (`root_node_id=1`, `tree_height`, `root_digest=manifest_id`),
     /// and advances `chain_state.best_full_block_*` to
     /// (`snapshot_height`, `canonical_header_id`). Then rebuilds
     /// the in-memory `tree` so subsequent reads hit the new state.

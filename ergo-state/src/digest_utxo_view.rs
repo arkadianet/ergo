@@ -15,15 +15,11 @@
 //! ```
 //!
 //! The block's outputs cover inputs/data-inputs that reference a box
-//! created earlier in the same block (which the parent-state proof does
-//! not witness). Full transaction validation (scripts, amounts) then
-//! runs against this view, identically to the UTXO backend — only the
-//! box source differs.
-//!
-//! `#![allow(dead_code)]`: the view is consumed by the digest-mode
-//! block-processing path wired in a later phase; no production caller
-//! reaches it yet.
-#![allow(dead_code)]
+//! created anywhere in the same block (which the parent-state proof does
+//! not witness). The production digest block-processing path runs transaction
+//! validation against this view. Output visibility alone does not establish
+//! valid transaction ordering or equivalence with the UTXO backend's overlay;
+//! authenticated net state changes are checked separately by the verifier.
 
 use std::collections::HashMap;
 
@@ -48,9 +44,9 @@ impl DigestUtxoView {
     /// block's raw transactions (whose outputs are added so in-block
     /// box chaining resolves). Mirrors Scala's `knownBoxes`.
     ///
-    /// A box id appearing in both sets resolves to the same box (the
-    /// proof's old value and the creating output are byte-identical),
-    /// so insertion order does not matter.
+    /// Output entries replace any proof entry at the same ID, matching Scala's
+    /// `knownBoxes` construction. The caller owns validated output identities
+    /// and the proof/parent-root context; this constructor builds the view.
     pub fn new(resolved: &ResolvedBoxes, transactions: &[Transaction]) -> Result<Self, StateError> {
         let mut boxes = HashMap::with_capacity(resolved.len() + transactions.len() * 2);
 
@@ -66,8 +62,7 @@ impl DigestUtxoView {
         }
 
         // The block's own outputs (all transactions, in block order) —
-        // covers inputs/data-inputs that reference a box created earlier
-        // in the same block.
+        // exposes outputs from every position, including later transactions.
         for tx in transactions {
             let tx_id = transaction_id(tx)
                 .map_err(|e| StateError::Serialization(format!("digest UtxoView: tx id: {e:?}")))?;
