@@ -84,17 +84,16 @@ pub enum HydrationError {
 
 impl SyncExecutor {
     /// Hydrate the recent-header window from persisted chain state.
-    /// Must be called on startup/resume so that block validation has
-    /// the correct CONTEXT.headers even after a restart.
+    /// Called on startup/resume to rebuild the SyncInfo V2 cache.
+    /// Applied-block script ancestry is rebuilt by `hydrate_block_context`.
     ///
     /// Walks backwards from best_header (not best_full_block) through
     /// parent_ids, loading up to LAST_HEADERS_WINDOW headers. Uses the
-    /// header chain tip because CONTEXT.headers reflects the header chain,
-    /// and during header-first sync the header tip is ahead of the full
-    /// block tip.
+    /// header chain tip because SyncInfo advertises that selected branch;
+    /// during header-first sync it can be ahead of the full-block tip.
     ///
     /// Reaching the end of the chain (`current_id == [0; 32]`, store
-    /// returns `Ok(None)`) is a successful termination — the cache may
+    /// reaches the zero parent) is a successful termination — the cache may
     /// be shorter than `LAST_HEADERS_WINDOW` early in the chain. Any
     /// other error (store I/O, header reconstruction integrity) is
     /// fatal: the persistent header table is the source of truth for

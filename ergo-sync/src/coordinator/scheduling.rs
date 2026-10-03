@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use ergo_p2p::delivery::ModifierStatus;
 use ergo_p2p::message;
@@ -696,7 +696,8 @@ impl SyncCoordinator {
     /// missing parents arrive, so this does nothing more than register
     /// the request with the delivery tracker and emit the wire message.
     ///
-    /// Returns at most one `SendToPeer(RequestModifier, Header, ids)` action.
+    /// Returns one `SendToPeer(RequestModifier, Header, ids)` action per
+    /// nonempty wire-sized chunk.
     /// Empty when all requested ids are already in-flight or received.
     /// Previously failed IDs are revived here: orphan roots are required to
     /// stitch a fork back to a known ancestor, and later peers may deliver
@@ -707,30 +708,28 @@ impl SyncCoordinator {
         parent_ids: &[[u8; 32]],
         now: Instant,
     ) -> Vec<Action> {
-        if parent_ids.is_empty() {
-            return Vec::new();
-        }
         let type_id = ModifierTypeId::Header.as_byte();
-        let registered = self
-            .delivery
-            .request_allow_failed(peer, type_id, parent_ids, now);
-        if registered.is_empty() {
-            return Vec::new();
-        }
-        let request = InvData {
-            type_id,
-            ids: registered,
-        };
-        match message::serialize_inv(&request) {
-            Ok(payload) => vec![Action::SendToPeer {
+        let mut actions = Vec::new();
+        // Bound before delivery registration: every registered request must
+        // have an encodable wire message, including parent walks above 400 IDs.
+        for chunk in parent_ids.chunks(message::MAX_INV_OBJECTS) {
+            let registered = self
+                .delivery
+                .request_allow_failed(peer, type_id, chunk, now);
+            if registered.is_empty() {
+                continue;
+            }
+            let payload = message::serialize_inv(&InvData {
+                type_id,
+                ids: registered,
+            })
+            .expect("known header type and wire-sized delivery chunk");
+            actions.push(Action::SendToPeer {
                 peer,
                 code: message::CODE_REQUEST_MODIFIER,
                 payload,
-            }],
-            Err(e) => {
-                warn!(error = %e, "failed to serialize RequestModifier(Header, parents)");
-                Vec::new()
-            }
+            });
         }
+        actions
     }
 }

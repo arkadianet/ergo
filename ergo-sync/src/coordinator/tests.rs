@@ -975,6 +975,46 @@ fn orphan_parent_request_revives_exhausted_header_id() {
 }
 
 #[test]
+fn orphan_parent_requests_chunk_before_delivery_registration() {
+    let mut coord = SyncCoordinator::new(0);
+    let p = peer(9030);
+    let ids: Vec<[u8; 32]> = (0u32..401)
+        .map(|n| {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            id
+        })
+        .collect();
+    let actions = coord.request_missing_header_parents(p, &ids, Instant::now());
+    let mut sent = Vec::new();
+    let mut sizes = Vec::new();
+    for action in actions {
+        let Action::SendToPeer {
+            peer,
+            code,
+            payload,
+        } = action
+        else {
+            panic!("parent requests must only emit sends");
+        };
+        assert_eq!(peer, p);
+        assert_eq!(code, message::CODE_REQUEST_MODIFIER);
+        let request = message::deserialize_inv(&payload).unwrap();
+        assert_eq!(request.type_id, ModifierTypeId::Header.as_byte());
+        sizes.push(request.ids.len());
+        sent.extend(request.ids);
+    }
+    assert_eq!(sizes, vec![400, 1]);
+    assert_eq!(sent, ids);
+    for id in &sent {
+        assert_eq!(coord.delivery().status(id), ModifierStatus::Requested);
+    }
+    assert!(coord
+        .request_missing_header_parents(p, &ids, Instant::now())
+        .is_empty());
+}
+
+#[test]
 fn peer_disconnect_reassigns_requests() {
     let mut coord = SyncCoordinator::new(0);
     let chain = MockChain::new(0, 0);
@@ -1124,6 +1164,22 @@ fn on_inv_ordering_single_request_ids_preserve_input_order() {
         })
         .count();
     assert_eq!(req_count, 1, "exactly one RequestModifier for the batch");
+    let request = actions
+        .iter()
+        .find_map(|action| match action {
+            Action::SendToPeer {
+                peer,
+                code,
+                payload,
+            } if *code == message::CODE_REQUEST_MODIFIER => {
+                assert_eq!(*peer, p);
+                Some(message::deserialize_inv(payload).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(request.type_id, ModifierTypeId::Header.as_byte());
+    assert_eq!(request.ids, ids_in);
 }
 
 #[test]
@@ -1300,12 +1356,18 @@ fn timeout_ordering_penalty_before_rerequest() {
                 if *peer == p2 && *code == message::CODE_REQUEST_MODIFIER
         )
     });
-    if let (Some(pi), Some(ri)) = (penalize_idx, rerequest_idx) {
-        assert!(
-            pi < ri,
-            "Penalize must precede re-request (got pi={pi}, ri={ri})"
-        );
-    }
+    let pi = penalize_idx.expect("the timed-out p1 request must produce a penalty");
+    let ri = rerequest_idx.expect("the available p2 must receive the replacement request");
+    assert!(
+        pi < ri,
+        "Penalize must precede re-request (got pi={pi}, ri={ri})"
+    );
+    let Action::SendToPeer { payload, .. } = &actions[ri] else {
+        unreachable!()
+    };
+    let request = message::deserialize_inv(payload).unwrap();
+    assert_eq!(request.type_id, ModifierTypeId::Header.as_byte());
+    assert_eq!(request.ids, vec![mod_id]);
 }
 
 // ---- Characterization of the single-peer request_missing_sections ----
