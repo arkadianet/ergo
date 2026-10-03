@@ -417,6 +417,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     //    the validator runs, so the serialized extension re-parses to the same
     //    params/settings the validator recomputes.
     let extension_fields = if genesis {
+        crate::extension_builder::validate_custom_extension_fields(custom_extension_fields)?;
         custom_extension_fields
             .iter()
             .map(|(k, v)| (k.to_vec(), v.clone()))
@@ -448,6 +449,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             custom_extension_fields,
         )?
     };
+    crate::extension_builder::validate_candidate_extension_size(&extension_fields)?;
 
     timings.setup = setup_start.elapsed();
     check_build_cancelled(should_cancel)?;
@@ -1545,12 +1547,10 @@ mod tests {
         }
     }
 
-    /// THE consensus oracle for epoch-boundary mining: the extension + header an
-    /// epoch-boundary candidate would carry must PASS the real block validator
-    /// (`validate_epoch_extension` — the exact path a peer runs in
-    /// `block_proc.rs`), for the SAME epoch-vote tally the miner used. If it
-    /// passes here, peers accept the mined block. Covered: a quiet epoch (no
-    /// votes) and an approved parameter increase.
+    /// Internal epoch-extension compatibility: fields produced by the miner
+    /// must pass `validate_epoch_extension` with the same tally and settings.
+    /// Covers a quiet epoch and an approved parameter increase. This does not
+    /// run full block/script/PoW validation or an independent Scala peer.
     #[test]
     fn epoch_boundary_payload_passes_validate_epoch_extension() {
         use ergo_validation::active_params::scala_launch;
@@ -1594,7 +1594,7 @@ mod tests {
                 false,
             )
             .unwrap_or_else(|e| {
-                panic!("a peer must accept the mined boundary block [{label}]: {e:?}")
+                panic!("epoch-extension helper must accept these fields [{label}]: {e:?}")
             });
             // The validator's recompute must equal the miner's — the block's
             // next-epoch params are exactly what we serialized.
