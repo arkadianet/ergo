@@ -115,6 +115,24 @@ sbt "avldb/publishLocal" "ergoWallet/publishLocal" "ergoCore/publishLocal"
 `using repository` directive.) Needs `scala-cli` on `PATH`; the first `--oracle`
 run resolves deps and compiles (~1 min), then queries are fast.
 
+The oracle executes a private copy of the selected standalone Scala source.
+Relative project files and resources from its original checkout are not copied.
+`Oracle::provenance()` records the exact source text and SHA-256, command arguments,
+and actual executing JVM properties and resolved classpath JAR hashes after a
+query. A declared dependency directive alone is not execution evidence.
+
+The first response has a 180-second deadline, including compilation and dependency
+resolution. Later responses have a 10-second deadline. Override these with
+`DIFFTEST_ORACLE_STARTUP_TIMEOUT_MS` and `DIFFTEST_ORACLE_QUERY_TIMEOUT_MS`; each
+must be an integer in `1..=1800000`. The deadline includes request writes and
+response reads. Request and response lines are limited to 16 MiB. Retained stderr
+is limited to its first 64 KiB and last 8 KiB, with the total byte count recorded.
+Timeouts, incomplete responses and transport errors terminate that oracle; it
+cannot be reused for later requests. Cleanup kills the owned Unix process group
+and attempts to reap the direct child within two seconds. Windows cleanup covers
+the direct child; descendant termination is not certified. Descendants that
+escape the owned Unix group are also outside this cleanup contract.
+
 ## Corpus
 
 `--corpus <dir>` loads regular files in lexical path order: `.hex` files
