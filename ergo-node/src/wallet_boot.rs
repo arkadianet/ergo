@@ -332,12 +332,12 @@ impl WalletBootService {
             .commit()
             .map_err(|e| WalletError::SecretFile(format!("redb commit: {e}")))?;
 
-        // Mirror persistence into in-memory state.
-        state.insert_tracked_pubkey(0, master_pk, network)?;
-        state.insert_tracked_pubkey(1, child_pk, network)?;
-        state.set_change_address(ergo_wallet::address::pubkey_to_p2pk_address(
-            &child_pk, network,
-        )?);
+        // Use the committed visibility and change-address snapshot, as on reopen.
+        let read = db
+            .begin_read()
+            .map_err(|e| WalletError::SecretFile(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+        state.hydrate_from_reader(&reader, network)?;
         Ok(())
     }
 
