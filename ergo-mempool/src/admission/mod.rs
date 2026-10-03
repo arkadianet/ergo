@@ -383,6 +383,12 @@ pub(crate) fn check_capturing_held<V: Validator>(
         }
     };
 
+    // Full validation spent this cost regardless of the later pool decision,
+    // including successful validation of an already-present transaction.
+    if !budget_exempt {
+        cx.budgets.charge(budget_source, validated.consumed_cost);
+    }
+
     // No invalidation-cache check here, deliberately. The cache is a
     // FETCH filter, consumed only by `Mempool::is_invalidated` on the
     // Inv path (ergo-node messaging) — exactly Scala's sole use of
@@ -449,10 +455,6 @@ pub(crate) fn check_capturing_held<V: Validator>(
         if (weight as u128) > avg {
             ReplacementDecision::Replace(conflicts.clone())
         } else {
-            // Losing the double-spend still charges cost (skipped for demoted).
-            if !budget_exempt {
-                cx.budgets.charge(budget_source, validated.consumed_cost);
-            }
             actions.push(MempoolAction::Observe {
                 event: ObservedEvent::DroppedDoubleSpendLoser {
                     tx_id: validated.tx_id,
@@ -472,10 +474,7 @@ pub(crate) fn check_capturing_held<V: Validator>(
         }
     };
 
-    // ── Step 14 — Charge cost, check capacity plan.
-    if !budget_exempt {
-        cx.budgets.charge(budget_source, validated.consumed_cost);
-    }
+    // ── Step 14 — Check capacity plan (validation cost already charged).
 
     // Capacity plan: check whether the new tx can fit after replacements.
     // Commit step loops evictions until both budgets clear; this phase
