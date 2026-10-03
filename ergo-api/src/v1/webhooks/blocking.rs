@@ -365,7 +365,11 @@ impl WebhookExecutor {
                         }
                     }
                     // Even a never-started durable engine can flush on Drop.
-                    drop(engine);
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(engine)))
+                        .is_err()
+                    {
+                        tracing::error!("webhook engine destruction panicked");
+                    }
                     done.store(true, Ordering::Release);
                     finished.notify_waiters();
                 }));
