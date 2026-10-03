@@ -124,7 +124,7 @@ pub(crate) fn rollback_one_block_with_changes(
     let block_height = block.height;
     let mut changes = capture_changes.then(Vec::new);
     let result: Result<IndexerMeta, IndexerError> =
-        rollback_one_block_inner(store, block, height_u64, block_height, &mut changes);
+        rollback_one_block_inner(store, meta, block, height_u64, block_height, &mut changes);
 
     match &result {
         Ok(new_meta) => {
@@ -160,18 +160,18 @@ pub(crate) fn rollback_one_block_with_changes(
     })
 }
 
-/// Body of [`rollback_one_block`], factored out so the caller can wrap
-/// it in start/complete/failed observability events without changing
-/// the inner control flow. Pure refactor — every `?` and early return
-/// behaves identically to the pre-split function.
+/// Perform rollback inside one writer, including checkpoint comparison.
+/// The caller emits completion only after this function commits.
 fn rollback_one_block_inner(
     store: &IndexerStore,
+    expected_meta: &IndexerMeta,
     block: &IndexerBlock<'_>,
     height_u64: u64,
     block_height: i32,
     changes: &mut Option<Vec<crate::events::BoxChange>>,
 ) -> Result<IndexerMeta, IndexerError> {
     let write_txn = store.begin_write()?;
+    meta_io::check_mutation_checkpoint(&write_txn, expected_meta)?;
     // Mirror apply: set if any secondary unflip is skipped on a drift, flushed
     // to the sticky repair marker before commit.
     let mut secondary_skipped = false;
