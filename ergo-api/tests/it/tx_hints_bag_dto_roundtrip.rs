@@ -93,6 +93,51 @@ fn round_trip_own_commitment() {
 }
 
 #[test]
+fn signing_request_debug_redacts_secrets_without_changing_transport() {
+    use ergo_api::wallet::sending::{ExternalSecretDto, TransactionSignRequest, UnsignedTxDto};
+
+    let nonce = fake_secret_hex();
+    let dlog = "a1".repeat(32);
+    let dht_secret = "b2".repeat(32);
+    let hint = HintDto::OwnCommitment {
+        image: fake_image(),
+        secret: nonce.clone(),
+        commitment: dlog_commitment(),
+        position: "1".into(),
+    };
+    let mut bag = TxHintsBagDto::default();
+    bag.secret_hints.insert("0".into(), vec![hint.clone()]);
+    let request = TransactionSignRequest {
+        unsigned_tx: UnsignedTxDto { bytes: "00".into() },
+        external_secrets: Some(vec![
+            ExternalSecretDto::Dlog { dlog: dlog.clone() },
+            ExternalSecretDto::DhTuple {
+                g: fake_point_hex(),
+                h: fake_point_hex(),
+                u: fake_point_hex(),
+                v: fake_point_hex(),
+                x: dht_secret.clone(),
+            },
+        ]),
+        hints: Some(bag),
+        inputs: None,
+        data_inputs: None,
+    };
+    let debug = format!("{request:?}");
+    assert!(debug.contains("[REDACTED]"));
+    for secret in [&nonce, &dlog, &dht_secret] {
+        assert!(!debug.contains(secret));
+    }
+    assert!(!format!("{hint:?}").contains(&nonce));
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["hints"]["secretHints"]["0"][0]["secret"], nonce);
+    assert_eq!(json["externalSecrets"][0]["dlog"]["dlog"], dlog);
+    assert_eq!(json["externalSecrets"][1]["dhTuple"]["x"], dht_secret);
+    let decoded: TransactionSignRequest = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+}
+
+#[test]
 fn round_trip_real_secret_proof() {
     let hint = HintDto::RealSecretProof {
         image: fake_image(),
