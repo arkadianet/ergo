@@ -266,7 +266,9 @@ pub(super) fn create(
         Some(
             existing
                 .iter()
-                .find(|(_, record)| record.job.state.terminal())
+                .find(|(_, record)| {
+                    record.job.state.terminal() && record.job.state != WalletJobState::Conflicted
+                })
                 .map(|(key, _)| *key)
                 .ok_or_else(|| {
                     WalletAdminError::BadRequest("private wallet job limit reached".into())
@@ -340,7 +342,7 @@ pub(super) async fn cancel(
         .find(|(key, _)| *key == job_id)
         .map(|(_, record)| record)
         .ok_or_else(|| WalletAdminError::BadRequest("wallet job not found".into()))?;
-    if record.job.state.terminal() {
+    if record.job.state.terminal() && record.job.state != WalletJobState::Conflicted {
         return Ok(record.job);
     }
     if let Some(tx_id) = &record.job.tx_id {
@@ -633,7 +635,12 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     }
     let height = ctx.chain.tip_height().map_err(internal)?;
     for (job_id, mut record) in jobs {
-        if record.job.state.terminal() && record.job.state != WalletJobState::Mined {
+        if record.job.state.terminal()
+            && !matches!(
+                record.job.state,
+                WalletJobState::Mined | WalletJobState::Conflicted
+            )
+        {
             continue;
         }
         let mut queue_known = false;
