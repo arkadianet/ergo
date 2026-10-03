@@ -50,10 +50,10 @@ pub fn encrypt(
     iv: &[u8; 12],
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, [u8; 16]), crate::error::WalletError> {
-    let key_array: &Key<Aes256Gcm> = key.as_ref().into();
+    // Borrow the fixed-size key without copying it out of Zeroizing.
+    let key_array: &Key<Aes256Gcm> = (&**key).into();
     let cipher = Aes256Gcm::new(key_array);
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(iv);
+    let nonce: &Nonce<_> = iv.into();
 
     let ciphertext_with_tag = cipher
         .encrypt(
@@ -92,10 +92,9 @@ pub fn decrypt(
     ciphertext: &[u8],
     auth_tag: &[u8; 16],
 ) -> Result<Zeroizing<Vec<u8>>, crate::error::WalletError> {
-    let key_array: &Key<Aes256Gcm> = key.as_ref().into();
+    let key_array: &Key<Aes256Gcm> = (&**key).into();
     let cipher = Aes256Gcm::new(key_array);
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(iv);
+    let nonce: &Nonce<_> = iv.into();
 
     let mut combined = Vec::with_capacity(ciphertext.len() + 16);
     combined.extend_from_slice(auth_tag);

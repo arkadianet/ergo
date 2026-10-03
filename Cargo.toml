@@ -63,7 +63,7 @@ ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
 
 # Cryptography
-aes-gcm  = "0.10"
+aes-gcm  = "0.11"
 blake2   = "0.10"
 k256     = "0.13"
 md5      = "0.7"
