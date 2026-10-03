@@ -5,17 +5,10 @@
 //! [`DivergenceRecord`] is the on-disk record shared with the triage tooling.
 //!
 //! ## Classification rule
-//! For a divergence on a **parse** surface (`ergo_tree`, `ergo_box_candidate`,
-//! `transaction`, `header`): re-run `diff` on the **`reduce`** surface for the
-//! same bytes.  If `reduce` **agrees** (no divergence), the parse-surface
-//! divergence is a [`Triage::KnownArtifact`] — the node retains original wire
-//! bytes / defers the curve-check, so the difference is benign.  If `reduce`
-//! **also diverges**, or if the original divergence was already on the `reduce`
-//! surface, the record is [`Triage::Pending`].
-//!
-//! The harness **never** sets a which-side-is-right verdict.  `Pending` means
-//! "a human must decide"; `KnownArtifact` means "explained benign, no consensus
-//! impact."
+//! New divergences stay [`Triage::Pending`] for human review. Agreement or
+//! rejection under one dummy reduction context does not explain a parse
+//! difference or establish benignity. [`Triage::KnownArtifact`] remains an
+//! explicit, reviewed disposition for externally explained records.
 //!
 //! ## Auto-filing
 //! [`auto_file`] writes the record to content-addressed paths under a
@@ -33,16 +26,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::oracle::{
-    oracle_surfaces, query_verdicts, reconcile, Divergence, DivergenceKind, Oracle, Reconciliation,
-    SurfaceSpec, Verdict,
-};
+use crate::oracle::{Divergence, DivergenceKind, Oracle, SurfaceSpec, Verdict};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema (§4)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A minimized, classified divergence record.  Matches `interface-contracts.md §4`.
+/// A detected divergence with processing and triage state.  Matches `interface-contracts.md §4`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DivergenceRecord {
     /// Oracle surface or `"block:<height>"`.
@@ -50,7 +40,7 @@ pub struct DivergenceRecord {
     /// Kind tag matching the `DivergenceKind` enum:
     /// `"AcceptReject"` | `"Canonical"` | `"Reduce"` | `"Cost"` | etc.
     pub kind: String,
-    /// Hex of the **minimized** input (post-shrink).
+    /// Hex of the minimized input, or original input if processing failed.
     pub input_hex: String,
     /// Rust node verdict.
     pub rust: VerdictInfo,
@@ -60,8 +50,12 @@ pub struct DivergenceRecord {
     pub repro: String,
     /// Seed used to generate this input, or `null` if unknown.
     pub seed: Option<SeedInfo>,
-    /// Always `true` (this type represents a post-minimization record).
+    /// True only after successful minimization and final re-verification.
+    /// False preserves an original finding when optional processing fails.
     pub minimized: bool,
+    /// Failed processing remains evidence and makes the campaign incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing_error: Option<String>,
     /// How this input was produced: `"structured-gen"`, `"oracle-mutation"`,
     /// `"replay:h<height>"`, etc.
     pub provenance: String,
@@ -118,71 +112,19 @@ impl Triage {
 // Classification
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The reduction surface a parse-surface divergence is reconciled against, and
-/// how to turn the parse-surface bytes into an input for it.
+/// Keep an unexplained divergence pending for human review.
 ///
-/// Reconciliation is only meaningful when the SAME bytes can be handed to a
-/// surface that actually EVALUATES them:
-///
-/// * `ergo_tree` bytes are a script → `reduce` consumes them directly.
-/// * `ergo_box_candidate` bytes are a box → prefixing an empty context
-///   extension (`0x00`) makes them a `reduce_ctx` frame, which reduces the
-///   box's own script with the box as SELF (registers included).
-///
-/// `transaction` and `header` bytes are NEITHER. Feeding them to `reduce` makes
-/// both sides reject on the first byte, which "agrees" for a reason that has
-/// nothing to do with the finding — so a real transaction-surface divergence
-/// (e.g. a context-extension value the node refuses to parse) would be filed
-/// as benign. Those surfaces therefore have no reconciliation channel and stay
-/// `Pending` for a human.
-fn reduction_channel(surface: &str) -> Option<(&'static str, &'static [u8])> {
-    match surface {
-        "ergo_tree" => Some(("reduce", &[])),
-        "ergo_box_candidate" => Some(("reduce_ctx", &[0x00])),
-        _ => None,
-    }
-}
-
-/// Classify a minimized divergence.
-///
-/// **Key rule**: for a parse-surface divergence with a reduction channel (see
-/// `reduction_channel`), re-run the reconciliation on that channel for the
-/// same bytes via [`crate::oracle::reconcile`]. If the reduction **explicitly
-/// agrees** (`Reconciliation::Agree`), the parse-surface divergence is a
-/// [`Triage::KnownArtifact`] — the node retains original wire bytes / defers
-/// the curve-check, so the difference is benign. If the reduction **also
-/// diverges**, the surface has no reduction channel, or the reduction channel
-/// itself **could not be evaluated** (`Reconciliation::Indeterminate` — e.g.
-/// `reduce`/`reduce_ctx` errored rather than agreeing), the record is
-/// [`Triage::Pending`]: an oracle that couldn't decide proves nothing about
-/// whether the original divergence is benign, so it must not be read as
-/// "reconciles."
-///
-/// This function never sets a which-side-is-right verdict.
+/// The parameters are retained for API compatibility with earlier callers.
+/// This function makes no additional oracle query: agreement in a fixed dummy
+/// context, including rejection by both sides, does not identify a benign
+/// normalization reason. Only an explicit reviewed disposition may produce
+/// [`Triage::KnownArtifact`].
 pub fn classify(
-    spec: &SurfaceSpec,
-    minimized_input: &[u8],
-    oracle: &mut Oracle,
+    _spec: &SurfaceSpec,
+    _minimized_input: &[u8],
+    _oracle: &mut Oracle,
 ) -> io::Result<Triage> {
-    let Some((channel, prefix)) = reduction_channel(spec.name) else {
-        return Ok(Triage::Pending);
-    };
-    let channel_spec = oracle_surfaces()
-        .into_iter()
-        .find(|s| s.name == channel)
-        .expect("reduction channel surfaces are always present in oracle_surfaces()");
-    let mut input = Vec::with_capacity(prefix.len() + minimized_input.len());
-    input.extend_from_slice(prefix);
-    input.extend_from_slice(minimized_input);
-
-    let (rust, jvm, jvm_input) = query_verdicts(&channel_spec, &input, oracle)?;
-    match reconcile(&channel_spec, rust, jvm, &jvm_input) {
-        Reconciliation::Agree => Ok(Triage::KnownArtifact(format!(
-            "reconciles on {channel}: parse-surface only, node retains original bytes / defers curve-check"
-        ))),
-        Reconciliation::Diverges(_) => Ok(Triage::Pending),
-        Reconciliation::Indeterminate => Ok(Triage::Pending),
-    }
+    Ok(Triage::Pending)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,8 +180,32 @@ pub fn build_record(
         repro,
         seed,
         minimized: true,
+        processing_error: None,
         provenance: provenance.to_string(),
         triage: triage.to_field(),
+    }
+}
+
+/// Preserve a detected divergence through optional minimization.
+///
+/// On success, use the re-verified minimized divergence. Every error retains
+/// the original input/verdicts as an unminimized pending record and stores the
+/// processing error. Callers must report such an error as an incomplete harness
+/// run even if the fallback record is filed successfully.
+pub fn record_after_minimization(
+    original: &Divergence,
+    minimized: io::Result<Divergence>,
+    seed: Option<SeedInfo>,
+    provenance: &str,
+) -> DivergenceRecord {
+    match minimized {
+        Ok(divergence) => build_record(&divergence, Triage::Pending, seed, provenance),
+        Err(error) => {
+            let mut record = build_record(original, Triage::Pending, seed, provenance);
+            record.minimized = false;
+            record.processing_error = Some(format!("{:?}: {error}", error.kind()));
+            record
+        }
     }
 }
 

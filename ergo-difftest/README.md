@@ -183,9 +183,12 @@ scripts/difftest-guard.sh --surfaces "reduce_ctx transaction"
 
 It runs the structure-aware generators against the live oracle on `reduce`,
 `reduce_ctx`, `transaction`, `ergo_box_candidate` and `validate`, minimizes and
-classifies every unique divergence, and prints a per-surface table. Records land
-under `ergo-difftest/regressions/` (gitignored); `QUEUE.md` lists the pending
-ones.
+files every observed divergence class as pending, and prints a per-surface
+table. Classes retain their first concrete generating iteration and actual
+structured/mutation mode. Records land under `ergo-difftest/regressions/`
+(gitignored); `QUEUE.md` lists pending records. If shrinking fails, the original
+input/verdicts are saved with `minimized: false` and `processing_error`; that
+failure still returns harness exit3. A failed file write also returns3.
 
 | exit | meaning |
 |---|---|
@@ -195,10 +198,11 @@ ones.
 | 3 | **harness error** — the oracle died, or a surface checked fewer inputs than it planned |
 
 Exit 3 exists because the failure mode that matters most is a guard that passes
-having checked almost nothing. Three independent assertions guard against it: the
+having checked almost nothing. Independent assertions guard against it: the
 campaign's own exit code (`difftest` returns 3 on a spawn or pipe failure, never
 folding one into a clean summary), an `oracle: HARNESS ERROR:` marker grep over
-the log, and a `checks == iters` count per surface. To see it work, set
+the log, a `checks == iters` count per surface, and complete pending-record
+accounting for every observed divergence class. To see it work, set
 `DIFFTEST_ORACLE_DIE_AFTER=<n>` — a fault-injection knob in the oracle script that
 answers `n` queries and exits.
 
@@ -268,19 +272,11 @@ of a lockstep type-mismatch reject.
 
 ### Triage: which divergences fail the guard
 
-A parse-surface divergence is reconciled against the surface that actually
-*evaluates* the same bytes:
-
-| parse surface | reduction channel |
-|---|---|
-| `ergo_tree` | `reduce` (the bytes are a script) |
-| `ergo_box_candidate` | `reduce_ctx`, prefixed with an empty extension (`00`) |
-| `transaction`, `header` | none — the bytes are not a script |
-
-If the reduction agrees, the finding is a `KnownArtifact` (the node retains
-original wire bytes / defers the curve check). If it persists, or the surface has
-no channel, the record is `PENDING` and a human decides. The harness never sets a
-which-side-is-right verdict.
+Every new divergence stays `PENDING`. Agreement under one fixed dummy context,
+including rejection by both reductions, does not explain a parse difference or
+prove it benign in other contexts. `KnownArtifact` is reserved for explicit
+human review backed by a specific source/fixture explanation. The harness
+never assigns which side is right or automatically certifies no consensus impact.
 
 ### Known coverage gap — `CONTEXT.headers`
 
