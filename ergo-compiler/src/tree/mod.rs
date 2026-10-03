@@ -746,6 +746,28 @@ mod tests {
         assert_eq!(reparse(&r.tree_bytes), r.ergo_tree);
     }
 
+    #[test]
+    fn val_bound_unsigned_collection_folds_to_header0_readable_output() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/scala-folded.stdout"
+        ))
+        .unwrap();
+        let source = fixture["source"].as_str().unwrap();
+        let compiled = compile(&ScriptEnv::new(), source, 3, NetworkPrefix::Testnet).unwrap();
+        assert_eq!(
+            hex::encode(&compiled.tree_bytes),
+            fixture["tree_hex"].as_str().unwrap()
+        );
+        for activation in 1..=3 {
+            let mut reader = VlqReader::new(&compiled.tree_bytes);
+            let parsed =
+                ergo_ser::ergo_tree::read_ergo_tree_with_activated_version(&mut reader, activation)
+                    .unwrap();
+            assert!(reader.is_empty());
+            assert_eq!(parsed, compiled.ergo_tree);
+        }
+    }
+
     // ----- error paths -----
 
     #[test]

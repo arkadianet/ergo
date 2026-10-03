@@ -13,9 +13,16 @@ fn numeric_constants_narrow_at_variable_argument_guards() {
     ] {
         let mut env = ScriptEnv::new();
         env.insert("id", value);
-        for source in ["getVar[Int](id)", "CONTEXT.getVarFromInput[Int](0, id)"] {
+        for (source, expected) in [
+            ("getVar[Int](id)", SType::SOption(Box::new(SType::SInt))),
+            (
+                "CONTEXT.getVarFromInput[Int](0, id)",
+                SType::SOption(Box::new(SType::SInt)),
+            ),
+            ("executeFromVar[Int](id)", SType::SInt),
+        ] {
             let result = typecheck(&env, source, 3).unwrap();
-            assert_eq!(node_tpe(&result), &SType::SOption(Box::new(SType::SInt)));
+            assert_eq!(node_tpe(&result), &expected);
         }
     }
 }
@@ -24,7 +31,11 @@ fn numeric_constants_narrow_at_variable_argument_guards() {
 fn bigint_variable_argument_out_of_range_returns_structured_error() {
     let mut env = ScriptEnv::new();
     env.insert("id", EnvValue::BigInt("128".to_owned()));
-    for source in ["getVar[Int](id)", "CONTEXT.getVarFromInput[Int](0, id)"] {
+    for source in [
+        "getVar[Int](id)",
+        "CONTEXT.getVarFromInput[Int](0, id)",
+        "executeFromVar[Int](id)",
+    ] {
         assert!(typecheck(&env, source, 3).is_err(), "{source}");
     }
     env.insert("input", EnvValue::BigInt("32768".to_owned()));

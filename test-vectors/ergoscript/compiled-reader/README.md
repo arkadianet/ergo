@@ -26,3 +26,11 @@ scala-cli run Capture.scala ../../ergo-sigma/collection-types/ErgoSerdeOracle.sc
 The existing oracle source supplies the locally published ergo-core dependency;
 this capture directly invokes the real compiler and serializer, with no Rust
 oracle. It does not execute a spend, full transaction or deployed node.
+
+`CapturePositive.scala` restores the val-bound empty unsigned collection control.
+Its type-bearing collection folds away before wire assembly; the real compiler
+emits `10010400d1937e730005c1a7`, and the real reader accepts all three activated
+versions with complete consumption. `scala-folded.stdout`, stderr and
+`receipt-folded.json` retain that independent result and source/JAR hashes.
+Reproduce with `scala-cli run CapturePositive.scala --server=false --jvm system
+--main-class CompilerFoldedControl` under the same Java/repository setup.
