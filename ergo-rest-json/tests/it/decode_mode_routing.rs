@@ -1,36 +1,11 @@
-//! Regression: `_with_mode` entry points MUST NOT internally route
-//! through submit-default decoders.
+//! Mode routing and node-form byte parity.
 //!
-//! Pins the decode-mode routing-drift class: a `_with_mode` entry
-//! point that internally calls a submit-default helper (e.g.
-//! `decode_block_transactions_with_mode` hard-calling `decode_input`
-//! instead of `decode_input_with_mode`) silently re-canonicalizes
-//! Scala-emitted bytes through the writer and breaks
-//! `bytes_to_sign(tx)` parity. Block 836113 / tx[18] / R9
-//! (Constant[STuple] register) is the live witness.
-//!
-//! These tests are *targeted at routing drift* — they prove the
-//! mode you ASK for is the mode you GET. The full Merkle invariant
-//! lives in `ergo-validation/tests/diagnose_block_836113.rs`.
-//!
-//! Two lever payloads, both producing detectably different Submit
-//! vs Preserve wire bytes:
-//!
-//! 1. **Constant[STuple(SColl[SByte], SColl[SByte])] register** —
-//!    the literal-tuple form Scala's ConstantSerializer emits as
-//!    `3c 0e 0e <vals>`. Submit canonicalizes to the
-//!    CreateTuple expression form (`86 02 0e <v1> 0e <v2>`).
-//!    Preserve must keep `3c 0e 0e ...`.
-//!
-//! 2. **Non-canonical SBoolean** — value byte `0x05` (or any
-//!    non-zero) reads as `true`; Submit canonicalizes to `0x01`,
-//!    Preserve keeps the original byte. Used inside
-//!    `spendingProof.extension` (and the same trick was already
-//!    pinned for registers by `b4_q5_*` in `api_bridge.rs`).
-//!
-//! If a future refactor re-introduces submit-default routing on any
-//! `_with_mode` entry point, the relevant assertion below fails
-//! with a precise location.
+//! The captured block836113/tx18/R9 ConstantTuple form round-trips in both
+//! modes: the structured writer retains ConstantTuple versus CreateTuple
+//! provenance. Noncanonical Boolean register values distinguish Submit's
+//! canonical writer from Preserve's consumed raw prefix. Context helper Preserve
+//! returns raw prefixes, while final spending proofs canonicalize in both modes.
+//! Full transaction/block entrypoints must propagate the selected policy.
 
 use std::collections::BTreeMap;
 
@@ -45,11 +20,8 @@ use ergo_ser::transaction::{read_transaction, transaction_id};
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
-/// Constant[STuple(SColl[SByte], SColl[SByte])] with two empty
-/// inner collections. Smallest payload that triggers the
-/// CreateTuple canonicalization:
-///   - bytes:  `3c 0e 0e 00 00`             (5 bytes, Constant form)
-///   - submit: `86 02 0e 00 0e 00`          (6 bytes, CreateTuple form)
+/// ConstantTuple with two empty byte collections. Both modes retain this node
+/// form; the separate CreateTuple fixture below remains a distinct encoding.
 const CONSTANT_TUPLE_HEX: &str = "3c0e0e0000";
 const SUBMIT_CANONICAL_TUPLE_HEX: &str = "86020e000e00";
 
@@ -224,11 +196,8 @@ fn decode_context_extension_with_mode_diverges_on_noncanonical_sbool() {
 #[test]
 fn decode_scala_transaction_with_mode_preserve_preserves_block_836113_tx18_id() {
     // tx[18] is the live witness — its R9 holds Constant[STuple]
-    // bytes that Submit-mode canonicalization breaks. If
-    // decode_scala_transaction_with_mode internally drops the mode
-    // (e.g. calls decode_input(si) or decode_output(so) instead of
-    // their _with_mode variants), the canonicalization fires and
-    // the recomputed tx_id no longer matches Scala's claim.
+    // bytes whose node-form provenance must survive decoding. This anchors
+    // the complete transaction ID to the captured Scala projection.
     let block = load_block_836113();
     let tx = &block.block_transactions.transactions[18];
     let scala_id_hex = tx.id.to_lowercase();
