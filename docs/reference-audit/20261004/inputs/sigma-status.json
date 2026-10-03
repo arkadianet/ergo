@@ -30,6 +30,7 @@
       "current_assessment": "Original homogeneous pairs and five previously differing mixed-carrier cases corrected; all six fresh mixed cases and original seven pass independent-reference regressions and the full gate.",
       "fix_commits": [
         "9e187e88298c8082cef50cab69672ecb17419dea",
+        "1387561821eac701aa6639ec240f80e0211a50bd",
         "1387561821eac701aa6639ec240f80e0211a50bd"
       ],
       "follow_up_evidence": [
@@ -40,7 +41,90 @@
         "https://github.com/arkadianet/ergo/pull/498",
         "https://github.com/arkadianet/ergo/pull/506"
       ],
-      "follow_up_pr": "https://github.com/arkadianet/ergo/pull/506"
+      "follow_up_pr": "https://github.com/arkadianet/ergo/pull/506",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-sigma/src/evaluator/helpers/coll.rs",
+            "sha256": "64a13c8a15f19ad603999b56fe48e7c9b33eee47281c485ad2f8a652799a569f",
+            "bytes": 17207
+          },
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/method_call/coll.rs",
+            "sha256": "b7f9b979aee44b97f6b1a0be220b1bc4fb9175c138d854c363e6dc797d96b139",
+            "bytes": 39398
+          },
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/property_call.rs",
+            "sha256": "43b9b82e13be9b68e5f53d151faabb9e2d4bdab5d325d6343362f12f00709374",
+            "bytes": 41448
+          },
+          {
+            "path": "ergo-sigma/tests/it/collection_types.rs",
+            "sha256": "ce45d7d79cc597e8a1f15554f7d7da5a461d2f4fabaf53fac9109ef4e0959421",
+            "bytes": 3366
+          },
+          {
+            "path": "ergo-sigma/tests/it/main.rs",
+            "sha256": "4c9f85329e65b9660ee600c14d3d8d8b651209dc5d5b2733c3d7488415084460",
+            "bytes": 527
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/Capture.scala",
+            "sha256": "182a2b9af22d1f0cca2febf0914a5eab277934b6db997625d17b612971d4df36",
+            "bytes": 2559
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/ErgoSerdeOracle.scala",
+            "sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+            "bytes": 22528
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/README.md",
+            "sha256": "32c12727fc20e1dc2d223c9b25f8f0807f84a72f5e43531b8cfc934f29f5c8f9",
+            "bytes": 1506
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/cases.json",
+            "sha256": "073f27f1bea86be5da62948beaf30eb5c75804cd64472731163c72c1d902e295",
+            "bytes": 4007
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/scala.stdout",
+            "sha256": "97640e3ade9ee9010b9362de1620a2598500ba22764ad05c65a4ec2f028240b8",
+            "bytes": 2039
+          },
+          {
+            "path": "test-vectors/ergo-sigma/mixed-collection-types/Capture.scala",
+            "sha256": "2254f25bed01189b39484093d8c0d7c2ae993c122c31b355dd4fac29e9dd9781",
+            "bytes": 3416
+          },
+          {
+            "path": "test-vectors/ergo-sigma/mixed-collection-types/README.md",
+            "sha256": "c0843576d195806199db52aee673cd7cb1df3cd20316f40dedf39f0e625d3f26",
+            "bytes": 1444
+          },
+          {
+            "path": "test-vectors/ergo-sigma/mixed-collection-types/cases.json",
+            "sha256": "f3e0487d60786e651414084c1df5e55057ea65a4b29eae8e42a1845d58f84abc",
+            "bytes": 5786
+          },
+          {
+            "path": "test-vectors/ergo-sigma/mixed-collection-types/scala.stderr",
+            "sha256": "fd31af1fdc0608c0f01f0320beca7220bc0c9938cf9b355b3f28a46fd5373486",
+            "bytes": 4268
+          },
+          {
+            "path": "test-vectors/ergo-sigma/mixed-collection-types/scala.stdout",
+            "sha256": "7822f0a2ef1186b8e86c9caf379af4ed37a54138e514931de500103c99733e84",
+            "bytes": 4466
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-sigma",
@@ -61,7 +145,60 @@
       "fix_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
       "limits": "Seven independently captured sigma-state6.0.6 scripts, exact reduction costs and Rust public spending-proof entry point. No fresh Scala recapture, full transaction, arbitrary proof or chain-occurrence claim.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/498",
-      "pr_head": "codex/reference-audit-20261004-sigma-collections"
+      "pr_head": "codex/reference-audit-20261004-sigma-collections",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/method_call/coll.rs",
+            "sha256": "b7f9b979aee44b97f6b1a0be220b1bc4fb9175c138d854c363e6dc797d96b139",
+            "bytes": 39398
+          },
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/property_call.rs",
+            "sha256": "43b9b82e13be9b68e5f53d151faabb9e2d4bdab5d325d6343362f12f00709374",
+            "bytes": 41448
+          },
+          {
+            "path": "ergo-sigma/tests/it/collection_types.rs",
+            "sha256": "ce45d7d79cc597e8a1f15554f7d7da5a461d2f4fabaf53fac9109ef4e0959421",
+            "bytes": 3366
+          },
+          {
+            "path": "ergo-sigma/tests/it/main.rs",
+            "sha256": "4c9f85329e65b9660ee600c14d3d8d8b651209dc5d5b2733c3d7488415084460",
+            "bytes": 527
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/Capture.scala",
+            "sha256": "182a2b9af22d1f0cca2febf0914a5eab277934b6db997625d17b612971d4df36",
+            "bytes": 2559
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/ErgoSerdeOracle.scala",
+            "sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+            "bytes": 22528
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/README.md",
+            "sha256": "32c12727fc20e1dc2d223c9b25f8f0807f84a72f5e43531b8cfc934f29f5c8f9",
+            "bytes": 1506
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/cases.json",
+            "sha256": "073f27f1bea86be5da62948beaf30eb5c75804cd64472731163c72c1d902e295",
+            "bytes": 4007
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/scala.stdout",
+            "sha256": "97640e3ade9ee9010b9362de1620a2598500ba22764ad05c65a4ec2f028240b8",
+            "bytes": 2039
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-sigma",
@@ -82,7 +219,60 @@
       "fix_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
       "limits": "Seven independently captured sigma-state6.0.6 scripts, exact reduction costs and Rust public spending-proof entry point. No fresh Scala recapture, full transaction, arbitrary proof or chain-occurrence claim.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/498",
-      "pr_head": "codex/reference-audit-20261004-sigma-collections"
+      "pr_head": "codex/reference-audit-20261004-sigma-collections",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/method_call/coll.rs",
+            "sha256": "b7f9b979aee44b97f6b1a0be220b1bc4fb9175c138d854c363e6dc797d96b139",
+            "bytes": 39398
+          },
+          {
+            "path": "ergo-sigma/src/evaluator/opcodes/property_call.rs",
+            "sha256": "43b9b82e13be9b68e5f53d151faabb9e2d4bdab5d325d6343362f12f00709374",
+            "bytes": 41448
+          },
+          {
+            "path": "ergo-sigma/tests/it/collection_types.rs",
+            "sha256": "ce45d7d79cc597e8a1f15554f7d7da5a461d2f4fabaf53fac9109ef4e0959421",
+            "bytes": 3366
+          },
+          {
+            "path": "ergo-sigma/tests/it/main.rs",
+            "sha256": "4c9f85329e65b9660ee600c14d3d8d8b651209dc5d5b2733c3d7488415084460",
+            "bytes": 527
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/Capture.scala",
+            "sha256": "182a2b9af22d1f0cca2febf0914a5eab277934b6db997625d17b612971d4df36",
+            "bytes": 2559
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/ErgoSerdeOracle.scala",
+            "sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+            "bytes": 22528
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/README.md",
+            "sha256": "32c12727fc20e1dc2d223c9b25f8f0807f84a72f5e43531b8cfc934f29f5c8f9",
+            "bytes": 1506
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/cases.json",
+            "sha256": "073f27f1bea86be5da62948beaf30eb5c75804cd64472731163c72c1d902e295",
+            "bytes": 4007
+          },
+          {
+            "path": "test-vectors/ergo-sigma/collection-types/scala.stdout",
+            "sha256": "97640e3ade9ee9010b9362de1620a2598500ba22764ad05c65a4ec2f028240b8",
+            "bytes": 2039
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-sigma",
@@ -100,7 +290,20 @@
       "prior_fix_commits": [
         "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
         "bc3befeae957481456ffff06534be2d823f7c3d6"
-      ]
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-sigma/src/lib.rs",
+            "sha256": "010932af126af59a80abca1af5a1ed63390bb3a79fa53c6de8179eac3f688e12",
+            "bytes": 3923
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -119,7 +322,45 @@
       "fix_commit": "6c5d125d78dafdc3222011e67c4870f769d85c24",
       "limits": "Finite pinned cached-tree/template ownership capture; no full transaction or chain-occurrence proof.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/500",
-      "pr_head": "codex/reference-audit-20261004-ser-tree-identity"
+      "pr_head": "codex/reference-audit-20261004-ser-tree-identity",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-ser/src/ergo_tree/hash.rs",
+            "sha256": "f0e69fb4f2e34ceb60a6afb6b43f896338f3bf926dacf182c77e799bcc7f0e4a",
+            "bytes": 8239
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "test-vectors/scala/tree-cached-identity/Capture.scala",
+            "sha256": "63a99b91041426477dd6cb8562d0ff6753f6c38dbb0c411f343e8cb28be660fc",
+            "bytes": 1100
+          },
+          {
+            "path": "test-vectors/scala/tree-cached-identity/README.md",
+            "sha256": "d78ea615a521c83bd2894889ed444e98d2bcf15de4977d34ada2d3f6d59c8d85",
+            "bytes": 933
+          },
+          {
+            "path": "test-vectors/scala/tree-cached-identity/cases.json",
+            "sha256": "3cda8c1478eaf30c96abbd46a7bed7d1ad7b21759cc876ef078890abe9e6f21c",
+            "bytes": 1484
+          },
+          {
+            "path": "test-vectors/scala/tree-cached-identity/scala.log",
+            "sha256": "c37abc23b5fc11bb02048442a443c8efe1290c9692d8398be5e1b38a9495d56d",
+            "bytes": 1658
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -139,7 +380,65 @@
       "fix_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
       "limits": "Parsed whole cached wire ID and new candidate canonical ID are separately pinned. Direct mutation of value,height,tokens,txId,index and private register replacement invalidates identity; stale metadata cannot hide writer error. No chain or full-tx claim.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/504",
-      "pr_head": "codex/reference-audit-20261004-ser-box-identity"
+      "pr_head": "codex/reference-audit-20261004-ser-box-identity",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-difftest/src/surfaces.rs",
+            "sha256": "995a3d63197a1ea732106e86f3ddb510957d34d61ce88026a3e71ca2dab0ee64",
+            "bytes": 91407
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/candidate.rs",
+            "sha256": "8d631641d5498bef167f39b20a8ae108bfeac854fe1d31600f6601feb979c562",
+            "bytes": 16214
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/candidate_indexed.rs",
+            "sha256": "cb660812c9209e255469880a402d6db3aee4dae4454a88b7ca96f58237e52765",
+            "bytes": 11536
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/whole.rs",
+            "sha256": "9820248c74accfd6f7717c1832d3833e656e0de728dfef3191cc46900e681412",
+            "bytes": 37077
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/Capture.scala",
+            "sha256": "cb0b6791c790a7d0b2b2ad3e5ab65b48f316de3eaf20d7590a5dfa099e264124",
+            "bytes": 1276
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/README.md",
+            "sha256": "f52eccaf6009cb16f56d5acdf909cdaea147de7e0916c4919cd3fa1177209b53",
+            "bytes": 848
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/cases.json",
+            "sha256": "1a0623a1457d2e9a9e89a3b86a627aa49cd64df5d12806dd018eaf16840507b6",
+            "bytes": 3310
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/scala.stderr",
+            "sha256": "d234ed0e4b4ac676757a601d5ffe36148341ff084905549eb3a18747a4a154c7",
+            "bytes": 398
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/scala.stdout",
+            "sha256": "aaef23fe6e5618d2b0ae5ecbc468790846c870d22e26e30c03e1fa111768f9b7",
+            "bytes": 1506
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -159,7 +458,65 @@
       "fix_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
       "limits": "Parsed whole cached wire ID and new candidate canonical ID are separately pinned. Direct mutation of value,height,tokens,txId,index and private register replacement invalidates identity; stale metadata cannot hide writer error. No chain or full-tx claim.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/504",
-      "pr_head": "codex/reference-audit-20261004-ser-box-identity"
+      "pr_head": "codex/reference-audit-20261004-ser-box-identity",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-difftest/src/surfaces.rs",
+            "sha256": "995a3d63197a1ea732106e86f3ddb510957d34d61ce88026a3e71ca2dab0ee64",
+            "bytes": 91407
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/candidate.rs",
+            "sha256": "8d631641d5498bef167f39b20a8ae108bfeac854fe1d31600f6601feb979c562",
+            "bytes": 16214
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/candidate_indexed.rs",
+            "sha256": "cb660812c9209e255469880a402d6db3aee4dae4454a88b7ca96f58237e52765",
+            "bytes": 11536
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/whole.rs",
+            "sha256": "9820248c74accfd6f7717c1832d3833e656e0de728dfef3191cc46900e681412",
+            "bytes": 37077
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/Capture.scala",
+            "sha256": "cb0b6791c790a7d0b2b2ad3e5ab65b48f316de3eaf20d7590a5dfa099e264124",
+            "bytes": 1276
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/README.md",
+            "sha256": "f52eccaf6009cb16f56d5acdf909cdaea147de7e0916c4919cd3fa1177209b53",
+            "bytes": 848
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/cases.json",
+            "sha256": "1a0623a1457d2e9a9e89a3b86a627aa49cd64df5d12806dd018eaf16840507b6",
+            "bytes": 3310
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/scala.stderr",
+            "sha256": "d234ed0e4b4ac676757a601d5ffe36148341ff084905549eb3a18747a4a154c7",
+            "bytes": 398
+          },
+          {
+            "path": "test-vectors/scala/box-cached-identity/scala.stdout",
+            "sha256": "aaef23fe6e5618d2b0ae5ecbc468790846c870d22e26e30c03e1fa111768f9b7",
+            "bytes": 1506
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -176,7 +533,25 @@
       "prior_fix_commits": [
         "4449b727"
       ],
-      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement."
+      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement.",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-ser/src/ergo_box/candidate.rs",
+            "sha256": "8d631641d5498bef167f39b20a8ae108bfeac854fe1d31600f6601feb979c562",
+            "bytes": 16214
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -193,7 +568,20 @@
       "prior_fix_commits": [
         "4449b727"
       ],
-      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement."
+      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement.",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-ser/src/input/context_extension.rs",
+            "sha256": "96c5e60f4b0ad66a0e39bd7026f488ea7028e537c172fc93920563a324ef3496",
+            "bytes": 65659
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -210,7 +598,7 @@
         "sigma-evidence/group06-ser.json"
       ],
       "resolution_stage": "draft_open",
-      "current_assessment": "ConcreteCollection and BoolCollection still narrow length to u16 without a fallible bound; boolean compaction also needs the same bound. Repair queued.",
+      "current_assessment": "Checked u16 collection lengths now refuse unrepresentable expression/bool collections before writer emission; construction boundary units and full gate pass.",
       "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
       "limits": [
         "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
@@ -218,7 +606,80 @@
         "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
       ],
       "draft_pr": 518,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-ser.md",
+            "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa",
+            "bytes": 12873
+          },
+          {
+            "path": "ergo-ser/src/address.rs",
+            "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02",
+            "bytes": 31896
+          },
+          {
+            "path": "ergo-ser/src/batch_merkle_proof.rs",
+            "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4",
+            "bytes": 10772
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/gates.rs",
+            "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea",
+            "bytes": 10517
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/mod.rs",
+            "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443",
+            "bytes": 7741
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/jvm_utf8.rs",
+            "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994",
+            "bytes": 10095
+          },
+          {
+            "path": "ergo-ser/src/opcode/tests.rs",
+            "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2",
+            "bytes": 68937
+          },
+          {
+            "path": "ergo-ser/src/opcode/types.rs",
+            "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b",
+            "bytes": 38537
+          },
+          {
+            "path": "ergo-ser/src/opcode/write.rs",
+            "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7",
+            "bytes": 26021
+          },
+          {
+            "path": "ergo-ser/src/scala_hamt.rs",
+            "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177",
+            "bytes": 17073
+          },
+          {
+            "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+            "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57",
+            "bytes": 19038
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -235,7 +696,7 @@
         "sigma-evidence/group06-ser.json"
       ],
       "resolution_stage": "draft_open",
-      "current_assessment": "Upstream shared SigmaBoolean representation reduces element size; three input-declared with_capacity(count) reservations remain. Repair queued with unchanged child/failure order.",
+      "current_assessment": "Initial SigmaBoolean child reservation is capped at64 and grows only after parsed children; original wire count/failure order remains. Pure capacity units and full gate pass; no allocator/workload claim.",
       "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
       "limits": [
         "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
@@ -243,7 +704,80 @@
         "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
       ],
       "draft_pr": 518,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-ser.md",
+            "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa",
+            "bytes": 12873
+          },
+          {
+            "path": "ergo-ser/src/address.rs",
+            "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02",
+            "bytes": 31896
+          },
+          {
+            "path": "ergo-ser/src/batch_merkle_proof.rs",
+            "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4",
+            "bytes": 10772
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/gates.rs",
+            "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea",
+            "bytes": 10517
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/mod.rs",
+            "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443",
+            "bytes": 7741
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/jvm_utf8.rs",
+            "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994",
+            "bytes": 10095
+          },
+          {
+            "path": "ergo-ser/src/opcode/tests.rs",
+            "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2",
+            "bytes": 68937
+          },
+          {
+            "path": "ergo-ser/src/opcode/types.rs",
+            "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b",
+            "bytes": 38537
+          },
+          {
+            "path": "ergo-ser/src/opcode/write.rs",
+            "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7",
+            "bytes": 26021
+          },
+          {
+            "path": "ergo-ser/src/scala_hamt.rs",
+            "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177",
+            "bytes": 17073
+          },
+          {
+            "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+            "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57",
+            "bytes": 19038
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -264,7 +798,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Public compiler reader still substitutes the activated-version embeddable table for emitted header scope. Existing exact pinned6.0.6 rejection remains relevant; incoming consensus gates must not be speculatively tightened.",
+      "current_assessment": "Compiler output self-check uses emitted header scope without activated-version embeddable override. Unsupported output returns a structured compiler error; pinned6.0.6 rejection and positive folded-type fixtures remain distinct. Runtime measured override is retained.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -273,10 +807,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -294,7 +997,20 @@
       "prior_fix_commits": [
         "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
         "bc3befeae957481456ffff06534be2d823f7c3d6"
-      ]
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-ser/src/lib.rs",
+            "sha256": "acdc129d401b6e59b5667014e0d7273144c3855450ea6792a372f12d97ac9200",
+            "bytes": 2050
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -319,7 +1035,85 @@
         "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
       ],
       "draft_pr": 518,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-ser.md",
+            "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa",
+            "bytes": 12873
+          },
+          {
+            "path": "ergo-ser/Cargo.toml",
+            "sha256": "611348b195a1bc464cd914f5513c24347da98e3475c7438d16634d47e3758c43",
+            "bytes": 1228
+          },
+          {
+            "path": "ergo-ser/src/address.rs",
+            "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02",
+            "bytes": 31896
+          },
+          {
+            "path": "ergo-ser/src/batch_merkle_proof.rs",
+            "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4",
+            "bytes": 10772
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/gates.rs",
+            "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea",
+            "bytes": 10517
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/mod.rs",
+            "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443",
+            "bytes": 7741
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/jvm_utf8.rs",
+            "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994",
+            "bytes": 10095
+          },
+          {
+            "path": "ergo-ser/src/opcode/tests.rs",
+            "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2",
+            "bytes": 68937
+          },
+          {
+            "path": "ergo-ser/src/opcode/types.rs",
+            "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b",
+            "bytes": 38537
+          },
+          {
+            "path": "ergo-ser/src/opcode/write.rs",
+            "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7",
+            "bytes": 26021
+          },
+          {
+            "path": "ergo-ser/src/scala_hamt.rs",
+            "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177",
+            "bytes": 17073
+          },
+          {
+            "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+            "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57",
+            "bytes": 19038
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -336,7 +1130,7 @@
         "sigma-evidence/group06-ser.json"
       ],
       "resolution_stage": "draft_open",
-      "current_assessment": "opcode_name still omits B6,B7,F2-F8 while payload vocabulary supports them. Diagnostic repair queued.",
+      "current_assessment": "Diagnostic opcode names cover the supported B6/B7/F2\u2013F8 payload vocabulary with registry unit coverage; full gate passes.",
       "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
       "limits": [
         "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
@@ -344,7 +1138,80 @@
         "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
       ],
       "draft_pr": 518,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-ser.md",
+            "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa",
+            "bytes": 12873
+          },
+          {
+            "path": "ergo-ser/src/address.rs",
+            "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02",
+            "bytes": 31896
+          },
+          {
+            "path": "ergo-ser/src/batch_merkle_proof.rs",
+            "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4",
+            "bytes": 10772
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/gates.rs",
+            "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea",
+            "bytes": 10517
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/mod.rs",
+            "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443",
+            "bytes": 7741
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/jvm_utf8.rs",
+            "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994",
+            "bytes": 10095
+          },
+          {
+            "path": "ergo-ser/src/opcode/tests.rs",
+            "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2",
+            "bytes": 68937
+          },
+          {
+            "path": "ergo-ser/src/opcode/types.rs",
+            "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b",
+            "bytes": 38537
+          },
+          {
+            "path": "ergo-ser/src/opcode/write.rs",
+            "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7",
+            "bytes": 26021
+          },
+          {
+            "path": "ergo-ser/src/scala_hamt.rs",
+            "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177",
+            "bytes": 17073
+          },
+          {
+            "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+            "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57",
+            "bytes": 19038
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-ser",
@@ -361,7 +1228,7 @@
         "sigma-evidence/group06-ser.json"
       ],
       "resolution_stage": "draft_open",
-      "current_assessment": "Each multiplication checked; 8+indices_size+proofs_size still uses unchecked additions. Native64-bit tests do not prove32-bit arithmetic. Repair queued.",
+      "current_assessment": "Batch proof size checks both products and their total additions; pure arithmetic boundaries and normal proof tests pass. Native32-bit execution remains untested.",
       "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
       "limits": [
         "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
@@ -369,7 +1236,80 @@
         "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
       ],
       "draft_pr": 518,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-ser.md",
+            "sha256": "98a1f994f757aea58b4537cfa3cebd82dcef092ef604dd10978476d78e36ceaa",
+            "bytes": 12873
+          },
+          {
+            "path": "ergo-ser/src/address.rs",
+            "sha256": "440f135ca49bb660173a87749b4b2cb0702f5514182af8b324483d99b1eeea02",
+            "bytes": 31896
+          },
+          {
+            "path": "ergo-ser/src/batch_merkle_proof.rs",
+            "sha256": "a9becff77d8358590201c3c9a93c0ef7712a61ecc079a693948a8af868a9e0b4",
+            "bytes": 10772
+          },
+          {
+            "path": "ergo-ser/src/ergo_box/mod.rs",
+            "sha256": "0b3fdda31dff811ec4f1b923bd45ac71e3da30f346f45b3af51ccdefd5cbdacd",
+            "bytes": 27656
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/gates.rs",
+            "sha256": "92d962a81ef2a394cc1a74feb082c256ed2412a9ce4cff39e9ade765cecda0ea",
+            "bytes": 10517
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/mod.rs",
+            "sha256": "b081cb860cc3a3e9c1d4081322d83877165f28211bcfab990f0e5b5c82298443",
+            "bytes": 7741
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/jvm_utf8.rs",
+            "sha256": "809267083e40088dceb7dc5bdb16b136839832414397827fd9b4f3609778f994",
+            "bytes": 10095
+          },
+          {
+            "path": "ergo-ser/src/opcode/tests.rs",
+            "sha256": "7dbf38c0a550a6951b1900b54edd4d2cd4556d03860b8e49ea8e930db2bf3fa2",
+            "bytes": 68937
+          },
+          {
+            "path": "ergo-ser/src/opcode/types.rs",
+            "sha256": "2e73be3ad3463334abfc97581ad7b76de1dba30b8438775d2c1d140d715da15b",
+            "bytes": 38537
+          },
+          {
+            "path": "ergo-ser/src/opcode/write.rs",
+            "sha256": "f3464fd4850b2bb8b82c8f73c0ad40ab0a7cb2abbfa1d6e4f34e34e65fbde5f7",
+            "bytes": 26021
+          },
+          {
+            "path": "ergo-ser/src/scala_hamt.rs",
+            "sha256": "4b4fd87cf82ce0bde097f86fdf7c440b1df88faee453cd34ae1c12a571723177",
+            "bytes": 17073
+          },
+          {
+            "path": "ergo-ser/src/sigma_value/sigma_boolean.rs",
+            "sha256": "7c9a44f742672522a712afe78db9012cf53dc633704a7ad277deed316b7a0f57",
+            "bytes": 19038
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -390,7 +1330,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "numeric_constant_parts includes BigInt while numeric_const_value ends in unreachable for it; callers use only is_some guards. Structured checked narrowing already exists downstream. Repair queued.",
+      "current_assessment": "Primitive numeric constant guard is explicit for getVar/getVarFromInput/executeFromVar numeric arguments; nonprimitive forms get a structured refusal, preserving independently pinned ordinary controls.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -399,10 +1339,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -423,7 +1532,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Public compile still emits exact independently rejected header0/type9 fixture and certifies with override. Same cause as ES010; repair requires pinned reference scope, not Rust self-roundtrip closure.",
+      "current_assessment": "Public compiler output self-check now follows emitted header acceptance; independently rejected type9/header0 outputs are refused. Pinned positive folded-type/header3 controls are retained, without speculative incoming consensus tightening.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -432,10 +1541,184 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/lib.rs",
+            "sha256": "cad5b0ec7568fc5b3a4bdc2a46028eea3b0df3385c016fed66de4755c653f7f8",
+            "bytes": 3858
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -456,7 +1739,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Upstream iterative constructed-tree checks credited; remaining discarded pattern/type-parameter recursion now guarded and universal stack guarantee removed.",
+      "current_assessment": "Discarded recursive declaration/type grammar now uses shared depth accounting; upstream constructed-expression/type guards retained. Ordinary boundary tests pass; no universal native stack/panic assurance.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -468,10 +1751,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -492,7 +1944,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Ignored live parity still batches v2 expectations under forced3; normal test handles versions correctly. Fix/live existing-test execution queued.",
+      "current_assessment": "Existing ignored typer comparison batches preserve each fixture activated version instead of forcing3; prior finite pinned existing test receipt passes. No further JVM execution after stopped-operation boundary.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -501,10 +1953,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -525,7 +2146,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Public manual IR/template fields still depend on validated compiler invariants without precise precondition/Panics docs. Documentation repair queued.",
+      "current_assessment": "Public manually built IR/template APIs state validated-compiler preconditions and panic contracts; normal compiler tests/strict docs pass. No blanket arbitrary-IR safety promise.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -534,10 +2155,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -555,7 +2345,20 @@
       "prior_fix_commits": [
         "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
         "bc3befeae957481456ffff06534be2d823f7c3d6"
-      ]
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-compiler/src/lib.rs",
+            "sha256": "cad5b0ec7568fc5b3a4bdc2a46028eea3b0df3385c016fed66de4755c653f7f8",
+            "bytes": 3858
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-compiler",
@@ -576,7 +2379,7 @@
         "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
       ],
       "resolution_stage": "draft_opened",
-      "current_assessment": "Milestone description and CSE comments still stale; some strict docs/path references repaired upstream. Current test target is it; remaining prose/commands repair queued.",
+      "current_assessment": "Milestone/CSE/test-target comments and commands describe current implementation and validation scope; strict docs/full gate pass.",
       "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
       "limits": [
         "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
@@ -585,10 +2388,179 @@
       ],
       "fix_commits": [
         "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
-        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
-      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-compiler.md",
+            "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf",
+            "bytes": 11773
+          },
+          {
+            "path": "docs/compiler-design-ledger.md",
+            "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef",
+            "bytes": 77343
+          },
+          {
+            "path": "ergo-compiler/Cargo.toml",
+            "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06",
+            "bytes": 997
+          },
+          {
+            "path": "ergo-compiler/src/contract_template.rs",
+            "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c",
+            "bytes": 28062
+          },
+          {
+            "path": "ergo-compiler/src/cse/key.rs",
+            "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061",
+            "bytes": 5993
+          },
+          {
+            "path": "ergo-compiler/src/fold.rs",
+            "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc",
+            "bytes": 35107
+          },
+          {
+            "path": "ergo-compiler/src/parse/block/definitions.rs",
+            "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e",
+            "bytes": 16634
+          },
+          {
+            "path": "ergo-compiler/src/parse/cursor.rs",
+            "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad",
+            "bytes": 13927
+          },
+          {
+            "path": "ergo-compiler/src/parse/depth.rs",
+            "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8",
+            "bytes": 9552
+          },
+          {
+            "path": "ergo-compiler/src/parse/mod.rs",
+            "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d",
+            "bytes": 62796
+          },
+          {
+            "path": "ergo-compiler/src/tree/mod.rs",
+            "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc",
+            "bytes": 87333
+          },
+          {
+            "path": "ergo-compiler/src/typed.rs",
+            "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100",
+            "bytes": 89711
+          },
+          {
+            "path": "ergo-compiler/src/typed_print.rs",
+            "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48",
+            "bytes": 55632
+          },
+          {
+            "path": "ergo-compiler/src/typer/assign/apply.rs",
+            "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202",
+            "bytes": 35676
+          },
+          {
+            "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+            "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd",
+            "bytes": 81557
+          },
+          {
+            "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+            "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52",
+            "bytes": 9018
+          },
+          {
+            "path": "ergo-compiler/tests/it/main.rs",
+            "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6",
+            "bytes": 186
+          },
+          {
+            "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+            "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665",
+            "bytes": 1443
+          },
+          {
+            "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+            "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59",
+            "bytes": 45886
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/read.rs",
+            "sha256": "33ddf054ece391bbbdb7ee579f7bafd232e2765d69aa147ded56e7a94c632458",
+            "bytes": 28132
+          },
+          {
+            "path": "ergo-ser/src/ergo_tree/tests.rs",
+            "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e",
+            "bytes": 98516
+          },
+          {
+            "path": "ergo-ser/src/sigma_type/mod.rs",
+            "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165",
+            "bytes": 14003
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+            "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c",
+            "bytes": 3601
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+            "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f",
+            "bytes": 1896
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/README.md",
+            "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c",
+            "bytes": 2076
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+            "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa",
+            "bytes": 9545
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+            "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16",
+            "bytes": 1515
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+            "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc",
+            "bytes": 2411
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+            "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb",
+            "bytes": 484
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+            "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286",
+            "bytes": 2852
+          },
+          {
+            "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+            "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565",
+            "bytes": 9229
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-primitives",
@@ -613,7 +2585,95 @@
         "Validation-owner parsed dynamic parameter integration remains separate from the corrected leaf assurance contract."
       ],
       "draft_pr": 524,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "docs/codemap/ergo-primitives.md",
+            "sha256": "f98aaa8c62c508a97f959c8c3249cdee65ca02ffd6cf2adef9af61c2c0d5c35f",
+            "bytes": 9641
+          },
+          {
+            "path": "ergo-primitives/src/cost.rs",
+            "sha256": "2fb918439f33ec7eb39191d95cb86ca4082771ee0ec2367e103155c2a138c2f5",
+            "bytes": 29131
+          },
+          {
+            "path": "ergo-primitives/src/group_element.rs",
+            "sha256": "2f57622890e3a3226fa9b74249f641b61069090829ef307f864370fdbe094039",
+            "bytes": 5763
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-primitives/src/writer.rs",
+            "sha256": "be91889943aee0ee28cb52cd0a912db5331bf8b9f9ebbe8ac4cd7fb4614c0c88",
+            "bytes": 7967
+          },
+          {
+            "path": "scripts/gen-evaluated-probe.py",
+            "sha256": "f45a9a8bbec959b10e9519819fc57047fa5732f3116855d97d088a283b9576ab",
+            "bytes": 8385
+          },
+          {
+            "path": "scripts/test_evaluated_probe.py",
+            "sha256": "902232a6920955c9d6595d6f7893e76a559d75608235dd59dc23dea657bb8818",
+            "bytes": 5181
+          },
+          {
+            "path": "test-vectors/scala/accumulator_initial_scope.json",
+            "sha256": "6b63dd80768f3055932690fd5ecd1ab5e62ab47347d618e2f2a0705e75143875",
+            "bytes": 6196
+          },
+          {
+            "path": "test-vectors/scala/direct-cost-recapture.json",
+            "sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+            "bytes": 58023
+          },
+          {
+            "path": "test-vectors/scala/jitcost_bounds.json",
+            "sha256": "c9174deb0a708a63ee83937a55b22f3b0583067883089075e074135728518cf9",
+            "bytes": 5982
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/README.md",
+            "sha256": "c91bb9e27a2bb2c2ec032a22ef9ce3a4e937f586886340fb723fc121d0b9318c",
+            "bytes": 2753
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
+            "bytes": 504
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+            "bytes": 64603
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/accumulator_probe.response.json",
+            "sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf",
+            "bytes": 1009
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/jitcost_probe.response.json",
+            "sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f",
+            "bytes": 787
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-primitives",
@@ -634,7 +2694,95 @@
         "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
       ],
       "draft_pr": 524,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "docs/codemap/ergo-primitives.md",
+            "sha256": "f98aaa8c62c508a97f959c8c3249cdee65ca02ffd6cf2adef9af61c2c0d5c35f",
+            "bytes": 9641
+          },
+          {
+            "path": "ergo-primitives/src/cost.rs",
+            "sha256": "2fb918439f33ec7eb39191d95cb86ca4082771ee0ec2367e103155c2a138c2f5",
+            "bytes": 29131
+          },
+          {
+            "path": "ergo-primitives/src/group_element.rs",
+            "sha256": "2f57622890e3a3226fa9b74249f641b61069090829ef307f864370fdbe094039",
+            "bytes": 5763
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-primitives/src/writer.rs",
+            "sha256": "be91889943aee0ee28cb52cd0a912db5331bf8b9f9ebbe8ac4cd7fb4614c0c88",
+            "bytes": 7967
+          },
+          {
+            "path": "scripts/gen-evaluated-probe.py",
+            "sha256": "f45a9a8bbec959b10e9519819fc57047fa5732f3116855d97d088a283b9576ab",
+            "bytes": 8385
+          },
+          {
+            "path": "scripts/test_evaluated_probe.py",
+            "sha256": "902232a6920955c9d6595d6f7893e76a559d75608235dd59dc23dea657bb8818",
+            "bytes": 5181
+          },
+          {
+            "path": "test-vectors/scala/accumulator_initial_scope.json",
+            "sha256": "6b63dd80768f3055932690fd5ecd1ab5e62ab47347d618e2f2a0705e75143875",
+            "bytes": 6196
+          },
+          {
+            "path": "test-vectors/scala/direct-cost-recapture.json",
+            "sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+            "bytes": 58023
+          },
+          {
+            "path": "test-vectors/scala/jitcost_bounds.json",
+            "sha256": "c9174deb0a708a63ee83937a55b22f3b0583067883089075e074135728518cf9",
+            "bytes": 5982
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/README.md",
+            "sha256": "c91bb9e27a2bb2c2ec032a22ef9ce3a4e937f586886340fb723fc121d0b9318c",
+            "bytes": 2753
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
+            "bytes": 504
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+            "bytes": 64603
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/accumulator_probe.response.json",
+            "sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf",
+            "bytes": 1009
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/jitcost_probe.response.json",
+            "sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f",
+            "bytes": 787
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-primitives",
@@ -659,7 +2807,95 @@
         "Finite standalone probes do not certify live voted caps, individual production charge reachability, or full transaction/chain acceptance."
       ],
       "draft_pr": 524,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "docs/codemap/ergo-primitives.md",
+            "sha256": "f98aaa8c62c508a97f959c8c3249cdee65ca02ffd6cf2adef9af61c2c0d5c35f",
+            "bytes": 9641
+          },
+          {
+            "path": "ergo-primitives/src/cost.rs",
+            "sha256": "2fb918439f33ec7eb39191d95cb86ca4082771ee0ec2367e103155c2a138c2f5",
+            "bytes": 29131
+          },
+          {
+            "path": "ergo-primitives/src/group_element.rs",
+            "sha256": "2f57622890e3a3226fa9b74249f641b61069090829ef307f864370fdbe094039",
+            "bytes": 5763
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-primitives/src/writer.rs",
+            "sha256": "be91889943aee0ee28cb52cd0a912db5331bf8b9f9ebbe8ac4cd7fb4614c0c88",
+            "bytes": 7967
+          },
+          {
+            "path": "scripts/gen-evaluated-probe.py",
+            "sha256": "f45a9a8bbec959b10e9519819fc57047fa5732f3116855d97d088a283b9576ab",
+            "bytes": 8385
+          },
+          {
+            "path": "scripts/test_evaluated_probe.py",
+            "sha256": "902232a6920955c9d6595d6f7893e76a559d75608235dd59dc23dea657bb8818",
+            "bytes": 5181
+          },
+          {
+            "path": "test-vectors/scala/accumulator_initial_scope.json",
+            "sha256": "6b63dd80768f3055932690fd5ecd1ab5e62ab47347d618e2f2a0705e75143875",
+            "bytes": 6196
+          },
+          {
+            "path": "test-vectors/scala/direct-cost-recapture.json",
+            "sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+            "bytes": 58023
+          },
+          {
+            "path": "test-vectors/scala/jitcost_bounds.json",
+            "sha256": "c9174deb0a708a63ee83937a55b22f3b0583067883089075e074135728518cf9",
+            "bytes": 5982
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/README.md",
+            "sha256": "c91bb9e27a2bb2c2ec032a22ef9ce3a4e937f586886340fb723fc121d0b9318c",
+            "bytes": 2753
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
+            "bytes": 504
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+            "bytes": 64603
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/accumulator_probe.response.json",
+            "sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf",
+            "bytes": 1009
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/jitcost_probe.response.json",
+            "sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f",
+            "bytes": 787
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-primitives",
@@ -680,7 +2916,95 @@
         "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
       ],
       "draft_pr": 524,
-      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "docs/codemap/ergo-primitives.md",
+            "sha256": "f98aaa8c62c508a97f959c8c3249cdee65ca02ffd6cf2adef9af61c2c0d5c35f",
+            "bytes": 9641
+          },
+          {
+            "path": "ergo-primitives/src/cost.rs",
+            "sha256": "2fb918439f33ec7eb39191d95cb86ca4082771ee0ec2367e103155c2a138c2f5",
+            "bytes": 29131
+          },
+          {
+            "path": "ergo-primitives/src/group_element.rs",
+            "sha256": "2f57622890e3a3226fa9b74249f641b61069090829ef307f864370fdbe094039",
+            "bytes": 5763
+          },
+          {
+            "path": "ergo-primitives/src/reader.rs",
+            "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c",
+            "bytes": 48522
+          },
+          {
+            "path": "ergo-primitives/src/writer.rs",
+            "sha256": "be91889943aee0ee28cb52cd0a912db5331bf8b9f9ebbe8ac4cd7fb4614c0c88",
+            "bytes": 7967
+          },
+          {
+            "path": "scripts/gen-evaluated-probe.py",
+            "sha256": "f45a9a8bbec959b10e9519819fc57047fa5732f3116855d97d088a283b9576ab",
+            "bytes": 8385
+          },
+          {
+            "path": "scripts/test_evaluated_probe.py",
+            "sha256": "902232a6920955c9d6595d6f7893e76a559d75608235dd59dc23dea657bb8818",
+            "bytes": 5181
+          },
+          {
+            "path": "test-vectors/scala/accumulator_initial_scope.json",
+            "sha256": "6b63dd80768f3055932690fd5ecd1ab5e62ab47347d618e2f2a0705e75143875",
+            "bytes": 6196
+          },
+          {
+            "path": "test-vectors/scala/direct-cost-recapture.json",
+            "sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+            "bytes": 58023
+          },
+          {
+            "path": "test-vectors/scala/jitcost_bounds.json",
+            "sha256": "c9174deb0a708a63ee83937a55b22f3b0583067883089075e074135728518cf9",
+            "bytes": 5982
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/README.md",
+            "sha256": "c91bb9e27a2bb2c2ec032a22ef9ce3a4e937f586886340fb723fc121d0b9318c",
+            "bytes": 2753
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+            "sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f",
+            "bytes": 504
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+            "sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+            "bytes": 64603
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/accumulator_probe.response.json",
+            "sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf",
+            "bytes": 1009
+          },
+          {
+            "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/jitcost_probe.response.json",
+            "sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f",
+            "bytes": 787
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest-fuzz",
@@ -689,7 +3013,7 @@
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
       "status": "remaining_evidence",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "current_commit": "26df859a6d9a9a9260edecced86b88a5d447547e",
       "pr_group": null,
       "evidence": [
         "sigma-evidence/current-revalidation.json",
@@ -698,8 +3022,36 @@
         "sigma-evidence/native-fuzz/fixed-seed-replay.json",
         "sigma-evidence/native-fuzz/native-symbols.json"
       ],
-      "resolution_stage": "validation_obligation",
-      "current_assessment": "All12 native ASan targets built and68 committed seeds replayed once each PASS under exact CI cargo-fuzz0.13.1/nightly2026-09-30; crash/artifact/minimization/upload assurance remains distinct and unexecuted."
+      "resolution_stage": "remaining_native_crash_artifact_assurance",
+      "current_assessment": "Earlier exact5691 source copy: all12 ASan builds and68 fixed public seeds passed under pinnedCI tools. These are retained positive build/seed receipts, not Bug\u2192native failure\u2192matching artifact\u2192replay/upload proof. That distinct native obligation remains NOT_RUN; no stopped operation repeated.",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.toml",
+            "sha256": "9a71f76a5fcb75d66bc10671f0da894ecfe49c21bf72d444cdebcf27fe7b59aa",
+            "bytes": 2315
+          },
+          {
+            "path": "ergo-difftest/fuzz/fuzz_targets/ergo_tree.rs",
+            "sha256": "1d01496dd4c6d0e09701908a2fb0e896deed504dd52bf91e886a12211de01fc7",
+            "bytes": 132
+          },
+          {
+            "path": "ergo-difftest/src/fuzz.rs",
+            "sha256": "dc1c29211e2444cda4a636688ec7538140c671580de8dc7fd3f54730abda0fea",
+            "bytes": 3547
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest-fuzz",
@@ -708,28 +3060,183 @@
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
       "status": "remaining_evidence",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "pr_group": "group14-fuzz-provenance-docs",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group14-ready.json",
+        "sigma-evidence/group14-gate.json",
+        "sigma-evidence/group14-cargo-fuzz-options.json",
+        "sigma-evidence/group14-doc-followup-units.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "Upstream f6973a14/3c075c47 pins/tracks detached lock and exact tool setup with locked metadata/drift check. Crash/corpus uploads still lack self-contained source/toolchain/binary/options/lock provenance; remaining repair queued."
+      "resolution_stage": "draft_open_source_fixed_actual_upload_unexecuted",
+      "current_assessment": "Upstream exact tool/lock policy repairs credited. New source/lock/tool/compiler/binary/seed/command provenance bundle and explicit failed/incomplete statuses source/unit validated. Actual scheduled workflow and artifact-upload chain remains NOT_RUN.",
+      "source_fix_commit": "26df859a6d9a9a9260edecced86b88a5d447547e",
+      "fix_commits": [
+        "10b4ccac72972beb74cd13abfaf96c679109b05c",
+        "26df859a6d9a9a9260edecced86b88a5d447547e",
+        "c361b104c74f8009b55b6a682b4b069405149d95"
+      ],
+      "limits": "EFF002 source repaired; actual workflow/artifact upload NOT_RUN. EFF001 native Bug\u2192nonzero\u2192matching raw artifact\u2192replay/upload and DIFF02/03 independent detector/generated rediscovery remain unclosed. No stopped native diagnostic/injection/reinjection/JVM differential/guard/upload action repeated.",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/ci-tools.toml",
+            "sha256": "1eafef49a312043b45e4ca8124f72d457b9f862b922d02a3f5bdfa17a9b5847a",
+            "bytes": 307
+          },
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.lock",
+            "sha256": "e2b6aea8be990a5092ebaa7423eba24b1d44410404f49a01100c957d40f03805",
+            "bytes": 29312
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.toml",
+            "sha256": "9a71f76a5fcb75d66bc10671f0da894ecfe49c21bf72d444cdebcf27fe7b59aa",
+            "bytes": 2315
+          },
+          {
+            "path": "ergo-difftest/fuzz/README.md",
+            "sha256": "ce8de4572f703c5271c264a08132c881bb2b0a07f13595f8702955097f6b95cf",
+            "bytes": 12850
+          },
+          {
+            "path": "scripts/fuzz-evidence.py",
+            "sha256": "81b5f11c3f6c98b68d15f0b88abe9d919453cb26c0df3c4a53441bceee64e2ee",
+            "bytes": 12591
+          },
+          {
+            "path": "scripts/fuzz-step.sh",
+            "sha256": "8ed19d350b98213d2299768dfcb45ece22a54feff9cf4b548b5fbf711ad055f8",
+            "bytes": 932
+          },
+          {
+            "path": "scripts/test_fuzz_evidence.py",
+            "sha256": "48dc3c96d9020e874a1b21d47b0684c21a860069644e2c6df29150d719d9d2fe",
+            "bytes": 7815
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root.",
+      "pr": "https://github.com/arkadianet/ergo/pull/568",
+      "published_pr_head": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/568",
+      "pr_head": "codex/reference-audit-20261004-fuzz-evidence",
+      "pr_commit": "c361b104c74f8009b55b6a682b4b069405149d95"
     },
     {
       "crate": "ergo-difftest-fuzz",
       "original_id": "EFF003",
       "original_title": "EFF003 \u2014 P3: The detached README misstates current replay/oracle CI coverage",
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
-      "status": "remaining_evidence",
+      "status": "fixed",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "pr_group": "group14-fuzz-provenance-docs",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group14-ready.json",
+        "sigma-evidence/group14-gate.json",
+        "sigma-evidence/group14-cargo-fuzz-options.json",
+        "sigma-evidence/group14-doc-followup-units.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "README still mixes floating quickstart with pinned CI, misstates stable/libFuzzer reason and historical replay/oracle claims. Current source/workflow checked; repair queued."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Current setup/spec/codemap names the twelve native targets, actual stable/nightly boundaries, 6.0.6 authority snapshots, early replay-only1\u2013200 context, truthful filing/triage/reinjection scope and historical attribution. Commands checked against pinned local source; ordinary units/policy/fragments pass.",
+      "source_fix_commit": "26df859a6d9a9a9260edecced86b88a5d447547e",
+      "fix_commits": [
+        "10b4ccac72972beb74cd13abfaf96c679109b05c",
+        "26df859a6d9a9a9260edecced86b88a5d447547e",
+        "c361b104c74f8009b55b6a682b4b069405149d95"
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.toml",
+            "sha256": "9a71f76a5fcb75d66bc10671f0da894ecfe49c21bf72d444cdebcf27fe7b59aa",
+            "bytes": 2315
+          },
+          {
+            "path": "ergo-difftest/fuzz/README.md",
+            "sha256": "ce8de4572f703c5271c264a08132c881bb2b0a07f13595f8702955097f6b95cf",
+            "bytes": 12850
+          },
+          {
+            "path": "scripts/fuzz-evidence.py",
+            "sha256": "81b5f11c3f6c98b68d15f0b88abe9d919453cb26c0df3c4a53441bceee64e2ee",
+            "bytes": 12591
+          },
+          {
+            "path": "scripts/fuzz-step.sh",
+            "sha256": "8ed19d350b98213d2299768dfcb45ece22a54feff9cf4b548b5fbf711ad055f8",
+            "bytes": 932
+          },
+          {
+            "path": "scripts/test_fuzz_evidence.py",
+            "sha256": "48dc3c96d9020e874a1b21d47b0684c21a860069644e2c6df29150d719d9d2fe",
+            "bytes": 7815
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root.",
+      "pr": "https://github.com/arkadianet/ergo/pull/568",
+      "published_pr_head": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/568",
+      "pr_head": "codex/reference-audit-20261004-fuzz-evidence",
+      "pr_commit": "c361b104c74f8009b55b6a682b4b069405149d95"
     },
     {
       "crate": "ergo-difftest",
@@ -751,7 +3258,60 @@
       "fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
       "limits": "No new independent Scala verdict or hidden consensus defect proof; DIFF11 artifact identity/publication remains separate queued cause.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/543",
-      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence"
+      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/oracle.rs",
+            "sha256": "ce57297feba343b8d1516a098030087d453ba9cbe8ed573df2f4fa783d3da340",
+            "bytes": 74662
+          },
+          {
+            "path": "ergo-difftest/src/regressions.rs",
+            "sha256": "e93cdfd3388afb1c26471566f1851b622dcd298a66098633d1a0ecf70f1136c8",
+            "bytes": 11670
+          },
+          {
+            "path": "ergo-difftest/tests/it/minimize.rs",
+            "sha256": "9f6572931531756c6bab22c22fb20cd4b0d5bea08a7b56d202a3287d8c3bc87e",
+            "bytes": 17915
+          },
+          {
+            "path": "scripts/difftest-guard.selftest.sh",
+            "sha256": "eba75e962e7a8543a47e10d9a044e8886a2bdb857fd57433081103f6977ae69c",
+            "bytes": 3495
+          },
+          {
+            "path": "scripts/difftest-guard.sh",
+            "sha256": "a331b0059e3263ce2b83a4e221486593c79ce26deb147224c7b288b3c952d6c9",
+            "bytes": 12643
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -760,13 +3320,54 @@
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
       "status": "remaining_evidence",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+      "pr_group": "group12-difftest-detector-results",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group12-ready.json",
+        "sigma-evidence/group12-gate-detector-result-tests.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "General reinjection build pipeline masks status; runtime treats any failure as expected detection. No operational reinjection run; typed matching/exit checks repair queued."
+      "resolution_stage": "draft_open_source_fixed_assurance_unexecuted",
+      "current_assessment": "Source false-green paths repaired and six pure saved-log classifier units pass. No actual detector/clean-patched reinjection or generated rediscovery ran; generated mode is explicitly unsupported and refuses usage2. Assurance remains unclosed per root scope instruction.",
+      "source_fix_commit": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/562",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "scripts/reinject-result.py",
+            "sha256": "bdcd45a74d213a79202bf41546ef8b5076bed4a191699d0c283ea89dfe75fc04",
+            "bytes": 1908
+          },
+          {
+            "path": "scripts/reinject_gate.selftest.sh",
+            "sha256": "ca7fd13ae78c2d3437ca10d3e183f132770cbdeade01a9e6be94978af2d1fb39",
+            "bytes": 3660
+          },
+          {
+            "path": "scripts/reinject_gate.sh",
+            "sha256": "14322abd27f407362052671558561c0c1566c218823317c3e613b0076e4b3fce",
+            "bytes": 13760
+          },
+          {
+            "path": "scripts/test_difftest_reinject.py",
+            "sha256": "a14f8636494c2937c81070133c10dfa71a8b27562d7a1119639d5755171b3af0",
+            "bytes": 2544
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -775,13 +3376,54 @@
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
       "status": "remaining_evidence",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+      "pr_group": "group12-difftest-detector-results",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group12-ready.json",
+        "sigma-evidence/group12-gate-detector-result-tests.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "Generated rediscovery still skips every eligible check. Unsupported mode must fail explicitly instead of false success; no campaign run."
+      "resolution_stage": "draft_open_source_fixed_assurance_unexecuted",
+      "current_assessment": "Source false-green paths repaired and six pure saved-log classifier units pass. No actual detector/clean-patched reinjection or generated rediscovery ran; generated mode is explicitly unsupported and refuses usage2. Assurance remains unclosed per root scope instruction.",
+      "source_fix_commit": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/562",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "scripts/reinject-result.py",
+            "sha256": "bdcd45a74d213a79202bf41546ef8b5076bed4a191699d0c283ea89dfe75fc04",
+            "bytes": 1908
+          },
+          {
+            "path": "scripts/reinject_gate.selftest.sh",
+            "sha256": "ca7fd13ae78c2d3437ca10d3e183f132770cbdeade01a9e6be94978af2d1fb39",
+            "bytes": 3660
+          },
+          {
+            "path": "scripts/reinject_gate.sh",
+            "sha256": "14322abd27f407362052671558561c0c1566c218823317c3e613b0076e4b3fce",
+            "bytes": 13760
+          },
+          {
+            "path": "scripts/test_difftest_reinject.py",
+            "sha256": "a14f8636494c2937c81070133c10dfa71a8b27562d7a1119639d5755171b3af0",
+            "bytes": 2544
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -802,7 +3444,50 @@
         "025a9cbfcb68891f702d35eadec6801a268890b5"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
-      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+      "pr_head": "codex/reference-audit-20261004-difftest-checks",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/lib.rs",
+            "sha256": "84bb191114094934f218d0fd95cc4ef920e36d5176a31c942550c8ef09e415ba",
+            "bytes": 11039
+          },
+          {
+            "path": "ergo-difftest/tests/it/cli_contracts.rs",
+            "sha256": "1673d1106e6fa0c3c21daff3c493304e51d26645b1c0431e733efcfb338427ea",
+            "bytes": 2656
+          },
+          {
+            "path": "ergo-difftest/tests/it/main.rs",
+            "sha256": "98aa7c5794d1ed5b487f6924f8168b7170c6393657a6a67b98206e643333f9d8",
+            "bytes": 106
+          },
+          {
+            "path": "ergo-difftest/tests/it/selftest.rs",
+            "sha256": "a7c92d5e0b94c67285b6ade44d21c5082d3b2598b2b4972b97714060513bfd55",
+            "bytes": 1090
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -823,7 +3508,50 @@
         "025a9cbfcb68891f702d35eadec6801a268890b5"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
-      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+      "pr_head": "codex/reference-audit-20261004-difftest-checks",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/lib.rs",
+            "sha256": "84bb191114094934f218d0fd95cc4ef920e36d5176a31c942550c8ef09e415ba",
+            "bytes": 11039
+          },
+          {
+            "path": "ergo-difftest/tests/it/cli_contracts.rs",
+            "sha256": "1673d1106e6fa0c3c21daff3c493304e51d26645b1c0431e733efcfb338427ea",
+            "bytes": 2656
+          },
+          {
+            "path": "ergo-difftest/tests/it/main.rs",
+            "sha256": "98aa7c5794d1ed5b487f6924f8168b7170c6393657a6a67b98206e643333f9d8",
+            "bytes": 106
+          },
+          {
+            "path": "ergo-difftest/tests/it/selftest.rs",
+            "sha256": "a7c92d5e0b94c67285b6ade44d21c5082d3b2598b2b4972b97714060513bfd55",
+            "bytes": 1090
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -844,7 +3572,50 @@
         "025a9cbfcb68891f702d35eadec6801a268890b5"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
-      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+      "pr_head": "codex/reference-audit-20261004-difftest-checks",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/lib.rs",
+            "sha256": "84bb191114094934f218d0fd95cc4ef920e36d5176a31c942550c8ef09e415ba",
+            "bytes": 11039
+          },
+          {
+            "path": "ergo-difftest/tests/it/cli_contracts.rs",
+            "sha256": "1673d1106e6fa0c3c21daff3c493304e51d26645b1c0431e733efcfb338427ea",
+            "bytes": 2656
+          },
+          {
+            "path": "ergo-difftest/tests/it/main.rs",
+            "sha256": "98aa7c5794d1ed5b487f6924f8168b7170c6393657a6a67b98206e643333f9d8",
+            "bytes": 106
+          },
+          {
+            "path": "ergo-difftest/tests/it/selftest.rs",
+            "sha256": "a7c92d5e0b94c67285b6ade44d21c5082d3b2598b2b4972b97714060513bfd55",
+            "bytes": 1090
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -865,7 +3636,50 @@
         "025a9cbfcb68891f702d35eadec6801a268890b5"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
-      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+      "pr_head": "codex/reference-audit-20261004-difftest-checks",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/lib.rs",
+            "sha256": "84bb191114094934f218d0fd95cc4ef920e36d5176a31c942550c8ef09e415ba",
+            "bytes": 11039
+          },
+          {
+            "path": "ergo-difftest/tests/it/cli_contracts.rs",
+            "sha256": "1673d1106e6fa0c3c21daff3c493304e51d26645b1c0431e733efcfb338427ea",
+            "bytes": 2656
+          },
+          {
+            "path": "ergo-difftest/tests/it/main.rs",
+            "sha256": "98aa7c5794d1ed5b487f6924f8168b7170c6393657a6a67b98206e643333f9d8",
+            "bytes": 106
+          },
+          {
+            "path": "ergo-difftest/tests/it/selftest.rs",
+            "sha256": "a7c92d5e0b94c67285b6ade44d21c5082d3b2598b2b4972b97714060513bfd55",
+            "bytes": 1090
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -887,7 +3701,50 @@
       "fix_commit": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
       "limits": "Windows descendants and escaped Unix process groups not certified; no full transaction/runtime fuzz campaign claim.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/540",
-      "pr_head": "codex/reference-audit-20261004-difftest-transport"
+      "pr_head": "codex/reference-audit-20261004-difftest-transport",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "Cargo.lock",
+            "sha256": "f5b6803e6277e6e08c51f923e7d007d76efbc2df5c66e804c5e38a0f6533086b",
+            "bytes": 95985
+          },
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/Cargo.toml",
+            "sha256": "f7f03a4d48a13b1c47dbf637722899210d19c0368bfcc9d8ee8516e985d83973",
+            "bytes": 2122
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.lock",
+            "sha256": "e2b6aea8be990a5092ebaa7423eba24b1d44410404f49a01100c957d40f03805",
+            "bytes": 29312
+          },
+          {
+            "path": "ergo-difftest/src/oracle.rs",
+            "sha256": "ce57297feba343b8d1516a098030087d453ba9cbe8ed573df2f4fa783d3da340",
+            "bytes": 74662
+          },
+          {
+            "path": "ergo-difftest/src/oracle/transport.rs",
+            "sha256": "ab584229fe06358a30794ef5674422ba3e525fa868e52802e68538e225ec9d43",
+            "bytes": 15585
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -909,7 +3766,60 @@
       "fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
       "limits": "No new independent Scala verdict or hidden consensus defect proof; DIFF11 artifact identity/publication remains separate queued cause.",
       "draft_pr": "https://github.com/arkadianet/ergo/pull/543",
-      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence"
+      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/oracle.rs",
+            "sha256": "ce57297feba343b8d1516a098030087d453ba9cbe8ed573df2f4fa783d3da340",
+            "bytes": 74662
+          },
+          {
+            "path": "ergo-difftest/src/regressions.rs",
+            "sha256": "e93cdfd3388afb1c26471566f1851b622dcd298a66098633d1a0ecf70f1136c8",
+            "bytes": 11670
+          },
+          {
+            "path": "ergo-difftest/tests/it/minimize.rs",
+            "sha256": "9f6572931531756c6bab22c22fb20cd4b0d5bea08a7b56d202a3287d8c3bc87e",
+            "bytes": 17915
+          },
+          {
+            "path": "scripts/difftest-guard.selftest.sh",
+            "sha256": "eba75e962e7a8543a47e10d9a044e8886a2bdb857fd57433081103f6977ae69c",
+            "bytes": 3495
+          },
+          {
+            "path": "scripts/difftest-guard.sh",
+            "sha256": "a331b0059e3263ce2b83a4e221486593c79ce26deb147224c7b288b3c952d6c9",
+            "bytes": 12643
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -925,9 +3835,28 @@
         "sigma-evidence/group11-gate.json",
         "sigma-evidence/group11-gate-record-tests.json"
       ],
-      "resolution_stage": "ready_for_root_review",
+      "resolution_stage": "draft_open",
       "current_assessment": "First generating iteration/mode retained in group10; group11 archives build-source/compiler/executable, exact primary/verify sources, actual JVM/JAR and ordered corpus identities, and archived-source repro commands. Unavailable authority remains incomplete.",
-      "partial_fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82"
+      "partial_fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/558",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/regressions.rs",
+            "sha256": "e93cdfd3388afb1c26471566f1851b622dcd298a66098633d1a0ecf70f1136c8",
+            "bytes": 11670
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -943,38 +3872,129 @@
         "sigma-evidence/group11-gate.json",
         "sigma-evidence/group11-gate-record-tests.json"
       ],
-      "resolution_stage": "ready_for_root_review",
-      "current_assessment": "Full canonical-record SHA256, immutable atomic publication, cross-process filing lock and derived queue; guard validates record/journal/source integrity and binds stable semantic baseline key to actual comparison authority. Legacy input-only keys cannot mute records. Ordinary concurrency/corrupt evidence/authority units pass; no power-loss/native upload certification."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Full canonical-record SHA256, immutable atomic publication, cross-process filing lock and derived queue; guard validates record/journal/source integrity and binds stable semantic baseline key to actual comparison authority. Legacy input-only keys cannot mute records. Ordinary concurrency/corrupt evidence/authority units pass; no power-loss/native upload certification.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/558",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-difftest/src/regressions.rs",
+            "sha256": "e93cdfd3388afb1c26471566f1851b622dcd298a66098633d1a0ecf70f1136c8",
+            "bytes": 11670
+          },
+          {
+            "path": "scripts/difftest-guard.sh",
+            "sha256": "a331b0059e3263ce2b83a4e221486593c79ce26deb147224c7b288b3c952d6c9",
+            "bytes": 12643
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
       "original_id": "DIFF-12",
       "original_title": "DIFF-12 \u2014 genesis root pin is not verified by the replay pin counter",
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
-      "status": "remaining_evidence",
+      "status": "fixed",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+      "pr_group": "group13-difftest-replay-pins",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group13-ready.json",
+        "sigma-evidence/group13-final-gate.json",
+        "sigma-evidence/group13-final-clean-fmt.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "Genesis pin counter increments on supplied header ID before computed root/pinned root verification. Offline root/pin contract repair queued; no remote node called."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Requested/decoded/pinned identities and applied roots are bound; genesis counter is truthful and fixed-context height range is enforced before I/O. Existing captured genesis unit and model/pin metadata units pass. Historical late-epoch replay is unimplemented; no reference-node certification.",
+      "fix_commits": [
+        "d6ffacab58ad7675d9c305d58e027a74d7615127",
+        "1a7ef8a58b6844edf8131d77978159c11c97f70b"
+      ],
+      "limits": "Six ordinary unit tests, including existing captured genesis application/pinned root. No live node or archival replay; historical late epochs remain unimplemented. No stopped detector/reinjection/JVM guard/native diagnostic/upload execution.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/564",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/replay-pins.json",
+            "sha256": "768ae52b0939400b58eae8c22089882406c82ada454f03d0f08bb67127e5ff12",
+            "bytes": 2535
+          },
+          {
+            "path": "ergo-difftest/src/bin/replay.rs",
+            "sha256": "564077965a2e638691227210cb756b5d8170e3f29b6f48b9ac792596dc4e02d2",
+            "bytes": 47068
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
       "original_id": "DIFF-13",
       "original_title": "DIFF-13 \u2014 replay accepts heights outside its faithful context model",
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
-      "status": "remaining_evidence",
+      "status": "fixed",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+      "pr_group": "group13-difftest-replay-pins",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group13-ready.json",
+        "sigma-evidence/group13-final-gate.json",
+        "sigma-evidence/group13-final-clean-fmt.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "Replay fixed historical context still accepts unsupported requested height ranges. Faithful supported-era bound/documentation repair queued; no archival replay."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Requested/decoded/pinned identities and applied roots are bound; genesis counter is truthful and fixed-context height range is enforced before I/O. Existing captured genesis unit and model/pin metadata units pass. Historical late-epoch replay is unimplemented; no reference-node certification.",
+      "fix_commits": [
+        "d6ffacab58ad7675d9c305d58e027a74d7615127",
+        "1a7ef8a58b6844edf8131d77978159c11c97f70b"
+      ],
+      "limits": "Six ordinary unit tests, including existing captured genesis application/pinned root. No live node or archival replay; historical late epochs remain unimplemented. No stopped detector/reinjection/JVM guard/native diagnostic/upload execution.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/564",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/replay-pins.json",
+            "sha256": "768ae52b0939400b58eae8c22089882406c82ada454f03d0f08bb67127e5ff12",
+            "bytes": 2535
+          },
+          {
+            "path": "ergo-difftest/src/bin/replay.rs",
+            "sha256": "564077965a2e638691227210cb756b5d8170e3f29b6f48b9ac792596dc4e02d2",
+            "bytes": 47068
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -990,8 +4010,22 @@
         "sigma-evidence/group11-gate.json",
         "sigma-evidence/group11-gate-record-tests.json"
       ],
-      "resolution_stage": "ready_for_root_review",
-      "current_assessment": "Guard never clears caller output. Default output is fresh; existing directories require explicit preservation. Per-invocation logs remain separate; arguments/supported nonempty surfaces are validated and Cargo build/metadata locked. Final changes source/unit validated; preserved earlier guard receipt predates finalization."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Guard never clears caller output. Default output is fresh; existing directories require explicit preservation. Per-invocation logs remain separate; arguments/supported nonempty surfaces are validated and Cargo build/metadata locked. Final changes source/unit validated; preserved earlier guard receipt predates finalization.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/558",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "scripts/difftest-guard.sh",
+            "sha256": "a331b0059e3263ce2b83a4e221486593c79ce26deb147224c7b288b3c952d6c9",
+            "bytes": 12643
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
@@ -1009,22 +4043,117 @@
       "prior_fix_commits": [
         "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
         "bc3befeae957481456ffff06534be2d823f7c3d6"
-      ]
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "ergo-difftest/src/gen/mod.rs",
+            "sha256": "994297e7c0c56f0d4714825dbdf4dac082b1e98b37cbf2231ea56f28bd0020f0",
+            "bytes": 23456
+          },
+          {
+            "path": "ergo-difftest/src/minimize.rs",
+            "sha256": "45f5937bcf42695c7144113cbf90286d18dcd5af171f6ee9713c9c526001e7be",
+            "bytes": 9710
+          },
+          {
+            "path": "ergo-difftest/src/regressions.rs",
+            "sha256": "e93cdfd3388afb1c26471566f1851b622dcd298a66098633d1a0ecf70f1136c8",
+            "bytes": 11670
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     },
     {
       "crate": "ergo-difftest",
       "original_id": "DIFF-16",
       "original_title": "DIFF-16 \u2014 present-tense spec/map and regeneration instructions are stale",
       "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
-      "status": "remaining_evidence",
+      "status": "fixed",
       "revalidation": "CURRENT_SOURCE_REVALIDATED",
-      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
-      "pr_group": null,
+      "current_commit": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "pr_group": "group14-fuzz-provenance-docs",
       "evidence": [
-        "sigma-evidence/current-revalidation.json"
+        "sigma-evidence/group14-ready.json",
+        "sigma-evidence/group14-gate.json",
+        "sigma-evidence/group14-cargo-fuzz-options.json",
+        "sigma-evidence/group14-doc-followup-units.json"
       ],
-      "resolution_stage": "confirmed_repair_queued",
-      "current_assessment": "Several module/registry/CI/regeneration claims still stale; upstream strict docs and trusted-reader repairs credited separately. Documentation repair queued."
+      "resolution_stage": "draft_open",
+      "current_assessment": "Current setup/spec/codemap names the twelve native targets, actual stable/nightly boundaries, 6.0.6 authority snapshots, early replay-only1\u2013200 context, truthful filing/triage/reinjection scope and historical attribution. Commands checked against pinned local source; ordinary units/policy/fragments pass.",
+      "source_fix_commit": "26df859a6d9a9a9260edecced86b88a5d447547e",
+      "fix_commits": [
+        "10b4ccac72972beb74cd13abfaf96c679109b05c",
+        "26df859a6d9a9a9260edecced86b88a5d447547e",
+        "c361b104c74f8009b55b6a682b4b069405149d95"
+      ],
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "sha256": "0c259db55fadbd13073a9f1f5412198c6abb612dce5aa049110215c7656c6642",
+            "bytes": 20190
+          },
+          {
+            "path": ".github/workflows/fuzz.yml",
+            "sha256": "9c61d7148554a22aa803d7f48284ad47a1c6fae5fb167b44c439f63b1004fde0",
+            "bytes": 18718
+          },
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/docs/interface-contracts.md",
+            "sha256": "f64780d4e6aa1b9f97eabdbfb26e3fbf8d70c26a42eb4545a1d85e128b2cb6a7",
+            "bytes": 16463
+          },
+          {
+            "path": "ergo-difftest/fuzz/Cargo.toml",
+            "sha256": "9a71f76a5fcb75d66bc10671f0da894ecfe49c21bf72d444cdebcf27fe7b59aa",
+            "bytes": 2315
+          },
+          {
+            "path": "ergo-difftest/fuzz/README.md",
+            "sha256": "ce8de4572f703c5271c264a08132c881bb2b0a07f13595f8702955097f6b95cf",
+            "bytes": 12850
+          },
+          {
+            "path": "scripts/fuzz-evidence.py",
+            "sha256": "81b5f11c3f6c98b68d15f0b88abe9d919453cb26c0df3c4a53441bceee64e2ee",
+            "bytes": 12591
+          },
+          {
+            "path": "scripts/fuzz-step.sh",
+            "sha256": "8ed19d350b98213d2299768dfcb45ece22a54feff9cf4b548b5fbf711ad055f8",
+            "bytes": 932
+          },
+          {
+            "path": "scripts/test_fuzz_evidence.py",
+            "sha256": "48dc3c96d9020e874a1b21d47b0684c21a860069644e2c6df29150d719d9d2fe",
+            "bytes": 7815
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root.",
+      "pr": "https://github.com/arkadianet/ergo/pull/568",
+      "published_pr_head": "c361b104c74f8009b55b6a682b4b069405149d95",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/568",
+      "pr_head": "codex/reference-audit-20261004-fuzz-evidence",
+      "pr_commit": "c361b104c74f8009b55b6a682b4b069405149d95"
     },
     {
       "crate": "ergo-difftest",
@@ -1045,7 +4174,65 @@
         "025a9cbfcb68891f702d35eadec6801a268890b5"
       ],
       "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
-      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+      "pr_head": "codex/reference-audit-20261004-difftest-checks",
+      "current_source_snapshot": {
+        "revision": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "scope": "Per-finding current file identity linking selected source revalidation and focused fixes to saved gates; hash rows are not new FULL_READ or runtime proof claims.",
+        "files": [
+          {
+            "path": "docs/codemap/ergo-difftest.md",
+            "sha256": "bcb06b8fc888992a43b4dd2b4e89575b2a2d097252baca5f914b525961c7a5e1",
+            "bytes": 7166
+          },
+          {
+            "path": "ergo-difftest/README.md",
+            "sha256": "03a1eb832d1f7f7f038a44428fbd7b2ab5070b1522e436bc61921ff8b1b17a9b",
+            "bytes": 19586
+          },
+          {
+            "path": "ergo-difftest/src/bin/difftest.rs",
+            "sha256": "c351163b61783a9cd598cf47938cc62ae8d231cf2f0843fb7f2a9fa019b6ef0c",
+            "bytes": 49114
+          },
+          {
+            "path": "ergo-difftest/src/lib.rs",
+            "sha256": "84bb191114094934f218d0fd95cc4ef920e36d5176a31c942550c8ef09e415ba",
+            "bytes": 11039
+          },
+          {
+            "path": "ergo-difftest/src/surfaces.rs",
+            "sha256": "995a3d63197a1ea732106e86f3ddb510957d34d61ce88026a3e71ca2dab0ee64",
+            "bytes": 91407
+          },
+          {
+            "path": "ergo-difftest/tests/it/cli_contracts.rs",
+            "sha256": "1673d1106e6fa0c3c21daff3c493304e51d26645b1c0431e733efcfb338427ea",
+            "bytes": 2656
+          },
+          {
+            "path": "ergo-difftest/tests/it/main.rs",
+            "sha256": "98aa7c5794d1ed5b487f6924f8168b7170c6393657a6a67b98206e643333f9d8",
+            "bytes": 106
+          },
+          {
+            "path": "ergo-difftest/tests/it/selftest.rs",
+            "sha256": "a7c92d5e0b94c67285b6ade44d21c5082d3b2598b2b4972b97714060513bfd55",
+            "bytes": 1090
+          }
+        ]
+      },
+      "current_gate_evidence": "sigma-evidence/group14-ready.json",
+      "last_branch_source_assessment": "Source fixes/upstream repairs retained on cleanc361b104; full gates at10b4ccac plus README-only follow-ups, final combined-head gate owned by root."
     }
-  ]
+  ],
+  "latest_source_head": "c361b104c74f8009b55b6a682b4b069405149d95",
+  "latest_full_gate_head": "10b4ccac72972beb74cd13abfaf96c679109b05c",
+  "scope_limits": "EFF002 source repaired; actual workflow/artifact upload NOT_RUN. EFF001 native Bug\u2192nonzero\u2192matching raw artifact\u2192replay/upload and DIFF02/03 independent detector/generated rediscovery remain unclosed. No stopped native diagnostic/injection/reinjection/JVM differential/guard/upload action repeated.",
+  "counts": {
+    "fixed": 37,
+    "already_fixed": 6,
+    "remaining_evidence": 4
+  },
+  "root_final_pr_mapping": "All focused drafts are recorded in pull-requests.json;568 is the final source/docs followup. Four assurance obligations remain unexecuted.",
+  "ledger_state": "FROZEN_SOURCE_MAINTENANCE_DONE_ASSURANCE_PARTIAL"
 }

@@ -1,0 +1,28 @@
+{
+  "git_start": {
+    "revision": "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0",
+    "tree": "ded2cf170845c0f0d114f896c26bd333d90f0ed5",
+    "dirty": ""
+  },
+  "git_end": {
+    "revision": "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0",
+    "tree": "ded2cf170845c0f0d114f896c26bd333d90f0ed5",
+    "dirty": ""
+  },
+  "command": [
+    "cargo",
+    "fmt",
+    "--all",
+    "--",
+    "--check"
+  ],
+  "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sync-parent-compat",
+  "start": "2026-10-03T21:43:45.250807+00:00",
+  "elapsed_seconds": 2.0574901499785483,
+  "exit_code": 0,
+  "environment_overrides": {
+    "CARGO_TARGET_DIR": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/targets/sync-parent-compat",
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-559-compat-final-fmt.log"
+}

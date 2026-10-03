@@ -1,0 +1,54 @@
+{
+  "version": "cargo-fuzz0.13.1",
+  "verdict": "SOURCE_CONFIRMED: build/run both flatten BuildOptions; target_dir is a long CLI option and passed to Cargo for both paths. Run supports positional corpus directories. No CLI/native campaign executed.",
+  "files": [
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/options/build.rs",
+      "sha256": "1ac0f3bc4b84a79466d4e2bd3d210be76112bc44fab1b97daa962eee50c9115d",
+      "selected_ranges": [
+        [
+          1,
+          26
+        ]
+      ],
+      "status": "SELECTED_SOURCE_READ"
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/options/run.rs",
+      "sha256": "a899419ed149385cfd743d004b07d35bdf15702b0e729ed618331c92f8b259db",
+      "selected_ranges": [
+        [
+          1,
+          42
+        ]
+      ],
+      "status": "SELECTED_SOURCE_READ"
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/options.rs",
+      "sha256": "8e48258eac746ca1c9c0c44bfe11347f29f11059a7425981f0197803afc00d33",
+      "selected_ranges": [
+        [
+          104,
+          109
+        ]
+      ],
+      "status": "SELECTED_SOURCE_READ"
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-fuzz-0.13.1/src/project.rs",
+      "sha256": "e4b604e921af6d85994d5f5a2ce7c7c1cf55aae76d4abfbf270ab6fa27c4e27e",
+      "selected_ranges": [
+        [
+          336,
+          347
+        ],
+        [
+          381,
+          392
+        ]
+      ],
+      "status": "SELECTED_SOURCE_READ"
+    }
+  ]
+}

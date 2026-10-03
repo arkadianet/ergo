@@ -971,6 +971,69 @@
     "archive_path": "receipts/indexer-evidence/integrated-gate/full-gate.json"
   },
   {
+    "reference": "integration-evidence/initial-full-gate/full-gate.json",
+    "sha256": "ff577f9c6d6b7d890c7b78704a8d29d2421aa65d5be592a8e0ab4ac366444870",
+    "bytes": 6108,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "1dc1b4741971eaa752eebb23d6c4796b760e0e98"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 12,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/integration-evidence/initial-full-gate/full-gate.json"
+  },
+  {
+    "reference": "integration-evidence/l4-input-acquisition.json",
+    "sha256": "c8d9725604655762988a3e04f34e0ab5e9dbc50179dda656958517965e6ff7af",
+    "bytes": 476,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/integration-evidence/l4-input-acquisition.json"
+  },
+  {
+    "reference": "integration-evidence/pruning-policy-followup.json",
+    "sha256": "c6e005a03aa8014137e123e41000192ba786fa68ce1f4d4e0fdaae4e9d51b81e",
+    "bytes": 454,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": "PASS",
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/integration-evidence/pruning-policy-followup.json"
+  },
+  {
     "reference": "integration-evidence/validation-assurance-tests.json",
     "sha256": "28a1137b09e66fe13d051ee55256c541977ecc2bdb699f2cd61f162967beeb1e",
     "bytes": 365,
@@ -985,6 +1048,177 @@
       "scope": "Recorded fields only; an absent result/head is not inferred."
     },
     "archive_path": "receipts/integration-evidence/validation-assurance-tests.json"
+  },
+  {
+    "reference": "record-evidence/api-lane-final-ledger.json",
+    "sha256": "66db390198bfa097c6b19f7ae1a18cc1ff6e951d8431f8c050c65f7efe62e898",
+    "bytes": 1245,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/api-lane-final-ledger.json"
+  },
+  {
+    "reference": "record-evidence/changed-markdown-links.json",
+    "sha256": "c1c50f587161a6a9bb23c39904c98cc88b278ed75a37f5ec03b03849e9809a2d",
+    "bytes": 34620,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": "84 existing local destinations resolved;20 anchor-only links intentionally excluded from path checks;8 external URLs were not browsed. Only unresolved shipped destination is the known fuzz README .github pin link already assigned for correction. No additional broken local link identified. No intentional session/generated unresolved destination found among recognized rendered links.",
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/changed-markdown-links.json"
+  },
+  {
+    "reference": "record-evidence/final-ledger-integrity.json",
+    "sha256": "2f97e17bacc266c5ce660992eb3c483296c56584f20adf770dc57412ac264ab4",
+    "bytes": 17840,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/final-ledger-integrity.json"
+  },
+  {
+    "reference": "record-evidence/fuzz-source-review.json",
+    "sha256": "04700a29ec307d1d313e3a191a4599440415c05880b8150f8c0dd793806e8acb",
+    "bytes": 10462,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": "No new blocking source defect identified within reviewed collection/wrapper/workflow and declared pure-filesystem unit scope. This is not a native campaign/detector/upload certification.",
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/fuzz-source-review.json"
+  },
+  {
+    "reference": "record-evidence/indexer-followup-full-gate.json",
+    "sha256": "664aecefa7bf3456259657145007c6ef42a9217d25831c0523e203d95601060b",
+    "bytes": 4757,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "8c3ddfe719b09874b815ee8e0fa8cb4d6504051a"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/indexer-followup-full-gate.json"
+  },
+  {
+    "reference": "record-evidence/indexer-zero-tip-ready.json",
+    "sha256": "3a0cb746af3713c8604a7d4d47c40e919cf4d7b0f222947ba67caf8dce85ad6e",
+    "bytes": 3459,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c640049c9e20bb6a628bf8f6feb8b5d9c2a010fb"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/indexer-zero-tip-ready.json"
+  },
+  {
+    "reference": "record-evidence/indexer-zero-tip-scoped-checks.json",
+    "sha256": "af0090b2308bf495061152beeaa579a49d015e726f3a88d0645391e73884368f",
+    "bytes": 3633,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 4,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/indexer-zero-tip-scoped-checks.json"
+  },
+  {
+    "reference": "record-evidence/integration-indexer-review.json",
+    "sha256": "495e45e775b257d72f188ee85d12b769b2c1633753a402d131acae823a1e6930",
+    "bytes": 14473,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/integration-indexer-review.json"
+  },
+  {
+    "reference": "record-evidence/record-v1-full-gate.json",
+    "sha256": "b3e9381a4bef29d2491c52caa438151cec81ee437d1d9d8514e4f77ffc39f0e7",
+    "bytes": 4549,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "f5a72f091a324c4eb2335918f14e3a5b2d027ebe"
+      ],
+      "recorded_result": "PASS",
+      "recorded_complete": true,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/record-evidence/record-v1-full-gate.json"
   },
   {
     "reference": "rest-evidence/final-gate/full-gate.json",
@@ -1016,6 +1250,142 @@
       "scope": "Recorded fields only; an absent result/head is not inferred."
     },
     "archive_path": "receipts/rest-evidence/final-gate/full-gate.json"
+  },
+  {
+    "reference": "root-control-ci-parent-followup.json",
+    "sha256": "a9760c70fe2077947a70f93ca18ad4ee6528f7b99ea2ce1edc36dd322ee4323c",
+    "bytes": 678,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/root-control-ci-parent-followup.json"
+  },
+  {
+    "reference": "root-control-platform-stop.json",
+    "sha256": "5e49f77b5888778f86fc17e5c5b42b4e91987bf6a52ae4bb19136b750d0af2f6",
+    "bytes": 1260,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/root-control-platform-stop.json"
+  },
+  {
+    "reference": "root-control-preservation.json",
+    "sha256": "e4d8cdb662e58c6e5b7dbd0c26263b62902663946753e7b5c3e0941b9bd9a541",
+    "bytes": 7311,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/root-control-preservation.json"
+  },
+  {
+    "reference": "sigma-evidence/ci-559-compat-final-check.json",
+    "sha256": "6935227ef986c1f9671825d079ceec18370f62484ded495a7100dcc9c10f2c0c",
+    "bytes": 924,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/ci-559-compat-final-check.json"
+  },
+  {
+    "reference": "sigma-evidence/ci-559-compat-final-clippy.json",
+    "sha256": "17b3dd9fca2cbbbea1f01b70816349f009137f9cad440f71adc02cbca872c061",
+    "bytes": 962,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/ci-559-compat-final-clippy.json"
+  },
+  {
+    "reference": "sigma-evidence/ci-559-compat-final-fmt.json",
+    "sha256": "2eee4ccc03bc7434123232e2ddd96b06bc8918b9fab4e7c7bfdd33d44f99de67",
+    "bytes": 894,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/ci-559-compat-final-fmt.json"
+  },
+  {
+    "reference": "sigma-evidence/ci-559-compat-ready.json",
+    "sha256": "0488c698fb3e890b54a566ece7323ea3fa2f176edf51c0c4cf9819599d8bf1ca",
+    "bytes": 3969,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 3,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/ci-559-compat-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/ci-559-macos-shard2-receipt.json",
+    "sha256": "82abfbb58b9fbdd925ad1c47e78a31f799602c25969102bc728fb06445c61331",
+    "bytes": 3349,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "18af68210620c024e1a462c6db374fb7990b635c"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/ci-559-macos-shard2-receipt.json"
   },
   {
     "reference": "sigma-evidence/current-revalidation.json",
@@ -1757,6 +2127,178 @@
     "archive_path": "receipts/sigma-evidence/group11-ready.json"
   },
   {
+    "reference": "sigma-evidence/group12-gate-detector-result-tests.json",
+    "sha256": "833959756506dbd333d2fc4d47949cacffcd90bc9cd97f6c33038810d078fe45",
+    "bytes": 943,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group12-gate-detector-result-tests.json"
+  },
+  {
+    "reference": "sigma-evidence/group12-ready.json",
+    "sha256": "84e353a462bcaf8fad9502a7a0f7e45d9483b38d932228e7a4386929b70fca4c",
+    "bytes": 1312,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "96066a3f2950e65853efbb2219b3cc464dc3ced5"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group12-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group13-final-clean-fmt.json",
+    "sha256": "0e22a217d4077d152246c900e2bfd0b152d53259dbe18c7162fd81c748a154cc",
+    "bytes": 868,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group13-final-clean-fmt.json"
+  },
+  {
+    "reference": "sigma-evidence/group13-final-gate.json",
+    "sha256": "21090f0790efb2390aedfa3bda2103e4a1441369cfc4ab0c296340e002025055",
+    "bytes": 485,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 9,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group13-final-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group13-ready.json",
+    "sha256": "27652727ff85e501d14e363f195db8f5938af0f70c34d4be5398ed0d728e1022",
+    "bytes": 1448,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "1a7ef8a58b6844edf8131d77978159c11c97f70b"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group13-ready.json"
+  },
+  {
+    "reference": "sigma-evidence/group14-cargo-fuzz-options.json",
+    "sha256": "e0ae4da2a965e1e6bf70049584f908319c1994b30e138f52d92f964428bee328",
+    "bytes": 1679,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group14-cargo-fuzz-options.json"
+  },
+  {
+    "reference": "sigma-evidence/group14-doc-followup-units.json",
+    "sha256": "ba15ffed57a478fb26ef244496a67ff45e8ab9221593175224d25641166efead",
+    "bytes": 931,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group14-doc-followup-units.json"
+  },
+  {
+    "reference": "sigma-evidence/group14-gate.json",
+    "sha256": "6fe6ccf46db005fa835a16617fc44930484de4cba9b2b22bb8a6d0b80ae20831",
+    "bytes": 610,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 11,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group14-gate.json"
+  },
+  {
+    "reference": "sigma-evidence/group14-ready.json",
+    "sha256": "b4d7b9fe6f9c9d687a735d15d29c099f52572152a520cb3bc33e849df456c8f6",
+    "bytes": 2375,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "c361b104c74f8009b55b6a682b4b069405149d95"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/sigma-evidence/group14-ready.json"
+  },
+  {
     "reference": "sigma-evidence/mixed-carriers/receipt-typed.json",
     "sha256": "04be83023c5964d1cd28a2082fe8573abd651306f079f6812530baa6b8c2e3be",
     "bytes": 1678,
@@ -1835,6 +2377,54 @@
       "scope": "Recorded fields only; an absent result/head is not inferred."
     },
     "archive_path": "receipts/sigma-evidence/native-fuzz/native-symbols.json"
+  },
+  {
+    "reference": "state-evidence/activation-acquisition/http-results.json",
+    "sha256": "7a424eb4edaa93ddf16a178f70bc61a8e17af6c8df6d7b7b2e89be7f91241dd7",
+    "bytes": 5324,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/activation-acquisition/http-results.json"
+  },
+  {
+    "reference": "state-evidence/activation-acquisition/portable-recapture-attempt2/invocation.json",
+    "sha256": "a2ce407988a583caf12cba8f7ae409789ae2496c07be82fb9e2b8fe3ab08460d",
+    "bytes": 1559,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/activation-acquisition/portable-recapture-attempt2/invocation.json"
+  },
+  {
+    "reference": "state-evidence/activation-acquisition/portable-recapture-attempt2/results.json",
+    "sha256": "29849e16b92ecb9c251706e3a18eaf1ab67770e330d66940156d6b2a7397ebbd",
+    "bytes": 4056,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/activation-acquisition/portable-recapture-attempt2/results.json"
   },
   {
     "reference": "state-evidence/group01-gate-attempt2/results.json",
@@ -2003,5 +2593,143 @@
       "scope": "Recorded fields only; an absent result/head is not inferred."
     },
     "archive_path": "receipts/state-evidence/group08-09-combined-gate/results.json"
+  },
+  {
+    "reference": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+    "sha256": "fc930d25fe34705ba4402ad3799825f50aedee899d728cff928ab91345085867",
+    "bytes": 4861,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group10-13-combined-gate-attempt2/results.json"
+  },
+  {
+    "reference": "state-evidence/group12-sync-tests-attempt3/result.json",
+    "sha256": "4d420837489567f74437a89b5fc4a098f1d95c35283db0560fb5902efe161284",
+    "bytes": 373,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [
+        "d0e389292783df1e6241c669684a428455b1894a"
+      ],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group12-sync-tests-attempt3/result.json"
+  },
+  {
+    "reference": "state-evidence/group14-index-follow-up-full-gate-attempt2/results.json",
+    "sha256": "3a6d909985e7dcb93293c58aefa127d6ee56021346679e2e5932e27a64ffa229",
+    "bytes": 4924,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group14-index-follow-up-full-gate-attempt2/results.json"
+  },
+  {
+    "reference": "state-evidence/group15-historical-costs-full-gate/counts.json",
+    "sha256": "b870ec91f5707a7f4a0e32d41c91089d75e32bac48755a2f624b6496d3623fd6",
+    "bytes": 75,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group15-historical-costs-full-gate/counts.json"
+  },
+  {
+    "reference": "state-evidence/group15-historical-costs-full-gate/results.json",
+    "sha256": "643ffbf1c00457ef87199d7cf4063e6aa18af92e84649120fc8d1e6c79d59694",
+    "bytes": 4870,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 7,
+      "recorded_exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group15-historical-costs-full-gate/results.json"
+  },
+  {
+    "reference": "state-evidence/group15-historical-costs-full-gate/source.json",
+    "sha256": "df9998dda860649721cc4dbffb83011d8ae7a7f9d0c748354ea9c07d7ef1317d",
+    "bytes": 375,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group15-historical-costs-full-gate/source.json"
+  },
+  {
+    "reference": "state-evidence/group15-historical-costs-tests-attempt4/result.json",
+    "sha256": "4064c7c1186c5d20412556d81face993b219f5160aa2d019cf3d080ed9db4298",
+    "bytes": 427,
+    "available_at_snapshot": true,
+    "archived": true,
+    "recorded_scope": {
+      "recorded_heads": [],
+      "recorded_result": null,
+      "recorded_complete": null,
+      "recorded_command_count": 0,
+      "recorded_exit_codes": [],
+      "scope": "Recorded fields only; an absent result/head is not inferred."
+    },
+    "archive_path": "receipts/state-evidence/group15-historical-costs-tests-attempt4/result.json"
   }
 ]

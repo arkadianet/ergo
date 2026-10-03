@@ -1,0 +1,69 @@
+{
+  "scope": "Offline fixed public data; no node or network requests.",
+  "assembly_sha256": "2a7e2978cb09538ed6780d85ae3aa39c1ecce10e5e5a6e0dc3cd8ab087851588",
+  "helper_sha256": "f46288a662a569044be787fdfb5f1794dfbe82aa1b1a29068173f3435086eb6c",
+  "compiler_jars": {
+    "/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar": "4d8a8f984cce31a329a24f10b0bf336f042cb62aeb435290a1b20243154cfccb",
+    "/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-compiler/2.12.20/scala-compiler-2.12.20.jar": "c88676d75c69721b717ea6c441ece04fff262abab9d210a2936abc2be3731fa2",
+    "/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-reflect/2.12.20/scala-reflect-2.12.20.jar": "5f1914cdc7a70580ea6038d929ebb25736ecf2234f677e2d47f8a4b2bc81e1fb"
+  },
+  "results": [
+    {
+      "name": "compile",
+      "command": [
+        "/home/arkadias/.local/kdex-toolchain/bin/java",
+        "-cp",
+        "/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/2.12.20/scala-library-2.12.20.jar:/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-compiler/2.12.20/scala-compiler-2.12.20.jar:/home/arkadias/.cache/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-reflect/2.12.20/scala-reflect-2.12.20.jar",
+        "scala.tools.nsc.Main",
+        "-Xfatal-warnings",
+        "-classpath",
+        "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/ergo-6.0.5.jar",
+        "-d",
+        "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/portable-recapture-attempt2/classes",
+        "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/test-vectors/ergo-state/historical-costs/OfflineHistoricalCosts.scala"
+      ],
+      "exit_code": 0,
+      "seconds": 2.708359502023086,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "v1v2",
+      "command": [
+        "/home/arkadias/.local/kdex-toolchain/bin/java",
+        "-Xmx512m",
+        "-cp",
+        "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/portable-recapture-attempt2/classes:/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/ergo-6.0.5.jar",
+        "OfflineHistoricalCosts",
+        "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/test-vectors/ergo-state/historical-costs",
+        "v1v2-spec.json"
+      ],
+      "exit_code": 0,
+      "seconds": 0.9453103429987095,
+      "stdout_sha256": "8cd0dac486e164bfad2c9fe464355e488a4ccbbdf3a0a677162db03ccb53eea7",
+      "stderr_sha256": "588a40c2cec69b5bffa97a06f3966542193c4a80765a4cdd3cc763cabc273564",
+      "parity_verdict": "PASS",
+      "transactions": 9,
+      "initial_boxes": 4
+    },
+    {
+      "name": "eip37",
+      "command": [
+        "/home/arkadias/.local/kdex-toolchain/bin/java",
+        "-Xmx512m",
+        "-cp",
+        "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/portable-recapture-attempt2/classes:/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/activation-acquisition/ergo-6.0.5.jar",
+        "OfflineHistoricalCosts",
+        "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/test-vectors/ergo-state/historical-costs",
+        "eip37-spec.json"
+      ],
+      "exit_code": 0,
+      "seconds": 1.3518219189718366,
+      "stdout_sha256": "2e48c2f029ea79e147014e4b4583b5b0ec35b10d3bb41b6d8876df4a1cc90a98",
+      "stderr_sha256": "7430548c8d0ac6c95516e0a86ca95ac3f8c071b80c7dd9f99888d204dcb738b7",
+      "parity_verdict": "PASS",
+      "transactions": 34,
+      "initial_boxes": 249
+    }
+  ]
+}

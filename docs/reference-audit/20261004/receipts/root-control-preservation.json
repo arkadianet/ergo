@@ -1,0 +1,165 @@
+{
+  "verified_utc": "2026-10-03T21:37:35.507699+00:00",
+  "files": [
+    {
+      "path": "README.md",
+      "expected_sha256": "d41feea6cdb234ebbf49c7a9b3befb5f3349d9add53e999614bda1c9a4ba328a",
+      "actual_sha256": "d41feea6cdb234ebbf49c7a9b3befb5f3349d9add53e999614bda1c9a4ba328a",
+      "match": true
+    },
+    {
+      "path": "docs/audit-2026-10-03.md",
+      "expected_sha256": "39a2987d1954ca1e81fbbbb4d8bee9f04227ce7f0711eb2234479ab72d973500",
+      "actual_sha256": "39a2987d1954ca1e81fbbbb4d8bee9f04227ce7f0711eb2234479ab72d973500",
+      "match": true
+    },
+    {
+      "path": "docs/audit-remediation-todo.md",
+      "expected_sha256": "a536e5b0d10efcad11ff073fe0651d8c3899e08993fc1d5307da57f6e8493ec1",
+      "actual_sha256": "a536e5b0d10efcad11ff073fe0651d8c3899e08993fc1d5307da57f6e8493ec1",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/COMMON.md",
+      "expected_sha256": "c9340fd89bf0bf99bec8aad728cd23086f3ac3e2672cce85109b7b5ec043c2b1",
+      "actual_sha256": "c9340fd89bf0bf99bec8aad728cd23086f3ac3e2672cce85109b7b5ec043c2b1",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/README.md",
+      "expected_sha256": "c328ed555b58e9d76c4e33cef37fbb431560c7719787fa1f691da5cb32fc5a0c",
+      "actual_sha256": "c328ed555b58e9d76c4e33cef37fbb431560c7719787fa1f691da5cb32fc5a0c",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/WORKSPACE.md",
+      "expected_sha256": "c493fae4326ff4c70b4dc55e93fea90771e8a52828933d5a6523715b0b232ed0",
+      "actual_sha256": "c493fae4326ff4c70b4dc55e93fea90771e8a52828933d5a6523715b0b232ed0",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-api.md",
+      "expected_sha256": "c3df3b9e42bbc171d177af71800bf6f13875055ed8fffeaad1fcf84de6d68487",
+      "actual_sha256": "c3df3b9e42bbc171d177af71800bf6f13875055ed8fffeaad1fcf84de6d68487",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-chain-spec.md",
+      "expected_sha256": "2e1387503c0e2531f99b744602fe9dbdd56e4636eb3fd73a1c5f246102bf4fef",
+      "actual_sha256": "2e1387503c0e2531f99b744602fe9dbdd56e4636eb3fd73a1c5f246102bf4fef",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-compiler.md",
+      "expected_sha256": "77b715580ad797a23d584326faf900b129d1ec87548f41fa47ef51808f5c306b",
+      "actual_sha256": "77b715580ad797a23d584326faf900b129d1ec87548f41fa47ef51808f5c306b",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-crypto.md",
+      "expected_sha256": "c1b1632d32c6ab59e619e0a457e282b259d36827bbdf7891d8e4ef11abbdcb03",
+      "actual_sha256": "c1b1632d32c6ab59e619e0a457e282b259d36827bbdf7891d8e4ef11abbdcb03",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-difftest-fuzz.md",
+      "expected_sha256": "aa8f7a140e9035a6b566556b12750719abfe70bf7d86a56049e4dc17e776de8d",
+      "actual_sha256": "aa8f7a140e9035a6b566556b12750719abfe70bf7d86a56049e4dc17e776de8d",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-difftest.md",
+      "expected_sha256": "a59ededf79d32c8133f509c43b07f606d13e40bb7d03622922750c13aeddef60",
+      "actual_sha256": "a59ededf79d32c8133f509c43b07f606d13e40bb7d03622922750c13aeddef60",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-indexer-types.md",
+      "expected_sha256": "dd133a9b00d0caf52de0e0f341fa9faa995fbbf8704c9922bc27c126660d8615",
+      "actual_sha256": "dd133a9b00d0caf52de0e0f341fa9faa995fbbf8704c9922bc27c126660d8615",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-indexer.md",
+      "expected_sha256": "74bbcd51ee35b3cc130f4c97238de6b8ad7ca1634eb2b8934b7ce0c8ceabc1b3",
+      "actual_sha256": "74bbcd51ee35b3cc130f4c97238de6b8ad7ca1634eb2b8934b7ce0c8ceabc1b3",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-mempool.md",
+      "expected_sha256": "f076f0d6dfd62080e78932b910ddc412fe1b113d23bc0ce1d9c0db8757067ec0",
+      "actual_sha256": "f076f0d6dfd62080e78932b910ddc412fe1b113d23bc0ce1d9c0db8757067ec0",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-mining.md",
+      "expected_sha256": "a38f8c5b5955e74e877627759a4e127f12881bfe02aea68f7e28cb805af0dc24",
+      "actual_sha256": "a38f8c5b5955e74e877627759a4e127f12881bfe02aea68f7e28cb805af0dc24",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-node.md",
+      "expected_sha256": "e13ea030ea7ba8e9fcf51975fa5f0f821ee0a9a8968b6af2b0f71c1ad18438e4",
+      "actual_sha256": "e13ea030ea7ba8e9fcf51975fa5f0f821ee0a9a8968b6af2b0f71c1ad18438e4",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-p2p.md",
+      "expected_sha256": "b5c70dab8edb9c544f44da9815399eb38bcba02a2bb04b1fc30029ec6e4d9fd2",
+      "actual_sha256": "b5c70dab8edb9c544f44da9815399eb38bcba02a2bb04b1fc30029ec6e4d9fd2",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-primitives.md",
+      "expected_sha256": "9e555b84f178f6f89a40e0029df7cc09089859b23eebc9c1db353ad42e1decfd",
+      "actual_sha256": "9e555b84f178f6f89a40e0029df7cc09089859b23eebc9c1db353ad42e1decfd",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-rest-json.md",
+      "expected_sha256": "6f871cb4a2c9d8e7810895474a9ef4869b40a8aa6afbd7632bd8943aa068af49",
+      "actual_sha256": "6f871cb4a2c9d8e7810895474a9ef4869b40a8aa6afbd7632bd8943aa068af49",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-ser.md",
+      "expected_sha256": "f4a54c2778be9bf11555397e88bb734720508a881f245f7a55738fc558ad175a",
+      "actual_sha256": "f4a54c2778be9bf11555397e88bb734720508a881f245f7a55738fc558ad175a",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-sigma.md",
+      "expected_sha256": "94a3856a81d9e69dae1ec44fff8f5d0e51a13157c1b8f44d9fa679300cb2a009",
+      "actual_sha256": "94a3856a81d9e69dae1ec44fff8f5d0e51a13157c1b8f44d9fa679300cb2a009",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-state.md",
+      "expected_sha256": "38855abdaadb8fffcd2eb9609fd7ac10beb40902ba056ce926e554656f2037a7",
+      "actual_sha256": "38855abdaadb8fffcd2eb9609fd7ac10beb40902ba056ce926e554656f2037a7",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-sync.md",
+      "expected_sha256": "d601c0117091f9988593bd9bdedc817925f96e2fd31884324ec4b7510c65a1cc",
+      "actual_sha256": "d601c0117091f9988593bd9bdedc817925f96e2fd31884324ec4b7510c65a1cc",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-validation.md",
+      "expected_sha256": "4a230a06a8f5455735bd496b081ba65656425a67e723a330b8a015c1017499a1",
+      "actual_sha256": "4a230a06a8f5455735bd496b081ba65656425a67e723a330b8a015c1017499a1",
+      "match": true
+    },
+    {
+      "path": "docs/audit-prompts/ergo-wallet.md",
+      "expected_sha256": "f191821b5fbec9457a8f98722741e5520abff573d0077feccadb49976002e52a",
+      "actual_sha256": "f191821b5fbec9457a8f98722741e5520abff573d0077feccadb49976002e52a",
+      "match": true
+    }
+  ],
+  "status": " M README.md\n?? docs/audit-2026-10-03.md\n?? docs/audit-prompts/\n?? docs/audit-remediation-todo.md\n",
+  "expected_status": " M README.md\n?? docs/audit-2026-10-03.md\n?? docs/audit-prompts/\n?? docs/audit-remediation-todo.md\n",
+  "status_match": true,
+  "all_hashes_match": true
+}

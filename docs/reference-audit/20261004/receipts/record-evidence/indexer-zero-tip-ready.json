@@ -1,0 +1,64 @@
+{
+  "status": "PUBLISHED_DRAFT_FINAL_ROOT_GATE_PENDING",
+  "original_id": "INDEXER-004",
+  "commit": "c640049c9e20bb6a628bf8f6feb8b5d9c2a010fb",
+  "base": "cb867fa2d8f27e4ecd1384596c7e9735946f5f5d",
+  "branch": "codex/reference-audit-20261004-indexer-zero-tip",
+  "worktree": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-indexer-zero-tip",
+  "clean": true,
+  "scope": "Inherited fully-applied IndexerTask contract: bounded one-block rollback to legitimate pre-genesis after second atomic tip read. No real operator store or consensus/oracle execution.",
+  "checks": "record-evidence/indexer-zero-tip-scoped-checks.json",
+  "checks_sha256": "af0090b2308bf495061152beeaa579a49d015e726f3a88d0645391e73884368f",
+  "body": "record-evidence/indexer-zero-tip-pr-body.md",
+  "body_sha256": "d484fcc8882959a43ade9dc4bb265333be97abe6da4159b2d49be9d18083c4a7",
+  "counts": {
+    "unit_passed": 209,
+    "integration_passed": 162,
+    "ignored": 2
+  },
+  "full_workspace_gate": "PENDING_ROOT_COMBINED_GATE",
+  "source_proof": [
+    {
+      "path": "ergo-state/src/store/reorg.rs",
+      "range": [
+        404,
+        418
+      ],
+      "sha256": "106a5eb818e4c0f6ae31cf25f34b056e9fcba664e5414df8d1b2ba15365a5dba",
+      "scope": "Scoped source: rollback target0 persists full tip0/zero ID; native existing State rollback tests were read, not rerun here."
+    },
+    {
+      "path": "ergo-indexer/src/task.rs",
+      "range": [
+        301,
+        327
+      ],
+      "sha256": "bde31a344b0dd3bd7aba4505fc22e614c54e9cd51178c3008dd7eca7d67c2517",
+      "scope": "Guarded source patch, positive applied-chain contract retained."
+    }
+  ],
+  "initial_attempt": "Initial test-only ModifierId/Digest32 mismatch corrected; captured failed compile log preserved at record-evidence/indexer-zero-tip-tests-initial-compile.log. An earlier console-only attempt had no durable log and is not counted as PASS.",
+  "captured_utc": "2026-10-03T21:35:24.216159+00:00",
+  "focused_commit": "efb1358367de1802804bfe71f523676051e3f32c",
+  "focused_base": "90191a99fc1d9463e845cc3b6b3229f5318b1a7a",
+  "focused_source_comparison": [
+    {
+      "path": "ergo-indexer/src/task.rs",
+      "implementation_sha256": "bde31a344b0dd3bd7aba4505fc22e614c54e9cd51178c3008dd7eca7d67c2517",
+      "focused_sha256": "a6225575ed1e4ba62efc6d58757361064963b18f7ba7732ff1660d9c7c457ad3",
+      "identical": false,
+      "difference": "Only inherited task.rs:14 comment: implementation includes record#563 returns-idle correction; focused parent retains sleeps. No zero-tip patch or executable source difference."
+    },
+    {
+      "path": "ergo-indexer/tests/it/task_step.rs",
+      "implementation_sha256": "a209195ca7ca841d65dc2163a001dd92d7d3126c1613e99479644a2d0bef35b8",
+      "focused_sha256": "a209195ca7ca841d65dc2163a001dd92d7d3126c1613e99479644a2d0bef35b8",
+      "identical": true
+    }
+  ],
+  "focused_patch_equality": true,
+  "patch_sha256": "5c18a068f9e69266cf4bdf1af8636ed6511c4877faa11e487bc6b4413c58c72f",
+  "focused_qualification": "Focused patch text equals implementation patch after removing Git blob index-hash lines. Test file is identical; task file differs only in inherited record#563 comment. Scoped checks ran on source-hashed workingtree before c640 above cb867; no scoped or full gate is claimed at efb. Root final combined gate remains pending.",
+  "publication_status": "PUBLISHED_DRAFT",
+  "pull_request": "https://github.com/arkadianet/ergo/pull/569"
+}

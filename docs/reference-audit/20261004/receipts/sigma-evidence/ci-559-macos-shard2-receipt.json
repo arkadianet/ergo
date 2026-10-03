@@ -1,0 +1,75 @@
+{
+  "classification": "SOURCE_COMPILE_DEFECT",
+  "pr": 559,
+  "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+  "job_url": "https://github.com/arkadianet/ergo/actions/runs/37152404229/job/111288803126",
+  "run_id": 37152404229,
+  "job_id": 111288803126,
+  "job": "Check, clippy, test (macos-latest) shard 2/2",
+  "failed_command": "cargo clippy --locked --all-targets -- -D warnings",
+  "exit_code": 101,
+  "rust_error": "E0004 non-exhaustive match",
+  "location": "ergo-node/src/node/events.rs:706",
+  "missing_variants": [
+    "HeaderProcessError::LocalHeaderIntegrity { .. }",
+    "HeaderProcessError::PrevalidatedBytesMismatch",
+    "HeaderProcessError::LocalContext(_)"
+  ],
+  "source_corroboration": [
+    {
+      "path": "ergo-node/src/node/events.rs",
+      "ranges": [
+        [
+          701,
+          784
+        ]
+      ],
+      "snapshot": "ci-559-node-events.rs"
+    },
+    {
+      "path": "ergo-sync/src/header_proc.rs",
+      "ranges": [
+        [
+          24,
+          51
+        ],
+        [
+          98,
+          113
+        ]
+      ],
+      "snapshot": "ci-559-header-proc.rs"
+    }
+  ],
+  "reason": "Compiler explicitly identifies omitted current enum variants in ordinary Node local-header caller. The sync error classifier marks these as local failures. Fix caller handling as internal/local failure; avoid treating them as submitter rejection. No infrastructure error caused this diagnostic.",
+  "test_scope": "nextest and subsequent tests were SKIPPED after Clippy compile failure; this is not an executed runtime/test verdict.",
+  "excerpt": [
+    "2026-10-03T21:26:36.7377390Z error[E0004]: non-exhaustive patterns: `Err(ergo_sync::header_proc::HeaderProcessError::LocalHeaderIntegrity { .. })`, `Err(ergo_sync::header_proc::HeaderProcessError::PrevalidatedBytesMismatch)` and `Err(ergo_sync::header_proc::HeaderProcessError::LocalContext(_))` not covered",
+    "2026-10-03T21:26:36.7396500Z    --> ergo-node/src/node/events.rs:706:11",
+    "2026-10-03T21:26:38.4566030Z error: could not compile `ergo-node` (lib) due to 1 previous error",
+    "2026-10-03T21:26:47.1962410Z ##[error]Process completed with exit code 101."
+  ],
+  "files": [
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-559-macos-shard2-job.json",
+      "sha256": "51ff3f924759ff4761705cab1b1a3af41216458fb16d5636ca6d2e331c4543ac",
+      "bytes": 4636
+    },
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-559-macos-shard2.log",
+      "sha256": "1836434f6228f9bb71d8c9f39aeebf8b8ea41049736f5e3ad2cb1c251a7ac421",
+      "bytes": 78005
+    },
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-559-node-events.rs",
+      "sha256": "fcf57a8de82ee1061d695115cee1b9da54bf3693ea8ddc6c3749743b17b7c490",
+      "bytes": 41956
+    },
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-559-header-proc.rs",
+      "sha256": "dc432ac17ee03dd95a5baa597cda5e9b5f545c06277b66a1db9fbd455b3f83e2",
+      "bytes": 56954
+    }
+  ],
+  "actions": "Read-only gh API log/metadata fetch plus selected immutable source inspection. No workflow rerun, source edits, local diagnostics, detector/reinjection/JVM/guard/native/upload controls."
+}

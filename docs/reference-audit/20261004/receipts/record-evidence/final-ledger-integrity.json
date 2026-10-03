@@ -1,0 +1,628 @@
+{
+  "kind": "independent_read_only_final_ledger_integrity",
+  "captured_utc": "2026-10-03T21:49:15.075938+00:00",
+  "status": "PASS",
+  "stable_snapshot": {
+    "attempt": 1,
+    "initial_repeat_read_delay_seconds": 0.2,
+    "bytes_unchanged_through_validation": true,
+    "files": [
+      {
+        "path": "baseline.json",
+        "sha256": "336cacdd85db5a92a24d8f58854a35ccd358a2b1eafe22af6b57185fb0fbdc89",
+        "bytes": 77119,
+        "file_mtime_ns": 1791043864374364703,
+        "declared_updated_at": null
+      },
+      {
+        "path": "findings.json",
+        "sha256": "98436d30bb23d985f7b3b0748f3ae4ed15462e553eb4186c610ecae24823ad86",
+        "bytes": 76726,
+        "file_mtime_ns": 1791043864373471453,
+        "declared_updated_at": null
+      },
+      {
+        "path": "api-status.json",
+        "sha256": "1d3d961814e2b03f1c8477be000d9a88f91ee93a48ab6b1fd278fa37b70b060e",
+        "bytes": 100948,
+        "file_mtime_ns": 1791063477245064541,
+        "declared_updated_at": "2026-10-03T21:37:57.244212+00:00"
+      },
+      {
+        "path": "state-status.json",
+        "sha256": "0558c281e376583f385f7a9e41745db32c1eb2ed097e75c886184a852a19a679",
+        "bytes": 77240,
+        "file_mtime_ns": 1791063550626015012,
+        "declared_updated_at": "2026-10-03T21:39:10.625412+00:00"
+      },
+      {
+        "path": "sigma-status.json",
+        "sha256": "f75116937b286bc414717c25b2dd52fa566f9c9c6583eeaa231de3fdee48e875",
+        "bytes": 203362,
+        "file_mtime_ns": 1791063286040271382,
+        "declared_updated_at": null
+      },
+      {
+        "path": "engineering-status.json",
+        "sha256": "c0fa9c46ec450fe578c47e285996d4cffcd681c7d35a94a579add1fe659979bf",
+        "bytes": 7090,
+        "file_mtime_ns": 1791049293450791009,
+        "declared_updated_at": "2026-10-03T17:41:33.450622+00:00"
+      },
+      {
+        "path": "pull-requests.json",
+        "sha256": "6ad137078c509ee5c34138128ac7574cf747151fa9462c81b271e89f2316dd27",
+        "bytes": 23464,
+        "file_mtime_ns": 1791064069751922354,
+        "declared_updated_at": null
+      },
+      {
+        "path": "current-coverage.json",
+        "sha256": "160418d5369eb8d0eec7ec19ed750a8474f28dc3fccc8645310921058d025d3e",
+        "bytes": 168017,
+        "file_mtime_ns": 1791049293453164666,
+        "declared_updated_at": "2026-10-03T17:41:33.450622+00:00"
+      },
+      {
+        "path": "root-control-final-preflight.json",
+        "sha256": "004af42339c000da7cbd2de5f2d1ad4d17a52ec83dd2fd36137afe0db5714842",
+        "bytes": 1096,
+        "file_mtime_ns": 1791062853201979032,
+        "declared_updated_at": null
+      },
+      {
+        "path": "root-control-ci-parent-followup.json",
+        "sha256": "a9760c70fe2077947a70f93ca18ad4ee6528f7b99ea2ce1edc36dd322ee4323c",
+        "bytes": 678,
+        "file_mtime_ns": 1791064059724170427,
+        "declared_updated_at": "2026-10-03T21:47:39.724100+00:00"
+      }
+    ]
+  },
+  "original_inventory": {
+    "rows": 160,
+    "unique_normalized_ids": 160,
+    "baseline_findings_exact": true,
+    "id_inventory_sha256": "a2bfa248c7a25da627a7a4e81a7eb52e5361136c7a36a9f4a552826eb12e2fb2",
+    "canonical_causes": 157,
+    "declared_shared_pairs": [
+      [
+        "ES006",
+        "API005"
+      ],
+      [
+        "ES010",
+        "EC002"
+      ],
+      [
+        "ECSP003",
+        "EV005"
+      ]
+    ]
+  },
+  "owner_coverage": {
+    "rows": 160,
+    "missing": [],
+    "extra": [],
+    "duplicates": {},
+    "by_lane": {
+      "api": {
+        "rows": 57,
+        "counts": {
+          "already_fixed": 14,
+          "fixed": 43
+        }
+      },
+      "state": {
+        "rows": 50,
+        "counts": {
+          "fixed": 44,
+          "already_fixed": 6
+        }
+      },
+      "sigma": {
+        "rows": 47,
+        "counts": {
+          "fixed": 37,
+          "already_fixed": 6,
+          "remaining_evidence": 4
+        }
+      },
+      "engineering": {
+        "rows": 6,
+        "counts": {
+          "already_fixed": 2,
+          "fixed": 4
+        }
+      }
+    },
+    "raw_disposition_counts": {
+      "already_fixed": 28,
+      "fixed": 128,
+      "remaining_evidence": 4
+    },
+    "expected_counts_match": true,
+    "remaining_original_ids": [
+      "DIFF02",
+      "DIFF03",
+      "EFF001",
+      "EFF002"
+    ],
+    "owner_status_map_sha256": "c5b1a57b7a12b9f5acb1df7a7f8d3c2abe1156ad5a38eaa2320c41b716593c2e"
+  },
+  "published_registry": {
+    "rows": 73,
+    "numbers": [
+      498,
+      499,
+      500,
+      501,
+      502,
+      503,
+      504,
+      505,
+      506,
+      507,
+      508,
+      509,
+      510,
+      511,
+      512,
+      513,
+      514,
+      515,
+      516,
+      517,
+      518,
+      519,
+      520,
+      521,
+      522,
+      523,
+      524,
+      525,
+      526,
+      527,
+      528,
+      529,
+      530,
+      531,
+      532,
+      533,
+      534,
+      535,
+      536,
+      537,
+      538,
+      539,
+      540,
+      541,
+      542,
+      543,
+      544,
+      545,
+      546,
+      547,
+      548,
+      549,
+      550,
+      551,
+      552,
+      553,
+      554,
+      555,
+      556,
+      557,
+      558,
+      559,
+      560,
+      561,
+      562,
+      563,
+      564,
+      565,
+      566,
+      567,
+      568,
+      569,
+      570
+    ],
+    "unique_urls": 73,
+    "unique_heads": 73,
+    "unique_commits": 73,
+    "full40hex_commit_shapes_and_local_commit_objects": true,
+    "finding_pr_reference_count": 171,
+    "finding_pr_reference_unique_urls": 62,
+    "unregistered_mapping_refs": [],
+    "fixed_originals_without_registry_mapping": [],
+    "registry_issues": []
+  },
+  "upstream_credit_resolution": {
+    "base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+    "rows": 28,
+    "all_resolved_credits_are_base_ancestors": true,
+    "resolved_rows": [
+      {
+        "id": "API001",
+        "commits": [
+          {
+            "declared": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "resolved": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "API002",
+        "commits": [
+          {
+            "declared": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "resolved": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "API003",
+        "commits": [
+          {
+            "declared": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "resolved": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "API004",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "NODE002",
+        "commits": [
+          {
+            "declared": "16a8d8e8",
+            "resolved": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "38e286cd",
+            "resolved": "38e286cd40f1e36c70749bc1cf8dcb8477cbf2b7",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "NODE011",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "WALLET003",
+        "commits": [
+          {
+            "declared": "16a8d8e8",
+            "resolved": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "WALLET004",
+        "commits": [
+          {
+            "declared": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "resolved": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "WALLET009",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "INDEXER005",
+        "commits": [
+          {
+            "declared": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+            "resolved": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "INDEXER006",
+        "commits": [
+          {
+            "declared": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+            "resolved": "4449b72728ab0c21c77b8c44f1d33b31223b7088",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "INDEXER010",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "REST005",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "MP007",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "ST011",
+        "commits": [
+          {
+            "declared": "16a8d8e8",
+            "resolved": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "ST006",
+        "commits": [
+          {
+            "declared": "16a8d8e8",
+            "resolved": "16a8d8e89a6381cbaf6bcaf3748e71e85224ff9b",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "EV007",
+        "commits": [
+          {
+            "declared": "bc3befeae957481456ffff06534be2d823f7c3d6",
+            "resolved": "bc3befeae957481456ffff06534be2d823f7c3d6",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "EP2P001",
+        "commits": [
+          {
+            "declared": "f7d72c58",
+            "resolved": "f7d72c58e6b1b49c65e98ce1de05084ea3428cab",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "EP2P003",
+        "commits": [
+          {
+            "declared": "714479ed9",
+            "resolved": "714479ed9c5d296016b7c28412b74dfbc018f83f",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "EM003",
+        "commits": [
+          {
+            "declared": "bc3befeae957481456ffff06534be2d823f7c3d6",
+            "resolved": "bc3befeae957481456ffff06534be2d823f7c3d6",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "SIG004",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "ES008",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "ES011",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "ES001",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "EC006",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "DIFF15",
+        "commits": [
+          {
+            "declared": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "resolved": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "WS001",
+        "commits": [
+          {
+            "declared": "df56a9f7",
+            "resolved": "df56a9f7c2b9ab06553942756a564af539ebaf56",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "2b0db836",
+            "resolved": "2b0db836127fb030744fb20104076a343b0a4645",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "6c523dfc",
+            "resolved": "6c523dfcc7873b0dc7d304f5c93cb7eed4dde6ee",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "4d08adf9",
+            "resolved": "4d08adf941f85fc41045af8a3de733b9e8379e13",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      },
+      {
+        "id": "WS002",
+        "commits": [
+          {
+            "declared": "df56a9f7",
+            "resolved": "df56a9f7c2b9ab06553942756a564af539ebaf56",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "2b0db836",
+            "resolved": "2b0db836127fb030744fb20104076a343b0a4645",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "6c523dfc",
+            "resolved": "6c523dfcc7873b0dc7d304f5c93cb7eed4dde6ee",
+            "ancestor_of_base71bb": true
+          },
+          {
+            "declared": "4d08adf9",
+            "resolved": "4d08adf941f85fc41045af8a3de733b9e8379e13",
+            "ancestor_of_base71bb": true
+          }
+        ]
+      }
+    ]
+  },
+  "declared_receipt_paths": {
+    "scope": "All owner ledgers plus root current-coverage: explicit *-evidence relative path strings only; existence resolution tries control, repository, current integration and historical report session. Prose command/source/tool paths and absent optional external inputs are not treated as missing receipts.",
+    "references": 619,
+    "unique_paths": 175,
+    "resolved_paths": 175,
+    "missing_paths": [],
+    "pattern_paths": [],
+    "resolved_inventory_sha256": "98f5eba73fb1648ab2bf3ebc324d3737d3456ae24d8392c1766db2c3f0d0ac3a",
+    "claim": "Path existence only; no log/schema/source execution verdict certified by this check."
+  },
+  "older_root_snapshots": {
+    "current-coverage.json": {
+      "classification": "STALE_AGGREGATE_SNAPSHOT_NOT_CURRENT_OWNER_DISPOSITIONS",
+      "updated_utc": "2026-10-03T17:41:33.450622+00:00",
+      "id_coverage_exact": true,
+      "recorded_counts": {
+        "fixed": 29,
+        "already_fixed": 28,
+        "remaining_evidence": 103
+      },
+      "current_counts_from_owner_snapshots": {
+        "already_fixed": 28,
+        "fixed": 128,
+        "remaining_evidence": 4
+      }
+    },
+    "root-control-final-preflight.json": {
+      "classification": "EARLIER_PREFLIGHT_NOT_CURRENT_PR_REGISTRY",
+      "captured_utc": "2026-10-03T21:27:33.201885+00:00",
+      "drafts_recorded": 71,
+      "current_registry_rows": 73,
+      "recorded_pending_followups": [
+        "ST009 historical cost fixtures",
+        "INDEXER004 zero-tip rollback"
+      ],
+      "now_published_followups": [
+        "INDEXER004 #569",
+        "ST009 #570"
+      ]
+    }
+  },
+  "issues": [],
+  "limits": [
+    "Only stable local snapshots, normalization, count/mapping/ref shape, local Git commit ancestry and declared receipt path existence were checked.",
+    "No ledger edits, review-record refresh, source mutation, browsing, GitHub live status check, native campaign, detector, oracle, artifact upload or new test execution.",
+    "Fixed owner dispositions describe original scoped causes and preserve execution-head qualifications; this receipt is not consensus certification or a new whole-source FULL_READ.",
+    "Four unexecuted assurance obligations remain EFF001/EFF002/DIFF02/DIFF03; partial source PRs do not close them.",
+    "Owner/root combined final gates remain outside this integrity check. Published parent559/560/565 compatibility heads match the captured root receipt; exact snapshot hashes/timestamps specify observed versions."
+  ],
+  "post_registry_correction_validation": {
+    "initial_receipt": "record-evidence/final-ledger-integrity-initial.json",
+    "initial_sha256": "4aab488f351b7d99f65c1143394e9eba00b3336522bc50c9af7d1ec731a293b3",
+    "other_eight_inputs_byte_unchanged_from_full_checks": true,
+    "registry_validation_repeated": true,
+    "expanded_original_abbreviations": {
+      "503": "c4e738dba9a751743a8c98fd42a2287d3f4a0547",
+      "507": "302fb893c48cde5d1843d633f1e9432b7386b639"
+    },
+    "parent_compatibility_heads": {
+      "559": "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0",
+      "560": "14a8223c3776dc642425620ef2bae846aab4b3b7",
+      "565": "25803fc9731eaa2d7b4d74e1e898e4618c15d4c6"
+    },
+    "parent_receipt_registry_heads_match": true,
+    "source_unchanged_claim_scope": "Parent compatibility receipt records identical combined source tree. This check verifies registry/pointer agreement, not a new source execution gate."
+  }
+}

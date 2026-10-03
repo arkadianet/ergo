@@ -3,7 +3,7 @@
   "base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
   "branch": "codex/reference-audit-20261004-state",
   "worktree": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
-  "updated_at": "2026-10-03T20:17:48.175480+00:00",
+  "updated_at": "2026-10-03T21:39:10.625412+00:00",
   "findings": [
     {
       "id": "ST001",
@@ -103,12 +103,35 @@
       "id": "ST009",
       "original_title": "P2 important validation gap \u2014 SOURCE_CONFIRMED: cache advance and voted-cost oracle assertions leave critical cases open",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-state.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "external_fixture_prerequisite",
-      "reason": "Available cache-advance defect fixed: captured nonempty mainnet1\u21922 cached/fresh proofs/tips/roots and clean reopen; synthetic nonemptyN+1 with data lookup; actual full denominators. Cost harness now rejects empty/incomplete corpus. Still requires absent Scala per-transaction costs, matching historical transactions/input boxes and pre/at/post activation UTXO state; available extensions alone cannot establish voted/activation script parity.",
+      "disposition": "fixed",
+      "resolution_state": "closed",
+      "reason": "Nonempty captured cache advance/fresh proofs and strict zero-omission denominators are repaired (#541/#561). New real pre/at/post Autolykos1\u21922 and EIP37 fixtures cover all43 transactions (302 once-per-input reference observations), with exact9-parent contexts, parsed full epoch tables/cumulative settings and only253 immutable initial external boxes advanced by actual spends/outputs. Pinned official Ergo6.0.5 assembly plus exact Scala2.12.20 compiler hashes reproduced both portable fixtures under python -O; native full transaction/cost validation compares every original position. Corrected the stale original EIP37/rule409 premise: actual captured settings keep215/409 active. This closes the original finite activation-cost/cache assertion gap without claiming JIT/6.0 governance, global historical UTXO/peer acceptance/reopen or physical crash evidence.",
       "infrastructure_commit": "51cd707c24e4711b6488a358adc6b838df3252cb",
-      "validation": "state-evidence/group08-09-combined-gate/results.json",
-      "pr": "https://github.com/arkadianet/ergo/pull/541"
+      "validation": "state-evidence/group15-historical-costs-full-gate/results.json",
+      "pr": "https://github.com/arkadianet/ergo/pull/570",
+      "acquisition_evidence": "state-evidence/activation-acquisition/http-results.json",
+      "additional_infrastructure_commit": "a79e52a6589cf4a4a1fd214b9ccddded5f01f052",
+      "follow_up_pr": "https://github.com/arkadianet/ergo/pull/561",
+      "commit": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
+      "cumulative_commit": "398349692f3fad68fb6ae8113896121154b574c5",
+      "native_validation": "state-evidence/group15-historical-costs-tests-attempt4/result.json",
+      "reference_validation": "state-evidence/activation-acquisition/portable-recapture-attempt2/results.json",
+      "reference_invocation": "state-evidence/activation-acquisition/portable-recapture-attempt2/invocation.json",
+      "fixture_pr_status": "draft_open",
+      "fixture_branch": "codex/reference-audit-20261004-state-historical-costs",
+      "fixture_base": "26aabd7875e76bb84d55811393338a406d1d690e",
+      "remaining_scope_limits": [
+        "Optional700000..700200 legacy corpus remains NOT_RUN because its files are absent.",
+        "No actual historical JIT or6.0 rule215/409 governance activation fixture is claimed.",
+        "No complete historical UTXO reconstruction, peer admission, persisted reopen or physical power-loss proof is claimed."
+      ],
+      "infrastructure_pr": "https://github.com/arkadianet/ergo/pull/541",
+      "fixture_pr": "https://github.com/arkadianet/ergo/pull/570",
+      "scope_by_pr": {
+        "541": "Nonempty captured cache advance/fresh proofs and strict fixture denominators.",
+        "561": "Nine immediate parent-first ancestors and accurately qualified optional legacy cost harness; absent corpus remains NOT_RUN.",
+        "570": "Real pre/at/post Autolykos1\u21922 and EIP37 complete cost fixtures, all43 transactions /302 input observations, portable pinned full-client recapture and initial-only external subset. No historical JIT/6.0 governance or global historical UTXO claim."
+      }
     },
     {
       "id": "ST007",
@@ -142,7 +165,8 @@
       "validation": "state-evidence/group08-09-combined-gate/results.json",
       "combined_verification_head": "79af459124e31a16c41cfe887f4fdb6e8dc23b7d",
       "gate_scope": "Combined cumulative source; isolated focused branch not independently executed.",
-      "pr": "https://github.com/arkadianet/ergo/pull/541"
+      "pr": "https://github.com/arkadianet/ergo/pull/541",
+      "follow_up_commit": "a79e52a6589cf4a4a1fd214b9ccddded5f01f052"
     },
     {
       "id": "ST010",
@@ -178,8 +202,8 @@
       "id": "ESY001",
       "original_title": "P2 \u2014 Persisted-header consistency failures are durably treated as consensus invalidity",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current is_validation_verdict still includes HeaderMeta, whose persisted consistency errors arise before full-block validation in both backends. Remove local integrity errors from durable consensus invalidity and cover exact classifier cases.",
       "current_source_checks": [
         {
@@ -199,14 +223,21 @@
           "sha256": "7f33d7ee38afe850d5944487a96f8480fe05a95a4c07bf9090feb3c7d838faae"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY002",
       "original_title": "P2 \u2014 Single/batched header catch-all blames peers for local failures; orphan drain hides them",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current single/batch finalize catch-all still emits peer Misbehavior for Storage and local integrity errors, and orphan drain hides generic errors. Introduce explicit error classification with consistent local failure handling; caller partial mutations constrain recovery behavior.",
       "current_source_checks": [
         {
@@ -218,15 +249,22 @@
           "sha256": "3c927cf0a131086b965d3f7b2d72e58370bf74521d3384f869ea5398010f1802"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY003",
       "original_title": "P2 \u2014 Recent header cache accepts losing forks as the advertised tip",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
-      "reason": "Current push_validated_header inserts every arrival into last_headers before is_new_best check; proactive cached_header_bytes therefore includes losing forks. Keep advertised cache on best-header ancestry and test fork promotion/source hydration.",
+      "disposition": "fixed",
+      "resolution_state": "closed",
+      "reason": "Losing forks no longer pollute advertised ancestry; winning reorg repairs the complete changed height suffix through the indexed common ancestor, including entries below applied tip. Native fixture applies empty test blocks1..5, extends headers10, then promotes fork from3 to11 and checks all changed cache/storage entries while preserving applied tip5.",
       "current_source_checks": [
         {
           "path": "ergo-sync/src/executor/header_pipeline.rs",
@@ -241,14 +279,23 @@
           "sha256": "8ac1ab276954fba909b2ce4bb5e5481300ad9e1e41fe18ceb0cbbf79d066c1b8"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "b463b76e5de95086fada799ce4c5e889b87e8187",
+      "pr": "https://github.com/arkadianet/ergo/pull/565",
+      "validation": "state-evidence/group14-index-follow-up-full-gate-attempt2/results.json",
+      "combined_verification_head": "d71daf6648571c202e0b11a86633b68f056de057",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed.",
+      "review_base": "18af68210620c024e1a462c6db374fb7990b635c",
+      "review_branch": "codex/reference-audit-20261004-sync-index"
     },
     {
       "id": "ESY004",
       "original_title": "P2 \u2014 Epoch-context buffered headers are never triggered by older ancestor completion",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current drain_orphans selects only keys in recently_installed; EpochContextIncomplete entries keyed by already-present immediate parent cannot be retried when an older ancestor arrives. Separate bounded context-retry scheduling is queued; canonical sequential preset reachability remains unproved.",
       "current_source_checks": [
         {
@@ -256,14 +303,21 @@
           "sha256": "1a3c1cb6bfe288ffdb1e12832f7cdacf9daa14dab1d54b1d6fbdd2064b254078"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY005",
       "original_title": "P2 \u2014 Public PreValidatedHeader metadata can disagree with its retained PoW proof",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current PreValidatedHeader still exposes mutable copied height/parent alongside private PowCheckedHeader. finalization consults those copied fields and accepts independent retained bytes. Make proof-derived metadata immutable and document or enforce exact-byte relation; ordinary production caller preserves bytes.",
       "current_source_checks": [
         {
@@ -271,14 +325,21 @@
           "sha256": "3c927cf0a131086b965d3f7b2d72e58370bf74521d3384f869ea5398010f1802"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY006",
       "original_title": "P2 \u2014 Request registration can outlive a serialization failure",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current request_missing_header_parents still registers entire input before serialize_inv, which rejects more than400 IDs. Split wire-bounded batches before delivery registration; include retry scheduling ownership assertions.",
       "current_source_checks": [
         {
@@ -286,14 +347,21 @@
           "sha256": "9817840a804e9a80a329c7e330dca52cabc2458493d2a59fe04199a53d9beecc"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY007",
       "original_title": "P2 \u2014 Public executor actions bypass Mode6/bootstrap suppression",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current public execute/execute_all still dispatch actions without coordinator headers_only/bootstrap gates; normal coordinator producers gate them. Close conditional public executor contract with early mode gates and ordinary no-mutation regression.",
       "current_source_checks": [
         {
@@ -305,14 +373,21 @@
           "sha256": "011003caa1c2210e90b7a2961636f2b8ce44efbc849ee6a0394cbb3ba7690747"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY008",
       "original_title": "P3 \u2014 Strict Rustdoc fails and several lifecycle comments overstate the current implementation",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Strict sync Rustdoc repaired upstream and combined gate passes; executor module still says epoch updates unimplemented/cache10 rather than50, perf module claims feature flag without feature, and PreValidated one-PoW description excludes genesis extra verification. Residual per-crate prose/codemap queued.",
       "current_source_checks": [
         {
@@ -328,14 +403,21 @@
           "sha256": "3c927cf0a131086b965d3f7b2d72e58370bf74521d3384f869ea5398010f1802"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "ESY009",
       "original_title": "P3 \u2014 Some test names promise stronger assertions than their bodies make",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sync.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
+      "disposition": "fixed",
+      "resolution_state": "closed",
       "reason": "Current single-request ordering test counts requests without decoding IDs; timeout action-order assertion is still conditional/vacuous; Mode5 data-input coverage asserts only positive rather than advertised55. Tighten exact transcript and expected corpus coverage.",
       "current_source_checks": [
         {
@@ -347,7 +429,14 @@
           "sha256": "614fa57d6e8f2b5145b10def3837358f0c3977d607aa1befddab5b9d1c290d65"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "implementation_commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "scoped_validation": "state-evidence/group12-sync-tests-attempt3/result.json",
+      "commit": "18af68210620c024e1a462c6db374fb7990b635c",
+      "pr": "https://github.com/arkadianet/ergo/pull/559",
+      "validation": "state-evidence/group10-13-combined-gate-attempt2/results.json",
+      "combined_verification_head": "a0017a6959e5c521b13ef7a240c9a0ba878b1709",
+      "gate_scope": "Seven-check cumulative source gate; focused branch not separately executed."
     },
     {
       "id": "EV001",
@@ -383,17 +472,23 @@
       "id": "EV003",
       "original_title": "P2 \u2014 Parallel \u201cfirst failing tx\u201d claim holds only inside a layer",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-validation.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
-      "reason": "Current parallel validator still claims sequential global first error although layer resolution returns earlier-stage/layer failures. Reconcile deterministic per-layer rejection contract and preserve successful accepted-block semantics; no whole-block forward-data compatibility claim."
+      "disposition": "fixed",
+      "resolution_state": "closed",
+      "reason": "Document exact deterministic per-layer resolution/validation failures; backward DAG schedule regression passes. General global sequential/Scala parity and whole forward-DATA compatibility are not claimed.",
+      "commit": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+      "pr": "https://github.com/arkadianet/ergo/pull/557",
+      "validation": "integration-evidence/validation-assurance-tests.json"
     },
     {
       "id": "EV004",
       "original_title": "P2 \u2014 Vector integrity test counts unparsable bytes as passing",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-validation.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
-      "reason": "Current vector_integrity still counts hex/parser failures as passing and omits EOF checks. Repair load-bearing corpus validation with explicit context/denominator; intentional upgraded-tree cases must be classified concretely."
+      "disposition": "fixed",
+      "resolution_state": "closed",
+      "reason": "Require all5 advertised files/all1548 records with hard hex/parse/EOF/ID assertions and malformed/empty/trailing controls; explicit storage activation1 context. No script, UTXO or full activation/canonical parity certification.",
+      "commit": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+      "pr": "https://github.com/arkadianet/ergo/pull/557",
+      "validation": "integration-evidence/validation-assurance-tests.json"
     },
     {
       "id": "EV005",
@@ -438,7 +533,8 @@
       "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
       "commit": "26aabd7875e76bb84d55811393338a406d1d690e",
       "validation": "api-evidence/node-cumulative-context-leaf-full-gate.json",
-      "consumer_commit": "8bf3fe704f3dd9075f8bbb8fe0761346751896da"
+      "consumer_commit": "8bf3fe704f3dd9075f8bbb8fe0761346751896da",
+      "pr": "https://github.com/arkadianet/ergo/pull/553"
     },
     {
       "id": "EV007",
@@ -454,9 +550,9 @@
       "id": "EV008",
       "original_title": "P3 \u2014 Public checked/proof prose overstates implementation",
       "report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-validation.md",
-      "disposition": "remaining_evidence",
-      "resolution_state": "revalidated_action_pending",
-      "reason": "Strict25links fixedbc3befeae; current public checked-header ID/constructor and checked-transaction prose still omits caller trust/skip_scripts, NiPoPoW docs describe >=/both-invalid/panic catch contrary to code, and overlay wrongly calls Scala sequential. Narrow factual contracts without changing unresolved comparator/data-input semantics.",
+      "disposition": "fixed",
+      "resolution_state": "closed",
+      "reason": "Checked artifacts and header caller ID/sideband/storage trust, checkpoint script skipping, and strict NiPoPoW/tie/error/no-panic-catcher semantics documented accurately.",
       "current_source_checks": [
         {
           "path": "ergo-validation/src/header/mod.rs",
@@ -475,7 +571,10 @@
           "sha256": "041444e435cc875d1f7f31d096e7c97f2d9a68d49e8a4a7e244244492d13ca59"
         }
       ],
-      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c"
+      "verification_head": "5b8f85af277a341552a7000683e847dfda05435c",
+      "commit": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+      "pr": "https://github.com/arkadianet/ergo/pull/557",
+      "validation": "integration-evidence/validation-assurance-tests.json"
     },
     {
       "id": "ECSP-001",
@@ -1184,5 +1283,22 @@
       "body": "state-evidence/group07-crypto-difficulty-pr-body.md",
       "pr": "https://github.com/arkadianet/ergo/pull/530"
     }
-  ]
+  ],
+  "latest_full_gate": {
+    "head": "d71daf6648571c202e0b11a86633b68f056de057",
+    "receipt": "state-evidence/group14-index-follow-up-full-gate-attempt2/results.json",
+    "verdict": "PASS",
+    "passed": 7936,
+    "ignored": 98
+  },
+  "final_cumulative_head": "398349692f3fad68fb6ae8113896121154b574c5",
+  "summary": {
+    "original_rows": 50,
+    "dispositions": {
+      "fixed": 44,
+      "already_fixed": 6
+    },
+    "closed": 50
+  },
+  "ledger_frozen": true
 }
