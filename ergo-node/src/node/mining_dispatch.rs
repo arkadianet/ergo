@@ -487,8 +487,6 @@ pub(super) fn signal_mining_engine(
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
     let intent = BuildIntent {
-        private_transactions: Arc::new(handle.private_queue().selection_entries()),
-        operator_generation: handle.operator_generation(),
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
