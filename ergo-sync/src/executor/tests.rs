@@ -1706,56 +1706,57 @@ fn older_header_progress_retries_epoch_context_bucket_once() {
     assert!(executor.orphan_retry_parents(&HashSet::new()).is_empty());
 }
 
+fn install_header_cache_fixture(
+    store: &mut ergo_state::StateBackendKind,
+    header: Header,
+    best: bool,
+) -> (header_proc::ProcessedHeader, Vec<u8>) {
+    let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
+    let id = *id.as_bytes();
+    let meta = ergo_state::chain::HeaderMeta {
+        parent_id: *header.parent_id.as_bytes(),
+        height: header.height,
+        cumulative_score: header.height.to_be_bytes().to_vec(),
+        pow_validity: 1,
+        timestamp: header.timestamp,
+    };
+    store
+        .store_validated_header(
+            &id,
+            &bytes,
+            &meta,
+            best.then_some((header.height, meta.cumulative_score.clone())),
+        )
+        .unwrap();
+    let checked = CheckedHeader::from_persisted_parts(
+        &bytes,
+        id,
+        1,
+        meta.height,
+        meta.parent_id,
+        meta.timestamp,
+    )
+    .unwrap();
+    (
+        header_proc::ProcessedHeader {
+            header_id: id,
+            height: header.height,
+            parent_id: meta.parent_id,
+            is_new_best: best,
+            transactions_root: *header.transactions_root.as_bytes(),
+            extension_root: *header.extension_root.as_bytes(),
+            ad_proofs_root: *header.ad_proofs_root.as_bytes(),
+            header,
+            checked,
+        },
+        bytes,
+    )
+}
+
 #[test]
 fn recent_header_cache_ignores_losing_forks_and_rebuilds_winning_ancestry() {
     // This is a cache/storage fixture: synthetic fork rows carry a trusted
     // test marker. It does not verify their PoW or execute peer admission.
-    fn install(
-        store: &mut ergo_state::StateBackendKind,
-        header: Header,
-        best: bool,
-    ) -> (header_proc::ProcessedHeader, Vec<u8>) {
-        let (bytes, id) = ergo_ser::header::serialize_header(&header).unwrap();
-        let id = *id.as_bytes();
-        let meta = ergo_state::chain::HeaderMeta {
-            parent_id: *header.parent_id.as_bytes(),
-            height: header.height,
-            cumulative_score: header.height.to_be_bytes().to_vec(),
-            pow_validity: 1,
-            timestamp: header.timestamp,
-        };
-        store
-            .store_validated_header(
-                &id,
-                &bytes,
-                &meta,
-                best.then_some((header.height, meta.cumulative_score.clone())),
-            )
-            .unwrap();
-        let checked = CheckedHeader::from_persisted_parts(
-            &bytes,
-            id,
-            1,
-            meta.height,
-            meta.parent_id,
-            meta.timestamp,
-        )
-        .unwrap();
-        (
-            header_proc::ProcessedHeader {
-                header_id: id,
-                height: header.height,
-                parent_id: meta.parent_id,
-                is_new_best: best,
-                transactions_root: *header.transactions_root.as_bytes(),
-                extension_root: *header.extension_root.as_bytes(),
-                ad_proofs_root: *header.ad_proofs_root.as_bytes(),
-                header,
-                checked,
-            },
-            bytes,
-        )
-    }
     let rows: serde_json::Value = serde_json::from_str(include_str!(
         "../../../test-vectors/mainnet/headers_1_10.json"
     ))
@@ -1773,18 +1774,18 @@ fn recent_header_cache_ignores_losing_forks_and_rebuilds_winning_ancestry() {
             ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
                 .unwrap();
         headers.push(header.clone());
-        let (processed, bytes) = install(&mut store, header, true);
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, true);
         originals.push(processed.header_id);
         executor.push_validated_header(&processed, &bytes, &store);
     }
     let original_cache = executor.last_headers.clone();
     let mut fork2 = headers[1].clone();
     fork2.timestamp += 1;
-    let (fork2, bytes2) = install(&mut store, fork2, false);
+    let (fork2, bytes2) = install_header_cache_fixture(&mut store, fork2, false);
     executor.push_validated_header(&fork2, &bytes2, &store);
     let mut fork3 = headers[2].clone();
     fork3.parent_id = ModifierId::from_bytes(fork2.header_id);
-    let (fork3, bytes3) = install(&mut store, fork3, false);
+    let (fork3, bytes3) = install_header_cache_fixture(&mut store, fork3, false);
     executor.push_validated_header(&fork3, &bytes3, &store);
     assert_eq!(
         executor
@@ -1799,7 +1800,7 @@ fn recent_header_cache_ignores_losing_forks_and_rebuilds_winning_ancestry() {
     fork4.height = 4;
     fork4.timestamp += 1;
     fork4.parent_id = ModifierId::from_bytes(fork3.header_id);
-    let (fork4, bytes4) = install(&mut store, fork4, true);
+    let (fork4, bytes4) = install_header_cache_fixture(&mut store, fork4, true);
     executor.push_validated_header(&fork4, &bytes4, &store);
     let expected = vec![
         fork4.header_id,
@@ -1828,4 +1829,93 @@ fn recent_header_cache_ignores_losing_forks_and_rebuilds_winning_ancestry() {
         hydrated.cached_header_bytes(50),
         executor.cached_header_bytes(50)
     );
+}
+
+#[test]
+fn winning_header_fork_repairs_index_below_applied_full_tip() {
+    // Real in-process store commits establish an applied empty test chain.
+    // Fork headers are trusted synthetic cache fixtures; no PoW or script
+    // acceptance, peer admission, or full-block rollback is asserted here.
+    let mut utxo = open_initialized_store();
+    let mut applied_headers = Vec::new();
+    let mut parent = [0; 32];
+    for height in 1..=5 {
+        parent = apply_empty_block(&mut utxo, height, parent);
+        let bytes = utxo.get_header(&parent).unwrap().unwrap();
+        let header =
+            ergo_ser::header::read_header(&mut ergo_primitives::reader::VlqReader::new(&bytes))
+                .unwrap();
+        applied_headers.push(header);
+    }
+    let applied_tip = parent;
+    let mut store = ergo_state::StateBackendKind::Utxo(utxo);
+    let mut executor = SyncExecutor::new(
+        ProtocolParams::mainnet_default(),
+        DifficultyParams::mainnet(),
+    );
+    let mut originals = Vec::new();
+    let mut template = applied_headers.last().unwrap().clone();
+    for height in 1..=10 {
+        let header = if height <= 5 {
+            applied_headers[(height - 1) as usize].clone()
+        } else {
+            template.height = height;
+            template.timestamp += 1;
+            template.parent_id = ModifierId::from_bytes(*originals.last().unwrap());
+            template.clone()
+        };
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, true);
+        originals.push(processed.header_id);
+        executor.push_validated_header(&processed, &bytes, &store);
+    }
+    assert_eq!(store.chain_state_meta().best_full_block_height, 5);
+    assert_eq!(store.chain_state_meta().best_full_block_id, applied_tip);
+
+    let mut fork_parent = originals[2];
+    let mut fork_ids = Vec::new();
+    for height in 4..=11 {
+        let mut header = template.clone();
+        header.height = height;
+        header.timestamp = 1_700_000_001 + u64::from(height);
+        header.parent_id = ModifierId::from_bytes(fork_parent);
+        let winning = height == 11;
+        let (processed, bytes) = install_header_cache_fixture(&mut store, header, winning);
+        fork_parent = processed.header_id;
+        fork_ids.push(processed.header_id);
+        executor.push_validated_header(&processed, &bytes, &store);
+        if !winning {
+            assert_eq!(executor.header_index_get(4), Some(originals[3]));
+            assert_eq!(executor.header_index_get(5), Some(originals[4]));
+        }
+    }
+    for height in 1..=3 {
+        assert_eq!(
+            executor.header_index_get(height),
+            Some(originals[(height - 1) as usize])
+        );
+    }
+    for height in 4..=11 {
+        let expected = fork_ids[(height - 4) as usize];
+        // Check the cache before a storage-backed accessor could refresh it.
+        assert_eq!(executor.header_index_get(height), Some(expected));
+        assert_eq!(
+            store.get_header_id_at_height(height).unwrap(),
+            Some(expected)
+        );
+    }
+    assert_eq!(executor.header_index_len(), 11);
+    assert_eq!(store.chain_state_meta().best_full_block_id, applied_tip);
+    assert_eq!(store.chain_state_meta().best_full_block_height, 5);
+    let cached_ids = executor
+        .last_headers
+        .iter()
+        .map(|(h, _)| *h.header_id())
+        .collect::<Vec<_>>();
+    let expected_ids = fork_ids
+        .iter()
+        .rev()
+        .chain(originals[..3].iter().rev())
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(cached_ids, expected_ids);
 }

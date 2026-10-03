@@ -1002,10 +1002,12 @@ impl SyncExecutor {
             }
             return;
         }
-        let full_height = store.chain_state_meta().best_full_block_height;
+        // The selected header fork can diverge below the applied full tip.
+        // This cache follows best-header ancestry, so only an indexed matching
+        // ancestor (or the pre-genesis boundary) terminates the repair walk.
         let mut current_id = processed.header_id;
         let mut current_height = processed.height;
-        while current_height > full_height && current_id != [0; 32] {
+        while current_height > 0 && current_id != [0; 32] {
             if self.header_index.get(&current_height) == Some(&current_id) {
                 break;
             }
