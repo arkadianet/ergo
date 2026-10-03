@@ -397,7 +397,12 @@ export function onFast({ status, info, reachable }) {
     setText('[data-k="up"]', i ? dur(i.uptime_seconds) : '—');
   }
   setText('[data-s="up"]', 'Since last restart');
-  const idxState = state.reachable === false ? 'Last known data' : idx?.status === 'caughtUp' ? 'Available' : idx?.status === 'halted' ? 'Needs attention' : idx ? 'Catching up' : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
+  const idxState = state.reachable === false ? 'Last known data'
+    : idx?.status === 'caughtUp'
+      ? state._slow?.indexerHealth?.status === 'caughtUp' ? 'Available' : 'Unconfirmed'
+      : idx?.status === 'halted' ? 'Needs attention'
+        : idx ? 'Catching up'
+          : state.identity?.extra_index_enabled === false ? 'Disabled' : 'Unavailable';
   setText('[data-index-state]', idxState);
   setText('[data-index-note]', idx ? `Indexed ${num(idx.indexedHeight)} of ${num(idx.fullHeight ?? blkH)} applied blocks` : 'Address, box and token lookups need the index');
 }

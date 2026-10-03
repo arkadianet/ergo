@@ -66,7 +66,7 @@
 - **Protocol-genesis box absorption.** The 3 protocol-seeded box IDs (foundation / no-premine / emission) are never in `INDEXED_BOX`; their first spend pushes `0` to `input_nums` and continues instead of `InputMissing`, mirroring Scala `ExtraIndexer.scala:331`. Genesis (height 1) skips the input-spend pass entirely (`src/apply.rs:191-222,318`, `src/rollback.rs:241-243,414`).
 - **Storage-rent index coherence.** `unspent_by_creation_height` is keyed by the box's own `creationHeight` (R3 metadata, *not* inclusion height) + immutable `global_box_index`; symmetric insert-on-output / remove-on-input with apply, fully re-derived from unchanged `IndexedErgoBox` rows on rollback (no undo-payload extension) (`src/store/storage_rent.rs:1-24`, `src/apply.rs:251,381`, `src/rollback.rs:295,472`).
 - **Secondary-index degrade-not-halt.** A `SegmentEntryMissing` on a DERIVED secondary index (template/token box-segment) is tolerated — the indexer marks a sticky `repair_pending` marker in `INDEXER_META` and continues applying blocks rather than halting. The PRIMARY address segments still halt on any topology error. On the next poll, `IndexerTask::step` detects the marker and runs `rebuild_secondary_indexes` (chain-free, from the intact primary box table) before resuming normal forward-apply. A process-lifetime counter `secondary_index_drift_skips()` and the durable repair markers drive the health surface (`src/segment_buffer.rs:76,101`, `src/task.rs:139-170`, `src/rebuild.rs`).
-- **Halted-handle read isolation.** A boot-time-halted handle has no store; reads return `None`/empty/0 and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault (`src/handle.rs:32-39,158-184`).
+- **Halted-handle read isolation.** A boot-time-halted handle has no store; database reads return `Err(IndexerReadError)` for the unavailable store and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault (`src/handle.rs:45-52,71-75,251-277`).
 - **Indexer DB isolation.** The redb file is separate from the chain store, so an indexer wipe never touches consensus data (`src/store/mod.rs:1-3`).
 
 ## Notes for the architecture doc
@@ -79,5 +79,8 @@ response. Global ranges are clipped to the snapshot's indexed counters.
 `health()` returns it rather than reporting healthy zero counters after an
 unrelated successful query. `/api/v1/indexer/status` returns HTTP 500 for
 failed snapshots or observed read corruption; cached indexed-height/status
-remain queryable. Storeless syncing/halted handles report their explicit
-offline status with unavailable counters represented as zero.
+remain queryable. Storeless syncing/halted handles still reject database
+queries with an unavailable-store error. Only `health()` may return `Ok` with
+zero store-backed counters for their explicit offline status, provided no
+read error is latched; `drift_skips` remains the live process counter
+(`src/handle.rs:280-308`).
