@@ -155,7 +155,8 @@ pub(crate) async fn history(State(s): State<OperatorState>) -> Response {
 /// through the candidate-builder crate; until then it answers the honest
 /// `route_unavailable` rather than fabricating vote bytes.
 #[utoipa::path(
-    get, path = "/api/v1/voting/candidate", tag = "voting",
+    get, path = "/api/v1/voting/candidate",
+    operation_id = "v1_voting_candidate_get", tag = "voting",
     responses((status = 503, description = "Next-block vote-byte preview not wired on this node", body = V1Error)),
 )]
 pub(crate) async fn candidate(State(_s): State<OperatorState>) -> Response {

@@ -64,7 +64,8 @@ fn balance_entry_from_info(e: BalanceInfoEntry) -> V1BalanceEntry {
 /// additive (Scala parity) — pool outputs add; pool spends do NOT subtract from
 /// `confirmed`.
 #[utoipa::path(
-    get, path = "/api/v1/addresses/{address}/balance", tag = "addresses",
+    get, path = "/api/v1/addresses/{address}/balance",
+    operation_id = "v1_addresses_address_balance_get", tag = "addresses",
     params(("address" = String, Path, description = "Base58 address")),
     responses(
         (status = 200, description = "Confirmed + unconfirmed balance", body = V1Balance),
@@ -126,7 +127,8 @@ pub async fn balance(State(state): State<V1State>, Path(address): Path<String>) 
 /// projected DOWN from the shared indexed-tx builder (never re-derives the
 /// confirmation math).
 #[utoipa::path(
-    get, path = "/api/v1/addresses/{address}/transactions", tag = "addresses",
+    get, path = "/api/v1/addresses/{address}/transactions",
+    operation_id = "v1_addresses_address_transactions_get", tag = "addresses",
     params(
         ("address" = String, Path, description = "Base58 address"),
         ("limit" = Option<u32>, Query, description = "Page size (default 20, cap 500)"),
