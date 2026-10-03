@@ -454,7 +454,7 @@ fn step_returns_race_when_canonical_flips_between_load_and_verify() {
     chain.put_block(block_a);
     chain.set_tip(1, header_a);
     // First call returns A (load); second call returns B (re-verify).
-    chain.queue_header_at(1, vec![header_a, header_b]);
+    chain.queue_header_at(1, vec![header_a, header_a, header_b]);
 
     let mut task = IndexerTask::new(handle.clone(), Arc::clone(&chain));
     match task.step() {
@@ -728,4 +728,71 @@ async fn zero_idle_and_persistent_races_wait_between_polls_and_cancel_promptly()
         assert_eq!(times.len(), 2);
         assert!(times[1].duration_since(times[0]) >= Duration::from_millis(50));
     }
+}
+
+/// Separately observed applied-chain heights can disagree with the captured
+/// tip during a State commit. Synthetic blocks exercise index ownership,
+/// not consensus acceptance.
+#[test]
+fn forward_catchup_rejects_an_inconsistent_applied_tip_anchor() {
+    let (handle, _tmp) = open_handle();
+    let common = genesis_block(Digest32::from_bytes([1; 32]));
+    apply_via_handle(&handle, &common);
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let child = child_block(&common.transactions[0], Digest32::from_bytes([2; 32]));
+    let old_tip = Digest32::from_bytes([3; 32]);
+    let new_tip = Digest32::from_bytes([4; 32]);
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_canonical(1, common.header_id);
+    chain.put_canonical(2, child.header_id);
+    chain.put_canonical(3, new_tip);
+    chain.put_block(child);
+    chain.set_tip(3, old_tip);
+    let mut task = IndexerTask::new(handle.clone(), chain.clone());
+    assert!(matches!(task.step_batch(), IndexerPoll::Race));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert!(store.read_undo(2).unwrap().is_none());
+    assert!(store
+        .read_numeric_box(before.global_box_index)
+        .unwrap()
+        .is_none());
+    assert!(!store
+        .read_box(&sealed_box_id(&common.transactions[0], 0))
+        .unwrap()
+        .unwrap()
+        .is_spent());
+    assert_eq!(handle_status(&handle), IndexerStatus::Syncing);
+    chain.set_tip(3, new_tip);
+    assert!(matches!(task.step(), IndexerPoll::Applied(2)));
+}
+
+#[test]
+fn forward_batch_aborts_when_captured_applied_anchor_changes() {
+    let (handle, _tmp) = open_handle();
+    let common = genesis_block(Digest32::from_bytes([1; 32]));
+    apply_via_handle(&handle, &common);
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let child = child_block(&common.transactions[0], Digest32::from_bytes([2; 32]));
+    let old_tip = Digest32::from_bytes([3; 32]);
+    let new_tip = Digest32::from_bytes([4; 32]);
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_canonical(1, common.header_id);
+    chain.put_canonical(2, child.header_id);
+    chain.put_canonical(3, old_tip);
+    chain.put_block(child);
+    chain.set_tip(3, old_tip);
+    // Initial anchor check succeeds. The final check observes the fork while
+    // the just-loaded child height itself still looks unchanged.
+    chain.queue_header_at(3, vec![old_tip, new_tip]);
+    let mut task = IndexerTask::new(handle, chain);
+    assert!(matches!(task.step(), IndexerPoll::Race));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert!(store.read_undo(2).unwrap().is_none());
+    assert!(!store
+        .read_box(&sealed_box_id(&common.transactions[0], 0))
+        .unwrap()
+        .unwrap()
+        .is_spent());
 }

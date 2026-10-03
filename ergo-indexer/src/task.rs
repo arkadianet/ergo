@@ -19,10 +19,10 @@
 //! Production uses [`IndexerTask::spawn`] to run this synchronous I/O and
 //! compute work on a dedicated thread, outside the node's async worker pool.
 //!
-//! Rollback is gated on the STATE layer having reorged (its committed
-//! tip lying on the canonical header chain), not on the raw header-chain
-//! flip — see the gate in [`IndexerTask::step`] for why chasing the flip
-//! alone can unwind the index off the end of its pruned undo log.
+//! Header lookups must follow the committed fully applied block chain.
+//! Header-only fork choice cannot establish validated bodies. Tip/height reads
+//! may straddle State commits, so both forward progress and rollback verify
+//! the captured applied tip's branch before mutating the index.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -73,8 +73,9 @@ pub trait IndexerChainSource: Send + Sync {
     /// call, so callers cannot count on snapshot stability).
     fn committed_tip(&self) -> Result<ChainTip, IndexerError>;
 
-    /// Canonical header_id at `height`, or `None` if past the tip / no
-    /// chain has been written / the height has been pruned.
+    /// Header ID on the committed fully applied block chain at `height`, or
+    /// `None` if past that tip, unwritten, or pruned. A best-header-only index
+    /// is insufficient: section presence does not establish block validation.
     fn header_id_at(&self, height: u32) -> Result<Option<HeaderId>, IndexerError>;
 
     /// Block (height + header_id + parsed transactions) by header_id.
@@ -297,18 +298,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 Some(id) => id != prev_id,
             };
             if diverged {
-                // Rollback gate: the trigger above keys off the best-HEADER
-                // chain index, which flips the moment a heavier branch wins
-                // the header race — before (or even WITHOUT) the state layer
-                // reorging onto it. Only unwind once the state's committed
-                // tip itself lies on the canonical chain (i.e. the state
-                // already rolled back; the fork point is then within our
-                // undo window because we never indexed past the state).
-                // Chasing the raw header flip instead can unwind the index
-                // straight off the end of its pruned undo log and halt on
-                // `UndoMissing` — the testnet 431,366 bystander wedge
-                // shredded 201 index heights exactly this way while the
-                // chain state (correctly) never moved.
+                // Separate source calls can observe a rollback between the
+                // tip and height lookups. Only unwind when the captured State
+                // tip belongs to the same applied chain we now observe.
                 let state_reorged = tip.height > 0
                     && chain_read!(self.chain.header_id_at(tip.height)) == Some(tip.header_id);
                 if !state_reorged {
@@ -316,9 +308,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                         tracing::warn!(
                             indexed_height = meta.indexed_height,
                             state_tip_height = tip.height,
-                            "indexer rollback deferred: best-header chain moved but \
-                             the chain state has not reorged onto it (reorg in \
-                             progress, or a deep-fork wedge) — holding the index \
+                            "indexer rollback deferred: applied-chain reads changed and \
+                             the captured chain-state tip no longer matches (reorg \
+                             in progress) — holding the index \
                              instead of unwinding it",
                         );
                         self.hold_logged = true;
@@ -329,6 +321,15 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 return self.do_rollback(&store, &meta, prev_id);
             }
             self.hold_logged = false;
+        }
+
+        // Separate source reads can straddle a State rollback. The captured
+        // applied tip must still anchor the chain before forward catch-up;
+        // its height alone cannot validate bodies from another applied branch.
+        if tip.height > 0 && chain_read!(self.chain.header_id_at(tip.height)) != Some(tip.header_id)
+        {
+            self.handle.set_status(IndexerStatus::Syncing);
+            return IndexerPoll::Race;
         }
 
         let next_height = meta.indexed_height + 1;
@@ -439,8 +440,11 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             }
             block = loaded;
         }
+        // The captured applied tip anchors this entire batch to validated
+        // State, including when State rolls back during loading.
         if chain_read!(self.chain.header_id_at(next.indexed_height as u32))
             != next.indexed_header_id
+            || chain_read!(self.chain.header_id_at(tip.height)) != Some(tip.header_id)
         {
             return IndexerPoll::Race;
         }

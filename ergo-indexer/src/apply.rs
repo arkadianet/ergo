@@ -465,7 +465,7 @@ pub(crate) fn apply_block_in_transaction(
                     &mut addr.segment,
                     global,
                     &mut scratch.staged_spills,
-                );
+                )?;
 
                 if let Some(template_hash) =
                     template_hash_for_box_bytes(candidate.ergo_tree_bytes())?
@@ -480,7 +480,7 @@ pub(crate) fn apply_block_in_transaction(
                         &mut template.segment,
                         global,
                         &mut scratch.staged_spills,
-                    );
+                    )?;
                 }
 
                 // EIP-4 mint detection. For each token in
@@ -535,7 +535,7 @@ pub(crate) fn apply_block_in_transaction(
                         &mut record.segment,
                         global,
                         &mut scratch.staged_spills,
-                    );
+                    )?;
                 }
 
                 if scratch.tx_touched_seen.insert(owner_tree_hash) {
@@ -601,7 +601,7 @@ pub(crate) fn apply_block_in_transaction(
                             hex::encode(tree_hash.as_bytes()),
                         ),
                     })?;
-                append_tx_entry(addr, tx_global, &mut scratch.staged_spills);
+                append_tx_entry(addr, tx_global, &mut scratch.staged_spills)?;
             }
         }
 

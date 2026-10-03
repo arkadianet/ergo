@@ -142,13 +142,20 @@ pub(crate) fn append_box_entry(
     segment: &mut Segment,
     global_index: i64,
     staged_spills: &mut StagedSpills,
-) {
+) -> Result<(), IndexerError> {
     debug_assert!(
         global_index >= 0,
         "box global_index must be non-negative on append"
     );
     segment.boxes.push(global_index);
     while segment.boxes.len() > SEGMENT_THRESHOLD {
+        let next_count =
+            segment
+                .box_segment_count
+                .checked_add(1)
+                .ok_or(IndexerError::CounterRange {
+                    field: "box_segment_count",
+                })?;
         let drained: Vec<i64> = segment.boxes.drain(..SEGMENT_THRESHOLD).collect();
         let seg_id = box_segment_id(parent_id, segment.box_segment_count);
         staged_spills.insert(
@@ -160,8 +167,9 @@ pub(crate) fn append_box_entry(
                 tx_segment_count: 0,
             },
         );
-        segment.box_segment_count += 1;
+        segment.box_segment_count = next_count;
     }
+    Ok(())
 }
 
 /// Append `+tx_global_index` to the address's tx-segment head, spilling
@@ -172,10 +180,17 @@ pub(crate) fn append_tx_entry(
     addr: &mut IndexedAddress,
     tx_global_index: i64,
     staged_spills: &mut StagedSpills,
-) {
+) -> Result<(), IndexerError> {
     debug_assert!(tx_global_index >= 0, "tx global_index must be non-negative");
     addr.segment.txs.push(tx_global_index);
     while addr.segment.txs.len() > SEGMENT_THRESHOLD {
+        let next_count =
+            addr.segment
+                .tx_segment_count
+                .checked_add(1)
+                .ok_or(IndexerError::CounterRange {
+                    field: "tx_segment_count",
+                })?;
         let drained: Vec<i64> = addr.segment.txs.drain(..SEGMENT_THRESHOLD).collect();
         let seg_id = tx_segment_id(&addr.tree_hash, addr.segment.tx_segment_count);
         staged_spills.insert(
@@ -187,8 +202,9 @@ pub(crate) fn append_tx_entry(
                 tx_segment_count: 0,
             },
         );
-        addr.segment.tx_segment_count += 1;
+        addr.segment.tx_segment_count = next_count;
     }
+    Ok(())
 }
 
 /// Sign-flip the entry whose `abs(...) == global_index` from positive
@@ -693,7 +709,7 @@ mod tests {
         let mut addr = fresh_addr(0x01);
         let mut staged = StagedSpills::new();
         for i in 0..100 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i as i64, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i as i64, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.boxes.len(), 100);
         assert_eq!(addr.segment.box_segment_count, 0);
@@ -705,7 +721,7 @@ mod tests {
         let mut addr = fresh_addr(0x02);
         let mut staged = StagedSpills::new();
         for i in 0..SEGMENT_THRESHOLD as i64 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.boxes.len(), SEGMENT_THRESHOLD);
         assert_eq!(addr.segment.box_segment_count, 0);
@@ -717,7 +733,7 @@ mod tests {
         let mut addr = fresh_addr(0x03);
         let mut staged = StagedSpills::new();
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Head retains the newest one; spill 0 carries 0..512.
         assert_eq!(addr.segment.boxes, vec![SEGMENT_THRESHOLD as i64]);
@@ -737,7 +753,7 @@ mod tests {
         // at 1025 (drain 512, head=[1024]).
         let total = SEGMENT_THRESHOLD as i64 * 2 + 1;
         for i in 0..total {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         assert_eq!(addr.segment.box_segment_count, 2);
         assert_eq!(addr.segment.boxes, vec![total - 1]);
@@ -756,7 +772,7 @@ mod tests {
         let mut addr = fresh_addr(0x05);
         let mut staged = StagedSpills::new();
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_tx_entry(&mut addr, i, &mut staged);
+            append_tx_entry(&mut addr, i, &mut staged).unwrap();
         }
         let tx_seg_id = tx_segment_id(&addr.tree_hash, 0);
         let box_seg_id = box_segment_id(&addr.tree_hash, 0);
@@ -778,7 +794,7 @@ mod tests {
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
         for i in 0..50_i64 {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         for i in (0..50_i64).rev() {
             let popped = pop_box_entry(
@@ -806,7 +822,7 @@ mod tests {
 
         // 513 appends: spill 0 holds 0..512, head holds [512].
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Pop newest first.
         let popped = pop_box_entry(
@@ -845,7 +861,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -877,7 +893,7 @@ mod tests {
 
         // Push 513 entries; spill 0 holds 0..512.
         for i in 0..(SEGMENT_THRESHOLD as i64 + 1) {
-            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged);
+            append_box_entry(&addr.tree_hash, &mut addr.segment, i, &mut staged).unwrap();
         }
         // Flip an entry that lives in the spill (not the head).
         flip_box_segment_entry(
@@ -906,7 +922,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -941,7 +957,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 7, &mut staged).unwrap();
         let err = unflip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -974,8 +990,8 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 42, &mut staged).unwrap();
         assert_eq!(addr.segment.boxes, vec![42, 42]);
 
         flip_box_segment_entry(
@@ -1049,7 +1065,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 0, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 0, &mut staged).unwrap();
         flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
@@ -1080,7 +1096,7 @@ mod tests {
         let read_txn = store.0.begin_write().unwrap();
         let segments_table = read_txn.open_table(crate::store::tables::SEGMENTS).unwrap();
 
-        append_box_entry(&addr.tree_hash, &mut addr.segment, 1, &mut staged);
+        append_box_entry(&addr.tree_hash, &mut addr.segment, 1, &mut staged).unwrap();
         let err = flip_box_segment_entry(
             &addr.tree_hash,
             &mut addr.segment,
