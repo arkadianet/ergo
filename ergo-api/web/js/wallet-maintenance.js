@@ -1,7 +1,9 @@
 import { api } from './api-client.js';
 import { decimal } from './wallet-transaction.js';
 
-const terminal = new Set(['mined', 'conflicted', 'cancelled', 'expired', 'failed']);
+const terminal = new Set(['mined', 'cancelled', 'expired', 'failed']);
+// Conflicted private transactions can become eligible again after a rollback.
+export function canCancelMaintenance(state) { return !terminal.has(state); }
 const kinds = { consolidate: 'Consolidate selected boxes', renew: 'Renew selected boxes', rewards: 'Retrieve selected mining rewards' };
 function el(tag, text, className) { const n = document.createElement(tag); if (text != null) n.textContent = text; if (className) n.className = className; return n; }
 function field(title, control) { const label = el('label', null, 'w-field'); label.append(el('span', title, 'w-label'), control); return label; }
@@ -84,7 +86,7 @@ export function createWalletMaintenance(root) {
     for (const job of result.data.items || []) {
       const row = el('div', null, 'wb-review'); row.append(el('strong', `${job.request.label} · ${job.state}`), el('p', `${job.request.task.boxIds?.length || job.request.task.intent?.inputs?.boxIds?.length || 0} inputs · attempts ${job.attempts}/${job.request.maxAttempts} · expires at ${job.request.expiresAtHeight}${job.txId ? ' · ' + job.txId : ''}`));
       if (job.detail) row.append(el('p', job.detail, 'wb-note'));
-      if (!terminal.has(job.state)) { const cancel = el('button', 'Cancel operation', 'btn btn--sm'); cancel.type = 'button'; cancel.addEventListener('click', async () => { if (busy) return; busy = true; cancel.disabled = true; const result = await api.wallet.cancelMiningJob(job.id); busy = false; if (disposed) return; note.textContent = result.ok ? 'Operation cancelled.' : result.reason || 'Cancellation failed.'; await refresh(); }); row.append(cancel); }
+      if (canCancelMaintenance(job.state)) { const cancel = el('button', 'Cancel operation', 'btn btn--sm'); cancel.type = 'button'; cancel.addEventListener('click', async () => { if (busy) return; busy = true; cancel.disabled = true; const result = await api.wallet.cancelMiningJob(job.id); busy = false; if (disposed) return; note.textContent = result.ok ? 'Operation cancelled.' : result.reason || 'Cancellation failed.'; await refresh(); }); row.append(cancel); }
       history.append(row);
     }
     if (!(result.data.items || []).length) history.append(el('p', 'No approved operations.', 'wb-note'));
