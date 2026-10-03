@@ -445,14 +445,22 @@ pub fn deserialize_handshake(payload: &[u8]) -> Result<Handshake, HandshakeError
 pub fn deserialize_handshake_with_consumed(
     payload: &[u8],
 ) -> Result<(Handshake, usize), HandshakeError> {
-    if payload.len() > MAX_HANDSHAKE_SIZE {
-        return Err(HandshakeError::TooLarge(payload.len()));
+    // A raw TCP read can coalesce a small handshake with framed traffic.
+    // Bound the handshake parser itself; bytes after a complete prefix belong
+    // to the framed connection and must not count against this admission cap.
+    let mut r = VlqReader::new(&payload[..payload.len().min(MAX_HANDSHAKE_SIZE)]);
+    let parsed = (|| {
+        let time = r.get_u64()?;
+        let peer_spec = deserialize_peer_spec_from(&mut r)?;
+        Ok((Handshake { time, peer_spec }, r.position()))
+    })();
+    match parsed {
+        Err(HandshakeError::Read(
+            ReadError::UnexpectedEnd { .. }
+            | ReadError::Vlq(ergo_primitives::vlq::VlqError::UnexpectedEnd),
+        )) if payload.len() > MAX_HANDSHAKE_SIZE => Err(HandshakeError::TooLarge(payload.len())),
+        other => other,
     }
-    let mut r = VlqReader::new(payload);
-    let time = r.get_u64()?;
-    let peer_spec = deserialize_peer_spec_from(&mut r)?;
-    let consumed = r.position();
-    Ok((Handshake { time, peer_spec }, consumed))
 }
 
 #[cfg(test)]
@@ -512,6 +520,66 @@ mod tests {
         assert_eq!(addr.addr, vec![127, 0, 0, 1]);
         assert_eq!(addr.port, 9030);
         assert_eq!(parsed.peer_spec.features.len(), 2);
+    }
+
+    #[test]
+    fn raw_handshake_prefix_preserves_large_coalesced_frame() {
+        use crate::framing::{deserialize_frame, serialize_frame, MessageFrame, MAINNET_MAGIC};
+        let hs = make_test_handshake();
+        let prefix = serialize_handshake(&hs);
+        let frame = MessageFrame {
+            code: 33,
+            payload: vec![7; MAX_HANDSHAKE_SIZE],
+        };
+        let wire = serialize_frame(&MAINNET_MAGIC, &frame);
+        let mut read = prefix.clone();
+        read.extend_from_slice(&wire);
+        assert!(read.len() > MAX_HANDSHAKE_SIZE);
+        let (parsed, consumed) = deserialize_handshake_with_consumed(&read).unwrap();
+        assert_eq!(parsed.time, hs.time);
+        assert_eq!(consumed, prefix.len());
+        assert_eq!(&read[consumed..], wire);
+        let (decoded, frame_len) = deserialize_frame(&MAINNET_MAGIC, &read[consumed..])
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.payload, frame.payload);
+        assert_eq!(frame_len, wire.len());
+    }
+
+    #[test]
+    fn handshake_parser_enforces_prefix_size_boundary() {
+        // The fixed prefix is 13 bytes: time1, agent2, version3, name2,
+        // address flag1, feature count1, feature id1, VLQ length2.
+        let mut hs = Handshake {
+            time: 0,
+            peer_spec: PeerSpec {
+                agent_name: "a".into(),
+                version: Version::CURRENT,
+                node_name: "n".into(),
+                declared_address: None,
+                features: vec![PeerFeature::Unknown {
+                    feature_id: 250,
+                    data: vec![7; MAX_HANDSHAKE_SIZE - 13],
+                }],
+            },
+        };
+        let bytes = serialize_handshake(&hs);
+        assert_eq!(bytes.len(), MAX_HANDSHAKE_SIZE);
+        assert_eq!(
+            deserialize_handshake_with_consumed(&bytes).unwrap().1,
+            MAX_HANDSHAKE_SIZE
+        );
+        if let PeerFeature::Unknown { data, .. } = &mut hs.peer_spec.features[0] {
+            data.push(7);
+        }
+        let oversize = serialize_handshake(&hs);
+        assert!(
+            matches!(deserialize_handshake_with_consumed(&oversize), Err(HandshakeError::TooLarge(n)) if n == MAX_HANDSHAKE_SIZE + 1)
+        );
+        assert!(matches!(
+            deserialize_handshake_with_consumed(&bytes[..bytes.len() - 1]),
+            Err(HandshakeError::Read(_))
+        ));
     }
 
     #[test]

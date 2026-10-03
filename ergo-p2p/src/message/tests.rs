@@ -940,3 +940,30 @@ fn modifiers_truncation_at_size_limit() {
     // Must parse cleanly (no size error in deserialization)
     assert_eq!(parsed.type_id, 101);
 }
+
+#[test]
+fn modifiers_encoder_matches_count_and_type_decoder_bounds() {
+    let mut data = ModifiersData {
+        type_id: 102,
+        modifiers: (0..MAX_MODIFIERS)
+            .map(|i| {
+                let mut id = [0; 32];
+                id[..4].copy_from_slice(&(i as u32).to_be_bytes());
+                (id, vec![7])
+            })
+            .collect(),
+    };
+    let parsed = deserialize_modifiers(&serialize_modifiers(&data).unwrap()).unwrap();
+    assert_eq!(parsed.type_id, data.type_id);
+    assert_eq!(parsed.modifiers, data.modifiers);
+    data.modifiers.push(([255; 32], vec![7]));
+    assert!(
+        matches!(serialize_modifiers(&data), Err(MessageError::TooManyModifiers(n)) if n == MAX_MODIFIERS + 1)
+    );
+    data.modifiers.truncate(1);
+    data.type_id = 0;
+    assert!(matches!(
+        serialize_modifiers(&data),
+        Err(MessageError::UnknownModifierType(0))
+    ));
+}
