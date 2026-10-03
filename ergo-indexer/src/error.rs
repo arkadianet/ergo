@@ -135,6 +135,22 @@ pub enum IndexerError {
         got: usize,
     },
 
+    /// A required checkpoint field is absent from an initialized database.
+    #[error("indexer metadata field {key} missing")]
+    MetadataMissing { key: &'static str },
+    /// Height/header/counter relationships cannot describe a valid checkpoint.
+    #[error("indexer metadata checkpoint is inconsistent")]
+    MetadataInvalid,
+    /// The caller's complete checkpoint differs from the writer's current rows.
+    #[error("indexer caller checkpoint is stale")]
+    StaleCheckpoint,
+    /// Secondary repair owns the derived tables until its marker is cleared.
+    #[error("indexer secondary repair is in progress")]
+    RepairInProgress,
+    /// A constructed height or next global index cannot be represented on disk.
+    #[error("indexer {field} is outside its supported range")]
+    CounterRange { field: &'static str },
+
     // ----- write-path (encode / hash / size cast) -----
     /// A persistence-write-path serializer call returned an error.
     /// `context` names the operation (e.g. `"indexed_box encode"`,
@@ -368,6 +384,11 @@ impl IndexerError {
             | Self::DbCommit(_)
             | Self::DbDecode { .. }
             | Self::DbRowLength { .. }
+            | Self::MetadataMissing { .. }
+            | Self::MetadataInvalid
+            | Self::StaleCheckpoint
+            | Self::RepairInProgress
+            | Self::CounterRange { .. }
             | Self::Serialize { .. }
             | Self::LengthExceedsI32 { .. }
             | Self::HashDerivation { .. }

@@ -142,11 +142,20 @@ pub(crate) fn apply_block_in_transaction(
     block: &IndexerBlock<'_>,
     scratch: &mut BlockApplyScratch,
 ) -> Result<AppliedBlock, IndexerError> {
-    let expected_next = meta.indexed_height + 1;
-    if (block.height as u64) != expected_next {
+    meta_io::check_mutation_checkpoint(write_txn, meta)?;
+    let expected_next = meta
+        .indexed_height
+        .checked_add(1)
+        .ok_or(IndexerError::CounterRange {
+            field: "indexed_height",
+        })?;
+    let height = u64::try_from(block.height).map_err(|_| IndexerError::CounterRange {
+        field: "block.height",
+    })?;
+    if height != expected_next {
         return Err(IndexerError::HeightMismatch {
             expected: expected_next,
-            got: block.height as u64,
+            got: height,
         });
     }
 
@@ -394,7 +403,11 @@ pub(crate) fn apply_block_in_transaction(
                         len: scratch.writer.len(),
                     }
                 })?;
-                let global = next.global_box_index as i64;
+                let global = i64::try_from(next.global_box_index).map_err(|_| {
+                    IndexerError::CounterRange {
+                        field: "global_box_index",
+                    }
+                })?;
                 let indexed = IndexedErgoBox {
                     inclusion_height: block_height,
                     spending_tx_id: None,
@@ -541,7 +554,10 @@ pub(crate) fn apply_block_in_transaction(
             }
 
             // Step 3: tx record + per-touched-address tx-segment append.
-            let tx_global = next.global_tx_index as i64;
+            let tx_global =
+                i64::try_from(next.global_tx_index).map_err(|_| IndexerError::CounterRange {
+                    field: "global_tx_index",
+                })?;
             scratch
                 .data_inputs
                 .extend(tx.data_inputs.iter().map(|di| di.box_id));
