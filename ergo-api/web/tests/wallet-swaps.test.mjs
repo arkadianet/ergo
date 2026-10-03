@@ -26,8 +26,8 @@ test('swap approval rejects duplicate implicit funding and unbounded retries or 
   assert.throws(() => swapDraft({ ...values(), attempts: '101' }), /attempts/);
 });
 
-test('swap cancellation remains available for mined and signed recoverable conflict states', () => {
-  assert.equal(canCancelSwap({state:'mined',txId:'44'.repeat(32)}),true);
+test('swap cancellation remains available for signed recoverable conflicts and keeps mined terminal', () => {
+  assert.equal(canCancelSwap({state:'mined',txId:'44'.repeat(32)}),false);
   assert.equal(canCancelSwap({state:'conflicted',txId:'44'.repeat(32)}),true);
   assert.equal(canCancelSwap({state:'conflicted',txId:null}),false);
   assert.equal(canCancelSwap({state:'cancelled',txId:'44'.repeat(32)}),false);

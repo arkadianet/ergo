@@ -1,7 +1,7 @@
 import { getApiKey, report, subscribe } from './auth.js';
 
 export const SPECTRUM_N2T_TREE_HASH = '99f30ad579a2c98ad31b432676627fcd9e303d43c06e898725f6155d8ac40aa9';
-const terminal = new Set(['conflicted', 'cancelled', 'expired', 'failed']);
+const terminal = new Set(['mined', 'conflicted', 'cancelled', 'expired', 'failed']);
 export const canCancelSwap = (item) => !terminal.has(item.state) || (item.state === 'conflicted' && Boolean(item.txId));
 const decimal = (text) => {
   if (!/^[1-9][0-9]*$/.test(text) || BigInt(text) > 9223372036854775807n) throw new Error('Amounts must be positive whole raw units within the Ergo Long limit.');
@@ -93,6 +93,12 @@ export function mountMiningSwaps(container) {
     </div>`;
   container.append(panel);
   const form = panel.querySelector('[data-swap-form]'), status = panel.querySelector('[data-swap-status]');
+  for (const control of form.querySelectorAll('input, select, textarea')) control.classList.add('input');
+  for (const label of form.querySelectorAll('label')) {
+    label.classList.add('w-field');
+    const caption = document.createElement('span'); caption.className = 'w-label';
+    caption.textContent = label.firstChild.textContent; label.firstChild.replaceWith(caption);
+  }
   const output = panel.querySelector('[data-swap-preview]'), list = panel.querySelector('[data-swap-list]');
   const approve = panel.querySelector('[data-swap-approve]');
   let approvedDraft = null, unsubscribe = null, accessKey = null, walletUnlocked = false, authorized = false, generation = 0, active = false, busy = false;
@@ -119,7 +125,7 @@ export function mountMiningSwaps(container) {
       text.textContent = `#${item.id} ${item.request.label}: ${item.state} · generation ${item.generation} · attempts ${item.attempts}/${item.request.maxAttempts}${item.quotedOutputAmount ? ' · output ' + item.quotedOutputAmount : ''}${item.detail ? ' · ' + item.detail : ''}`;
       row.append(text);
       if (canCancelSwap(item)) {
-        const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = item.state === 'mined' ? 'Stop future intent retries' : 'Cancel and retire private work';
+        const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = 'Cancel and retire private work';
         cancel.addEventListener('click', async () => {
           cancel.disabled = true;
           const result = await request('/' + encodeURIComponent(item.id) + '/cancel', 'POST', {});
