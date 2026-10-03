@@ -717,6 +717,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "k256",
  "num-bigint",
  "num-integer",
  "num-traits",

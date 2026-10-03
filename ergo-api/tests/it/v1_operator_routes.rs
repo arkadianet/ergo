@@ -443,6 +443,17 @@ impl NodeMining for StubMining {
     ) -> Result<Option<WorkMessageJson>, MiningApiError> {
         Ok(Some(fixed_work()))
     }
+    async fn candidate_with_txs(
+        &self,
+        _txs: Vec<ergo_rest_json::types::ScalaTransactionInput>,
+        miner_pk: Option<String>,
+    ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+        let mut work = fixed_work();
+        if let Some(pk) = miner_pk {
+            work.pk = pk;
+        }
+        Ok(Some(work))
+    }
     async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
         Ok(())
     }
@@ -987,7 +998,30 @@ async fn mining_candidate_mining_off_is_mining_disabled_not_404() {
 }
 
 #[tokio::test]
-async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
+async fn mining_candidate_with_txs_array_and_explicit_key_reach_seam() {
+    const PK: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    for body in ["[]".to_owned(), format!(r#"{{"txs":[],"pk":"{PK}"}}"#)] {
+        let (status, v) = send(
+            app_full(default_auth()),
+            req(
+                Method::POST,
+                "/api/v1/mining/candidate-with-txs",
+                Some("operator-secret"),
+                Some(REMOTE),
+                Some(Body::from(body.clone())),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["msg"], "ab".repeat(32));
+        if body.starts_with('{') {
+            assert_eq!(v["pk"], PK);
+        }
+    }
+}
+
+#[tokio::test]
+async fn mining_candidate_with_txs_invalid_body_is_v1_bad_request() {
     let (status, v) = send(
         app_full(default_auth()),
         req(
@@ -995,12 +1029,12 @@ async fn mining_candidate_with_txs_seam_deferred_route_unavailable() {
             "/api/v1/mining/candidate-with-txs",
             Some("operator-secret"),
             Some(REMOTE),
-            None,
+            Some(Body::from("{}")),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(v["error"]["reason"], "route_unavailable");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["reason"], "bad_request");
 }
 
 #[tokio::test]

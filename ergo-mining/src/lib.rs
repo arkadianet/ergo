@@ -6,11 +6,12 @@
 //!   error types for the mining subsystem.
 //!
 //! External-miner only: no internal CPU miner, no wallet integration, no
-//! automatic voting-bit selection, no `/mining/candidateWithTxs`, and no
-//! `offline_generation`. Mining requires the node be synced to the
+//! `offline_generation`. Caller-supplied candidate transactions use the same
+//! block validation and proof path as ordinary mining. Mining requires sync to the
 //! network tip.
 
 pub mod candidate;
+pub mod candidate_proof;
 pub mod candidate_selection;
 pub mod coinbase;
 pub mod config;

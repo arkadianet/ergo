@@ -642,7 +642,7 @@ async fn canonical_family_inventories_are_bidirectional_and_fully_mounted() {
     assert_eq!(inventory.rust, rust_documented);
     assert_eq!(inventory.scala, scala_documented);
     assert_eq!(inventory.rust.len(), 181);
-    assert_eq!(inventory.scala.len(), 125);
+    assert_eq!(inventory.scala.len(), 127);
     assert!(inventory.rust.is_disjoint(&inventory.scala));
 
     let app = app.layer(axum::middleware::from_fn(mark_matched_route));

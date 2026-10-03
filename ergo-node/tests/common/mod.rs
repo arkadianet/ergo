@@ -74,6 +74,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         api_key_hash: Some(
             "324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf".into(),
         ),
+        allow_unauthenticated_legacy_mining: false,
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
         allow_direct_block_submit: false,

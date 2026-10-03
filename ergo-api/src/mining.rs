@@ -1,4 +1,4 @@
-//! Mining-side REST routes: `/mining/{candidate,solution,rewardAddress,rewardPublicKey}`.
+//! Mining-side REST routes for candidates, supplied transactions and solutions.
 //!
 //! The trait [`NodeMining`] is the seam: the node implements it against
 //! `ergo_mining::handle::MiningHandle` + the main loop's mining-submit
@@ -7,14 +7,15 @@
 //!
 //! HTTP shape (matches Scala `MiningApiRoute`):
 //! - `GET  /mining/candidate`        → `WorkMessage` JSON
+//! - `POST /mining/candidateWithTxs` → work with transaction inclusion proofs
+//! - `POST /mining/candidateWithTxsAndPk` → the same, with a per-request miner key
 //! - `POST /mining/solution`         → empty body on 200, JSON error on 4xx
 //! - `GET  /mining/rewardAddress`    → `{ rewardAddress: "9..." }`
 //! - `GET  /mining/rewardPublicKey`  → `{ rewardPubkey: "02..." }`
 //!
-//! All four routes sit behind the api_key gate; an absent
-//! `[api.security] api_key_hash` keeps them closed. This is a deliberate
-//! hardening over Scala, which leaves `/mining/*` open; see
-//! `server/scala_api.rs::auxiliary_router`.
+//! Every route defaults to the api_key gate. Explicit legacy compatibility
+//! opens only the original candidate/solution/reward routes; transaction
+//! injection always requires a configured key.
 
 use std::sync::Arc;
 
@@ -25,8 +26,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ergo_rest_json::mining::{
-    AutolykosSolutionJson, RewardAddressResponse, RewardPublicKeyResponse, WorkMessageJson,
+    AutolykosSolutionJson, CandidateWithTxsAndPkRequest, RewardAddressResponse,
+    RewardPublicKeyResponse, WorkMessageJson,
 };
+use ergo_rest_json::types::ScalaTransactionInput;
 use serde::{Deserialize, Serialize};
 
 /// Trait the node implements to surface its mining subsystem to the
@@ -49,6 +52,20 @@ pub trait NodeMining: Send + Sync {
         &self,
         longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError>;
+
+    /// Builds and retains a candidate with the supplied transactions, optionally
+    /// using a per-request miner key. Transactions keep their request order and
+    /// their spending-proof context extension order. Only admitted transactions
+    /// receive inclusion proofs in the returned work message.
+    async fn candidate_with_txs(
+        &self,
+        _txs: Vec<ScalaTransactionInput>,
+        _miner_pk: Option<String>,
+    ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "transaction candidate building not wired".into(),
+        ))
+    }
 
     /// `POST /mining/solution`. Returns `Ok(())` on accepted-by-executor.
     async fn submit_solution(&self, solution: AutolykosSolutionJson) -> Result<(), MiningApiError>;
@@ -142,6 +159,93 @@ async fn candidate_handler(
     }
 }
 
+/// Bound authenticated candidate requests before they cross into the node loop.
+pub const MAX_CANDIDATE_TRANSACTIONS: usize = 1024;
+pub const MAX_CANDIDATE_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) fn decode_candidate_transactions(
+    body: &[u8],
+) -> Result<Vec<ScalaTransactionInput>, MiningApiError> {
+    check_candidate_body_size(body)?;
+    let txs: Vec<ScalaTransactionInput> = serde_json::from_slice(body)
+        .map_err(|e| MiningApiError::BadRequest(format!("invalid transaction array: {e}")))?;
+    validate_candidate_request(&txs, None)?;
+    Ok(txs)
+}
+
+pub(crate) fn decode_candidate_with_pk(
+    body: &[u8],
+) -> Result<CandidateWithTxsAndPkRequest, MiningApiError> {
+    check_candidate_body_size(body)?;
+    let request: CandidateWithTxsAndPkRequest = serde_json::from_slice(body)
+        .map_err(|e| MiningApiError::BadRequest(format!("invalid candidate request: {e}")))?;
+    validate_candidate_request(&request.txs, Some(&request.pk))?;
+    Ok(request)
+}
+
+fn check_candidate_body_size(body: &[u8]) -> Result<(), MiningApiError> {
+    if body.len() > MAX_CANDIDATE_REQUEST_BYTES {
+        return Err(MiningApiError::BadRequest(format!(
+            "candidate request exceeds {MAX_CANDIDATE_REQUEST_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_candidate_request(
+    txs: &[ScalaTransactionInput],
+    miner_pk: Option<&str>,
+) -> Result<(), MiningApiError> {
+    if txs.len() > MAX_CANDIDATE_TRANSACTIONS {
+        return Err(MiningApiError::BadRequest(format!(
+            "candidate request exceeds {MAX_CANDIDATE_TRANSACTIONS} transactions"
+        )));
+    }
+    if let Some(pk) = miner_pk {
+        if pk.len() != 66 {
+            return Err(MiningApiError::BadRequest(
+                "pk must be a compressed secp256k1 public key".into(),
+            ));
+        }
+        let bytes = hex::decode(pk)
+            .map_err(|_| MiningApiError::BadRequest("pk must be hexadecimal".into()))?;
+        if bytes.len() != 33 || !matches!(bytes[0], 2 | 3) {
+            return Err(MiningApiError::BadRequest(
+                "pk must be a compressed secp256k1 public key".into(),
+            ));
+        }
+        k256::PublicKey::from_sec1_bytes(&bytes)
+            .map_err(|_| MiningApiError::BadRequest("pk is not a secp256k1 curve point".into()))?;
+    }
+    Ok(())
+}
+
+async fn candidate_with_txs_handler(
+    State(m): State<Arc<dyn NodeMining>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<Json<WorkMessageJson>, MiningApiError> {
+    let body = body.map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+    let txs = decode_candidate_transactions(&body)?;
+    candidate_response(m.candidate_with_txs(txs, None).await?)
+}
+
+async fn candidate_with_txs_and_pk_handler(
+    State(m): State<Arc<dyn NodeMining>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Result<Json<WorkMessageJson>, MiningApiError> {
+    let body = body.map_err(|e| MiningApiError::BadRequest(e.to_string()))?;
+    let request = decode_candidate_with_pk(&body)?;
+    candidate_response(m.candidate_with_txs(request.txs, Some(request.pk)).await?)
+}
+
+fn candidate_response(
+    work: Option<WorkMessageJson>,
+) -> Result<Json<WorkMessageJson>, MiningApiError> {
+    work.map(Json).ok_or_else(|| {
+        MiningApiError::Unavailable("no candidate (not synced or generation race)".into())
+    })
+}
+
 async fn solution_handler(
     State(m): State<Arc<dyn NodeMining>>,
     Json(body): Json<AutolykosSolutionJson>,
@@ -170,11 +274,25 @@ async fn reward_pubkey_handler(
 /// the main router via `.merge(mining_router(handle))` when mining is
 /// enabled.
 pub fn mining_router(mining: Arc<dyn NodeMining>) -> Router {
+    legacy_mining_router(mining.clone()).merge(transaction_mining_router(mining))
+}
+
+pub(crate) fn legacy_mining_router(mining: Arc<dyn NodeMining>) -> Router {
     Router::new()
         .route("/mining/candidate", get(candidate_handler))
         .route("/mining/solution", post(solution_handler))
         .route("/mining/rewardAddress", get(reward_address_handler))
         .route("/mining/rewardPublicKey", get(reward_pubkey_handler))
+        .with_state(mining)
+}
+
+pub(crate) fn transaction_mining_router(mining: Arc<dyn NodeMining>) -> Router {
+    Router::new()
+        .route("/mining/candidateWithTxs", post(candidate_with_txs_handler))
+        .route(
+            "/mining/candidateWithTxsAndPk",
+            post(candidate_with_txs_and_pk_handler),
+        )
         .with_state(mining)
 }
 
@@ -351,5 +469,151 @@ mod tests {
             .await,
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    // ----- candidate request transport and bounds -----
+
+    const GENERATOR_PK: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    type CandidateObservation = (Vec<ScalaTransactionInput>, Option<String>);
+
+    struct CandidateSpy {
+        seen: std::sync::Mutex<Option<CandidateObservation>>,
+    }
+
+    #[async_trait]
+    impl NodeMining for CandidateSpy {
+        async fn candidate(
+            &self,
+            _: Option<String>,
+        ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+            Ok(Some(fixed_work()))
+        }
+        async fn candidate_with_txs(
+            &self,
+            txs: Vec<ScalaTransactionInput>,
+            pk: Option<String>,
+        ) -> Result<Option<WorkMessageJson>, MiningApiError> {
+            *self.seen.lock().unwrap() = Some((txs, pk));
+            Ok(Some(fixed_work()))
+        }
+        async fn submit_solution(&self, _: AutolykosSolutionJson) -> Result<(), MiningApiError> {
+            Ok(())
+        }
+        async fn reward_address(&self) -> Result<String, MiningApiError> {
+            Ok(String::new())
+        }
+        async fn reward_pubkey(&self) -> Result<String, MiningApiError> {
+            Ok(GENERATOR_PK.into())
+        }
+    }
+
+    fn ordered_tx(id_byte: &str) -> String {
+        format!(
+            r#"{{"inputs":[{{"boxId":"{}","spendingProof":{{"proofBytes":"","extension":{{"5":"0400","3":"0400","8":"0400"}}}}}}],"dataInputs":[],"outputs":[]}}"#,
+            id_byte.repeat(32)
+        )
+    }
+
+    #[tokio::test]
+    async fn candidate_posts_preserve_transaction_and_context_extension_order() {
+        use tower::ServiceExt;
+        for with_pk in [false, true] {
+            let spy = Arc::new(CandidateSpy {
+                seen: std::sync::Mutex::new(None),
+            });
+            let txs = format!("[{},{}]", ordered_tx("bb"), ordered_tx("aa"));
+            let (path, body) = if with_pk {
+                (
+                    "/mining/candidateWithTxsAndPk",
+                    format!(r#"{{"txs":{txs},"pk":"{GENERATOR_PK}"}}"#),
+                )
+            } else {
+                ("/mining/candidateWithTxs", txs)
+            };
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let response = mining_router(spy.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let seen = spy.seen.lock().unwrap();
+            let (txs, pk) = seen.as_ref().unwrap();
+            assert_eq!(
+                txs.iter()
+                    .map(|tx| tx.inputs[0].box_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["bb".repeat(32), "aa".repeat(32)]
+            );
+            assert_eq!(
+                txs[0].inputs[0]
+                    .spending_proof
+                    .extension
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["5", "3", "8"]
+            );
+            assert_eq!(pk.as_deref(), with_pk.then_some(GENERATOR_PK));
+        }
+    }
+
+    #[test]
+    fn candidate_requests_reject_malformed_keys_and_excessive_work() {
+        for pk in [
+            "",
+            "aa",
+            &"00".repeat(33),
+            &format!("02{}", "ff".repeat(32)),
+        ] {
+            let body = format!(r#"{{"txs":[],"pk":"{pk}"}}"#);
+            assert!(matches!(
+                decode_candidate_with_pk(body.as_bytes()),
+                Err(MiningApiError::BadRequest(_))
+            ));
+        }
+        let tx = ordered_tx("aa");
+        let excessive = format!(
+            "[{}]",
+            vec![tx.as_str(); MAX_CANDIDATE_TRANSACTIONS + 1].join(",")
+        );
+        assert!(matches!(
+            decode_candidate_transactions(excessive.as_bytes()),
+            Err(MiningApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            decode_candidate_transactions(&vec![b' '; MAX_CANDIDATE_REQUEST_BYTES + 1]),
+            Err(MiningApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            decode_candidate_transactions(b"{}"),
+            Err(MiningApiError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_candidate_body_returns_json_error_without_calling_node() {
+        use tower::ServiceExt;
+        let spy = Arc::new(CandidateSpy {
+            seen: std::sync::Mutex::new(None),
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mining/candidateWithTxs")
+            .body(axum::body::Body::from(vec![
+                b' ';
+                MAX_CANDIDATE_REQUEST_BYTES + 1
+            ]))
+            .unwrap();
+        let response = mining_router(spy.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["reason"], "bad_request");
+        assert!(spy.seen.lock().unwrap().is_none());
     }
 }
