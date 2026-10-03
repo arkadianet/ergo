@@ -1772,8 +1772,8 @@ impl StateStore {
                 });
             }
             let mut found = false;
-            for chunk in bytes.chunks_exact(32) {
-                if chunk == header_id {
+            for chunk in bytes.as_chunks::<32>().0 {
+                if *chunk == header_id {
                     found = true;
                     break;
                 }

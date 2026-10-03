@@ -3,7 +3,7 @@
 # IMPORTANT: this crate is intentionally EXCLUDED from the stable workspace.
 # The [workspace] declaration below makes it a detached workspace so that
 # `cargo clippy --workspace` from the repo root does NOT try to build these
-# targets with the pinned stable 1.95.0 toolchain (libfuzzer-sys requires
+# targets with the pinned stable 1.99.0 toolchain (libfuzzer-sys requires
 # nightly). See ergo-difftest/fuzz/README.md for how to run fuzz targets.
 [workspace]
 

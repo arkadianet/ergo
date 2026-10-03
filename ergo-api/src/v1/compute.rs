@@ -92,7 +92,7 @@ impl ComputePool {
         self.permits.available_permits()
     }
 
-    pub async fn run<T, F>(&self, work: F) -> Result<T, Response>
+    pub async fn run<T, F>(&self, work: F) -> Result<T, Box<Response>>
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
@@ -138,7 +138,7 @@ impl ComputePool {
         }
         match timeout(self.run_timeout, receive).await {
             Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(_))) | Ok(Err(_)) => Err(v1_error(
+            Ok(Ok(Err(_))) | Ok(Err(_)) => Err(Box::new(v1_error(
                 Reason::InternalError,
                 if self.service == "read" {
                     "the read could not be completed"
@@ -146,8 +146,8 @@ impl ComputePool {
                     "the computation could not be completed"
                 },
                 "an internal error occurred",
-            )),
-            Err(_) => Err(v1_error(
+            ))),
+            Err(_) => Err(Box::new(v1_error(
                 Reason::Timeout,
                 if self.service == "read" {
                     "the read timed out"
@@ -155,7 +155,7 @@ impl ComputePool {
                     "the computation timed out"
                 },
                 "retry the request shortly",
-            )),
+            ))),
         }
     }
 
@@ -196,19 +196,19 @@ impl ComputePool {
     where
         F: FnOnce() -> Response + Send + 'static,
     {
-        self.run(work).await.unwrap_or_else(|response| response)
+        self.run(work).await.unwrap_or_else(|response| *response)
     }
 }
 
-fn shutting_down(service: &str) -> Response {
-    v1_error(
+fn shutting_down(service: &str) -> Box<Response> {
+    Box::new(v1_error(
         Reason::ShuttingDown,
         format!("{service} service is shutting down"),
         "retry when the node is available",
-    )
+    ))
 }
 
-fn overloaded(service: &str) -> Response {
+fn overloaded(service: &str) -> Box<Response> {
     let mut response = v1_error(
         Reason::Overloaded,
         format!("{service} capacity is busy"),
@@ -217,7 +217,7 @@ fn overloaded(service: &str) -> Response {
     response
         .headers_mut()
         .insert(RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
-    response
+    Box::new(response)
 }
 
 impl Default for ComputePool {

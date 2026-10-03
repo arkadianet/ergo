@@ -5,6 +5,12 @@ vs the Scala reference at `reference/ergo-core` v6.0.2). Every slice builds
 against the contracts here. Changing a contract is a lead-engineer decision, not
 a slice-local one.
 
+The ground-truth table and D1 decision below record the July 2026 environment.
+The workspace now pins stable Rust 1.99.0. CI also runs coverage-guided campaigns
+with the independently pinned nightly in `.github/ci-tools.toml`; see
+[`fuzz/README.md`](../fuzz/README.md) for the current setup. The hermetic runner
+remains the stable PR gate.
+
 Status legend: **[BUILT]** landed + gated · **[SPEC]** contract fixed, not yet
 built · **[DEFERRED]** out of this session's scope, contract reserved.
 

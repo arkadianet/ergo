@@ -169,7 +169,7 @@ impl ActiveProtocolParameters {
         };
 
         let mut by_id: std::collections::BTreeMap<u8, i32> = std::collections::BTreeMap::new();
-        for chunk in body.chunks_exact(5) {
+        for chunk in body.as_chunks::<5>().0 {
             let id = chunk[0];
             let v = i32::from_be_bytes(
                 chunk[1..5]
@@ -357,7 +357,7 @@ mod tests {
         let count = bytes[4] as usize;
         let entries_end = 5 + count * 5;
         let body = &bytes[5..entries_end];
-        let ids: Vec<u8> = body.chunks_exact(5).map(|c| c[0]).collect();
+        let ids: Vec<u8> = body.as_chunks::<5>().0.iter().map(|c| c[0]).collect();
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted);
