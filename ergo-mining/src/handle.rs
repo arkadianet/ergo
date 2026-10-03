@@ -226,6 +226,7 @@ pub struct MiningHandle {
     /// every clone of the handle — the engine task, the action loop, the
     /// boot-time subscriber — shares the one channel.
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
+    private_queue: Arc<crate::private_queue::PrivateTransactionQueue>,
     policy: Arc<RwLock<(u64, crate::policy::BlockPolicy)>>,
     outcomes: Arc<Mutex<std::collections::VecDeque<crate::inspection::MiningOutcome>>>,
     reward_key: RewardKeySource,
@@ -312,6 +313,7 @@ impl MiningHandle {
         Self {
             cache: Arc::new(RwLock::new(MiningCache::default())),
             serve_notify: Arc::new(tokio::sync::watch::channel(0u64).0),
+            private_queue: Arc::new(crate::private_queue::PrivateTransactionQueue::default()),
             policy: Arc::new(RwLock::new((0, crate::policy::BlockPolicy::default()))),
             outcomes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             reward_key,
@@ -330,6 +332,20 @@ impl MiningHandle {
             voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             suspects: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Install the node-owned durable operator queue at startup.
+    pub fn with_private_queue(
+        mut self,
+        queue: Arc<crate::private_queue::PrivateTransactionQueue>,
+    ) -> Self {
+        self.private_queue = queue;
+        self
+    }
+
+    /// This queue is separate from peer relay, public mempool and explorer APIs.
+    pub fn private_queue(&self) -> Arc<crate::private_queue::PrivateTransactionQueue> {
+        self.private_queue.clone()
     }
 
     /// Install a validated initial policy without changing its revision.
