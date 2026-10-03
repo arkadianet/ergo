@@ -669,6 +669,67 @@ fn duplicate_tx_rejected_idempotently() {
         }
     ));
     assert_eq!(pool.len(), 1);
+    assert_eq!(b.global_consumed(), 20_000);
+    assert_eq!(v.validate_call_count(), 2);
+}
+
+#[test]
+fn successful_duplicates_exhaust_each_source_budget_before_more_validation() {
+    for source in [
+        TxSource::Peer(peer()),
+        TxSource::PublicApi,
+        TxSource::Api,
+        TxSource::Wallet,
+    ] {
+        let utxo = EmptyUtxo;
+        let c = ctx();
+        let (mut pool, _, mut inv, mut unr) = fresh();
+        let mut budgets = CostBudgets::new(20_000, 20_000, 0);
+        let cfg = default_config();
+        let w = ByCost;
+        let validator = validator_accepting(b"bytes", id(1), 5_000_000);
+        let tip = c.view(&utxo);
+        let mut cx = AdmissionCtx {
+            tip_ctx: &tip,
+            config: &cfg,
+            pool: &mut pool,
+            budgets: &mut budgets,
+            invalidated: &mut inv,
+            unresolved: &mut unr,
+            weight_fn: &w,
+        };
+        let (first, _) = process(
+            b"bytes",
+            source.clone(),
+            Instant::now(),
+            &mut cx,
+            &validator,
+        );
+        assert!(matches!(first, AdmissionOutcome::Admitted { .. }));
+        let (duplicate, _) = process(
+            b"bytes",
+            source.clone(),
+            Instant::now(),
+            &mut cx,
+            &validator,
+        );
+        assert_eq!(
+            duplicate,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::Duplicate
+            }
+        );
+        assert_eq!(cx.budgets.global_consumed(), 20_000);
+        let (exhausted, _) = process(b"bytes", source, Instant::now(), &mut cx, &validator);
+        assert!(matches!(
+            exhausted,
+            AdmissionOutcome::Rejected {
+                reason: RejectReason::GlobalBudgetExhausted
+            }
+        ));
+        assert_eq!(validator.validate_call_count(), 2);
+        assert_eq!(cx.pool.len(), 1);
+    }
 }
 
 #[test]
