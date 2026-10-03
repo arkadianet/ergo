@@ -236,6 +236,24 @@ for surface in $SURFACES; do
         echo "difftest-guard: HARNESS ERROR — $surface ran ${CHECKS[$surface]} checks, expected $ITERS"
         harness_failed=1
     fi
+
+    # A completed input loop does not establish that detected evidence was
+    # processed/filed. Every observed class must have a pending record.
+    if (( ${CLASSES[$surface]} > 0 )); then
+        minimized_unique= filed_pending= filed_artifacts=
+        read -r minimized_unique filed_pending filed_artifacts < <(
+            sed -n 's/^minimize summary: checks=[0-9]* unique_divergences=\([0-9]*\) minimized=[0-9]* pending_queued=\([0-9]*\) known_artifacts=\([0-9]*\)$/\1 \2 \3/p' "$log" | tail -n 1
+        ) || true
+        if [[ "${minimized_unique:-}" != "${CLASSES[$surface]}" ||
+              "${filed_pending:-}" != "${CLASSES[$surface]}" ||
+              "${filed_artifacts:-}" != "0" ]]; then
+            echo "difftest-guard: HARNESS ERROR — $surface detected ${CLASSES[$surface]} class(es), but pending filing was incomplete"
+            harness_failed=1
+        fi
+    elif [[ $rc -eq "$EXIT_FINDING" ]]; then
+        echo "difftest-guard: HARNESS ERROR — $surface exited finding with zero reported classes"
+        harness_failed=1
+    fi
     echo
 done
 

@@ -166,12 +166,13 @@ campaign):
   "surface":   "ergo_tree",           // oracle surface or "block:<height>"
   "kind":      "AcceptReject" | "Canonical" | "Reduce" | "Cost"
              | "RootMismatch" | "TxValidity" | "Panic",
-  "input_hex": "…",                   // the MINIMIZED input (post-shrink)
+  "input_hex": "…",                   // minimized, or preserved original on failure
   "rust":      { "verdict": "Accept|Reject|Panic", "detail": "…" },
   "jvm":       { "verdict": "Accept|Reject",       "detail": "…" },
   "repro":     "difftest --repro <hex> --surface <s>",
   "seed":      { "seed": 7, "iter": 12345 } | null,
-  "minimized": true,
+  "minimized": true | false,
+  "processing_error": "…",             // optional; failed processing, harness exit3
   "provenance":"structured-gen|oracle-mutation|replay:h<height>",
   "triage":    "PENDING"              // never auto-resolved; a human sets the verdict
 }
@@ -181,7 +182,12 @@ campaign):
 predicate (same `kind` + same rust/jvm verdict split). Auto-file writes the
 minimized record to `ergo-difftest/regressions/<surface>/<hash>.json` and appends
 a line to `ergo-difftest/regressions/QUEUE.md`. **The which-side-is-right call is
-never made by the harness** — `triage: PENDING` until a human edits it.
+never made by the harness** — new records stay `triage: PENDING`. Agreement
+in one dummy reduction context cannot automatically mark a difference benign.
+Any minimization failure retains the original input/verdicts and marks the
+campaign incomplete, even when fallback filing succeeds. Campaign records retain
+the first concrete generating iteration and distinguish structured generation
+from mutation.
 
 ---
 

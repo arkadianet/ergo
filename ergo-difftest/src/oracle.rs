@@ -1538,9 +1538,7 @@ mod tests {
     //
     // Pure-logic tests for `reconcile` — no oracle process needed, since the
     // decision only looks at two already-computed `Verdict`s. This is the
-    // regression coverage for classify()'s "None means indeterminate, not
-    // agreement" bug: `reconcile` (used by both `diff` and
-    // `crate::regressions::classify`) must keep `Indeterminate` (a
+    // `reconcile`, used by `diff`, must keep `Indeterminate` (a
     // `Verdict::Err` on either side) distinct from `Agree` (an explicit
     // Reject/Reject or matching Accept/Accept).
 

@@ -11,8 +11,8 @@ layers the JVM oracle on top: a long-lived `scala-cli` process runs `ErgoSerdeOr
 diffs accept/reject verdicts and canonical re-serializations. A structure-aware
 generator (`src/gen/`) covers a 35-variant `Feature` vocabulary (34 adversarial + an on-manifold
 baseline), each mapped where applicable to a named catalog bug, with a measurable coverage ratio. A greedy delta-debugging minimizer
-shrinks findings, a triage classifier distinguishes genuine bugs from parse-surface
-artifacts, and a `known_bugs/manifest.toml` (27 entries) drives a re-injection gate
+shrinks findings while retaining original evidence on failure, automatic triage
+leaves unexplained differences pending, and a `known_bugs/manifest.toml` (27 entries) drives a re-injection gate
 that confirms each fix still blocks its trigger. Not compiled into the node binary.
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma, ergo-state,
@@ -62,8 +62,9 @@ the node binary
   cleanup and bounded direct-child reaping. Windows descendants are not certified.
 - `src/regressions.rs` — divergence record schema, classification, and auto-filing:
   `DivergenceRecord` / `VerdictInfo` / `SeedInfo` (§4 of interface-contracts.md);
-  `Triage` enum (`KnownArtifact` / `Pending`); `classify` (reduce-reconciliation rule
-  for parse surfaces); `auto_file` (content-addressed path under `regressions_dir`,
+  `Triage` enum (`KnownArtifact` / `Pending`); `classify` (conservative pending
+  disposition); `record_after_minimization` (original pending fallback on any
+  processing error); `auto_file` (content-addressed path under `regressions_dir`,
   QUEUE.md append for Pending only); `classify_and_file` pipeline.
 - `src/minimize.rs` — greedy delta-debugging minimizer: `minimize` (three-phase
   chunk-removal / truncation / single-byte-deletion, O(n²) terminating);
@@ -143,14 +144,13 @@ the node binary
   `src/minimize.rs:42`
 - `minimize_divergence` (fn) — oracle-wired minimizer with re-verify invariant;
   errors on minimizer bugs — `src/minimize.rs:150`
-- `DivergenceRecord` (struct) — minimized + classified finding persisted as JSON;
+- `DivergenceRecord` (struct) — observed finding persisted as JSON;
   `surface`, `kind`, `input_hex`, `rust`/`jvm` verdicts, `repro` CLI command,
-  `seed`, `minimized`, `provenance`, `triage` — `src/regressions.rs:46`
+  `seed`, `minimized`, `processing_error`, `provenance`, `triage` — `src/regressions.rs`
 - `Triage` (enum) — `KnownArtifact(String)` / `Pending`; the harness never sets
   which side is right — `src/regressions.rs:93`
-- `classify` (fn) — reduce-reconciliation rule: parse-surface divergences that
-  reconcile on `reduce` are `KnownArtifact`; those that don't (or that originated
-  on `reduce`) are `Pending` — `src/regressions.rs:131`
+- `classify` (fn) — new unexplained differences remain `Pending`; a single dummy
+  reduction agreement does not establish benignity — `src/regressions.rs`
 - `auto_file` (fn) — content-addressed write (`SHA-256(input_hex)[..16].json`);
   `Pending` → `<surface>/`; `KnownArtifact` → `artifacts/<surface>/`; QUEUE.md
   append for Pending only; idempotent — `src/regressions.rs:235`
