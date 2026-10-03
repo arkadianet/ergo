@@ -39,7 +39,9 @@ use ergo_validation::{
 ///
 /// All methods must reflect ONE committed view; the `CommittedSnapshot`
 /// impl guarantees this by sourcing every read from a single redb read
-/// transaction.
+/// transaction. The live `StateStore` caller must hold the writer and drain
+/// accepted persistence before a build, so live tip fields and committed
+/// applied-chain history refer to the same state.
 ///
 /// Requires [`UtxoView`] (box resolution): the candidate builder seeds its
 /// in-block overlay with the view as the committed base UTXO set, so the
@@ -54,7 +56,7 @@ pub trait CandidateStateView: UtxoView {
     fn best_full_block_height(&self) -> u32;
     /// Raw serialized header bytes by id (`None` if absent).
     fn get_header_bytes(&self, id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
-    /// Canonical header-chain id at `height` (`None` if absent).
+    /// Fully applied block-chain ID at `height` (`None` if absent).
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError>;
     /// Serialized block-section bytes by modifier id (`None` if absent).
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError>;
@@ -79,8 +81,8 @@ pub trait CandidateStateView: UtxoView {
     fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError>;
 }
 
-// On-loop: verbatim delegation to the existing inherent methods, so the
-// live candidate build is byte-for-byte unchanged. Each body is
+// On-loop: delegate height lookups to the applied-chain index and the other
+// reads to their inherent methods. Each body is
 // fully-qualified to the inherent method to rule out any trait-vs-inherent
 // resolution ambiguity (and accidental self-recursion).
 impl CandidateStateView for StateStore {
@@ -97,7 +99,7 @@ impl CandidateStateView for StateStore {
         StateStore::get_header(self, id)
     }
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
-        StateStore::get_header_id_at_height(self, height)
+        StateStore::get_applied_header_id_at_height(self, height)
     }
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         StateStore::get_block_section(self, modifier_id)
@@ -136,7 +138,7 @@ impl CandidateStateView for CommittedSnapshot {
         CommittedSnapshot::get_header_bytes(self, id)
     }
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
-        CommittedSnapshot::header_id_at_height(self, height)
+        CommittedSnapshot::applied_header_id_at_height(self, height)
     }
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         CommittedSnapshot::block_section(self, modifier_id)
@@ -234,7 +236,7 @@ impl CandidateStateView for CachedSnapshotView<'_> {
         CommittedSnapshot::get_header_bytes(self.snap, id)
     }
     fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
-        CommittedSnapshot::header_id_at_height(self.snap, height)
+        CommittedSnapshot::applied_header_id_at_height(self.snap, height)
     }
     fn block_section(&self, modifier_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StateError> {
         CommittedSnapshot::block_section(self.snap, modifier_id)
@@ -430,6 +432,113 @@ impl<V: CandidateStateView> CandidateStateView for ProofCachingView<'_, V> {
 
     fn mode2_trust_first_epoch_armed(&self) -> Result<bool, StateError> {
         self.view.mode2_trust_first_epoch_armed()
+    }
+}
+
+#[cfg(test)]
+mod ancestry_tests {
+    use super::*;
+    use ergo_primitives::digest::{ADDigest, ModifierId};
+    use ergo_ser::autolykos::AutolykosSolution;
+    use ergo_ser::header::serialize_header;
+    use ergo_state::chain::HeaderMeta;
+
+    fn header(parent_id: [u8; 32], height: u32, timestamp: u64) -> Header {
+        Header {
+            version: 2,
+            parent_id: ModifierId::from_bytes(parent_id),
+            ad_proofs_root: Digest32::from_bytes([0; 32]),
+            transactions_root: Digest32::from_bytes([0; 32]),
+            state_root: ADDigest::from_bytes([0; 33]),
+            timestamp,
+            extension_root: Digest32::from_bytes([0; 32]),
+            n_bits: 16842752,
+            height,
+            votes: [0; 3],
+            unparsed_bytes: vec![],
+            solution: AutolykosSolution::V2 {
+                pk: ergo_primitives::group_element::GroupElement::from([2; 33]),
+                nonce: [0; 8],
+            },
+        }
+    }
+
+    #[test]
+    fn candidate_height_lookup_keeps_applied_ancestry_when_header_chain_forks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&dir.path().join("state.redb")).unwrap();
+        store.initialize_genesis(&[]).unwrap();
+        let mut parent = [0; 32];
+        let mut applied = vec![];
+        for height in 1..=3 {
+            let (bytes, id) = serialize_header(&header(parent, height, u64::from(height))).unwrap();
+            let id = *id.as_bytes();
+            store.store_header(&id, &bytes).unwrap();
+            let root = store.root_digest();
+            store
+                .apply_block_unchecked_for_test(height, &id, &root, &[])
+                .unwrap();
+            applied.push(id);
+            parent = id;
+        }
+        let before = store.committed_snapshot().unwrap().unwrap();
+        let mut fork_parent = applied[0];
+        let mut fork = vec![];
+        for height in 2..=4 {
+            let hdr = header(fork_parent, height, 100 + u64::from(height));
+            let (bytes, id) = serialize_header(&hdr).unwrap();
+            let id = *id.as_bytes();
+            store
+                .store_validated_header(
+                    &id,
+                    &bytes,
+                    &HeaderMeta {
+                        parent_id: fork_parent,
+                        height,
+                        cumulative_score: vec![height as u8],
+                        pow_validity: 1,
+                        timestamp: hdr.timestamp,
+                    },
+                    Some((height, vec![height as u8])),
+                )
+                .unwrap();
+            fork.push(id);
+            fork_parent = id;
+        }
+        assert_eq!(store.get_header_id_at_height(2).unwrap(), Some(fork[0]));
+        assert_eq!(
+            store
+                .reader_handle()
+                .get_applied_header_id_at_height(2)
+                .unwrap(),
+            Some(applied[1])
+        );
+        assert_eq!(
+            CandidateStateView::header_id_at_height(&store, 2).unwrap(),
+            Some(applied[1])
+        );
+        assert_eq!(CandidateStateView::best_full_block_id(&store), applied[2]);
+        let after = store.committed_snapshot().unwrap().unwrap();
+        assert_eq!(after.header_id_at_height(2).unwrap(), Some(fork[0]));
+        assert_eq!(
+            CandidateStateView::header_id_at_height(&after, 2).unwrap(),
+            Some(applied[1])
+        );
+        assert_eq!(
+            CandidateStateView::header_id_at_height(&before, 2).unwrap(),
+            Some(applied[1])
+        );
+        assert_eq!(before.header_id_at_height(2).unwrap(), Some(applied[1]));
+        assert_eq!(
+            CandidateStateView::header_id_at_height(&after, 4).unwrap(),
+            None
+        );
+        let mut base = None;
+        let cached = CachedSnapshotView::new(&after, &mut base);
+        assert_eq!(
+            CandidateStateView::header_id_at_height(&cached, 2).unwrap(),
+            Some(applied[1])
+        );
     }
 }
 

@@ -215,8 +215,8 @@ impl CommittedSnapshot {
 
     /// Canonical best-header-chain id at `height`, or `None` if absent.
     /// Reads `HEADER_CHAIN_INDEX` in the held transaction; mirrors
-    /// `StateStore::get_header_id_at_height`. Used by the difficulty
-    /// retarget's epoch-header lookup.
+    /// `StateStore::get_header_id_at_height`. Candidate ancestry instead uses
+    /// [`Self::applied_header_id_at_height`].
     pub fn header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
         let table = match self.txn.open_table(HEADER_CHAIN_INDEX) {
             Ok(t) => t,
@@ -239,6 +239,12 @@ impl CommittedSnapshot {
             }
             None => Ok(None),
         }
+    }
+
+    /// Fully applied chain ID from `CHAIN_INDEX` in this snapshot's held
+    /// transaction. Header-only fork selection cannot change this ancestry.
+    pub fn applied_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+        crate::reader::applied_header_id_in_txn(&self.txn, height)
     }
 
     /// Serialized block-section bytes by modifier_id (extension /
