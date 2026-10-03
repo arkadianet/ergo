@@ -24,6 +24,28 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("wallet_mining_job
 const MAX_JOBS: usize = 256;
 const MAX_BOXES: usize = 100;
 const MAX_RECORD_BYTES: usize = 512 * 1024;
+const BACKGROUND_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn bounded_rpc<T>(
+    request: impl std::future::Future<Output = Result<T, ergo_api::types::SubmitError>>,
+) -> Result<T, ergo_api::types::SubmitError> {
+    tokio::time::timeout(BACKGROUND_RPC_TIMEOUT, request)
+        .await
+        .unwrap_or_else(|_| {
+            Err(ergo_api::types::SubmitError {
+                reason: "timeout".into(),
+                detail: Some("background mining request did not reply within 1000 ms".into()),
+            })
+        })
+}
+
+fn follows_queue(record: &Record) -> bool {
+    !record.job.state.terminal()
+        || matches!(
+            record.job.state,
+            WalletJobState::Mined | WalletJobState::Conflicted
+        )
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Record {
@@ -346,15 +368,12 @@ pub(super) async fn cancel(
         return Ok(record.job);
     }
     if let Some(tx_id) = &record.job.tx_id {
-        if ctx
-            .submit_handle
-            .private_transaction_status(tx_id.clone())
+        if bounded_rpc(ctx.submit_handle.private_transaction_status(tx_id.clone()))
             .await
             .map_err(sign_submit::map_submit_error)?
             .is_some()
         {
-            ctx.submit_handle
-                .cancel_private_transaction(tx_id.clone())
+            bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone()))
                 .await
                 .map_err(sign_submit::map_submit_error)?;
         }
@@ -634,23 +653,42 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         return Ok(());
     }
     let height = ctx.chain.tip_height().map_err(internal)?;
+    // One queue RPC per wake, regardless of retained job count. An unavailable
+    // snapshot is never evidence that an uncertain admission disappeared.
+    let queue = if jobs
+        .iter()
+        .any(|(_, record)| follows_queue(record) && record.job.tx_id.is_some())
+    {
+        match bounded_rpc(ctx.submit_handle.private_transactions()).await {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|entry| (entry.tx_id.clone(), entry))
+                .collect::<BTreeMap<_, _>>(),
+            Err(error) => {
+                let detail = error.detail.or(Some(error.reason));
+                for (job_id, mut record) in jobs {
+                    if follows_queue(&record)
+                        && record.job.tx_id.is_some()
+                        && record.job.detail != detail
+                    {
+                        record.job.detail = detail.clone();
+                        save(ctx.db, job_id, &record)?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        BTreeMap::new()
+    };
     for (job_id, mut record) in jobs {
-        if record.job.state.terminal()
-            && !matches!(
-                record.job.state,
-                WalletJobState::Mined | WalletJobState::Conflicted
-            )
-        {
+        if !follows_queue(&record) {
             continue;
         }
         let mut queue_known = false;
         if let Some(tx_id) = record.job.tx_id.as_ref() {
-            match ctx
-                .submit_handle
-                .private_transaction_status(tx_id.clone())
-                .await
-            {
-                Ok(Some(entry)) => {
+            match queue.get(tx_id) {
+                Some(entry) => {
                     queue_known = true;
                     let state = match entry.state.as_str() {
                         "mined" => WalletJobState::Mined,
@@ -671,14 +709,13 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                         continue;
                     }
                 }
-                Ok(None) if record.job.state == WalletJobState::Mined => {
+                None if record.job.state == WalletJobState::Mined => {
                     continue;
                 }
-                Ok(None)
-                    if matches!(
-                        record.job.state,
-                        WalletJobState::Queued | WalletJobState::InCandidate
-                    ) =>
+                None if matches!(
+                    record.job.state,
+                    WalletJobState::Queued | WalletJobState::InCandidate
+                ) =>
                 {
                     transition(
                         &mut record,
@@ -687,22 +724,13 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                     );
                     save(ctx.db, job_id, &record)?;
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    // Queue unavailability must not stop the wallet writer or
-                    // make an already admitted transaction appear cancelled.
-                    record.job.detail = error.detail.or(Some(error.reason));
-                    save(ctx.db, job_id, &record)?;
-                    continue;
-                }
+                None => {}
             }
         }
         if height >= record.job.request.expires_at_height {
             if let Some(tx_id) = record.job.tx_id.as_ref() {
                 match if queue_known {
-                    ctx.submit_handle
-                        .cancel_private_transaction(tx_id.clone())
-                        .await
+                    bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone())).await
                 } else {
                     Ok(())
                 } {
@@ -711,7 +739,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                     Err(error) => {
                         record.job.detail = error.detail.or(Some(error.reason));
                         save(ctx.db, job_id, &record)?;
-                        continue;
+                        return Ok(());
                     }
                 }
             }
@@ -721,6 +749,9 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 Some("approved height deadline reached".into()),
             );
             save(ctx.db, job_id, &record)?;
+            if queue_known {
+                return Ok(());
+            }
             continue;
         }
         if height < record.job.request.not_before_height
@@ -791,11 +822,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             expires_at_height: Some(record.job.request.expires_at_height),
             ..Default::default()
         };
-        match ctx
-            .submit_handle
-            .submit_private_transaction(bytes, options)
-            .await
-        {
+        match bounded_rpc(ctx.submit_handle.submit_private_transaction(bytes, options)).await {
             Ok(_) => transition(&mut record, WalletJobState::Queued, None),
             Err(error) if error.reason == "duplicate" => {
                 transition(&mut record, WalletJobState::Queued, None)
@@ -811,6 +838,10 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "jobs/scheduler_tests.rs"]
+mod scheduler_tests;
 
 #[cfg(test)]
 mod tests {

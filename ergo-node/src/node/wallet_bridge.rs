@@ -60,15 +60,24 @@ pub trait TxSubmitter: Send + Sync {
         })
     }
 
-    async fn private_transaction_status(
+    /// Read one bounded metadata snapshot for all approved background jobs.
+    async fn private_transactions(
         &self,
-        _tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
         Err(ergo_api::types::SubmitError {
             reason: "private_mining_unavailable".into(),
             detail: None,
         })
+    }
+
+    async fn private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
+    {
+        self.private_transactions()
+            .await
+            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
     }
 
     async fn cancel_private_transaction(
@@ -129,11 +138,9 @@ impl TxSubmitter for NodeSubmitAdapter {
             .map_err(private_mining_submit_error)
     }
 
-    async fn private_transaction_status(
+    async fn private_transactions(
         &self,
-        tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
         let mining = self
             .mining
             .as_ref()
@@ -141,7 +148,6 @@ impl TxSubmitter for NodeSubmitAdapter {
         mining
             .private_transactions()
             .await
-            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
             .map_err(private_mining_submit_error)
     }
 

@@ -27,6 +27,11 @@ ID. It never builds a second payment from fresh funds. An interrupted unsigned
 preparation restores its reservations before the writer accepts commands.
 There is at most one preparation/submission attempt per applied height and one
 operation per scheduler wake. Mined jobs follow private-queue reorg state.
+The scheduler reads one queue metadata snapshot per wake and waits at most one
+second for each background metadata, admission, or cancellation request. An
+unavailable snapshot preserves pending jobs and their reservations. An uncertain
+admission keeps its prepared bytes; only a successful later snapshot showing
+absence permits resubmission of those same bytes.
 
 The journal holds at most 256 jobs, pruning the oldest terminal record when
 necessary. Each record is bounded to 512 KiB. Signed bytes remain in the node's
