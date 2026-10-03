@@ -145,6 +145,8 @@ pub struct Candidate {
     /// best-full-block id to reject candidates whose parent the chain
     /// has moved past.
     pub parent_id: [u8; 32],
+    /// Frozen operator observations; never exposed by public mempool reads.
+    pub observation: crate::inspection::CandidateObservation,
 }
 
 /// Build a candidate for the next block. Returns `None` if the chain
@@ -873,6 +875,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     let candidate = Candidate {
         header,
         validation_ctx,
+        observation: Default::default(),
         transactions: raw_txs,
         ad_proof_bytes,
         extension_fields,

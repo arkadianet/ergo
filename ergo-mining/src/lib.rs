@@ -20,6 +20,7 @@ pub mod engine;
 pub mod error;
 pub mod extension_builder;
 pub mod handle;
+pub mod inspection;
 pub mod reemission;
 pub mod reward_script;
 pub mod solution;

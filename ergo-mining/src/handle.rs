@@ -1071,6 +1071,7 @@ mod tests {
         let candidate = Candidate {
             header: h,
             validation_ctx,
+            observation: Default::default(),
             transactions: Vec::new(),
             ad_proof_bytes: Vec::new(),
             extension_fields: Vec::new(),
