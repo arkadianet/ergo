@@ -300,7 +300,8 @@ fn readonly_source_remains_readonly_and_destination_preserves_attribute() {
     let source = dir.path().join("source.redb");
     let destination = dir.path().join("destination.redb");
     fixture(&source);
-    let mut permissions = fs::metadata(&source).unwrap().permissions();
+    let original_permissions = fs::metadata(&source).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
     permissions.set_readonly(true);
     fs::set_permissions(&source, permissions).unwrap();
     let bytes = fs::read(&source).unwrap();
@@ -310,9 +311,7 @@ fn readonly_source_remains_readonly_and_destination_preserves_attribute() {
     assert!(fs::metadata(&destination).unwrap().permissions().readonly());
     // Allow TempDir to clean the two readonly files on Windows.
     for path in [&source, &destination] {
-        let mut permissions = fs::metadata(path).unwrap().permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions).unwrap();
+        fs::set_permissions(path, original_permissions.clone()).unwrap();
     }
 }
 
