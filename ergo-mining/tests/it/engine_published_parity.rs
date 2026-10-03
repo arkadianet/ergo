@@ -457,6 +457,8 @@ const BUILT_AT_MS: u64 = 1_700_000_000_000;
 
 fn build_intent(parent: [u8; 32], parent_height: u32) -> BuildIntent {
     BuildIntent {
+        private_transactions: Arc::new(Vec::new()),
+        operator_generation: 0,
         expected_parent: parent,
         expected_height: parent_height,
         mempool: Arc::new(MempoolReadSnapshot::empty()),

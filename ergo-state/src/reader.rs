@@ -20,7 +20,7 @@ use crate::avl::node::NULL_NODE;
 use crate::chain::{ChainStateMeta, HeaderMeta};
 use crate::store::{
     difficulty_headers_needed, read_height_index_ids, CommittedSnapshot, PopowByIdLookup,
-    PopowMissingAt, StateError, AVL_NODES, BLOCK_SECTIONS, CHAIN_STATE_META, HEADERS,
+    PopowMissingAt, StateError, AVL_NODES, BLOCK_SECTIONS, CHAIN_INDEX, CHAIN_STATE_META, HEADERS,
     HEADERS_BY_HEIGHT, HEADER_CHAIN_INDEX, HEADER_META, MODIFIER_TYPE_INDEX, STATE_META,
 };
 
@@ -61,7 +61,65 @@ pub fn committed_tip_in(
     Ok(Some((meta.best_full_block_height, meta.best_full_block_id)))
 }
 
+/// Applied-chain IDs and full-block tip from one committed read transaction.
+/// Used to recheck a bounded local mining ledger after reorgs.
+#[derive(Debug, Clone)]
+pub struct AppliedChainLookup {
+    pub tip_height: u32,
+    pub tip_id: [u8; 32],
+    pub blocks: Vec<(u32, Option<[u8; 32]>)>,
+}
+
 impl ChainStoreReader {
+    /// Resolve at most 128 applied-chain heights and the committed full tip
+    /// atomically. The header-chain index is deliberately not used: a known
+    /// header or fork is not evidence that its block is applied.
+    pub fn applied_chain_at_heights(
+        &self,
+        heights: &[u32],
+    ) -> Result<Option<AppliedChainLookup>, StateError> {
+        if heights.len() > 128 {
+            return Err(StateError::InvalidPrecondition {
+                what: "at most 128 mining ledger heights may be queried",
+            });
+        }
+        let read = self.db.begin_read()?;
+        let Some((tip_height, tip_id)) = committed_tip_in(&read)? else {
+            return Ok(None);
+        };
+        let table = match read.open_table(CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut blocks = Vec::with_capacity(heights.len());
+        for &height in heights {
+            let id = if height > tip_height {
+                None
+            } else {
+                match table.get(height as u64)? {
+                    Some(value) => {
+                        let bytes = value.value();
+                        let id: [u8; 32] =
+                            bytes.try_into().map_err(|_| StateError::DbCorruption {
+                                table: "chain_index",
+                                key: hex::encode((height as u64).to_be_bytes()),
+                                reason: format!("row has len {} (expected 32)", bytes.len()),
+                            })?;
+                        Some(id)
+                    }
+                    None => None,
+                }
+            };
+            blocks.push((height, id));
+        }
+        Ok(Some(AppliedChainLookup {
+            tip_height,
+            tip_id,
+            blocks,
+        }))
+    }
+
     /// Check full-block availability in one snapshot without copying payloads.
     pub fn block_sections_exist(&self, ids: &[[u8; 32]]) -> Result<bool, StateError> {
         let txn = self.db.begin_read()?;
@@ -1292,4 +1350,45 @@ mod tests {
     }
 
     // ----- oracle parity -----
+    #[test]
+    fn applied_chain_lookup_uses_full_chain_and_tracks_reorgs() {
+        let (_directory, db) = fresh_db();
+        let meta = ChainStateMeta {
+            best_header_id: [9; 32],
+            best_header_height: 12,
+            best_header_score: vec![1],
+            best_full_block_id: [3; 32],
+            best_full_block_height: 10,
+            header_availability: crate::chain::HeaderAvailability::Dense,
+        };
+        write_chain_state_meta_raw(&db, &meta.serialize());
+        write_header_chain_index_raw(&db, 10, &[9; 32]);
+        let transaction = crate::begin_write_qr(&db).unwrap();
+        {
+            let mut table = transaction.open_table(CHAIN_INDEX).unwrap();
+            table.insert(10, [3u8; 32].as_slice()).unwrap();
+        }
+        transaction.commit().unwrap();
+        let reader = ChainStoreReader::new(db.clone());
+        let first = reader.applied_chain_at_heights(&[10, 11]).unwrap().unwrap();
+        assert_eq!(first.tip_id, [3; 32]);
+        assert_eq!(first.blocks, vec![(10, Some([3; 32])), (11, None)]);
+        let transaction = crate::begin_write_qr(&db).unwrap();
+        {
+            let mut table = transaction.open_table(CHAIN_INDEX).unwrap();
+            table.insert(10, [4u8; 32].as_slice()).unwrap();
+            let mut meta_table = transaction.open_table(CHAIN_STATE_META).unwrap();
+            let mut meta = meta.clone();
+            meta.best_full_block_id = [4; 32];
+            meta_table
+                .insert("chain_state", meta.serialize().as_slice())
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        let changed = reader.applied_chain_at_heights(&[10]).unwrap().unwrap();
+        assert_eq!(changed.tip_id, [4; 32]);
+        assert_eq!(changed.blocks, vec![(10, Some([4; 32]))]);
+        assert_eq!(first.blocks[0].1, Some([3; 32]));
+        assert!(reader.applied_chain_at_heights(&[10; 129]).is_err());
+    }
 }

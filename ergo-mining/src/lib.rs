@@ -20,6 +20,10 @@ pub mod engine;
 pub mod error;
 pub mod extension_builder;
 pub mod handle;
+pub mod inspection;
+mod outcome_journal;
+pub mod policy;
+pub mod private_queue;
 pub mod reemission;
 pub mod reward_script;
 pub mod solution;
@@ -37,3 +41,4 @@ pub use error::MiningError;
 pub use reward_script::{reward_output_script, reward_output_script_from_hex, REWARD_SCRIPT_LEN};
 
 mod genesis;
+mod policy_store;

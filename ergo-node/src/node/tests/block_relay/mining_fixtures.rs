@@ -119,6 +119,7 @@ fn solved_block(
             last_headers: Vec::new(),
             last_block_utxo_root: build_last_block_utxo_root(state_root),
         },
+        observation: Default::default(),
         transactions,
         ad_proof_bytes,
         extension_fields: Vec::new(),
@@ -406,6 +407,8 @@ fn publish_candidate(state: &NodeState, handle: &MiningHandle) {
     use ergo_mining::engine::{build_and_publish, BuildIntent, BuildOutcome};
     let (parent, height) = sync_handle_to_tip(state, handle);
     let intent = BuildIntent {
+        private_transactions: std::sync::Arc::new(Vec::new()),
+        operator_generation: 0,
         expected_parent: parent,
         expected_height: height,
         mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool)),

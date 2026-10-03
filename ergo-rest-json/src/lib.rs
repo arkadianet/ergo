@@ -14,6 +14,7 @@
 
 pub mod decode;
 pub mod mining;
+pub mod mining_inspection;
 pub mod types;
 
 pub use decode::{

@@ -27,6 +27,9 @@ use axum::{Json, Router};
 use ergo_rest_json::mining::{
     AutolykosSolutionJson, RewardAddressResponse, RewardPublicKeyResponse, WorkMessageJson,
 };
+use ergo_rest_json::mining_inspection::{
+    CandidateDetailsJson, MiningFreshnessJson, MiningHistoryJson,
+};
 use serde::{Deserialize, Serialize};
 
 /// Trait the node implements to surface its mining subsystem to the
@@ -49,6 +52,46 @@ pub trait NodeMining: Send + Sync {
         &self,
         longpoll: Option<String>,
     ) -> Result<Option<WorkMessageJson>, MiningApiError>;
+
+    /// Authenticated exact-template inspection. Both selectors are matched
+    /// against the same retained template; no selector chooses current work.
+    async fn candidate_details(
+        &self,
+        _msg: Option<String>,
+        _template_seq: Option<u64>,
+    ) -> Result<Option<CandidateDetailsJson>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "candidate inspection unsupported".into(),
+        ))
+    }
+
+    /// Operator-only bounded template and local submission history.
+    async fn mining_history(&self) -> Result<MiningHistoryJson, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "mining history unsupported".into(),
+        ))
+    }
+
+    /// Public freshness has no transaction or wallet content.
+    async fn mining_freshness(&self) -> Result<MiningFreshnessJson, MiningApiError> {
+        Ok(MiningFreshnessJson::default())
+    }
+
+    /// Validated runtime block selection policy. A JSON seam preserves the
+    /// API crate's independence from the concrete mining implementation.
+    async fn block_policy(&self) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
+        ))
+    }
+    async fn set_block_policy(
+        &self,
+        _policy: serde_json::Value,
+    ) -> Result<serde_json::Value, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "block policy unsupported".into(),
+        ))
+    }
 
     /// `POST /mining/solution`. Returns `Ok(())` on accepted-by-executor.
     async fn submit_solution(&self, solution: AutolykosSolutionJson) -> Result<(), MiningApiError>;

@@ -62,6 +62,12 @@ pub(super) fn build_subsystem(
         config.chain_spec.voting,
     )
     .with_network(config.network)
+    .with_outcome_journal(&config.data_dir.join("mining-history.json"))
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
+    .with_policy(config.mining_config.block_policy.clone())
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
+    .with_policy_store(config.data_dir.join("mining-policy.json"))
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
     .with_rent_config(
         config.mining_config.claim_storage_rent,
         config.mining_config.max_storage_rent_claims,
@@ -88,6 +94,7 @@ pub(super) fn build_subsystem(
     let serve_rx = handle.subscribe_serve_changes();
     let bridge =
         crate::mining_bridge::MiningBridge::new(mining_submit_tx.clone(), network_prefix, serve_rx)
+            .with_handle(handle.clone())
             .into_dyn();
     match reward_key {
         ergo_mining::handle::RewardKeySource::Pinned(pk) => {

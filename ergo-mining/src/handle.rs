@@ -107,7 +107,7 @@ use crate::reemission::ReemissionSettings;
 use crate::solution::{verify_solution, SolutionOutcome, SubmittedBlock};
 use crate::work_message::{MinerSolution, WorkMessage};
 
-/// Upper bound on templates retained in the [`MiningCache`] ring — the number
+/// Upper bound on templates retained in the `MiningCache` ring — the number
 /// of recently-published templates whose in-flight solutions can still be
 /// verified. Deliberately small: it bounds both memory (a handful of full
 /// candidates) and the per-`verify_solution` scan cost (each submit recomputes
@@ -121,7 +121,9 @@ use crate::work_message::{MinerSolution, WorkMessage};
 /// per tip (minimal + enriched two-phase publish): 16 slots retain ≈8
 /// tip-changes of in-flight solution history, matching the pre-two-phase
 /// horizon.
-const MAX_RETAINED_TEMPLATES: usize = 16;
+pub const MAX_RETAINED_TEMPLATES: usize = 16;
+/// Bounded lifecycle event retention; events reset on node restart.
+pub const MAX_MINING_OUTCOMES: usize = 128;
 
 /// Where the miner reward key comes from. Mirrors Scala's two-tier
 /// resolution (`ErgoMiner`): an operator-configured key, or the wallet's
@@ -155,6 +157,7 @@ struct MiningCache {
     /// Monotonic publish counter, stamped onto each template's
     /// `TemplateIdentity::template_seq`. Never reset.
     template_seq: u64,
+    operator_generation: u64,
     /// Authoritative current tip + synced bit, kept INSIDE the cache lock so
     /// the off-loop engine's CAS-publish and the cache-only serve both decide
     /// against the tip and access the cached templates atomically — no TOCTOU
@@ -165,13 +168,29 @@ struct MiningCache {
 /// A published template in the [`MiningCache`] ring.
 #[derive(Debug)]
 struct RetainedTemplate {
-    template: Template,
+    template: Arc<Template>,
     /// Set by [`MiningHandle::withdraw_templates_for_parent`] once a block
     /// mined on the template's parent became the best header and failed to
     /// apply. A withdrawn template is never served, never counts as the
     /// parent's template, and a solution to it is answered stale rather than
     /// accepted.
     withdrawn: bool,
+}
+
+fn template_status(
+    retained: &RetainedTemplate,
+    parent: [u8; 32],
+    current_sequence: Option<u64>,
+) -> &'static str {
+    if retained.withdrawn {
+        "withdrawn"
+    } else if retained.template.candidate.parent_id != parent {
+        "stale_parent"
+    } else if current_sequence == Some(retained.template.identity.template_seq) {
+        "current"
+    } else {
+        "superseded"
+    }
 }
 
 impl MiningCache {
@@ -181,7 +200,7 @@ impl MiningCache {
             .iter()
             .rev()
             .filter(|t| !t.withdrawn)
-            .map(|t| &t.template)
+            .map(|t| t.template.as_ref())
     }
 
     /// The newest offered template built on `parent`.
@@ -207,6 +226,10 @@ pub struct MiningHandle {
     /// every clone of the handle — the engine task, the action loop, the
     /// boot-time subscriber — shares the one channel.
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
+    private_queue: Arc<crate::private_queue::PrivateTransactionQueue>,
+    policy: Arc<RwLock<(u64, crate::policy::BlockPolicy)>>,
+    policy_store: Option<Arc<std::path::PathBuf>>,
+    outcomes: Arc<Mutex<crate::outcome_journal::OutcomeJournal>>,
     reward_key: RewardKeySource,
     monetary: Arc<MonetarySettings>,
     /// `None` on networks that don't enable EIP-27 reemission
@@ -291,6 +314,10 @@ impl MiningHandle {
         Self {
             cache: Arc::new(RwLock::new(MiningCache::default())),
             serve_notify: Arc::new(tokio::sync::watch::channel(0u64).0),
+            private_queue: Arc::new(crate::private_queue::PrivateTransactionQueue::default()),
+            policy: Arc::new(RwLock::new((0, crate::policy::BlockPolicy::default()))),
+            policy_store: None,
+            outcomes: Arc::new(Mutex::new(crate::outcome_journal::OutcomeJournal::default())),
             reward_key,
             monetary: Arc::new(monetary),
             reemission: reemission.map(Arc::new),
@@ -307,6 +334,224 @@ impl MiningHandle {
             voting_targets: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             suspects: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Install the node-owned durable operator queue at startup.
+    pub fn with_private_queue(
+        mut self,
+        queue: Arc<crate::private_queue::PrivateTransactionQueue>,
+    ) -> Self {
+        self.private_queue = queue;
+        self
+    }
+
+    /// This queue is separate from peer relay, public mempool and explorer APIs.
+    pub fn private_queue(&self) -> Arc<crate::private_queue::PrivateTransactionQueue> {
+        self.private_queue.clone()
+    }
+
+    /// Install a validated initial policy without changing its revision.
+    pub fn with_policy(self, policy: crate::policy::BlockPolicy) -> Result<Self, MiningError> {
+        policy.validate()?;
+        *self.policy.write().expect("policy poisoned") = (0, policy);
+        Ok(self)
+    }
+
+    /// Snapshot the policy and its revision under one lock.
+    pub fn policy_snapshot(&self) -> (u64, crate::policy::BlockPolicy) {
+        self.policy.read().expect("policy poisoned").clone()
+    }
+
+    /// Reopen saved operator preferences at startup. A saved policy overrides
+    /// the boot default; malformed state refuses startup instead of mining
+    /// blocks under an unexpected fallback policy.
+    pub fn with_policy_store(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, MiningError> {
+        let path = path.into();
+        if let Some(policy) = crate::policy_store::load(&path)? {
+            *self.policy.write().expect("policy poisoned") = (0, policy);
+        }
+        self.policy_store = Some(Arc::new(path));
+        Ok(self)
+    }
+
+    pub fn policy(&self) -> crate::policy::BlockPolicy {
+        self.policy_snapshot().1
+    }
+
+    pub fn policy_revision(&self) -> u64 {
+        self.policy.read().expect("policy poisoned").0
+    }
+
+    /// Retire old templates atomically with a policy edit. The publish guard
+    /// rejects builds carrying the prior revision, including in-flight builds.
+    pub fn set_policy(&self, policy: crate::policy::BlockPolicy) -> Result<(), MiningError> {
+        policy.validate()?;
+        let mut slot = self.policy.write().expect("policy poisoned");
+        if slot.1 == policy {
+            return Ok(());
+        }
+        if let Some(path) = &self.policy_store {
+            crate::policy_store::save(path, &policy)?;
+        }
+        let mut cache = self.cache.write().expect("cache poisoned");
+        slot.0 = slot
+            .0
+            .checked_add(1)
+            .ok_or_else(|| MiningError::InvalidConfig("policy revision exhausted".into()))?;
+        slot.1 = policy;
+        cache.operator_generation = cache
+            .operator_generation
+            .checked_add(1)
+            .expect("operator generation exhausted");
+        for retained in &mut cache.templates {
+            retained.withdrawn = true;
+        }
+        drop(cache);
+        drop(slot);
+        self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        Ok(())
+    }
+
+    /// Generation frozen by a build before it reads operator queue contents.
+    pub fn operator_generation(&self) -> u64 {
+        self.cache
+            .read()
+            .expect("cache poisoned")
+            .operator_generation
+    }
+
+    /// Cancel/expire operator work and reject older in-flight builds.
+    pub fn invalidate_operator_generation(&self) -> u64 {
+        let mut cache = self.cache.write().expect("cache poisoned");
+        cache.operator_generation = cache
+            .operator_generation
+            .checked_add(1)
+            .expect("operator generation exhausted");
+        for retained in &mut cache.templates {
+            retained.withdrawn = true;
+        }
+        let generation = cache.operator_generation;
+        drop(cache);
+        self.serve_notify.send_modify(|v| *v = v.wrapping_add(1));
+        generation
+    }
+
+    /// Retained snapshot selected by both work ID and publish sequence. An
+    /// absent selector chooses the current offered template; historical lookups
+    /// remain available while their bounded cache entry is retained.
+    pub fn inspect_template(
+        &self,
+        msg: Option<[u8; 32]>,
+        sequence: Option<u64>,
+    ) -> Option<crate::inspection::InspectionSnapshot> {
+        let cache = self.cache.read().expect("cache poisoned");
+        let current = cache
+            .best_tip
+            .synced
+            .then(|| cache.newest_offered_on(&cache.best_tip.parent_id))
+            .flatten();
+        let retained = if msg.is_none() && sequence.is_none() {
+            let seq = current?.identity.template_seq;
+            cache
+                .templates
+                .iter()
+                .find(|t| t.template.identity.template_seq == seq)?
+        } else {
+            cache.templates.iter().rev().find(|t| {
+                msg.is_none_or(|id| t.template.candidate.msg == id)
+                    && sequence.is_none_or(|seq| t.template.identity.template_seq == seq)
+            })?
+        };
+        Some(crate::inspection::InspectionSnapshot {
+            template: retained.template.clone(),
+            status: template_status(
+                retained,
+                cache.best_tip.parent_id,
+                current.map(|t| t.identity.template_seq),
+            ),
+        })
+    }
+
+    /// Bounded history, newest first, with a status determined under one lock.
+    pub fn inspect_history(&self) -> Vec<crate::inspection::InspectionSnapshot> {
+        let cache = self.cache.read().expect("cache poisoned");
+        let current = cache
+            .best_tip
+            .synced
+            .then(|| cache.newest_offered_on(&cache.best_tip.parent_id))
+            .flatten()
+            .map(|t| t.identity.template_seq);
+        cache
+            .templates
+            .iter()
+            .rev()
+            .map(|retained| crate::inspection::InspectionSnapshot {
+                template: retained.template.clone(),
+                status: template_status(retained, cache.best_tip.parent_id, current),
+            })
+            .collect()
+    }
+
+    /// Record local solution handling. The caller must distinguish executor
+    /// acceptance from PoW validity and canonical-chain confirmations.
+    pub fn record_outcome(
+        &self,
+        msg: Option<[u8; 32]>,
+        block_id: Option<[u8; 32]>,
+        outcome: &str,
+        detail: Option<String>,
+        at_ms: u64,
+    ) {
+        let template = msg.and_then(|id| self.inspect_template(Some(id), None));
+        let template_seq = template.as_ref().map(|s| s.template.identity.template_seq);
+        let accounting = (outcome == "accepted")
+            .then(|| {
+                template
+                    .as_ref()
+                    .map(|s| crate::inspection::outcome_accounting(&s.template))
+            })
+            .flatten();
+        let detail = detail.map(|text| text.chars().take(4096).collect());
+        self.outcomes
+            .lock()
+            .expect("outcomes poisoned")
+            .append(crate::inspection::MiningOutcome {
+                msg,
+                template_seq,
+                block_id,
+                at_ms,
+                outcome: outcome.chars().take(64).collect(),
+                detail,
+                accounting,
+            });
+    }
+
+    /// Hydrate durable local submission history at boot; corrupt files fail
+    /// closed so the operator does not unknowingly lose accounting history.
+    pub fn with_outcome_journal(self, path: &std::path::Path) -> Result<Self, MiningError> {
+        *self.outcomes.lock().expect("outcomes poisoned") =
+            crate::outcome_journal::OutcomeJournal::open(path)
+                .map_err(MiningError::InvalidConfig)?;
+        Ok(self)
+    }
+
+    pub fn mining_outcomes(&self) -> Vec<crate::inspection::MiningOutcome> {
+        self.outcomes
+            .lock()
+            .expect("outcomes poisoned")
+            .events
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
+    }
+
+    pub fn outcome_journal_status(&self) -> (bool, Option<String>) {
+        let journal = self.outcomes.lock().expect("outcomes poisoned");
+        (journal.persistent(), journal.last_error.clone())
     }
 
     /// Record the suspect ids from a just-published Full build.
@@ -507,7 +752,13 @@ impl MiningHandle {
         now_ms: impl Fn() -> u64,
         reason: BuildReason,
     ) -> Option<TemplateIdentity> {
+        let policy = self.policy.read().expect("policy poisoned");
         let mut cache = self.cache.write().expect("cache poisoned");
+        if candidate.observation.policy_revision != policy.0
+            || candidate.observation.operator_generation != cache.operator_generation
+        {
+            return None;
+        }
         if !crate::engine::should_publish(&cache.best_tip, built_parent) {
             return None;
         }
@@ -529,11 +780,11 @@ impl MiningHandle {
             reason,
         };
         cache.templates.push_back(RetainedTemplate {
-            template: Template {
+            template: Arc::new(Template {
                 candidate,
                 work,
                 identity: identity.clone(),
-            },
+            }),
             withdrawn: false,
         });
         // Age-based eviction: keep the ring bounded by dropping the oldest.
@@ -1071,6 +1322,7 @@ mod tests {
         let candidate = Candidate {
             header: h,
             validation_ctx,
+            observation: Default::default(),
             transactions: Vec::new(),
             ad_proof_bytes: Vec::new(),
             extension_fields: Vec::new(),
@@ -2137,5 +2389,133 @@ mod tests {
         );
         // And the embedded pubkey is at the canonical offset [7..40].
         assert_eq!(&script_from_pinned[7..40], &pk);
+    }
+    // ----- operator inspection -----
+
+    #[test]
+    fn inspection_matches_both_selectors_and_preserves_superseded_templates() {
+        let handle = base_handle();
+        let parent = [1; 32];
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let (candidate, work) = candidate_pair_msg(parent, [2; 32]);
+        let first = handle
+            .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
+            .unwrap();
+        let frozen = handle
+            .inspect_template(Some([2; 32]), Some(first.template_seq))
+            .unwrap();
+        let (candidate, work) = candidate_pair_msg(parent, [3; 32]);
+        handle
+            .publish_if_current(
+                candidate,
+                work,
+                &parent,
+                || 200,
+                BuildReason::MempoolRefresh,
+            )
+            .unwrap();
+        assert_eq!(frozen.template.identity.built_at_ms, 100);
+        assert_eq!(
+            handle
+                .inspect_template(Some([2; 32]), Some(first.template_seq))
+                .unwrap()
+                .status,
+            "superseded"
+        );
+        assert!(handle
+            .inspect_template(Some([2; 32]), Some(first.template_seq + 1))
+            .is_none());
+        assert_eq!(
+            handle
+                .inspect_template(None, None)
+                .unwrap()
+                .template
+                .candidate
+                .msg,
+            [3; 32]
+        );
+    }
+
+    #[test]
+    fn operator_generation_retires_work_and_rejects_older_builds() {
+        let handle = base_handle();
+        let parent = [1; 32];
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let (candidate, work) = candidate_pair(parent);
+        handle
+            .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
+            .unwrap();
+        let (mut candidate, work) = candidate_pair(parent);
+        assert_eq!(handle.invalidate_operator_generation(), 1);
+        assert!(handle.inspect_template(None, None).is_none());
+        assert!(handle
+            .publish_if_current(
+                candidate.clone(),
+                work.clone(),
+                &parent,
+                || 200,
+                BuildReason::Tip
+            )
+            .is_none());
+        candidate.observation.operator_generation = 1;
+        assert!(handle
+            .publish_if_current(candidate, work, &parent, || 300, BuildReason::Tip)
+            .is_some());
+    }
+
+    #[test]
+    fn policy_edit_is_shared_retires_work_and_rejects_previous_revision() {
+        let handle = base_handle();
+        let clone = handle.clone();
+        let parent = [1; 32];
+        handle.set_best_tip(BestTip {
+            parent_id: parent,
+            chain_seq: 1,
+            synced: true,
+        });
+        let (candidate, work) = candidate_pair(parent);
+        handle
+            .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
+            .unwrap();
+        let mut policy = handle.policy();
+        policy.rent_max_cost_basis_points = 0;
+        handle.set_policy(policy.clone()).unwrap();
+        assert_eq!(clone.policy_snapshot(), (1, policy));
+        assert!(clone.cached_template_if_synced().is_none());
+        let (mut candidate, work) = candidate_pair(parent);
+        assert!(handle
+            .publish_if_current(
+                candidate.clone(),
+                work.clone(),
+                &parent,
+                || 200,
+                BuildReason::Tip
+            )
+            .is_none());
+        candidate.observation.policy_revision = 1;
+        candidate.observation.operator_generation = 1;
+        assert!(handle
+            .publish_if_current(candidate, work, &parent, || 300, BuildReason::Tip)
+            .is_some());
+    }
+
+    #[test]
+    fn local_outcomes_have_bounded_newest_first_retention() {
+        let handle = base_handle();
+        for at in 0..(MAX_MINING_OUTCOMES as u64 + 3) {
+            handle.record_outcome(None, None, "rejected", None, at);
+        }
+        let events = handle.mining_outcomes();
+        assert_eq!(events.len(), MAX_MINING_OUTCOMES);
+        assert_eq!(events.last().unwrap().at_ms, 3);
+        assert_eq!(events[0].at_ms, MAX_MINING_OUTCOMES as u64 + 2);
     }
 }

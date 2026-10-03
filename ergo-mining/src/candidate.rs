@@ -29,7 +29,7 @@ use ergo_crypto::difficulty::{
     DifficultyParams,
 };
 use ergo_crypto::merkle::{extension_root, transactions_root};
-use ergo_mempool::MempoolReadSnapshot;
+use ergo_mempool::{pool::Entry, MempoolReadSnapshot};
 use ergo_primitives::digest::{blake2b256, Digest32};
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
@@ -50,22 +50,26 @@ use ergo_validation::{
     UtxoView, VotingSettings,
 };
 use num_bigint::BigUint;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Rule 215 (`hdrVotesUnknown`). When this rule is soft-fork-disabled (mainnet
 /// 6.0 carries `rules_to_disable=[215,409]`) an epoch-start header may seed
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
-use crate::candidate_selection::{select_user_txs_cancellable, CandidateOverlay};
+use crate::candidate_selection::{
+    protected_rent_inputs, select_user_txs_with_policy_cancellable, CandidateOverlay,
+};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
 use crate::error::{check_build_cancelled, MiningError};
 use crate::extension_builder::build_candidate_extension_fields;
+use crate::inspection::{CandidateObservation, ExcludedTransaction, TransactionObservation};
+use crate::policy::BlockPolicy;
 use crate::reemission::{build_post_eip27_emission_tx, ReemissionSettings};
 use crate::state_view::CandidateStateView;
-use crate::storage_rent_claim::build_budget_bounded_rent_claim;
+use crate::storage_rent_claim::build_budget_bounded_rent_claim_with_policy;
 use crate::tx_selection::block_cost_safety_gap;
 use crate::work_message::{CandidateMetrics, WorkMessage};
 use ergo_validation::pre_header::{
@@ -145,6 +149,8 @@ pub struct Candidate {
     /// best-full-block id to reject candidates whose parent the chain
     /// has moved past.
     pub parent_id: [u8; 32],
+    /// Frozen operator observations; never exposed by public mempool reads.
+    pub observation: crate::inspection::CandidateObservation,
 }
 
 /// Build a candidate for the next block. Returns `None` if the chain
@@ -241,7 +247,91 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     suspects_out: &mut Vec<Digest32>,
     should_cancel: &dyn Fn() -> bool,
 ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+    generate_candidate_with_policy_cancellable(
+        view,
+        network,
+        mode,
+        mempool,
+        miner_pk,
+        monetary,
+        reemission,
+        reemission_rules,
+        chain_config,
+        eligible_rent_boxes,
+        voting_targets,
+        voting_settings,
+        custom_extension_fields,
+        suspects_out,
+        &[],
+        &BlockPolicy::default(),
+        0,
+        0,
+        should_cancel,
+    )
+}
+
+/// Candidate assembly with operator selection and asset preservation policy.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
+    view: &V,
+    network: ergo_chain_spec::Network,
+    mode: BuildMode,
+    mempool: &MempoolReadSnapshot,
+    miner_pk: &[u8; 33],
+    monetary: &MonetarySettings,
+    reemission: Option<&ReemissionSettings>,
+    // EIP-27 re-emission VALIDATION rules (distinct from the emission-curve
+    // `reemission` above): threaded into every `TxValidationCtx` this builds so
+    // the candidate's emission tx, fee tx, storage-rent claims, and selected
+    // mempool txs are all checked against the burning condition — closing the
+    // gap where a locally-assembled candidate could carry an EIP-27-invalid tx
+    // that block validation later rejects. `None` where EIP-27 is disabled.
+    reemission_rules: Option<&ReemissionRuleInputs>,
+    chain_config: &DifficultyParams,
+    eligible_rent_boxes: &[ErgoBox],
+    voting_targets: &BTreeMap<u8, i64>,
+    voting_settings: &VotingSettings,
+    // Operator-configured custom extension fields (validated at config time via
+    // `validate_custom_extension_fields`) — the general merge-mining / commitment
+    // hook. Injected into every candidate's extension alongside interlinks; empty
+    // when the operator has configured none.
+    custom_extension_fields: &[([u8; 2], Vec<u8>)],
+    // Side-output: ids of pooled txs whose consensus re-validation
+    // failed during selection (suspected tip-invalid). Written only on the Full
+    // path that runs mempool selection; left untouched for Minimal builds. The
+    // engine forwards these to the node, which re-validates each against the live
+    // tip and evicts the still-invalid ones. A side-output (not part of the
+    // Candidate) because suspects are diagnostic, not consensus artifacts.
+    suspects_out: &mut Vec<Digest32>,
+    private_transactions: &[Entry],
+    policy: &BlockPolicy,
+    policy_revision: u64,
+    operator_generation: u64,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
     check_build_cancelled(should_cancel)?;
+    policy.validate()?;
+    if mode == BuildMode::Minimal && policy.has_required_transactions() {
+        return Ok(None);
+    }
+    let private_ids: HashSet<_> = private_transactions
+        .iter()
+        .map(|entry| entry.tx_id)
+        .collect();
+    let mut observation = CandidateObservation {
+        mode: if mode == BuildMode::Minimal {
+            "initial"
+        } else {
+            "enriched"
+        },
+        rent_scanned: eligible_rent_boxes.len(),
+        policy_revision,
+        operator_generation,
+        policy_requires_transactions: policy.has_required_transactions(),
+        ..Default::default()
+    };
+    let mut final_rent_cost = 0;
+    let mut final_fee_cost = 0;
     let build_start = std::time::Instant::now();
     let setup_start = std::time::Instant::now();
     // 1. Tip + parent header (all reads via one committed view — see
@@ -492,6 +582,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         }
     })?;
     let params = ProtocolParams::from_active(&active_params);
+    observation.rent_storage_fee_factor = Some(params.storage_fee_factor);
     let ctx = TransactionContext {
         height: candidate_height,
         miner_pubkey: *miner_pk,
@@ -570,31 +661,51 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         let safety_gap = block_cost_safety_gap(max_block_cost);
         let max_block_size = active_params.max_block_size as u64;
         let phase_start = std::time::Instant::now();
-        let rent_cost_ceiling = max_block_cost
-            .saturating_sub(safety_gap)
-            .saturating_sub(emission_cost)
-            .saturating_sub(max_block_cost / 16);
-        let rent_size_ceiling = max_block_size
-            .saturating_sub(emission_size)
-            .saturating_sub(max_block_size / 16);
-        let (checked_rent, rent_cost, rent_size) = match build_budget_bounded_rent_claim(
-            eligible_rent_boxes,
-            candidate_height,
-            &params,
-            eligible_rent_boxes.len(),
-            miner_pk,
-            &ctx,
-            last_headers.as_slice(),
-            rent_cost_ceiling,
-            rent_size_ceiling,
-            reemission_rules,
-        )? {
-            Some((checked, cost, size)) => {
-                overlay.apply_checked(&checked);
-                (Some(checked), cost, size)
-            }
-            None => (None, 0, 0),
-        };
+        let rent_cost_ceiling = BlockPolicy::rent_ceiling(
+            max_block_cost,
+            safety_gap.saturating_add(emission_cost),
+            policy.rent_max_cost_basis_points,
+            policy.private_reserved_cost_basis_points,
+            !private_transactions.is_empty(),
+        );
+        let rent_size_ceiling = BlockPolicy::rent_ceiling(
+            max_block_size,
+            emission_size.saturating_add(BLOCK_ASSEMBLY_SIZE_RESERVE),
+            policy.rent_max_size_basis_points,
+            policy.private_reserved_size_basis_points,
+            !private_transactions.is_empty(),
+        );
+        let protected_inputs = protected_rent_inputs(mempool, private_transactions, policy)?;
+        let rent_boxes: Vec<_> = eligible_rent_boxes
+            .iter()
+            .filter(|box_| {
+                box_.box_id()
+                    .is_ok_and(|id| !protected_inputs.contains(&id))
+            })
+            .cloned()
+            .collect();
+        let (checked_rent, rent_cost, rent_size) =
+            match build_budget_bounded_rent_claim_with_policy(
+                &rent_boxes,
+                candidate_height,
+                &params,
+                rent_boxes.len(),
+                miner_pk,
+                &ctx,
+                last_headers.as_slice(),
+                rent_cost_ceiling,
+                rent_size_ceiling,
+                reemission_rules,
+                policy.rent_token_policy,
+                &mut observation.rent_skipped_preservation,
+            )? {
+                Some((checked, cost, size)) => {
+                    overlay.apply_checked(&checked);
+                    (Some(checked), cost, size)
+                }
+                None => (None, 0, 0),
+            };
+        final_rent_cost = rent_cost;
         timings.rent = phase_start.elapsed();
         check_build_cancelled(should_cancel)?;
 
@@ -613,7 +724,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             .saturating_sub(rent_size)
             .saturating_sub(BLOCK_ASSEMBLY_SIZE_RESERVE);
 
-        let selected = select_user_txs_cancellable(
+        let selected = select_user_txs_with_policy_cancellable(
             &mut overlay,
             mempool,
             &ctx,
@@ -622,6 +733,8 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             cost_budget,
             size_budget,
             reemission_rules,
+            private_transactions,
+            policy,
             should_cancel,
         )?;
 
@@ -640,6 +753,8 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         //     `max_block_cost`. The fee tx is validated against a FRESH overlay
         //     rebuilt from the kept set, so a trimmed tx never leaves a stale
         //     spend behind.
+        observation.excluded.extend(selected.excluded);
+        let required_ids = selected.required;
         let mut user_checked = selected.checked; // Vec<(CheckedTransaction, cost)>
         let cost_ceiling = max_block_cost.saturating_sub(safety_gap);
         let checked_fee = loop {
@@ -729,9 +844,23 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             if (total_cost <= cost_ceiling && section_size <= max_block_size as usize)
                 || user_checked.is_empty()
             {
+                final_fee_cost = fee_cost;
                 final_validation_cost = total_cost;
                 final_section_size = Some(section_size as u64);
                 break checked_fee;
+            }
+            if let Some((transaction, _)) = user_checked.last() {
+                let id = Digest32::from_bytes(*transaction.tx_id());
+                if required_ids.contains(&id) {
+                    return Err(MiningError::InvalidConfig(format!(
+                        "required transaction {} exceeds the final block budget",
+                        hex::encode(id.as_bytes())
+                    )));
+                }
+                observation.excluded.push(ExcludedTransaction {
+                    tx_id: id,
+                    reason: "final_fee_or_section_budget".into(),
+                });
             }
             user_checked.pop();
         };
@@ -751,14 +880,50 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             .sum()
     });
     let mut checked: Vec<CheckedTransaction> = Vec::with_capacity(3 + user_checked.len());
-    checked.extend(checked_emission);
+    if let Some(emission) = checked_emission {
+        observation.transactions.push(TransactionObservation {
+            category: "emission",
+            validation_cost: emission_cost,
+            fee_nano_erg: 0,
+            resolved_inputs: emission.resolved_inputs().to_vec(),
+        });
+        checked.push(emission);
+    }
     if let Some(cr) = checked_rent {
+        observation.transactions.push(TransactionObservation {
+            category: "rent",
+            validation_cost: final_rent_cost,
+            fee_nano_erg: 0,
+            resolved_inputs: cr.resolved_inputs().to_vec(),
+        });
         checked.push(cr);
     }
-    for (c, _) in user_checked {
+    for (c, cost) in user_checked {
+        let id = Digest32::from_bytes(*c.tx_id());
+        let fee = mempool
+            .iter()
+            .chain(private_transactions)
+            .find(|entry| entry.tx_id == id)
+            .map_or(0, |entry| entry.fee);
+        observation.transactions.push(TransactionObservation {
+            category: if private_ids.contains(&id) {
+                "private"
+            } else {
+                "public"
+            },
+            validation_cost: cost,
+            fee_nano_erg: fee,
+            resolved_inputs: Vec::new(),
+        });
         checked.push(c);
     }
     if let Some(cf) = checked_fee {
+        observation.transactions.push(TransactionObservation {
+            category: "fees",
+            validation_cost: final_fee_cost,
+            fee_nano_erg: 0,
+            resolved_inputs: cf.resolved_inputs().to_vec(),
+        });
         checked.push(cf);
     }
     // BlockTransactions.scala:42 requires a non-empty section, including after
@@ -873,6 +1038,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     let candidate = Candidate {
         header,
         validation_ctx,
+        observation,
         transactions: raw_txs,
         ad_proof_bytes,
         extension_fields,
