@@ -32,6 +32,9 @@ use ergo_rest_json::mining_inspection::{
 };
 use serde::{Deserialize, Serialize};
 
+mod private;
+pub use private::{PrivateTransactionEntry, PrivateTransactionOptions, PrivateTransactionRequest};
+
 /// Trait the node implements to surface its mining subsystem to the
 /// API server. Each call crosses into the node's main loop and awaits
 /// a oneshot reply, matching the existing [`crate::traits::NodeSubmit`]
@@ -102,6 +105,34 @@ pub trait NodeMining: Send + Sync {
     /// initialized, and `Internal` (500) if wallet tracking is inconsistent —
     /// never a stale or fabricated address.
     async fn reward_address(&self) -> Result<String, MiningApiError>;
+
+    /// List private transactions, available only through authenticated routes.
+    async fn private_transactions(&self) -> Result<Vec<PrivateTransactionEntry>, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Validate and durably retain signed bytes for this miner alone.
+    async fn submit_private_transaction(
+        &self,
+        _bytes: Vec<u8>,
+        _options: PrivateTransactionOptions,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
+
+    /// Withdraw pending work before releasing its reserved wallet inputs.
+    async fn cancel_private_transaction(
+        &self,
+        _tx_id: String,
+    ) -> Result<PrivateTransactionEntry, MiningApiError> {
+        Err(MiningApiError::Unavailable(
+            "private mining queue is unavailable".into(),
+        ))
+    }
 
     /// `GET /mining/rewardPublicKey`. Hex-encoded 33-byte compressed
     /// secp256k1 miner pubkey. Same fallibility as [`Self::reward_address`].

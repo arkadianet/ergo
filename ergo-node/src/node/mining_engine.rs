@@ -261,7 +261,9 @@ fn full_refresh_adds_nothing(
     intent: &ergo_mining::engine::BuildIntent,
     handle: &MiningHandle,
 ) -> bool {
-    intent.mempool.is_empty() && !handle.claim_storage_rent()
+    intent.mempool.is_empty()
+        && intent.private_transactions.is_empty()
+        && !handle.claim_storage_rent()
 }
 
 /// Backoff between commit-visibility retries (the committed redb tip trailing

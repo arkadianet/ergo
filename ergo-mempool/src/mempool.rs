@@ -85,6 +85,8 @@ pub struct Mempool {
     /// A side effect of `process` alone — `check` (`/check`) never touches
     /// it — and it never gossips. See [`crate::staging`].
     staging: StagingPool,
+    /// Operator transaction ids excluded from all public admission paths.
+    private_only_ids: std::collections::HashSet<TxId>,
 }
 
 impl Mempool {
@@ -117,6 +119,7 @@ impl Mempool {
             observer: None,
             pending_orphan_eviction: Vec::new(),
             staging,
+            private_only_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -166,6 +169,15 @@ impl Mempool {
     /// not reach through the doc-hidden test pool accessor.
     pub fn iter_transactions(&self) -> impl Iterator<Item = &Entry> {
         self.pool.iter_prioritized()
+    }
+
+    /// Register private mining identities without retaining their bytes.
+    pub fn register_private_transaction(&mut self, id: TxId) {
+        self.private_only_ids.insert(id);
+    }
+
+    pub fn is_private_transaction(&self, id: &TxId) -> bool {
+        self.private_only_ids.contains(id)
     }
 
     pub fn contains(&self, tx_id: &TxId) -> bool {
@@ -308,6 +320,23 @@ impl Mempool {
                 self.tip,
             );
             return (outcome, Vec::new());
+        }
+        if !self.private_only_ids.is_empty()
+            && tx_bytes.len() <= self.config.max_tx_size_bytes
+            && validator
+                .peek_fee(tx_bytes)
+                .is_ok_and(|tx| self.is_private_transaction(&tx.tx_id))
+        {
+            return (
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::ValidationFailed {
+                        kind: admission::ValidationErr::Other(
+                            "transaction is reserved for private mining".into(),
+                        ),
+                    },
+                },
+                Vec::new(),
+            );
         }
         let mut held_out: Option<admission::HeldCandidate> = None;
         let (outcome, mut actions) = {

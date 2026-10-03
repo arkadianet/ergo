@@ -215,6 +215,29 @@ impl ChainStoreReader {
         read_height_index_ids(&table, height)
     }
 
+    /// Header identity on the applied full-block chain (independent of header run-ahead).
+    pub fn applied_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(CHAIN_INDEX) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let value = table.get(u64::from(height))?;
+        value
+            .map(|value| {
+                value
+                    .value()
+                    .try_into()
+                    .map_err(|_| StateError::DbCorruption {
+                        table: "chain_index",
+                        key: height.to_string(),
+                        reason: "applied header id must be 32 bytes".into(),
+                    })
+            })
+            .transpose()
+    }
+
     /// Header ID on the canonical best-header chain at `height`. Returns
     /// `None` if the height is past the tip or no chain has been written.
     pub fn get_header_id_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {

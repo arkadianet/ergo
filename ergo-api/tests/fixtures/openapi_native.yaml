@@ -3967,6 +3967,30 @@ components:
         dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
         destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
         rejects unknown sibling fields and cross-variant field leakage.
+    PrivateTransactionOptions:
+      type: object
+      description: Queue policy. A deadline is local policy, not a transaction script expiry.
+      properties:
+        expires_at_height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          minimum: 0
+        expires_at_ms:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        label:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+      additionalProperties: false
     RawTransactionBytes:
       type: string
       format: binary
@@ -4278,9 +4302,15 @@ components:
         - intent
         - type
         properties:
+          delivery:
+            $ref: '#/components/schemas/TxDelivery'
           intent:
             $ref: '#/components/schemas/TxIntent'
             description: The transaction intent.
+          privateOptions:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/PrivateTransactionOptions'
           type:
             type: string
             enum:
@@ -4291,6 +4321,12 @@ components:
         - signedTransaction
         - type
         properties:
+          delivery:
+            $ref: '#/components/schemas/TxDelivery'
+          privateOptions:
+            oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/PrivateTransactionOptions'
           signedTransaction:
             $ref: '#/components/schemas/TxRepr'
             description: The signed transaction.
@@ -4385,6 +4421,12 @@ components:
       - syncing
       - at_tip
       - stalled
+    TxDelivery:
+      type: string
+      description: Delivery controls who can include the transaction before confirmation.
+      enum:
+      - broadcast
+      - mine_private
     TxIntent:
       type: object
       description: |-

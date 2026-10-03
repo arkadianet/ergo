@@ -487,11 +487,15 @@ pub(super) fn signal_mining_engine(
     };
     let mempool = ergo_mempool::MempoolReadSnapshot::from_pool(&state.mempool);
     let intent = BuildIntent {
-        private_transactions: Arc::new(handle.private_queue().selection_entries()),
-        operator_generation: handle.operator_generation(),
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
+        private_transactions: Arc::new(
+            handle
+                .private_queue()
+                .selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height),
+        ),
+        operator_generation: handle.operator_generation(),
         miner_pk,
         reason,
     };
@@ -523,6 +527,17 @@ pub(super) fn handle_mining_request(
             // the request carries. We avoid `panic!` even though
             // this branch is unreachable in steady state.
             match req {
+                crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
+                crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { reply, .. }
+                | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { reply, .. } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
                 crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
                     let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
                         "mining disabled".into(),
@@ -541,6 +556,57 @@ pub(super) fn handle_mining_request(
             }
             return false;
         }
+    };
+
+    if let Err(error) = super::private_mining::expire(state, handle) {
+        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
+        // A solution must not be accepted when its private queue deadlines
+        // cannot be established durably against the applied parent.
+        if matches!(
+            &req,
+            crate::mining_bridge::MiningRequest::SubmitSolution { .. }
+        ) {
+            handle.invalidate_operator_generation();
+            if let crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } = req {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(format!(
+                    "private mining deadline check failed: {error}"
+                ))));
+            }
+            return true;
+        }
+    }
+    let req = match req {
+        crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
+            let items = handle
+                .private_queue()
+                .list()
+                .into_iter()
+                .map(super::private_mining::api_entry)
+                .collect();
+            let _ = reply.send(Ok(items));
+            return false;
+        }
+        crate::mining_bridge::MiningRequest::SubmitPrivateTransaction {
+            bytes,
+            options,
+            reply,
+        } => {
+            let result = super::private_mining::admit(state, handle, &bytes, options);
+            let changed = result.is_ok();
+            let _ = reply.send(result);
+            return changed;
+        }
+        crate::mining_bridge::MiningRequest::CancelPrivateTransaction { tx_id, reply } => {
+            handle.invalidate_operator_generation();
+            let result = handle
+                .private_queue()
+                .cancel(&tx_id)
+                .map(super::private_mining::api_entry)
+                .map_err(ergo_api::MiningApiError::BadRequest);
+            let _ = reply.send(result);
+            return true;
+        }
+        other => other,
     };
 
     // Reward-key resolution is independent of sync state — answer it before
@@ -591,7 +657,10 @@ pub(super) fn handle_mining_request(
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
             // GetRewardKey is answered before this mining-started gate (above).
-            crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
+            crate::mining_bridge::MiningRequest::ListPrivateTransactions { .. }
+            | crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { .. }
+            | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { .. }
+            | crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
                 unreachable!("GetRewardKey is handled before the mining-started gate")
             }
         }
@@ -718,15 +787,20 @@ pub(super) fn handle_mining_request(
                 }
                 ergo_mining::solution::SolutionOutcome::InvalidPow => {
                     crate::metrics_counters::incr_invalid_pow();
+                    handle.record_outcome(None, None, "invalid_pow", None, now_unix_ms());
                     let _ = reply.send(Err(ergo_api::MiningApiError::InvalidPow));
                     return false;
                 }
                 ergo_mining::solution::SolutionOutcome::StaleParent { .. } => {
                     crate::metrics_counters::incr_stale_parent();
+                    handle.record_outcome(None, None, "stale", None, now_unix_ms());
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
                     return false;
                 }
             };
+            let solved_msg = ergo_ser::header::serialize_header_without_pow(&block.header)
+                .ok()
+                .map(|bytes| *ergo_primitives::digest::blake2b256(&bytes).as_bytes());
             let parent_id = block.parent_id;
             // 2. Recheck parent_id under the action-loop lock (the
             //    consensus-bearing TOCTOU close) and serialize the header
@@ -1026,6 +1100,7 @@ pub(super) fn handle_mining_request(
                 state, header_id, parent_id, submitted, follow_ups,
             ) {
                 info!(id = %hex::encode(header_id), apply_ms, "mined block applied");
+                handle.record_outcome(solved_msg, Some(header_id), "accepted", None, now_unix_ms());
                 let _ = reply.send(Ok(()));
                 false
             } else {
@@ -1084,6 +1159,13 @@ pub(super) fn handle_mining_request(
                         "mining: withdrew the failed block's parent templates; rebuilding",
                     );
                 }
+                handle.record_outcome(
+                    solved_msg,
+                    Some(header_id),
+                    "rejected",
+                    Some(failure.clone()),
+                    now_unix_ms(),
+                );
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                     "block apply failed ({failure})"
                 ))));
@@ -1091,7 +1173,10 @@ pub(super) fn handle_mining_request(
             }
         }
         // GetRewardKey is answered before the mining-started gate (above).
-        crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
+        crate::mining_bridge::MiningRequest::ListPrivateTransactions { .. }
+        | crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { .. }
+        | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { .. }
+        | crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
             unreachable!("GetRewardKey is handled before the mining-started gate")
         }
     }

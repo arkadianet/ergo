@@ -193,6 +193,7 @@ pub(super) async fn bind(
     indexer_event_observer: Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     mempool: &mut ergo_mempool::Mempool,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
+    private_queue: Option<Arc<ergo_mining::private_queue::PrivateTransactionQueue>>,
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     shutdown_notify: &Arc<tokio::sync::Notify>,
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
@@ -220,14 +221,16 @@ pub(super) async fn bind(
     // `ChainStateAccessorImpl::tip_height()` now reads the live committed
     // tip from redb per-call (no captured value), so no boot-time tip is
     // threaded in.
-    let chain_accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> =
-        Arc::new(super::super::wallet_bridge::ChainStateAccessorImpl::new(
+    let chain_accessor: Arc<dyn super::super::wallet_bridge::ChainStateAccessor> = Arc::new(
+        super::super::wallet_bridge::ChainStateAccessorImpl::new(
             db_arc.clone(),
             is_pruned,
             // Same EIP-27 rules the validator uses, so the wallet's
             // burn-aware builder + self-verify gate share consensus.
             super::build_reemission_rules(&config.chain_spec),
-        ));
+        )
+        .with_private_queue(private_queue),
+    );
     let wallet_storage = {
         let secret_dir = config.data_dir.join("wallet");
         Arc::new(parking_lot::RwLock::new(
@@ -280,7 +283,8 @@ pub(super) async fn bind(
         max_tx_size_bytes: config.mempool_config.max_tx_size_bytes,
     };
     let submit_handle: Arc<dyn super::super::wallet_bridge::TxSubmitter> = Arc::new(
-        super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
+        super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone())
+            .with_private_mining(mining_bridge.clone()),
     );
     let wallet_rescan = Arc::new(crate::wallet_boot::RescanControl::default());
     let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);
