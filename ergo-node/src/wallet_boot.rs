@@ -299,8 +299,7 @@ impl WalletBootService {
         let child_pk = unlocked.master.derive_pubkey_at_path(&eip3_path)?;
 
         // Persist BOTH WALLET_TRACKED_PUBKEYS entries + WALLET_VISIBLE_ADDRESSES entry in ONE write txn.
-        let write_txn = db
-            .begin_write()
+        let write_txn = ergo_state::begin_write_qr(db)
             .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
         {
             let mut tracked = write_txn.open_table(WALLET_TRACKED_PUBKEYS).map_err(|e| {
@@ -396,8 +395,7 @@ impl WalletBootService {
         };
 
         // Persist the pubkey, then mirror the rendered address into state.
-        let write_txn = db
-            .begin_write()
+        let write_txn = ergo_state::begin_write_qr(db)
             .map_err(|e| WalletError::SecretFile(format!("redb begin_write: {e}")))?;
         {
             let mut change = write_txn
