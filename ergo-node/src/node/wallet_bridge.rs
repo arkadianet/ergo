@@ -29,6 +29,7 @@ use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 
 pub mod chain_snapshot;
+mod jobs;
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
 /// Abstracts the chain submit path so the wallet writer can submit a
@@ -59,15 +60,24 @@ pub trait TxSubmitter: Send + Sync {
         })
     }
 
-    async fn private_transaction_status(
+    /// Read one bounded metadata snapshot for all approved background jobs.
+    async fn private_transactions(
         &self,
-        _tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
         Err(ergo_api::types::SubmitError {
             reason: "private_mining_unavailable".into(),
             detail: None,
         })
+    }
+
+    async fn private_transaction_status(
+        &self,
+        tx_id: String,
+    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
+    {
+        self.private_transactions()
+            .await
+            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
     }
 
     async fn cancel_private_transaction(
@@ -128,11 +138,9 @@ impl TxSubmitter for NodeSubmitAdapter {
             .map_err(private_mining_submit_error)
     }
 
-    async fn private_transaction_status(
+    async fn private_transactions(
         &self,
-        tx_id: String,
-    ) -> Result<Option<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError>
-    {
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
         let mining = self
             .mining
             .as_ref()
@@ -140,7 +148,6 @@ impl TxSubmitter for NodeSubmitAdapter {
         mining
             .private_transactions()
             .await
-            .map(|items| items.into_iter().find(|entry| entry.tx_id == tx_id))
             .map_err(private_mining_submit_error)
     }
 
@@ -182,6 +189,18 @@ fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::typ
 
 /// Command sent from the API task to the wallet writer task.
 pub enum WalletCommand {
+    MiningJobs {
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError>>,
+    },
+    CreateMiningJob {
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+    CancelMiningJob {
+        job_id: String,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+
     Status {
         reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
     },
@@ -476,6 +495,29 @@ impl NodeWalletAdmin {
 
 #[async_trait]
 impl WalletAdmin for NodeWalletAdmin {
+    async fn mining_jobs(
+        &self,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::MiningJobs { reply })
+            .await
+    }
+
+    async fn create_mining_job(
+        &self,
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CreateMiningJob { request, reply })
+            .await
+    }
+
+    async fn cancel_mining_job(
+        &self,
+        job_id: String,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CancelMiningJob { job_id, reply })
+            .await
+    }
+
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::Status { reply }).await
     }
@@ -886,8 +928,10 @@ impl WalletAdmin for NodeWalletAdmin {
 /// in `/wallet/restore`, (c) block fetch during `/wallet/rescan`,
 /// and (d) signing-context + UTXO lookup for send routes.
 pub trait ChainStateAccessor: Send + Sync {
-    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
-        std::collections::BTreeSet::new()
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        Ok(std::collections::BTreeSet::new())
     }
 
     /// Current `WALLET_SCAN_HEIGHT` — populates `walletHeight`.
@@ -1032,11 +1076,14 @@ impl ChainStateAccessorImpl {
 }
 
 impl ChainStateAccessor for ChainStateAccessorImpl {
-    fn reserved_wallet_inputs(&self) -> std::collections::BTreeSet<[u8; 32]> {
-        self.private_queue
-            .as_ref()
-            .map(|queue| queue.reserved_inputs())
-            .unwrap_or_default()
+    fn reserved_wallet_inputs(
+        &self,
+    ) -> Result<std::collections::BTreeSet<[u8; 32]>, WalletAdminError> {
+        let mut reserved = jobs::reserved_inputs(&self.db)?;
+        if let Some(queue) = &self.private_queue {
+            reserved.extend(queue.reserved_inputs());
+        }
+        Ok(reserved)
     }
 
     fn wallet_scan_height(&self) -> Result<u32, ergo_state::store::StateError> {
@@ -1387,7 +1434,13 @@ pub async fn run_wallet_writer_supervised(
     // `commands::admin::AttemptLimiter`.
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
-    let mut failure = None;
+    let mut failure = jobs::recover_preparing(&db).err();
+    if failure.is_some() {
+        rescan.stop();
+        rx.close();
+    }
+    let mut jobs_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    jobs_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if rescan.stopping() || *shutdown.borrow() {
             break;
@@ -1413,11 +1466,30 @@ pub async fn run_wallet_writer_supervised(
             biased;
             _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
             command = rx.recv() => match command { Some(command) => command, None => break },
+            _ = jobs_tick.tick() => {
+                if let Err(error) = jobs::tick(&ctx).await {
+                    tracing::error!(%error, "wallet mining job journal failure");
+                    failure.get_or_insert(error);
+                    rescan.stop();
+                    rx.close();
+                    break;
+                }
+                continue;
+            },
         };
         let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
             continue;
         };
         match cmd {
+            WalletCommand::MiningJobs { reply } => {
+                let _ = reply.send(jobs::list(&db));
+            }
+            WalletCommand::CreateMiningJob { request, reply } => {
+                let _ = reply.send(jobs::create_owned(&ctx, request));
+            }
+            WalletCommand::CancelMiningJob { job_id, reply } => {
+                let _ = reply.send(jobs::cancel(&ctx, &job_id).await);
+            }
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
                 pass,

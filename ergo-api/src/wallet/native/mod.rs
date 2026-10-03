@@ -15,6 +15,7 @@ use error::NativeErr;
 
 pub mod dto;
 pub mod error;
+pub(crate) mod jobs;
 
 /// Unwrap a `Query<T>` extraction, mapping Axum's rejection (unknown query key
 /// via `deny_unknown_fields`, malformed value) to the native `{reason, detail?}`
@@ -746,6 +747,14 @@ pub fn router_with_security(
         .route("/api/v1/wallet/transactions/sign", post(sign_transaction))
         .route("/api/v1/wallet/transactions/send", post(send_transaction))
         .route("/api/v1/wallet/rewards/retrieve", post(retrieve_rewards))
+        .route(
+            "/api/v1/wallet/mining-jobs",
+            get(jobs::list).post(jobs::create),
+        )
+        .route(
+            "/api/v1/wallet/mining-jobs/:job_id/cancel",
+            post(jobs::cancel),
+        )
         .route("/api/v1/wallet/transactions/:tx_id", get(transaction_by_id))
         // --- lifecycle (POST) ---
         .route("/api/v1/wallet/init", post(init))
