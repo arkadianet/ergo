@@ -71,6 +71,17 @@ pub(super) async fn action_loop(
     mut shutdown_rx: oneshot::Receiver<()>,
     mempool_tick_ms: u64,
 ) -> Result<(), NodeError> {
+    if let Some(wiring) = mining.as_ref() {
+        for entry in wiring.handle.private_queue().list() {
+            if let Ok(raw) = hex::decode(&entry.tx_id) {
+                if let Ok(id) = <[u8; 32]>::try_from(raw) {
+                    state.mempool.register_private_transaction(
+                        ergo_primitives::digest::Digest32::from_bytes(id),
+                    );
+                }
+            }
+        }
+    }
     // Tick every 5s so cold-start fills the outbound pool quickly.
     // The slow-mode gate inside `try_dial_peers` enforces the
     // original 30s cadence once the deficit is small (see
@@ -132,6 +143,10 @@ pub(super) async fn action_loop(
     // gets fresh work without waiting for the recovery retry.
     let mut mining_rebuild_requested = false;
     let mut mining_deadline: Option<Instant> = None;
+    let mut operator_generation = mining
+        .as_ref()
+        .map(|w| w.handle.operator_generation())
+        .unwrap_or(0);
     // Startup priming publishes the persisted BestTip. Normal online mining
     // still waits for a freshly applied, recent block to open its startup
     // latch; offline generation and an empty devnet have explicit exceptions.
@@ -284,6 +299,14 @@ pub(super) async fn action_loop(
         // the select keeps the wiring in a single place rather than threaded
         // through events.rs / sync_tick.rs.
         if let Some(wiring) = mining.as_ref() {
+            if let Err(error) = super::private_mining::expire(&wiring.handle) {
+                tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
+            }
+            if let Err(error) = super::private_mining::reconcile(&state, &wiring.handle) {
+                tracing::warn!(%error, "private mining queue waits for confirmation history");
+            }
+            let generation_now = wiring.handle.operator_generation();
+            let operator_changed = generation_now != operator_generation;
             let now = tokio::time::Instant::now().into_std();
             let tip_now = MiningTipSnapshot::capture(&state);
             let revision_now = state.mempool.revision();
@@ -320,7 +343,10 @@ pub(super) async fn action_loop(
                     refresh_debounce: wiring.refresh_debounce,
                 },
             );
-            let signal = decided.or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
+            let signal = decided
+                .or(operator_changed.then_some(BuildReason::MempoolRefresh))
+                .or(mining_votes_dirty.then_some(BuildReason::VotesChanged));
+            operator_generation = generation_now;
             mining_votes_dirty = false;
             if let Some(reason) = signal {
                 let prev = mining_last_tip.best_full_id();
@@ -466,7 +492,10 @@ fn handle_mempool_tick(state: &mut NodeState, mining_handle: Option<&MiningHandl
                         .map(|f| f.peer.to_string()),
                 });
             }
-            let mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
+            let mut mempool_diff: ergo_mempool::types::TxDiff = state_diff.into();
+            mempool_diff
+                .demoted
+                .retain(|tx| !state.mempool.is_private_transaction(&tx.tx_id));
             let mempool_actions = state.mempool.on_tip_change(&mempool_diff);
             let routed = route_mempool_actions(state, mempool_actions);
             flush_actions(state, routed);

@@ -594,6 +594,15 @@ pub struct SignTxResponse {
     pub tx_id: String,
 }
 
+/// Delivery controls who can include the transaction before confirmation.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TxDelivery {
+    #[default]
+    Broadcast,
+    MinePrivate,
+}
+
 /// `POST /api/v1/wallet/transactions/send` request (tagged). `intent` builds +
 /// signs with the wallet's own secrets (needs unlock); `signed` submits a
 /// caller-supplied signed tx (no unlock). Manual `Deserialize` for strictness.
@@ -601,15 +610,22 @@ pub struct SignTxResponse {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SendTxRequest {
     /// Build + sign + send from an intent.
+    #[serde(rename_all = "camelCase")]
     Intent {
         /// The transaction intent.
         intent: TxIntent,
+        #[serde(default)]
+        delivery: TxDelivery,
+        private_options: Option<crate::mining::PrivateTransactionOptions>,
     },
     /// Send a pre-signed transaction.
     #[serde(rename_all = "camelCase")]
     Signed {
         /// The signed transaction.
         signed_transaction: TxRepr,
+        #[serde(default)]
+        delivery: TxDelivery,
+        private_options: Option<crate::mining::PrivateTransactionOptions>,
     },
 }
 
@@ -623,6 +639,9 @@ impl<'de> Deserialize<'de> for SendTxRequest {
             ty: String,
             intent: Option<TxIntent>,
             signed_transaction: Option<TxRepr>,
+            #[serde(default)]
+            delivery: TxDelivery,
+            private_options: Option<crate::mining::PrivateTransactionOptions>,
         }
         let r = Raw::deserialize(d)?;
         match r.ty.as_str() {
@@ -634,6 +653,8 @@ impl<'de> Deserialize<'de> for SendTxRequest {
                 }
                 Ok(SendTxRequest::Intent {
                     intent: r.intent.ok_or_else(|| D::Error::missing_field("intent"))?,
+                    delivery: r.delivery,
+                    private_options: r.private_options,
                 })
             }
             "signed" => {
@@ -644,6 +665,8 @@ impl<'de> Deserialize<'de> for SendTxRequest {
                     signed_transaction: r
                         .signed_transaction
                         .ok_or_else(|| D::Error::missing_field("signedTransaction"))?,
+                    delivery: r.delivery,
+                    private_options: r.private_options,
                 })
             }
             other => Err(D::Error::unknown_variant(other, &["intent", "signed"])),

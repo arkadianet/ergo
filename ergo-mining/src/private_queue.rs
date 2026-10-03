@@ -299,6 +299,15 @@ impl PrivateTransactionQueue {
         (store.observed_height, store.observed_tip.clone())
     }
 
+    /// Persist incremental ancestry progress during a deep rollback.
+    pub fn set_observation_cursor(&self, height: u32, tip: Option<String>) -> Result<(), String> {
+        self.update(|store| {
+            store.observed_height = height;
+            store.observed_tip = tip;
+            Ok(())
+        })
+    }
+
     /// Reconcile exact applied transactions and canonical mined-block identity.
     /// Missing inputs can recover after a rollback; cancellation/expiry cannot.
     pub fn reconcile(

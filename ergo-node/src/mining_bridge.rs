@@ -71,6 +71,19 @@ pub const LONGPOLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// loop's `select!` arm sends back when the request completes.
 #[derive(Debug)]
 pub enum MiningRequest {
+    ListPrivateTransactions {
+        reply:
+            oneshot::Sender<Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError>>,
+    },
+    SubmitPrivateTransaction {
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
+    CancelPrivateTransaction {
+        tx_id: String,
+        reply: oneshot::Sender<Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError>>,
+    },
     /// `GET /mining/candidate` — main loop serves the cache via
     /// [`ergo_mining::handle::MiningHandle::cached_template_if_synced`] (the
     /// off-loop engine is the sole builder) and replies with the work message
@@ -252,6 +265,25 @@ impl MiningBridge {
                 MINING_TIMEOUT.as_millis()
             ))),
         }
+    }
+
+    async fn private_request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, MiningApiError>>) -> MiningRequest,
+    ) -> Result<T, MiningApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.try_send(make(reply)).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => {
+                MiningApiError::Unavailable("mining channel full; retry with backoff".into())
+            }
+            mpsc::error::TrySendError::Closed(_) => {
+                MiningApiError::Unavailable("node main loop has stopped".into())
+            }
+        })?;
+        tokio::time::timeout(MINING_TIMEOUT, rx)
+            .await
+            .map_err(|_| MiningApiError::Timeout("private queue request timed out".into()))?
+            .map_err(|_| MiningApiError::Unavailable("main loop closed reply channel".into()))?
     }
 
     /// Erase the concrete type for axum state injection.
@@ -462,6 +494,34 @@ impl NodeMining for MiningBridge {
         let reward_bytes = ergo_mining::reward_output_script(&pk).to_vec();
         parse_and_encode_reward_address(&reward_bytes, self.network)
             .map_err(|e| MiningApiError::Internal(format!("encode reward address: {e}")))
+    }
+
+    async fn private_transactions(
+        &self,
+    ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, MiningApiError> {
+        self.private_request(|reply| MiningRequest::ListPrivateTransactions { reply })
+            .await
+    }
+
+    async fn submit_private_transaction(
+        &self,
+        bytes: Vec<u8>,
+        options: ergo_api::mining::PrivateTransactionOptions,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::SubmitPrivateTransaction {
+            bytes,
+            options,
+            reply,
+        })
+        .await
+    }
+
+    async fn cancel_private_transaction(
+        &self,
+        tx_id: String,
+    ) -> Result<ergo_api::mining::PrivateTransactionEntry, MiningApiError> {
+        self.private_request(|reply| MiningRequest::CancelPrivateTransaction { tx_id, reply })
+            .await
     }
 
     async fn reward_pubkey(&self) -> Result<String, MiningApiError> {

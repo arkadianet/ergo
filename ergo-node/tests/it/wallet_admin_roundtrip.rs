@@ -501,6 +501,8 @@ async fn native_send_signed_known_tx_short_circuits() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -527,6 +529,8 @@ async fn native_send_signed_duplicate_is_idempotent_accept() {
 
     let resp = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -549,6 +553,8 @@ async fn native_send_signed_real_rejection_is_error() {
 
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&signed_bytes),
         })
         .await
@@ -571,6 +577,8 @@ async fn native_send_signed_malformed_bytes_is_bad_request() {
     // `00` is valid hex (one 0x00 byte) but not a serialized Transaction.
     let err = admin
         .send_transaction(SendTxRequest::Signed {
+            delivery: Default::default(),
+            private_options: None,
             signed_transaction: TxRepr::from_bytes(&[0x00]),
         })
         .await
@@ -609,7 +617,11 @@ async fn native_send_intent_locked_rejects() {
         allow_token_burn: false,
     };
     let err = admin
-        .send_transaction(SendTxRequest::Intent { intent })
+        .send_transaction(SendTxRequest::Intent {
+            intent,
+            delivery: Default::default(),
+            private_options: None,
+        })
         .await
         .expect_err("intent send requires unlock");
     assert!(matches!(err, WalletAdminError::Locked), "got {err:?}");
@@ -1555,6 +1567,8 @@ mod scan_invalidation {
         assert_invalidated(
             admin
                 .send_transaction(SendTxRequest::Signed {
+                    delivery: Default::default(),
+                    private_options: None,
                     signed_transaction: TxRepr::from_bytes(&minimal_signed_tx().0),
                 })
                 .await,

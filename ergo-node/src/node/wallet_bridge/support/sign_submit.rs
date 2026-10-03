@@ -127,7 +127,7 @@ pub(crate) async fn send_transaction_native_impl(
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
-        SendTxRequest::Intent { intent } => {
+        SendTxRequest::Intent { intent, .. } => {
             let (built, pool_snapshot) =
                 build_transaction_impl_with_snapshot(intent, state, db, chain, network, mempool)
                     .await?;
@@ -146,7 +146,9 @@ pub(crate) async fn send_transaction_native_impl(
             )?;
             (bytes, Some(snapshot))
         }
-        SendTxRequest::Signed { signed_transaction } => {
+        SendTxRequest::Signed {
+            signed_transaction, ..
+        } => {
             let bytes = hex::decode(signed_transaction.bytes_hex())
                 .map_err(|_| WalletAdminError::BadRequest("signedTransaction: bad hex".into()))?;
             let mut r = ergo_primitives::reader::VlqReader::new(&bytes);
@@ -196,8 +198,30 @@ pub(crate) async fn send_transaction_native_impl(
     }
     drop(snapshot);
 
+    let (delivery, options) = match req {
+        SendTxRequest::Intent {
+            delivery,
+            private_options,
+            ..
+        }
+        | SendTxRequest::Signed {
+            delivery,
+            private_options,
+            ..
+        } => (*delivery, private_options.clone().unwrap_or_default()),
+    };
+    let result = match delivery {
+        ergo_api::wallet::native::dto::TxDelivery::Broadcast => {
+            submitter.submit_transaction(signed_bytes).await
+        }
+        ergo_api::wallet::native::dto::TxDelivery::MinePrivate => {
+            submitter
+                .submit_private_transaction(signed_bytes, options)
+                .await
+        }
+    };
     // 3. Submit. A `duplicate` reason (already in-pool) is idempotently accepted.
-    match submitter.submit_transaction(signed_bytes).await {
+    match result {
         Ok(_) => Ok(SendTxResponse {
             tx_id: tx_id_hex,
             accepted: true,

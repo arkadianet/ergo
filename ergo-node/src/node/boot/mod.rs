@@ -879,6 +879,10 @@ async fn run_inner_with_backend(
         sync.indexer_event_observer.clone(),
         &mut mempool,
         mining_subsystem.bridge.clone(),
+        mining_subsystem
+            .handle
+            .as_ref()
+            .map(|handle| handle.private_queue()),
         scaffold.voting_targets_slot.clone(),
         &shutdown_notify,
         &peer_connect_tx,

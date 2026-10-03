@@ -61,6 +61,12 @@ pub(super) fn build_subsystem(
         config.chain_spec.difficulty.clone(),
         config.chain_spec.voting,
     )
+    .with_private_queue(std::sync::Arc::new(
+        ergo_mining::private_queue::PrivateTransactionQueue::open(
+            config.data_dir.join("private-mining-queue.json"),
+        )
+        .map_err(|e| -> NodeError { e.into() })?,
+    ))
     .with_network(config.network)
     .with_outcome_journal(&config.data_dir.join("mining-history.json"))
     .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?

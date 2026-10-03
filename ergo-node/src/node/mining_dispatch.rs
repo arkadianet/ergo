@@ -492,6 +492,8 @@ pub(super) fn signal_mining_engine(
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
+        private_transactions: Arc::new(handle.private_queue().selection_entries()),
+        operator_generation: handle.operator_generation(),
         miner_pk,
         reason,
     };
@@ -523,6 +525,17 @@ pub(super) fn handle_mining_request(
             // the request carries. We avoid `panic!` even though
             // this branch is unreachable in steady state.
             match req {
+                crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
+                crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { reply, .. }
+                | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { reply, .. } => {
+                    let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
+                        "mining disabled".into(),
+                    )));
+                }
                 crate::mining_bridge::MiningRequest::GetCandidate { reply } => {
                     let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(
                         "mining disabled".into(),
@@ -541,6 +554,43 @@ pub(super) fn handle_mining_request(
             }
             return false;
         }
+    };
+
+    if let Err(error) = super::private_mining::expire(handle) {
+        tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
+    }
+    let req = match req {
+        crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {
+            let items = handle
+                .private_queue()
+                .list()
+                .into_iter()
+                .map(super::private_mining::api_entry)
+                .collect();
+            let _ = reply.send(Ok(items));
+            return false;
+        }
+        crate::mining_bridge::MiningRequest::SubmitPrivateTransaction {
+            bytes,
+            options,
+            reply,
+        } => {
+            let result = super::private_mining::admit(state, handle, &bytes, options);
+            let changed = result.is_ok();
+            let _ = reply.send(result);
+            return changed;
+        }
+        crate::mining_bridge::MiningRequest::CancelPrivateTransaction { tx_id, reply } => {
+            handle.invalidate_operator_generation();
+            let result = handle
+                .private_queue()
+                .cancel(&tx_id)
+                .map(super::private_mining::api_entry)
+                .map_err(ergo_api::MiningApiError::BadRequest);
+            let _ = reply.send(result);
+            return true;
+        }
+        other => other,
     };
 
     // Reward-key resolution is independent of sync state — answer it before
@@ -591,7 +641,10 @@ pub(super) fn handle_mining_request(
                 let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(msg)));
             }
             // GetRewardKey is answered before this mining-started gate (above).
-            crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
+            crate::mining_bridge::MiningRequest::ListPrivateTransactions { .. }
+            | crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { .. }
+            | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { .. }
+            | crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
                 unreachable!("GetRewardKey is handled before the mining-started gate")
             }
         }
@@ -1091,7 +1144,10 @@ pub(super) fn handle_mining_request(
             }
         }
         // GetRewardKey is answered before the mining-started gate (above).
-        crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
+        crate::mining_bridge::MiningRequest::ListPrivateTransactions { .. }
+        | crate::mining_bridge::MiningRequest::SubmitPrivateTransaction { .. }
+        | crate::mining_bridge::MiningRequest::CancelPrivateTransaction { .. }
+        | crate::mining_bridge::MiningRequest::GetRewardKey { .. } => {
             unreachable!("GetRewardKey is handled before the mining-started gate")
         }
     }
