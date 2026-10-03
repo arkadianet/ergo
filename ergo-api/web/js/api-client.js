@@ -1,4 +1,4 @@
-// Public reads resolve failed requests to null. Mining work and wallet reads
+// Best-effort telemetry reads resolve failed requests to null. Entity lookups, mining work and wallet reads
 // preserve response status/reason so authorization failures stay distinguishable
 // from unavailable data. The API key (if set) is read per-call.
 //
@@ -7,19 +7,42 @@
 // (a 2xx from a public read proves nothing — see auth.js).
 import { getApiKey, report } from './auth.js';
 
-async function getJson(path) {
-  try {
-    const headers = {};
-    const key = getApiKey();
-    if (key) headers['api_key'] = key;
-    const r = await fetch(path, { cache: 'no-store', headers, signal: AbortSignal.timeout(12000) });
-    const error = r.status === 403 ? await r.clone().json().catch(() => null) : null;
-    report(r.status, false, key, error?.reason);
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
+// Entity lookups distinguish an authoritative 404 from a failed read. The
+// best-effort telemetry getter below retains its existing nullable interface.
+export class ReadError extends Error {
+  constructor(status, reason) {
+    super(reason || 'request failed');
+    this.name = 'ReadError';
+    this.status = status;
   }
+}
+
+export async function lookupJson(path) {
+  const headers = {};
+  const key = getApiKey();
+  if (key) headers['api_key'] = key;
+  let r;
+  try {
+    r = await fetch(path, { cache: 'no-store', headers, signal: AbortSignal.timeout(12000) });
+  } catch {
+    throw new ReadError(0, 'request failed');
+  }
+  const error = r.status === 403 ? await r.clone().json().catch(() => null) : null;
+  report(r.status, false, key, error?.reason);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new ReadError(r.status, error?.reason || `HTTP ${r.status}`);
+  try {
+    const data = await r.json();
+    if (data == null) throw new Error('empty response');
+    return data;
+  } catch {
+    throw new ReadError(r.status, 'invalid JSON response');
+  }
+}
+
+async function getJson(path) {
+  try { return await lookupJson(path); }
+  catch { return null; }
 }
 
 // Public rent reads retain readiness errors instead of turning them into zero.

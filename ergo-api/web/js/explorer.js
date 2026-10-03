@@ -18,7 +18,8 @@
 //   fallbacks keep that from presenting as "not found".
 // - header.difficulty is a decimal STRING (may exceed 2^53) — displayed
 //   verbatim, never via Number().
-import { api, getJson } from './api-client.js';
+import { api, lookupJson as getJson } from './api-client.js';
+import { loadTransaction } from './transaction-source.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, dur, truncMiddle, blockTime } from './format.js';
 import { minerNode, pkToAddress, fetchOwnPk, poolLabel } from './miners.js';
@@ -195,6 +196,15 @@ const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{9,4096}$/;
 let searchSeq = 0;
 
 async function runSearch(q) {
+  const myRoute = seq;
+  const mine = searchSeq + 1;
+  try { return await probeSearch(q); }
+  catch {
+    if (myRoute === seq && mine === searchSeq) setStatus('Search unavailable — a node lookup failed. Try again.');
+  }
+}
+
+async function probeSearch(q) {
   const query = q.trim();
   if (!query) return;
   const mine = ++searchSeq;
@@ -446,7 +456,9 @@ async function renderBlock(id, mySeq) {
   next.href = '#';
   next.onclick = async (e) => {
     e.preventDefault();
-    const ids = await getJson(`/blocks/at/${h.height + 1}`);
+    let ids;
+    try { ids = await getJson(`/blocks/at/${h.height + 1}`); }
+    catch { if (mySeq === seq) setStatus('Next block lookup unavailable. Try again.'); return; }
     // The resolve is async — if the user navigated away meanwhile, don't yank
     // them to the next block.
     if (mySeq !== seq) return;
@@ -536,30 +548,10 @@ function ioLine(b) {
 
 async function renderTx(id, mySeq) {
   loading();
-  // Status is derived ONLY from source-authoritative endpoints, never from the
-  // source-hiding slim /detail route (which searches the index *then* the
-  // mempool and hides which it hit — so its mere presence can't prove
-  // confirmed vs pending):
-  //   • rich  = /blockchain/transaction/byId — CONFIRMED-only (carries blockId)
-  //   • pool  = /transactions/unconfirmed/byTransactionId — MEMPOOL-only
-  //   • slim  = /api/v1/transactions/:id/detail — used ONLY to render IO, and
-  //             only in the degraded case where rich 503s behind a syncing
-  //             index; by then `pool` has authoritatively ruled out mempool.
-  // Residual: during the ~1-block mempool→index turnover a tx can momentarily
-  // satisfy both rich-null and pool; it then reads "unconfirmed" until the
-  // index ingests the block (rich resolves → confirmed). That flip is inherent
-  // to any multi-read explorer and self-corrects on the next refresh.
-  const rich = await getJson(`/blockchain/transaction/byId/${id}`);
-  let pool = null;
-  let slim = null;
-  if (!rich) {
-    [pool, slim] = await Promise.all([
-      getJson(`/transactions/unconfirmed/byTransactionId/${id}`),
-      getJson(`/api/v1/transactions/${id}/detail`),
-    ]);
-  }
+  const { rich, pool, slim, status } = await loadTransaction(id);
   if (mySeq !== seq) return;
-  if (!rich && !pool && !slim) return notFoundGated('transaction', mySeq);
+  if (status === 'unavailable') throw new Error('transaction lookup unavailable');
+  if (status === 'absent') return notFoundGated('transaction', mySeq);
   body.replaceChildren();
 
   const { panel: p, body: pb } = panel('Transaction');
@@ -574,20 +566,10 @@ async function renderTx(id, mySeq) {
     kvRow(grid, 'time', tsNode(rich.timestamp));
     kvRow(grid, 'size', bytes(rich.size));
     kvRow(grid, 'index in block', String(rich.index));
-  } else if (pool || indexerReady()) {
-    // pool → authoritatively in the mempool. OR: the index is caught up yet the
-    // confirmed-only rich route missed while slim resolved → slim served it from
-    // the mempool (it searches the index first), so it's pending too. (This also
-    // covers a pool probe that failed rather than 404'd — getJson collapses both
-    // to null — without mislabelling a mempool tx as confirmed on a healthy node.)
+  } else if (status === 'unconfirmed') {
     kvRow(grid, 'status', el('span', 'pill pill--warn', 'unconfirmed'));
   } else {
-    // Index is BEHIND (rich 503'd) and pool ruled out mempool: slim is our only
-    // source. Best-effort "confirmed", flagged as detail-limited — naming the
-    // real degradation (syncing vs halted vs unavailable), not assuming syncing.
-    const s = el('span');
-    s.append(el('span', 'pill pill--ok', 'confirmed'), el('span', 'muted', ` · ${gatedMiss()} — limited detail`));
-    kvRow(grid, 'status', s);
+    kvRow(grid, 'status', el('span', 'pill pill--warn', 'confirmation status unavailable · limited detail'));
   }
   pb.append(grid);
   body.append(p);
@@ -767,6 +749,7 @@ async function renderAddress(addr, mySeq) {
     // keyboard users aren't dumped to <body> on every page.
     const focusPg = document.activeElement?.dataset?.pg || null;
     tabHost.replaceChildren(el('div', 'muted', 'loading…'));
+    try {
     if (mode === 'txs') {
       const r = await getJson(`/blockchain/transaction/byAddress/${encodeURIComponent(addr)}?offset=${offset}&limit=${PAGE}`);
       if (stale()) return;
@@ -808,6 +791,9 @@ async function renderAddress(addr, mySeq) {
       tabHost.append(pagerEl(offset, null, rows.length, move));
       refocusPager(tabHost, focusPg);
     }
+    } catch {
+      if (!stale()) tabHost.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Try another tab or retry.'));
+    }
   }
 
   select('txs');
@@ -843,6 +829,7 @@ async function renderToken(id, mySeq) {
   async function pageBoxes() {
     const myPage = ++pageEpoch;
     const focusPg = document.activeElement?.dataset?.pg || null;
+    try {
     const r = await getJson(`/blockchain/box/byTokenId/${id}?offset=${offset}&limit=${PAGE}`);
     if (mySeq !== seq || myPage !== pageEpoch) return;
     const items = r?.items || [];
@@ -877,6 +864,9 @@ async function renderToken(id, mySeq) {
     );
     boxSection.replaceChildren(bp);
     refocusPager(boxSection, focusPg);
+    } catch {
+      if (mySeq === seq && myPage === pageEpoch) boxSection.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Reopen the token to retry.'));
+    }
   }
   await pageBoxes();
 }
@@ -897,6 +887,10 @@ function route() {
   const focused = (p) =>
     p.then(() => {
       if (my === seq) focusView();
+    }).catch(() => {
+      if (my !== seq) return;
+      body.replaceChildren(banner('warn', 'Lookup unavailable — the node could not answer this request. Try again.'));
+      focusView();
     });
   if (!kind) return focused(renderHome(my));
   // SECURITY: validate the entity id against a strict shape BEFORE it can reach
