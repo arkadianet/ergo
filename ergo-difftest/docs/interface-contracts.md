@@ -227,13 +227,17 @@ reinject = "replace `crate::jvm_utf8::decode(name_bytes)` with `String::from_utf
 budget_iters = 200000            # max iters the generator gets to rediscover it
 ```
 
-**Re-injection runner** (scratch branch, never committed): applies each
-`reinject` patch, runs the target generator/differential for `budget_iters`,
-asserts a divergence of the declared `class` on the declared `surface` is found,
-reverts. A generator that cannot rediscover its wire-reachable bugs is **rejected
-and re-dispatched** — no exceptions. Wire-unreachable bugs (state-dependent:
-1808895, deser-subst cost, adproofs, eip27) are gated by the **replay driver**,
-not the wire generators.
+**Existing trigger runner:** `scripts/reinject_gate.sh` takes owned source copies,
+checks clean exit0, applies the catalog patch, and requires finding exit1 with
+its declared class/surface marker. Locked build failures, missing binaries and
+unrelated nonzero detector exits fail the check. Source copies are removed;
+build/detector logs are retained. A run with no executed pair is incomplete
+(exit3), even when every skipped entry has an explanation. `--generated` is
+currently unsupported and fails usage2 before any planned work; it does not
+certify generator rediscovery. Independent clean/patched detector execution and
+bounded generated rediscovery remain separate assurance obligations. Pure saved-
+log classification unit tests do not discharge either obligation. State-dependent
+catalog cases require their own correctly contextualized replay evidence.
 
 ---
 
