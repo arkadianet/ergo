@@ -13,6 +13,7 @@ The [security policy](SECURITY.md) describes private disclosure.
 ## Running
 
 Extract the archive into its own directory. Check `--version` and `--help`.
+The following configuration and startup steps require the `ergo-node` archive.
 Copy `config/ergo-node.toml` to a writable working directory, review the
 settings, and start the node with an explicit config and data directory:
 
