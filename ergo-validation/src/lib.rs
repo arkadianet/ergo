@@ -7,7 +7,7 @@
 //! * [`block`] — full-block validation orchestration: header check,
 //!   transactions root, parallel per-tx validation, cost-budget tally.
 //! * [`header`] — pre-validated [`CheckedHeader`] type and the
-//!   header-level rules (PoW, difficulty, version-for-height).
+//!   header-level rules (PoW, difficulty, linkage, timestamp, vote checks).
 //! * [`tx`] — transaction validation broken into structural / monetary
 //!   / script phases, plus the [`CheckedTransaction`] container.
 //! * [`context`] — [`ProtocolParams`] / [`LocalPolicy`] /

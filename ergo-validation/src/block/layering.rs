@@ -12,11 +12,12 @@ use super::error::BlockValidationError;
 /// Topological layering of a block's transactions for parallel validation.
 ///
 /// Every tx index in `[0, txs.len())` appears in exactly one layer. For any
-/// pair where tx `j` spends (or data-reads) an output of tx `i` within the
-/// same block, `layer[j] > layer[i]`. Within a single layer no tx depends
-/// on any other in the same layer, so layer members can be validated
-/// concurrently against a shared overlay snapshot that contains the
-/// outputs of strictly lower layers.
+/// backward dependency where tx `j` spends (or data-reads) an output of tx
+/// `i` with `i < j`, `layer[j] > layer[i]`. Within a single layer no tx has
+/// a recorded backward dependency on another member, so members validate
+/// concurrently against an overlay
+/// containing outputs of lower layers. Forward references are not recorded;
+/// this property alone does not establish their reference-node semantics.
 ///
 /// Also rejects intra-block double-spends (two txs listing the same input
 /// `box_id`) up front — this was caught implicitly by the sequential
@@ -103,9 +104,9 @@ pub(crate) fn build_tx_layers(txs: &[Transaction]) -> Result<TxLayers, BlockVali
     // 3. Compute dependency depth per tx. A block's canonical tx order
     //    places dependencies at lower indices, so forward iteration with
     //    layer[j] = max(layer[dep]) + 1 is sufficient. Backwards edges
-    //    (j depends on k>j) cannot be stitched into a dag here — they
-    //    fall through unresolved and the per-tx input resolution will
-    //    fail normally, matching sequential behaviour.
+    //    (j depends on k>j) are not recorded. Their resolution depends on
+    //    the base view and which earlier layers have completed; this is not
+    //    a proof of sequential or Scala whole-block compatibility.
     let mut layer: Vec<usize> = vec![0; txs.len()];
     for (i, tx) in txs.iter().enumerate() {
         let mut max_dep_layer: Option<usize> = None;
@@ -230,6 +231,21 @@ mod layering_tests {
         let layers = build_tx_layers(&txs).unwrap();
         assert_eq!(layers.layer_count(), 1, "no deps → single layer");
         assert_eq!(layers.layers[0], vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn layers_do_not_preserve_global_original_error_order() {
+        let producer = tx_with(vec![input_filled(1)], vec![], 1);
+        let dependent = tx_with(vec![input_of(first_output_box_id(&producer))], vec![], 1);
+        let independent = tx_with(vec![input_filled(2)], vec![], 1);
+        let layers = build_tx_layers(&[producer, dependent, independent]).unwrap();
+        assert_eq!(layers.layers, vec![vec![0, 2], vec![1]]);
+        assert_eq!(
+            layers.layers.into_iter().flatten().collect::<Vec<_>>(),
+            vec![0, 2, 1]
+        );
+        // If tx2 fails in layer0, validation never reaches tx1 in layer1.
+        // This assertion describes scheduling, not a reference verdict.
     }
 
     #[test]

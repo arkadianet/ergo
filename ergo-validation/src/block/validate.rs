@@ -365,29 +365,21 @@ pub fn validate_full_block_with_costs(
     ))
 }
 
-/// Parallel equivalent of [`validate_full_block`]: topologically layers the
-/// block's transactions by intra-block dependency, then validates each layer
-/// via `rayon::par_iter`. Identical output to the sequential path for any
-/// block the sequential path accepts (and for every rejection — first-failing
-/// tx by index wins, matching Scala's error-order semantics).
+/// Layered parallel block validation. Backward dependencies determine layers;
+/// resolution is serial within each layer, followed by parallel transaction
+/// validation and original-index collection of that layer's results. Successful
+/// results are returned in original block order, with summed transaction costs.
 ///
-/// Consensus invariants held constant across both paths:
-/// - Per-tx structural / monetary / script validation is untouched — same
-///   `validate_transaction_parsed` call, same `CostAccumulator`, same
-///   `TransactionContext`.
-/// - Section-id linkage + merkle-root checks are performed identically and
-///   up-front, before any per-tx work.
-/// - Total block cost is summed from per-tx totals after all layers finish;
-///   `max_block_cost` comparison is the exact same inequality.
-/// - Returned `CheckedBlock.transactions()` is ordered by original tx index,
-///   so downstream AVL application mutates the UTXO tree in consensus order.
-/// - Intra-block double-spend (two txs listing the same input box_id) is
-///   rejected up front via `build_tx_layers` rather than being caught
-///   implicitly by the sequential overlay's spent-set.
+/// Rejection order is deterministic for a fixed block and context, but differs
+/// from the sequential test path: an earlier layer can fail before a lower-index
+/// transaction in a later layer; any layer-wide resolution error precedes that
+/// layer's script failures. Within the parallel validation results, the lowest
+/// failing index in the current layer wins. Double spends are rejected up front.
 ///
-/// Only difference visible to callers: errors report the first-by-index
-/// failing tx, which matches sequential behavior. If two txs in the same
-/// layer fail concurrently, the lower tx index is reported (deterministic).
+/// This scheduling contract does not establish whole-block reference parity for
+/// forward dependencies. In particular the UTXO base and digest view expose
+/// different sets of same-block outputs; a forward data read needs independent
+/// whole-block compatibility evidence before acceptance semantics are changed.
 fn validate_full_block_parallel_impl(
     checked_header: CheckedHeader,
     block_transactions: &BlockTransactions,
@@ -664,9 +656,9 @@ fn validate_full_block_parallel_impl(
         // Step 3: deterministic error ordering + commit. Layer members
         // are already sorted ascending by tx index in `build_tx_layers`,
         // and par_iter preserves input order in collect, so iterating
-        // `layer_results` is ascending. First Err wins — matches the
-        // sequential path's early-return on first failing tx (Scala
-        // parity). The owned `ValidationError` is taken directly from
+        // `layer_results` is ascending. The first Err in THIS layer wins;
+        // earlier resolution/layer errors may precede lower original indices.
+        // The owned `ValidationError` is taken directly from
         // the parallel result, not reconstructed by re-running the
         // failing tx through a second validator instance.
         let mut successes: Vec<(usize, CheckedTransaction, u64)> =
