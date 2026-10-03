@@ -51,11 +51,15 @@ the node binary
   surfaces; plus `batch_merkle_proof` (read-only), `validate` (`ergo-validation`
   stateless check), and `verify_avl` (`ergo-sigma` AvlVerifier).
 - `src/oracle.rs` — Phase 2 JVM oracle: `Oracle` process handle (long-lived `scala-cli`
-  child with pipe I/O); `Verdict` / `Divergence` / `DivergenceKind` / `SurfaceSpec`
+  child executing a private source snapshot, with actual JVM/JAR provenance);
+  `Verdict` / `Divergence` / `DivergenceKind` / `SurfaceSpec`
   types; `oracle_surfaces`; per-surface verdict functions including `ergo_tree_verdict`
   (with all four post-parse consensus gates), `reduce_verdict` (full eval+cost
   differential against `EvalCore.dummyContext`), `validate_verdict`, `verify_avl_verdict`;
   `diff` combinator.
+- `src/oracle/transport.rs` — bounded request/response lines and retained stderr,
+  startup/query deadlines, terminal transport failures, owned Unix process-group
+  cleanup and bounded direct-child reaping. Windows descendants are not certified.
 - `src/regressions.rs` — divergence record schema, classification, and auto-filing:
   `DivergenceRecord` / `VerdictInfo` / `SeedInfo` (§4 of interface-contracts.md);
   `Triage` enum (`KnownArtifact` / `Pending`); `classify` (reduce-reconciliation rule
@@ -125,8 +129,9 @@ the node binary
   — `src/surfaces.rs:24`
 - `surfaces::registry` (fn) — build the 28-surface hermetic registry, optionally
   filtered by name — `src/surfaces.rs:104`
-- `Oracle` (struct) — long-lived `scala-cli` process with pipe I/O; `spawn`,
-  `query`, `query_raw`; kills + reaps the child on `Drop` — `src/oracle.rs:56`
+- `Oracle` (struct) — long-lived `scala-cli` process with bounded pipe I/O; `spawn`,
+  `query`, `query_raw`, `provenance`; cleanup on terminal error and `Drop`
+  — `src/oracle.rs`
 - `oracle_surfaces` (fn) — 9 oracle-diffable `SurfaceSpec` entries — `src/oracle.rs:145`
 - `SurfaceSpec` (struct) — `name`, `rust_verdict`, `compare_canonical`,
   `soft_fork_header`; drives the `diff` combinator — `src/oracle.rs:128`
