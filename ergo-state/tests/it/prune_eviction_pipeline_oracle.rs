@@ -29,7 +29,7 @@ fn open_pipelined_store(blocks_to_keep: i32) -> (StateStore, TempDir) {
     // Set BEFORE enabling the pipeline — the pipeline worker
     // captures `blocks_to_keep` at spawn time.
     store.set_blocks_to_keep(blocks_to_keep);
-    store.enable_persist_pipeline(8);
+    store.enable_persist_pipeline(8).unwrap();
     (store, dir)
 }
 
@@ -242,7 +242,7 @@ fn pipeline_archive_to_pruned_transition_preserves_historical_prefix() {
         let mut store = StateStore::open(&path).expect("open archive");
         store.initialize_genesis(&[]).unwrap();
         store.set_blocks_to_keep(-1);
-        store.enable_persist_pipeline(8);
+        store.enable_persist_pipeline(8).unwrap();
         for h in 1..=15 {
             stamp_height(&store, h);
             apply_empty_block(&mut store, h);
@@ -254,7 +254,7 @@ fn pipeline_archive_to_pruned_transition_preserves_historical_prefix() {
     // is a restart, not a hot-flip.
     let mut store = StateStore::open(&path).expect("reopen pruned");
     store.set_blocks_to_keep(5);
-    store.enable_persist_pipeline(8);
+    store.enable_persist_pipeline(8).unwrap();
     stamp_height(&store, 16);
     apply_empty_block(&mut store, 16);
     store
@@ -313,7 +313,7 @@ fn pipeline_batch_spanning_voting_epoch_snap_matches_sync() {
     .unwrap();
     pipe.initialize_genesis(&[]).unwrap();
     pipe.set_blocks_to_keep(2);
-    pipe.enable_persist_pipeline(64); // large queue ⇒ one big batch on flush
+    pipe.enable_persist_pipeline(64).unwrap(); // large queue ⇒ one big batch on flush
 
     // Sync-path store — pipeline NOT enabled, same config.
     let mut sync_store = StateStore::open_with_cache_launch_voting(
@@ -384,7 +384,7 @@ fn pipeline_eviction_voting_epoch_snap_matches_sync() {
     .unwrap();
     store.initialize_genesis(&[]).unwrap();
     store.set_blocks_to_keep(2);
-    store.enable_persist_pipeline(8);
+    store.enable_persist_pipeline(8).unwrap();
 
     for h in 1..=10 {
         stamp_height(&store, h);

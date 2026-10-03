@@ -699,7 +699,9 @@ pub struct StateStore {
     /// IBD durability relaxation. When enabled, block commits use
     /// Durability::None except every `ibd_flush_interval` blocks which
     /// use Durability::Immediate (flushing all prior non-durable commits).
-    /// On crash, up to ibd_flush_interval blocks of work may be lost.
+    /// Committed blocks after the last synchronous barrier can be lost on a
+    /// power failure. Queued jobs are additional in-memory work; the interval
+    /// alone does not bound the total replay window. See `persistence_progress`.
     ibd_mode: bool,
     ibd_blocks_since_flush: u32,
     ibd_flush_interval: u32,
@@ -925,7 +927,15 @@ impl StateStore {
     /// proceed to the next block.
     ///
     /// `queue_depth`: max in-flight jobs before backpressure (8-16 typical).
-    pub fn enable_persist_pipeline(&mut self, queue_depth: usize) {
+    /// A store cannot replace its active or terminal pipeline. Reopen the
+    /// store after a persistence failure to rebuild from committed state.
+    pub fn enable_persist_pipeline(&mut self, queue_depth: usize) -> Result<(), StateError> {
+        if let Some(pipeline) = &self.persist_pipeline {
+            pipeline.check_health()?;
+            return Err(StateError::InvalidPrecondition {
+                what: "persist pipeline already enabled",
+            });
+        }
         self.persist_pipeline = Some(crate::persist::PersistPipeline::new(
             Arc::clone(&self.db),
             self.db_path.clone(),
@@ -938,6 +948,7 @@ impl StateStore {
             // through to redb and serve pre-commit bytes.
             self.tree.arena_durable_seq_handle(),
         ));
+        Ok(())
     }
 
     /// Install a pending result to exercise callers' preservation of apply errors.
@@ -952,6 +963,7 @@ impl StateStore {
         let Some(ref pipeline) = self.persist_pipeline else {
             return Ok(());
         };
+        pipeline.check_health()?;
         for result in pipeline.drain_all_results() {
             match result {
                 crate::persist::PersistResult::Ok { .. } => {}
@@ -973,6 +985,15 @@ impl StateStore {
             }
         }
         Ok(())
+    }
+
+    /// Sequence progress for the asynchronous writer. Foreground chain height
+    /// can lead this progress; only synchronously durable jobs have crossed an
+    /// explicit fsync boundary. `None` means persistence runs synchronously.
+    pub fn persistence_progress(&self) -> Option<crate::persist::PersistProgress> {
+        self.persist_pipeline
+            .as_ref()
+            .map(crate::persist::PersistPipeline::progress)
     }
 
     /// Current committed height (0 = genesis, no blocks applied).
@@ -1056,18 +1077,19 @@ impl StateStore {
     /// When enabled, block commits use `Durability::None` except every
     /// `flush_interval` blocks. On disable, forces a durable flush of
     /// any pending non-durable commits.
-    pub fn set_ibd_mode(&mut self, enabled: bool, flush_interval: u32) {
+    pub fn set_ibd_mode(&mut self, enabled: bool, flush_interval: u32) -> Result<(), StateError> {
+        self.drain_persist_results()?;
         if self.ibd_mode && !enabled {
-            // Exiting IBD: force durable flush if there are pending non-durable commits
-            if self.ibd_blocks_since_flush > 0 {
-                if let Err(e) = self.force_durable_flush() {
-                    warn!(error = %e, "durable flush on IBD exit failed");
-                }
-            }
+            // Drain first: a foreground empty transaction cannot fsync jobs
+            // that the worker has not committed yet. Retain the old mode and
+            // counters on failure so callers cannot advertise a false boundary.
+            self.flush_persist_pipeline()?;
+            self.force_durable_flush()?;
         }
         self.ibd_mode = enabled;
         self.ibd_flush_interval = flush_interval;
         self.ibd_blocks_since_flush = 0;
+        Ok(())
     }
 
     /// Whether IBD durability mode is active.
@@ -1082,6 +1104,9 @@ impl StateStore {
         // Durability::Immediate is the default — just commit an empty txn.
         // This forces redb to fsync, persisting all prior non-durable writes.
         write_txn.commit()?;
+        if let Some(pipeline) = &self.persist_pipeline {
+            pipeline.record_durable_barrier();
+        }
         Ok(())
     }
 
@@ -1094,10 +1119,14 @@ impl StateStore {
     /// issued after queued `Durability::None` IBD commits land. Ctrl+C uses
     /// this explicit path so redb sees a normal clean close on the next start.
     pub fn shutdown_cleanly(&mut self) -> Result<(), StateError> {
-        if let Some(pipeline) = self.persist_pipeline.take() {
-            drop(pipeline);
-        }
-        self.force_durable_flush()?;
+        let persisted = self
+            .persist_pipeline
+            .as_mut()
+            .map_or(Ok(()), |pipeline| pipeline.shutdown());
+        // Flush the last successfully committed state even on failure, while
+        // preserving the original error rather than masking it with cleanup.
+        let durable = self.force_durable_flush();
+        persisted.and(durable)?;
         self.ibd_blocks_since_flush = 0;
         Ok(())
     }
@@ -2451,7 +2480,7 @@ impl StateStore {
     ///
     /// Returns `Ok(vec![])` when no headers are indexed at `height`.
     /// First entry is always the best-header-chain id at `height`
-    /// (the [`HEADERS_BY_HEIGHT`] invariant); subsequent entries are
+    /// (the `HEADERS_BY_HEIGHT` invariant); subsequent entries are
     /// orphans (validated headers at this height that aren't on the
     /// current best chain). Order beyond slot 0 is insertion-order
     /// of the orphan arrivals.
@@ -2693,7 +2722,7 @@ impl StateStore {
     ///
     /// The walk, the durable `pow_validity = 3` writes, and the best-header
     /// re-anchor all live in the shared header tables
-    /// ([`crate::header_store::HeaderSectionTables::invalidate_validation_branch`]),
+    /// (`crate::header_store::HeaderSectionTables::invalidate_validation_branch`),
     /// which the digest backend drives with the same semantics. This wrapper
     /// supplies the committed chain-state snapshot and mirrors the re-anchored
     /// best-header back onto the in-memory `ChainState`.
@@ -2711,6 +2740,7 @@ impl StateStore {
         &mut self,
         header_id: [u8; 32],
     ) -> Result<Vec<[u8; 32]>, StateError> {
+        self.flush_persist_pipeline()?;
         let (invalidated, cs_after) = self
             .headers
             .invalidate_validation_branch(header_id, &self.chain_state.to_persisted())?;
@@ -3780,7 +3810,7 @@ impl StateStore {
         let chain_state_bytes = cs.serialize();
 
         let durable_this_block = if self.ibd_mode && self.ibd_flush_interval > 0 {
-            self.ibd_blocks_since_flush >= self.ibd_flush_interval
+            self.ibd_blocks_since_flush.saturating_add(1) >= self.ibd_flush_interval
         } else {
             true
         };
@@ -4138,6 +4168,97 @@ pub use crate::avl::serialization::{node_from_bytes, node_to_bytes};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ibd_periodic_barrier_runs_on_nth_job_and_exit_drains_remaining_jobs() {
+        let (mut store, _directory) = fresh_store();
+        store.initialize_genesis(&[]).unwrap();
+        let root = store.root_digest();
+        store.enable_persist_pipeline(4).unwrap();
+        store.set_ibd_mode(true, 3).unwrap();
+        for height in 1..=4 {
+            store
+                .apply_block_unchecked(height, &[height as u8; 32], &root, &[])
+                .unwrap();
+            store.flush_persist_pipeline().unwrap();
+            let progress = store.persistence_progress().unwrap();
+            assert_eq!(progress.enqueued_jobs, height as u64);
+            assert_eq!(progress.committed_jobs, height as u64);
+            assert_eq!(
+                progress.synchronously_durable_jobs,
+                if height < 3 { 0 } else { 3 }
+            );
+        }
+        store.set_ibd_mode(false, 0).unwrap();
+        assert_eq!(
+            store
+                .persistence_progress()
+                .unwrap()
+                .synchronously_durable_jobs,
+            4
+        );
+        assert!(!store.ibd_mode());
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn shutdown_pending_persistence_failure_returns_original_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        store.inject_pending_persist_failure_for_test(42);
+        assert!(matches!(
+            store.shutdown_cleanly(),
+            Err(StateError::PersistFailed { height: 42, .. })
+        ));
+        assert!(matches!(
+            store.shutdown_cleanly(),
+            Err(StateError::PersistFailed { height: 42, .. })
+        ));
+        assert!(matches!(
+            store.enable_persist_pipeline(4),
+            Err(StateError::PersistFailed { height: 42, .. })
+        ));
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn failed_ibd_exit_retains_mode_and_original_pipeline_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("state.redb")).unwrap();
+        store.set_ibd_mode(true, 50).unwrap();
+        store.inject_pending_persist_failure_for_test(42);
+        assert!(matches!(
+            store.set_ibd_mode(false, 0),
+            Err(StateError::PersistFailed { height: 42, .. })
+        ));
+        assert!(store.ibd_mode());
+        assert_eq!(store.ibd_flush_interval, 50);
+    }
+
+    #[test]
+    fn reopen_rejects_full_block_metadata_ahead_of_avl_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.redb");
+        let store = StateStore::open(&path).unwrap();
+        let mut metadata = store.chain_state.to_persisted();
+        metadata.best_full_block_height = 42;
+        metadata.best_full_block_id = [42; 32];
+        let write = store.db.begin_write().unwrap();
+        write
+            .open_table(CHAIN_STATE_META)
+            .unwrap()
+            .insert("chain_state", metadata.serialize().as_slice())
+            .unwrap();
+        write.commit().unwrap();
+        drop(store);
+        assert!(matches!(
+            StateStore::open(&path),
+            Err(StateError::DbCorruption {
+                table: "chain_state_meta",
+                ..
+            })
+        ));
+    }
 
     // ----- helpers -----
 

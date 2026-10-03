@@ -3,11 +3,15 @@
 //! Scala parity: `AES.scala:62` defines the cipher parameters we
 //! match byte-for-byte. PBKDF2-HMAC-SHA512 with 128,000 iterations
 //! produces a 32-byte key; AES-256-GCM with a fresh 96-bit IV per
-//! encryption produces the ciphertext + 16-byte auth tag.
+//! encryption produces ciphertext followed by a 16-byte GCM tag. Scala's
+//! JSON format calls the first 16 bytes of that stream `authTag` and the
+//! remainder `cipherText`; these historical names do not describe the GCM
+//! components. Imports also accept the layout written by earlier Rust releases.
 //!
-//! All intermediate buffers (derived key, plaintext while encrypted,
-//! plaintext after decrypt) are wrapped in `zeroize::Zeroizing` so
-//! the OS doesn't leak them via swap or crash dumps.
+//! Owned derived keys and decrypted plaintext are wrapped in
+//! `zeroize::Zeroizing` and wiped on drop, including error paths. This does
+//! not prevent copies in cryptographic implementations, registers, swap or
+//! process dumps while values are alive; plaintext input remains caller-owned.
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -32,9 +36,10 @@ pub fn derive_key_pbkdf2(password: &[u8], salt: &[u8], iterations: u32) -> Zeroi
 }
 
 /// Encrypt under AES-256-GCM. Returns `(ciphertext, auth_tag)` as
-/// separate byte vectors — matching Scala `EncryptedSecret.scala:18-19`
-/// wire shape where `cipherText` and `authTag` are stored as separate
-/// JSON fields, NOT concatenated.
+/// separate byte vectors with Scala's historical JSON field split: `auth_tag`
+/// contains the first 16 bytes of the encrypted stream, and `ciphertext` the
+/// remainder, including the cryptographic GCM tag. Decrypt concatenates these
+/// fields in the opposite order from their return tuple.
 ///
 /// **IV reuse warning**: the caller MUST pass a freshly random 96-bit
 /// IV. AES-256-GCM under IV reuse leaks plaintext correlations and
@@ -65,7 +70,11 @@ pub fn encrypt(
             "internal: ciphertext shorter than auth tag".to_string(),
         ));
     }
-    let (ct, tag) = ciphertext_with_tag.split_at(ciphertext_with_tag.len() - 16);
+    // Scala AES.encrypt names the first 16 bytes `authTag` and the
+    // remaining bytes `cipherText`, then concatenates in that order on
+    // decrypt. Preserve this historical field layout rather than assuming
+    // that the JSON authTag contains the cryptographic GCM tag.
+    let (tag, ct) = ciphertext_with_tag.split_at(16);
     let mut tag_arr = [0u8; 16];
     tag_arr.copy_from_slice(tag);
     Ok((ct.to_vec(), tag_arr))
@@ -89,9 +98,24 @@ pub fn decrypt(
     let nonce = Nonce::from_slice(iv);
 
     let mut combined = Vec::with_capacity(ciphertext.len() + 16);
+    combined.extend_from_slice(auth_tag);
+    combined.extend_from_slice(ciphertext);
+
+    let result = cipher.decrypt(
+        nonce,
+        Payload {
+            msg: &combined,
+            aad: &[],
+        },
+    );
+    if let Ok(plaintext) = result {
+        return Ok(Zeroizing::new(plaintext));
+    }
+    // Older Rust releases wrote conventional ciphertext/tag fields. Retain
+    // authenticated import compatibility without rewriting those files.
+    combined.clear();
     combined.extend_from_slice(ciphertext);
     combined.extend_from_slice(auth_tag);
-
     cipher
         .decrypt(
             nonce,

@@ -164,6 +164,61 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --all --doc
 
+      - name: Wallet proving feature tests (ubuntu only)
+        if: runner.os == 'Linux'
+        run: cargo test -p ergo-wallet --features test-utils --test multi_sig_inline --test proving_internal_consistency
+
+  wallet-interop:
+    name: Scala wallet interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: VirtusLab/scala-cli-setup@v1
+      - uses: sbt/setup-sbt@v1
+        with:
+          sbt-runner-version: 1.12.11
+      - uses: Swatinem/rust-cache@v2
+      # ergo-wallet 6.0.6 is published locally by the reference build,
+      # rather than to Maven Central. A fresh runner needs this cold path.
+      - name: Cache pinned Scala wallet dependencies
+        id: wallet-oracle-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ivy2/local
+            ~/.cache/coursier
+          key: wallet-oracle-${{ hashFiles('scripts/jvm_wallet_oracle/WalletOracle.scala') }}-23aabead88774d27f2c9190ace3c9abbc8f1d5cb
+      - name: Publish reference wallet locally
+        if: steps.wallet-oracle-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v6.0.6 https://github.com/ergoplatform/ergo.git "$RUNNER_TEMP/wallet-reference"
+          cd "$RUNNER_TEMP/wallet-reference"
+          test "$(git rev-parse HEAD)" = 23aabead88774d27f2c9190ace3c9abbc8f1d5cb
+          sbt "ergoWallet/publishLocal"
+      - name: Verify committed Scala fixtures
+        shell: bash
+        run: |
+          scala-cli run scripts/jvm_wallet_oracle/WalletOracle.scala --server=false --jvm 17 > "$RUNNER_TEMP/scala-wallet.json"
+          diff -u test-vectors/wallet/scala_6_0_6.json "$RUNNER_TEMP/scala-wallet.json"
+      - name: Generate Rust wallet and unlock with Scala
+        shell: bash
+        run: |
+          export ERGO_WALLET_INTEROP_FILE="$RUNNER_TEMP/rust-wallet.json"
+          cargo test -p ergo-wallet --test it rust_generated_file_exports_for_scala_verification
+          scala-cli run scripts/jvm_wallet_oracle/WalletOracle.scala --server=false --jvm 17 -- verify "$ERGO_WALLET_INTEROP_FILE" test-rust-to-scala-pw
+
   check-required:
     # Preserve the existing branch-protection context. A failed, cancelled,
     # or skipped matrix must never turn this required check green.

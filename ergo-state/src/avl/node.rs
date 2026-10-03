@@ -1,7 +1,7 @@
 //! AVL+ tree node types and arena-based storage.
 //!
 //! Nodes are identified by u64 IDs and stored in an arena (HashMap now, redb
-//! table later). This avoids Rc<RefCell> and maps cleanly to persistent storage.
+//! table later). This avoids `Rc<RefCell>` and maps cleanly to persistent storage.
 
 use ergo_primitives::digest::Digest32;
 

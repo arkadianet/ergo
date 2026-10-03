@@ -676,7 +676,7 @@ fn persist_pipeline_batched_commits_restore_correctly() {
     // Phase 1: apply blocks 1-10 with persist pipeline enabled.
     {
         let mut store = StateStore::open(&db_path).unwrap();
-        store.enable_persist_pipeline(64);
+        store.enable_persist_pipeline(64).unwrap();
         init_genesis(&mut store);
 
         let digests_data =

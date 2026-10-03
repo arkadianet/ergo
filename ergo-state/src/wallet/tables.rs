@@ -78,7 +78,7 @@ pub const WALLET_DERIVATION_HEAD: TableDefinition<(), u64> =
 
 /// Tracked HD pubkeys. Keyed by `(derivation_path_index, pubkey)` so
 /// the BTree iteration order = derivation order across restarts.
-/// Value carries metadata (derivation path Vec<u32>, optional label,
+/// Value carries metadata (derivation path `Vec<u32>`, optional label,
 /// height-added).
 ///
 /// Key: `(derivation_path_index: u64 BE, pubkey: [u8; 33])` packed

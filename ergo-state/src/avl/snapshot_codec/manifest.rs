@@ -276,7 +276,7 @@ fn collect_chunk_roots(
 // ----- Consume-side reconstruction -----
 
 /// A node in a [`ReconstructedTree`]. Indices into the tree's
-/// arena, mirroring the runtime [`crate::avl::AvlNode`] but with
+/// arena, mirroring the runtime [`crate::avl::node::AvlNode`] but with
 /// fully-resolved labels and arena indices instead of `NodeId`s.
 ///
 /// `Internal.key` is the separator key (the key of the leftmost

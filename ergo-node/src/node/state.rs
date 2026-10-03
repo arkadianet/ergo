@@ -350,6 +350,7 @@ pub(crate) struct NodeState {
     /// from `sync_tick` after each block apply to keep wallet tables
     /// up-to-date without coupling the sync layer to the wallet.
     /// `None` in no-API / headers-only mode.
+    pub(super) wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
     pub(super) wallet_hook: Option<Arc<wallet_bridge::WalletStateHook>>,
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).

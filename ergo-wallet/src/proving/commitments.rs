@@ -14,6 +14,32 @@ use crate::proving::node_position::NodePosition;
 use crate::proving::randomness::ProvingRng;
 use ergo_ser::sigma_value::SigmaBoolean;
 
+/// Generate message-bound, single-owner commitments for native signing.
+/// Public commitments can be shared, while [`crate::proving::prover::Prover::sign_bound`]
+/// consumes the private nonce material. The compatibility function below is
+/// intentionally lower level and leaves nonce lifecycle enforcement to callers.
+pub fn generate_bound_commitments_for_tx(
+    unsigned_tx: &ergo_ser::transaction::UnsignedTransaction,
+    boxes_to_spend: &[ergo_ser::ergo_box::ErgoBox],
+    data_boxes: &[ergo_ser::ergo_box::ErgoBox],
+    state_context: &crate::tx_context::BlockchainStateContext,
+    generate_for: &[SigmaBoolean],
+    rng: &mut dyn ProvingRng,
+) -> Result<crate::proving::hints::BoundTransactionHints, WalletError> {
+    let message = crate::proving::prover::Prover::bytes_to_sign_for_tx(unsigned_tx)?;
+    let hints = generate_commitments_for_tx(
+        unsigned_tx,
+        boxes_to_spend,
+        data_boxes,
+        state_context,
+        generate_for,
+        rng,
+    )?;
+    Ok(crate::proving::hints::BoundTransactionHints::new(
+        hints, &message,
+    ))
+}
+
 /// Generate commitments for every leaf in `sigma_tree` whose proposition
 /// appears in `generate_for`. Mirrors Scala
 /// `ProverUtils.generateCommitmentsFor(sigmaTree, generateFor)`.
@@ -21,6 +47,7 @@ use ergo_ser::sigma_value::SigmaBoolean;
 /// Only `ProveDlog` and `ProveDHTuple` leaves are commitment-able.
 /// Compound nodes (`Cand`, `Cor`, `Cthreshold`) are walked recursively.
 /// `TrivialProp` and leaves outside `generate_for` are skipped.
+/// Never reuse the resulting own commitment for another signing operation.
 pub fn generate_commitments_for(
     sigma_tree: &SigmaBoolean,
     generate_for: &[SigmaBoolean],
@@ -52,7 +79,7 @@ fn traverse_node(
                 let (r, commitment) = sample_commitment_for(sb, rng)?;
                 bag.add(Hint::OwnCommitment(OwnCommitment {
                     image: sb.clone(),
-                    secret_randomness: r,
+                    secret_randomness: r.into(),
                     commitment: commitment.clone(),
                     position: position.clone(),
                 }));

@@ -10,70 +10,108 @@ use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::{LockState, SecretStorage};
 use redb::{Database, ReadableTableMetadata, WriteTransaction};
 
-/// Each admitted rescan owns a unique process-local identity. Rollback revokes
-/// it immediately; a replacement rescan cannot make the old task active again.
-static RESCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
-static ACTIVE_RESCAN: AtomicU64 = AtomicU64::new(0);
-
-/// Cheap gate for live wallet apply while a rescan owns the active identity.
-pub fn rescan_in_progress() -> bool {
-    ACTIVE_RESCAN.load(Ordering::SeqCst) != 0
+/// Rescan ownership belongs to one node, so embedded nodes and parallel tests
+/// cannot suppress each other's live wallet writes.
+#[derive(Debug, Default)]
+pub struct RescanControl {
+    generation: AtomicU64,
+    active: AtomicU64,
+    pub from_height: std::sync::atomic::AtomicU32,
+    pub rebuilding: std::sync::atomic::AtomicBool,
+    stopping: std::sync::atomic::AtomicBool,
+    pub(crate) workers: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RescanIdentity(u64);
-
-impl RescanIdentity {
-    pub(crate) fn admit() -> Option<Self> {
-        // Never reuse an identity, including on counter exhaustion.
-        let id = RESCAN_GENERATION
+impl RescanControl {
+    pub fn in_progress(&self) -> bool {
+        self.active.load(Ordering::SeqCst) != 0
+    }
+    pub(crate) fn admit(self: &std::sync::Arc<Self>) -> Option<RescanIdentity> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return None;
+        }
+        let id = self
+            .generation
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
             .ok()?
             + 1;
-        ACTIVE_RESCAN
+        self.active
             .compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
-            .ok()
-            .map(|_| Self(id))
+            .ok()?;
+        if self.stopping.load(Ordering::SeqCst) {
+            self.cancel();
+            return None;
+        }
+        Some(RescanIdentity {
+            id,
+            control: self.clone(),
+        })
+    }
+    pub(crate) fn cancel(&self) -> bool {
+        self.active.swap(0, Ordering::SeqCst) != 0
+    }
+    pub(crate) fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+    pub(crate) fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn owns(self) -> bool {
-        ACTIVE_RESCAN.load(Ordering::SeqCst) == self.0
+    /// Join every retained worker. Cancellation of the joining future returns
+    /// its current handle to this controller, so another shutdown owner can
+    /// finish the join instead of silently detaching a database owner.
+    pub(crate) async fn join_workers(
+        self: &std::sync::Arc<Self>,
+    ) -> Result<(), tokio::task::JoinError> {
+        let mut failure = None;
+        loop {
+            let Some(worker) = self.workers.lock().pop() else {
+                break;
+            };
+            let mut joining = RescanWorkerJoin {
+                control: self.clone(),
+                worker: Some(worker),
+            };
+            let result = joining.worker.as_mut().unwrap().await;
+            joining.worker.take();
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
+}
 
-    pub(crate) fn release(self) -> bool {
-        ACTIVE_RESCAN
-            .compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst)
+struct RescanWorkerJoin {
+    control: std::sync::Arc<RescanControl>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RescanWorkerJoin {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.control.workers.lock().push(worker);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RescanIdentity {
+    id: u64,
+    pub(crate) control: std::sync::Arc<RescanControl>,
+}
+
+impl RescanIdentity {
+    pub(crate) fn owns(&self) -> bool {
+        self.control.active.load(Ordering::SeqCst) == self.id
+    }
+    pub(crate) fn release(&self) -> bool {
+        self.control
+            .active
+            .compare_exchange(self.id, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 }
-
-fn cancel_rescan() -> bool {
-    ACTIVE_RESCAN.swap(0, Ordering::SeqCst) != 0
-}
-
-/// Start height of the in-flight rescan. Only meaningful while
-/// [`rescan_in_progress`] is true. Admission and owner-only flag cleanup
-/// hold the wallet database writer lock so a new owner cannot lose its flags.
-pub static RESCAN_FROM_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-#[cfg(test)]
-pub(crate) static RESCAN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Scan-rebuild-in-progress flag. Set by the Rescan dispatch ONLY for a
-/// full rebuild (`fromHeight == 0`) that rebuilds the registered `/scan/*`
-/// tables; read by the chain-apply hook's scan path (`registered_scan_count`
-/// / `match_boxes`), which no-ops while it is set. This quiesces live scan
-/// apply for the rebuild's duration: the rebuild clears and repopulates the
-/// scan tables block-by-block, so a concurrent live write would race it
-/// (miss a spend against the cleared reverse index, or stale that index).
-///
-/// Distinct from [`rescan_in_progress`] on purpose: a PARTIAL rescan
-/// (`fromHeight > 0`) owns an identity but does NOT rebuild scans,
-/// so live scan tracking must keep running across it. Cleared when the
-/// owning rescan task finishes. A cancelled task cannot clear a replacement
-/// task's flag (process-local; reads `false` after a restart).
-pub static SCAN_REBUILD_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Test-only fault-injection flag for the atomic-commit test.
 /// When `true`, `unlock_and_sync` panics AFTER inserting the
@@ -336,7 +374,7 @@ impl WalletBootService {
 /// Production `RescanGuard` impl. Two methods with distinct semantics:
 ///
 /// - `abort_in_progress`: called by `rollback_block_from_wallet` on
-///   every rollback (success or failure). Swaps `ACTIVE_RESCAN`
+///   every rollback (success or failure). Revokes the node-owned active identity
 ///   to zero and writes `WALLET_SCAN_INVALIDATED = true` ONLY if
 ///   a rescan was actually running — successful rollback without an
 ///   active rescan stays consistent with the rolled-back chain and
@@ -349,17 +387,17 @@ impl WalletBootService {
 ///   warranted regardless of whether a rescan was active.
 ///
 /// Operational notes:
-/// - `ACTIVE_RESCAN` is a process-local atomic, not persisted;
+/// - The active identity is a per-node atomic, not persisted;
 ///   the swap runs immediately and is not coupled to the caller's
 ///   `&WriteTransaction`. A later commit failure leaves the flag
-///   cleared. Reads as zero after a process restart.
+///   cleared. Starts inactive on each node boot.
 /// - `WALLET_SCAN_INVALIDATED` is durable. The insert queues on the
 ///   caller's `&WriteTransaction`, becoming effective only on
 ///   commit. While set, live wallet apply no-ops; an operator-driven
 ///   rescan completing successfully is the only path that clears it.
-pub struct ProdRescanGuard;
+pub type ProdRescanGuard = RescanControl;
 
-impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
+impl ergo_state::wallet::apply::RescanGuard for RescanControl {
     /// Abort an in-progress rescan if one is active. Conditional
     /// invalidation matches the semantics
     /// `rollback_block_from_wallet` needs on the success path:
@@ -369,7 +407,7 @@ impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
     /// invalidates because the rescan was working against a chain
     /// state that's now gone.
     fn abort_in_progress(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        let was_in_progress = cancel_rescan();
+        let was_in_progress = self.cancel();
         if was_in_progress {
             txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         }
@@ -381,7 +419,7 @@ impl ergo_state::wallet::apply::RescanGuard for ProdRescanGuard {
     /// history cannot be replayed — invalidation IS warranted
     /// regardless of whether a rescan was active.
     fn force_invalidate(&self, txn: &WriteTransaction) -> Result<(), redb::Error> {
-        cancel_rescan();
+        self.cancel();
         txn.open_table(WALLET_SCAN_INVALIDATED)?.insert((), true)?;
         Ok(())
     }
@@ -405,14 +443,66 @@ mod tests {
 
     #[test]
     fn rescan_identity_single_owner_admits_and_releases() {
-        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
-        let identity = RescanIdentity::admit().unwrap();
-        assert!(rescan_in_progress());
+        let control = std::sync::Arc::new(RescanControl::default());
+        let identity = control.admit().unwrap();
+        assert!(control.in_progress());
         assert!(identity.owns());
         assert!(identity.release());
         assert!(!identity.owns());
-        assert!(!rescan_in_progress());
-        assert!(!cancel_rescan());
+        assert!(!control.in_progress());
+        assert!(!control.cancel());
+    }
+
+    #[test]
+    fn rescan_ownership_is_independent_between_embedded_nodes() {
+        let left = std::sync::Arc::new(RescanControl::default());
+        let right = std::sync::Arc::new(RescanControl::default());
+        let left_owner = left.admit().unwrap();
+        let right_owner = right.admit().unwrap();
+        assert!(left.cancel());
+        assert!(!left_owner.owns());
+        assert!(right_owner.owns());
+        assert!(right.in_progress());
+        assert!(right_owner.release());
+    }
+
+    #[tokio::test]
+    async fn cancelled_worker_join_retains_handle_for_next_shutdown_owner() {
+        let control = std::sync::Arc::new(RescanControl::default());
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        let entered = started.clone();
+        control
+            .workers
+            .lock()
+            .push(tokio::task::spawn_blocking(move || {
+                entered.notify_one();
+                blocked.recv().unwrap();
+            }));
+        started.notified().await;
+        let owner = control.clone();
+        let joining = tokio::spawn(async move { owner.join_workers().await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !control.workers.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        joining.abort();
+        assert!(joining.await.unwrap_err().is_cancelled());
+        assert_eq!(control.workers.lock().len(), 1);
+
+        let owner = control.clone();
+        let mut next_join = tokio::spawn(async move { owner.join_workers().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut next_join)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        next_join.await.unwrap().unwrap();
+        assert!(control.workers.lock().is_empty());
     }
 
     /// Exercises the `WalletBootService` write path under fault
@@ -547,20 +637,20 @@ mod tests {
 
     #[test]
     fn rescan_identity_second_admission_rejected() {
-        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
-        let first = RescanIdentity::admit().unwrap();
-        assert!(RescanIdentity::admit().is_none());
+        let control = std::sync::Arc::new(RescanControl::default());
+        let first = control.admit().unwrap();
+        assert!(control.admit().is_none());
         assert!(first.owns());
         assert!(first.release());
     }
 
     #[test]
     fn rescan_identity_cancelled_owner_cannot_release_successor() {
-        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
-        let first = RescanIdentity::admit().unwrap();
-        assert!(cancel_rescan());
-        let second = RescanIdentity::admit().unwrap();
-        assert_ne!(first, second);
+        let control = std::sync::Arc::new(RescanControl::default());
+        let first = control.admit().unwrap();
+        assert!(control.cancel());
+        let second = control.admit().unwrap();
+        assert_ne!(first.id, second.id);
         assert!(!first.owns());
         assert!(!first.release());
         assert!(second.owns());

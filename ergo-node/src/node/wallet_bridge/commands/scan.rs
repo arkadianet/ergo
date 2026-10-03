@@ -43,8 +43,10 @@ fn internal(e: impl std::fmt::Display) -> WalletAdminError {
 /// out of sync. Reject for the rebuild window — the caller retries once it
 /// completes. (`Ordering::SeqCst` matches the rebuild's flag set in
 /// `admin.rs`.)
-fn reject_during_scan_rebuild() -> Result<(), WalletAdminError> {
-    if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
+fn reject_during_scan_rebuild(
+    control: &crate::wallet_boot::RescanControl,
+) -> Result<(), WalletAdminError> {
+    if control.rebuilding.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(WalletAdminError::BadRequest(
             "scan rebuild in progress (full /wallet/rescan); retry after it completes".to_string(),
         ));
@@ -181,7 +183,7 @@ pub(crate) async fn register(
     request: ScanRequestDto,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -289,7 +291,7 @@ pub(crate) async fn deregister(
     scan_id: u16,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -607,7 +609,7 @@ pub(crate) async fn stop_tracking(
     box_id: String,
     reply: oneshot::Sender<Result<(), WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -620,7 +622,7 @@ pub(crate) async fn add_box(
     box_json: serde_json::Value,
     reply: oneshot::Sender<Result<String, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -632,7 +634,7 @@ pub(crate) async fn p2s_rule(
     p2s: String,
     reply: oneshot::Sender<Result<u16, WalletAdminError>>,
 ) {
-    if let Err(e) = reject_during_scan_rebuild() {
+    if let Err(e) = reject_during_scan_rebuild(ctx.rescan) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -2265,7 +2267,6 @@ mod tests {
 
     #[test]
     fn scan_rebuild_in_progress_quiesces_live_scan_apply() {
-        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
         // While a full rescan rebuilds the scan tables, the live block-apply
         // scan path must no-op so it doesn't race the rebuild's block-by-block
         // clear+repopulate. The gate lives in the `WalletApplyHook` impl:
@@ -2290,6 +2291,7 @@ mod tests {
 
         let db = std::sync::Arc::new(db);
         let hook = crate::node::wallet_bridge::WalletStateHook {
+            rescan: std::sync::Arc::new(crate::wallet_boot::RescanControl::default()),
             wallet: std::sync::Arc::new(parking_lot::RwLock::new(
                 ergo_wallet::state::WalletState::empty(false),
             )),
@@ -2306,10 +2308,10 @@ mod tests {
 
         // Flag set: both hook methods quiesce. Capture under the flag, then
         // reset BEFORE asserting so a failure can't leak the flag to siblings.
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
+        hook.rescan.rebuilding.store(true, Ordering::SeqCst);
         let gated_count = hook.registered_scan_count();
         let gated_match = hook.match_boxes(std::slice::from_ref(&b));
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        hook.rescan.rebuilding.store(false, Ordering::SeqCst);
 
         assert_eq!(gated_count, 0, "live scan count gated to 0 during rebuild");
         assert_eq!(
@@ -2324,17 +2326,17 @@ mod tests {
 
     #[test]
     fn scan_mutation_guard_rejects_during_rebuild() {
-        let _guard = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
+        let control = crate::wallet_boot::RescanControl::default();
         use std::sync::atomic::Ordering;
         // Guard passes when no rebuild is in flight...
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
-        assert!(reject_during_scan_rebuild().is_ok());
+        control.rebuilding.store(false, Ordering::SeqCst);
+        assert!(reject_during_scan_rebuild(&control).is_ok());
         // ...and rejects scan mutations while a rebuild snapshot is live.
         // Capture under the flag, then reset BEFORE asserting so a failure
         // can't leak the flag to sibling tests (same discipline as above).
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(true, Ordering::SeqCst);
-        let gated = reject_during_scan_rebuild();
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
+        control.rebuilding.store(true, Ordering::SeqCst);
+        let gated = reject_during_scan_rebuild(&control);
+        control.rebuilding.store(false, Ordering::SeqCst);
         assert!(
             matches!(gated, Err(WalletAdminError::BadRequest(_))),
             "scan mutation must be rejected during rebuild, got {gated:?}"

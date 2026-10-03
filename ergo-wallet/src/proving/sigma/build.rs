@@ -70,8 +70,8 @@ pub(super) fn build_tree(
                         (r, r_bytes)
                     });
                 LeafState::Real {
-                    secret,
-                    r_scalar: r,
+                    secret: zeroize::Zeroizing::new(secret),
+                    r_scalar: zeroize::Zeroizing::new(r),
                     commit_bytes: r_pt.to_vec(),
                 }
             } else if let Some(rsp) = find_real_secret_proof_compound(prop, &position, hints) {
@@ -162,8 +162,8 @@ pub(super) fn build_tree(
                 cb.extend_from_slice(&a);
                 cb.extend_from_slice(&b);
                 LeafState::Real {
-                    secret,
-                    r_scalar: r,
+                    secret: zeroize::Zeroizing::new(secret),
+                    r_scalar: zeroize::Zeroizing::new(r),
                     commit_bytes: cb,
                 }
             } else if let Some(rsp) = find_real_secret_proof_compound(prop, &position, hints) {

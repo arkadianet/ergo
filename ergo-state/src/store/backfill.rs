@@ -111,19 +111,19 @@ impl StateStore {
     /// Returns the count of new entries written. Caller can use this
     /// to log a one-time migration message on first boot.
     ///
-    /// Thin wrapper over [`back_fill_modifier_type_index_with_progress`]
+    /// Thin wrapper over [`Self::back_fill_modifier_type_index_with_progress`]
     /// with a no-op callback.
     pub fn back_fill_modifier_type_index(&self) -> Result<usize, StateError> {
         self.back_fill_modifier_type_index_with_progress(|_| {})
     }
 
-    /// Same as [`back_fill_modifier_type_index`] but with a progress
+    /// Same as [`Self::back_fill_modifier_type_index`] but with a progress
     /// callback at well-defined points (Start, optionally Skipped on
     /// the sentinel-present fast path; otherwise AfterCollect,
     /// BeforeCommit, AfterCommit). Used by the node's init markers to
     /// attribute the boot-phase memory shape.
     ///
-    /// Thin wrapper over [`back_fill_modifier_type_index_chunked`]
+    /// Thin wrapper over [`Self::back_fill_modifier_type_index_chunked`]
     /// with the production chunk caps. The streaming implementation
     /// eliminates the previous `Vec<([u8;32], Vec<u8>)>` of every
     /// header row, and short-circuits on a `STATE_META` sentinel
@@ -466,7 +466,7 @@ impl StateStore {
         Ok(written)
     }
 
-    /// Back-fill [`HEADERS_BY_HEIGHT`] for pre-existing data.
+    /// Back-fill `HEADERS_BY_HEIGHT` for pre-existing data.
     ///
     /// Walks every header in `HEADER_META`, groups header_ids by
     /// `meta.height`, then for each height writes the index row

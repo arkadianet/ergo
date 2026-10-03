@@ -18,7 +18,7 @@ fn dummy_own_commitment(seed: u8) -> Hint {
     pt[1] = seed;
     Hint::OwnCommitment(OwnCommitment {
         image: dummy_dlog_pk(seed),
-        secret_randomness: [seed; 32],
+        secret_randomness: [seed; 32].into(),
         commitment: FirstProverMessage::Schnorr(pt),
         position: NodePosition::crypto_tree_prefix(),
     })
@@ -132,13 +132,13 @@ fn first_prover_message_schnorr_and_dh_tuple_partition_correctly() {
 
     let own_schnorr = Hint::OwnCommitment(OwnCommitment {
         image: dummy_dlog_pk(0xAA),
-        secret_randomness: [0xAA; 32],
+        secret_randomness: [0xAA; 32].into(),
         commitment: FirstProverMessage::Schnorr(schnorr_pt),
         position: NodePosition::crypto_tree_prefix(),
     });
     let own_dht = Hint::OwnCommitment(OwnCommitment {
         image: dummy_dlog_pk(0xBB),
-        secret_randomness: [0xBB; 32],
+        secret_randomness: [0xBB; 32].into(),
         commitment: FirstProverMessage::DhTuple { a: dht_a, b: dht_b },
         position: NodePosition {
             positions: vec![1, 0],

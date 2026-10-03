@@ -63,7 +63,7 @@ mod lib_tests {
         )
         .unwrap();
         let seed = m.to_seed("");
-        let pk = miner_pubkey_for_seed(&seed).unwrap();
+        let pk = miner_pubkey_for_seed(&seed[..]).unwrap();
         let hex = hex::encode(pk);
         assert_eq!(hex.len(), 66, "33 bytes hex = 66 chars");
         assert!(

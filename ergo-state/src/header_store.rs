@@ -28,6 +28,29 @@ use crate::store::{
     MODIFIER_TYPE_INDEX, SECTION_HEIGHT_INDEX, STATE_META,
 };
 
+/// Header writers own only the header fields. The foreground full-block
+/// pointer may already include queued AVL deltas, so always retain the
+/// transaction's committed full-block pointer when publishing a header tip.
+fn persist_header_chain_state(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    proposed: &ChainStateMeta,
+) -> Result<(), StateError> {
+    let committed = table
+        .get("chain_state")?
+        .map(|row| ChainStateMeta::deserialize(row.value()))
+        .transpose()
+        .map_err(|error| StateError::DbCorruption {
+            table: "chain_state_meta",
+            key: "chain_state".into(),
+            reason: error.to_string(),
+        })?;
+    let mut merged = proposed.clone();
+    merged.best_full_block_id = committed.as_ref().map_or([0; 32], |c| c.best_full_block_id);
+    merged.best_full_block_height = committed.as_ref().map_or(0, |c| c.best_full_block_height);
+    table.insert("chain_state", merged.serialize().as_slice())?;
+    Ok(())
+}
+
 /// Header + block-section tables with the buffered-write overlay.
 ///
 /// `db` is shared with the embedding store: both hold an `Arc` to the
@@ -415,7 +438,7 @@ impl HeaderSectionTables {
                 }
             }
             let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
-            cs_table.insert("chain_state", cs_after.serialize().as_slice())?;
+            persist_header_chain_state(&mut cs_table, &cs_after)?;
         }
         write_txn.commit()?;
 
@@ -641,7 +664,7 @@ impl HeaderSectionTables {
             }
 
             let mut cs_table = write_txn.open_table(CHAIN_STATE_META)?;
-            cs_table.insert("chain_state", cs_after.serialize().as_slice())?;
+            persist_header_chain_state(&mut cs_table, cs_after)?;
 
             // HEADERS_BY_HEIGHT — every batched header gets appended at
             // its height (idempotent). Orphans land here too so
@@ -792,7 +815,7 @@ impl HeaderSectionTables {
                 cs.best_header_height = height;
                 cs.best_header_score = score.clone();
                 let mut chain_meta = write_txn.open_table(CHAIN_STATE_META)?;
-                chain_meta.insert("chain_state", cs.serialize().as_slice())?;
+                persist_header_chain_state(&mut chain_meta, &cs)?;
 
                 let mut idx_table = write_txn.open_table(HEADER_CHAIN_INDEX)?;
                 rewrite_best_chain_into_index(
@@ -908,4 +931,47 @@ fn insert_block_section_in_txn(
         idx.insert(modifier_id.as_slice(), section_type)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod metadata_ownership_tests {
+    use super::*;
+
+    // ----- error paths -----
+
+    #[test]
+    fn header_publication_preserves_only_committed_full_block_tip() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::create(directory.path().join("ownership.redb")).unwrap();
+        let mut committed = crate::chain::ChainState::empty().to_persisted();
+        committed.best_full_block_height = 7;
+        committed.best_full_block_id = [7; 32];
+        let initial = db.begin_write().unwrap();
+        initial
+            .open_table(CHAIN_STATE_META)
+            .unwrap()
+            .insert("chain_state", committed.serialize().as_slice())
+            .unwrap();
+        initial.commit().unwrap();
+        // Foreground state leads the queued AVL commit by one block.
+        let mut proposed = committed.clone();
+        proposed.best_full_block_height = 8;
+        proposed.best_full_block_id = [8; 32];
+        proposed.best_header_height = 100;
+        proposed.best_header_id = [100; 32];
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(CHAIN_STATE_META).unwrap();
+            persist_header_chain_state(&mut table, &proposed).unwrap();
+        }
+        write.commit().unwrap();
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(CHAIN_STATE_META).unwrap();
+        let result =
+            ChainStateMeta::deserialize(table.get("chain_state").unwrap().unwrap().value())
+                .unwrap();
+        assert_eq!(result.best_full_block_height, 7);
+        assert_eq!(result.best_full_block_id, [7; 32]);
+        assert_eq!(result.best_header_height, 100);
+    }
 }

@@ -232,14 +232,14 @@ pub(super) fn handle_sync_tick_at(state: &mut NodeState, now: Instant) {
             // synchronous and persist-pipeline paths. Rollback also rewinds
             // wallet state atomically; missing required sections invalidate
             // wallet scan state for a full rescan.
-            let rescan_guard = crate::wallet_boot::ProdRescanGuard;
+            let rescan_guard = state.wallet_rescan.as_ref();
             let wallet_wiring =
                 state
                     .wallet_hook
                     .as_deref()
                     .map(|h| ergo_state::wallet::WalletWiring {
                         hook: h as &dyn ergo_state::wallet::WalletApplyHook,
-                        rescan_guard: &rescan_guard,
+                        rescan_guard,
                     });
             state.executor.try_apply_next_blocks(
                 &mut state.store,

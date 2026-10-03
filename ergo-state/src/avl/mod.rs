@@ -13,7 +13,7 @@
 //!   by the tree to compute the authenticated root.
 //! * [`changelog`] — `ChangeLog`: before-image undo records produced
 //!   during apply and consumed during rollback.
-//! * [`serialization`] — byte codecs for `AvlNode` and the
+//! * `serialization` — byte codecs for `AvlNode` and the
 //!   crate-internal `AllocMeta`. Wire-format identity matters for
 //!   storage compat; touching this is consensus-affecting.
 
