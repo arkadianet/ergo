@@ -124,6 +124,8 @@ pub fn parse_active_params(
 ///   serialized `ErgoValidationSettingsUpdate` — ALWAYS present, even when
 ///   empty (`0x0000`), matching Scala.
 ///
+/// Returns an error for invalid persistent parameters or numeric extra124,
+/// which would collide with the separately encoded settings update.
 /// Fields are emitted in a fixed, deterministic order (ids 1..=8, 9, 123,
 /// extras ascending, 124) so two builds of the same epoch produce byte-
 /// identical extensions (required for the off-loop/on-loop candidate parity).
@@ -131,7 +133,15 @@ pub fn parse_active_params(
 /// order-independently — but determinism is required for the parity guarantee.
 pub fn active_params_to_extension_fields(
     params: &ActiveProtocolParameters,
-) -> Vec<([u8; 2], Vec<u8>)> {
+) -> Result<super::ActiveParameterFields, ActiveParamsError> {
+    params.validate()?;
+    if params
+        .extra
+        .iter()
+        .any(|(id, _)| *id == SOFT_FORK_DISABLING_RULES_ID)
+    {
+        return Err(ActiveParamsError::DuplicateId(SOFT_FORK_DISABLING_RULES_ID));
+    }
     let p = SYSTEM_PARAMETERS_PREFIX;
     let be = |v: i32| v.to_be_bytes().to_vec();
     let mut out: Vec<([u8; 2], Vec<u8>)> = vec![
@@ -159,7 +169,7 @@ pub fn active_params_to_extension_fields(
         [p, SOFT_FORK_DISABLING_RULES_ID],
         params.proposed_update.serialize(),
     ));
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -194,6 +204,16 @@ mod tests {
             ([0x00, 8], be_i32(100)),
             ([0x00, 123], be_i32(1)),
         ]
+    }
+
+    #[test]
+    fn extension_writer_rejects_reserved_update_id() {
+        let mut params = super::super::scala_launch();
+        params.extra.push((SOFT_FORK_DISABLING_RULES_ID, 42));
+        assert_eq!(
+            active_params_to_extension_fields(&params),
+            Err(ActiveParamsError::DuplicateId(124))
+        );
     }
 
     #[test]

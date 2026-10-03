@@ -437,6 +437,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         let epoch_boundary_fields = epoch_payload
             .as_ref()
             .map(|p| p.extension_fields())
+            .transpose()?
             .unwrap_or_default();
         build_candidate_extension_fields(
             &parent_header,
@@ -962,12 +963,19 @@ impl EpochBoundaryPayload {
     /// The `0x00` parameter fields + `0x02` validation-settings chunks for the
     /// extension, in a deterministic order (params then settings) so the
     /// off-loop and on-loop builds produce byte-identical extensions.
-    fn extension_fields(&self) -> Vec<([u8; 2], Vec<u8>)> {
-        let mut fields = active_params_to_extension_fields(&self.computed);
+    fn extension_fields(
+        &self,
+    ) -> Result<ergo_validation::active_params::ActiveParameterFields, MiningError> {
+        let mut fields = active_params_to_extension_fields(&self.computed).map_err(|error| {
+            MiningError::Decode {
+                op: "epoch_parameters",
+                reason: error.to_string(),
+            }
+        })?;
         fields.extend(validation_settings_update_to_extension_fields(
             &self.cumulative,
         ));
-        fields
+        Ok(fields)
     }
 }
 
@@ -1507,6 +1515,7 @@ mod tests {
             header_id: ModifierId::from_bytes([0u8; 32]),
             fields: payload
                 .extension_fields()
+                .unwrap()
                 .into_iter()
                 .map(|(key, value)| ExtensionField { key, value })
                 .collect(),
