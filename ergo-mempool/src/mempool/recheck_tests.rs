@@ -525,6 +525,85 @@ fn recheck_hard_invalid_cascade_evicts_full_subtree_past_depth_cap() {
     mp.pool().check_invariants();
 }
 
+#[test]
+fn admission_and_reorg_frontiers_continue_on_idle_maintenance_ticks() {
+    let revoked = |actions: &[MempoolAction]| -> Vec<TxId> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                MempoolAction::RevokeBroadcast { tx_ids } => Some(tx_ids.iter().copied()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    for replacement in [true, false] {
+        let mut mp = mempool_with(MempoolConfig {
+            max_family_depth: 2,
+            max_tx_cost: 100_000,
+            mempool_cleanup_cost_mult: 1,
+            ..MempoolConfig::default()
+        });
+        for b in 1..=5 {
+            seed(
+                &mut mp,
+                b,
+                0x10 + b - 1,
+                0x10 + b,
+                100,
+                if b == 1 { vec![] } else { vec![d(b - 1)] },
+            );
+        }
+        let utxo = FakeUtxo::empty();
+        let tip = TestTip::new().with_max_block_cost(100_000);
+        let now = Instant::now();
+        if replacement {
+            let (bytes, mut plan) = ok_plan(9, 10_000);
+            let validated = plan.result.as_mut().unwrap();
+            validated.input_box_ids = vec![d(0x10)];
+            validated.output_box_ids = vec![d(0x99)];
+            validated.fee = 10_000_000;
+            let v = validator(vec![(bytes.clone(), plan)]);
+            let (outcome, actions) = mp.process(&bytes, TxSource::Api, now, &tip.view(&utxo), &v);
+            assert!(matches!(outcome, AdmissionOutcome::Admitted { .. }));
+            assert_eq!(revoked(&actions).len(), 2);
+            assert!(mp.contains(&d(9)));
+        } else {
+            let actions = mp.on_tip_change(&crate::types::TxDiff {
+                new_tip: tip.view(&utxo).tip,
+                applied: vec![],
+                demoted: vec![],
+                applied_spent_inputs: HashSet::from([d(0x10)]),
+            });
+            assert_eq!(revoked(&actions).len(), 2);
+        }
+        assert!(!mp.contains(&d(1)) && !mp.contains(&d(2)));
+        assert_eq!(mp.orphan_eviction_pending(), 1);
+        assert_eq!(mp.revalidation_pending(), 0);
+
+        let no_validation = MockValidator::new();
+        let first = mp.tick_revalidation(now, &tip.view(&utxo), &no_validation);
+        assert_eq!(revoked(&first).len(), 2, "one bounded removal op");
+        assert!(!mp.contains(&d(3)) && !mp.contains(&d(4)));
+        assert!(mp.contains(&d(5)));
+        assert_eq!(mp.orphan_eviction_pending(), 1);
+        let second = mp.tick_revalidation(now, &tip.view(&utxo), &no_validation);
+        assert_eq!(revoked(&second), vec![d(5)]);
+        assert_eq!(mp.orphan_eviction_pending(), 0);
+        assert_eq!(no_validation.validate_call_count(), 0);
+        for b in 1..=5 {
+            assert!(
+                !mp.is_invalidated(&d(b)),
+                "dependency eviction is not a blacklist verdict"
+            );
+        }
+        assert!(mp
+            .tick_revalidation(now, &tip.view(&utxo), &no_validation)
+            .is_empty());
+        mp.pool().check_invariants();
+    }
+}
+
 // ----- anti-DoS cost cap + rotation -----
 
 #[test]
