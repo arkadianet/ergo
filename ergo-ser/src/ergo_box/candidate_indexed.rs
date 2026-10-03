@@ -144,6 +144,7 @@ fn read_box_tail(
         tokens,
         additional_registers,
         register_bytes,
+        received_box_identity: None,
     })
 }
 
