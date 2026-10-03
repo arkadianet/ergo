@@ -64,7 +64,7 @@ preserve every input spelling in transaction or box IDs.
   are length-checked before conversion to fixed-size representations.
 - Header version 1 uses the V1 PoW solution; later versions use V2. The V1 `d`
   field accepts an exact nonnegative number/string magnitude and serializes it
-  with the signed two's-complement leading-zero convention.
+  as unsigned big-endian bytes without a sign-disambiguation byte.
 - Full-block conversion requires each present section's `headerId` to match the
   computed header ID before returning its wire bytes.
 
