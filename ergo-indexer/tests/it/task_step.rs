@@ -33,6 +33,8 @@ use ergo_indexer::{
 
 struct ScriptedChain {
     tip: Mutex<ChainTip>,
+    /// Atomic tip observations queued for a source change between reads.
+    tip_reads: Mutex<Vec<ChainTip>>,
     chain: Mutex<HashMap<u32, Digest32>>,
     blocks: Mutex<HashMap<Digest32, IndexerFullBlock>>,
     /// Optional override list of header_ids to return for successive
@@ -47,6 +49,7 @@ impl ScriptedChain {
                 height: 0,
                 header_id: Digest32::from_bytes([0u8; 32]),
             }),
+            tip_reads: Mutex::new(Vec::new()),
             chain: Mutex::new(HashMap::new()),
             blocks: Mutex::new(HashMap::new()),
             flip_at: Mutex::new(HashMap::new()),
@@ -55,6 +58,10 @@ impl ScriptedChain {
 
     fn set_tip(&self, height: u32, header_id: Digest32) {
         *self.tip.lock().unwrap() = ChainTip { height, header_id };
+    }
+
+    fn queue_tip_reads(&self, tips: Vec<ChainTip>) {
+        *self.tip_reads.lock().unwrap() = tips;
     }
 
     fn put_canonical(&self, height: u32, header_id: Digest32) {
@@ -76,6 +83,10 @@ impl ScriptedChain {
 
 impl IndexerChainSource for ScriptedChain {
     fn committed_tip(&self) -> Result<ChainTip, ergo_indexer::IndexerError> {
+        let mut tips = self.tip_reads.lock().unwrap();
+        if !tips.is_empty() {
+            return Ok(tips.remove(0));
+        }
         Ok(*self.tip.lock().unwrap())
     }
 
@@ -364,6 +375,106 @@ fn step_rolls_back_when_chain_truncates_below_indexed_tip() {
     let meta = store.read_meta().unwrap();
     assert_eq!(meta.indexed_height, 1);
     assert_eq!(meta.indexed_header_id, Some(header_a));
+}
+
+#[test]
+fn step_batch_rolls_back_to_a_coherent_pre_genesis_tip() {
+    let (handle, _tmp) = open_handle();
+    let store = handle.store().unwrap();
+    let empty = store.read_meta().unwrap();
+    let first = genesis_block(Digest32::from_bytes([0x11; 32]));
+    let second = child_block(&first.transactions[0], Digest32::from_bytes([0x22; 32]));
+    apply_via_handle(&handle, &first);
+    apply_via_handle(&handle, &second);
+    let transactions = [&first.transactions[0], &second.transactions[0]];
+    let box_ids: Vec<_> = transactions
+        .iter()
+        .flat_map(|tx| (0..tx.output_candidates.len()).map(|index| sealed_box_id(tx, index as u16)))
+        .collect();
+    assert!(store.read_box(&box_ids[0]).unwrap().unwrap().is_spent());
+
+    // The fully applied chain is empty. Retained bodies provide inverse data;
+    // there is deliberately no synthetic header row at height zero.
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_block(first.clone());
+    chain.put_block(second.clone());
+    let mut task = IndexerTask::new(handle.clone(), chain);
+    assert!(matches!(task.step_batch(), IndexerPoll::RolledBack(2)));
+    assert_eq!(store.read_meta().unwrap().indexed_height, 1);
+    assert!(!store.read_box(&box_ids[0]).unwrap().unwrap().is_spent());
+    assert!(store.read_undo(2).unwrap().is_none());
+    assert!(matches!(task.step_batch(), IndexerPoll::RolledBack(1)));
+    assert_eq!(store.read_meta().unwrap(), empty);
+    assert!(store.read_undo(1).unwrap().is_none());
+    for box_id in box_ids {
+        assert!(store.read_box(&box_id).unwrap().is_none());
+    }
+    for tx in transactions {
+        assert!(store
+            .read_tx(&Digest32::from_bytes(
+                *transaction_id(tx).unwrap().as_bytes()
+            ))
+            .unwrap()
+            .is_none());
+    }
+    assert!(matches!(task.step_batch(), IndexerPoll::Idle));
+    assert_eq!(handle_status(&handle), IndexerStatus::CaughtUp);
+}
+
+#[test]
+fn step_batch_holds_when_pre_genesis_tip_changes_between_reads() {
+    let (handle, _tmp) = open_handle();
+    let first = genesis_block(Digest32::from_bytes([0x11; 32]));
+    apply_via_handle(&handle, &first);
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let undo = store.read_undo(1).unwrap();
+    let chain = Arc::new(ScriptedChain::new());
+    chain.put_block(first.clone());
+    chain.queue_tip_reads(vec![
+        ChainTip {
+            height: 0,
+            header_id: Digest32::ZERO,
+        },
+        ChainTip {
+            height: 1,
+            header_id: first.header_id,
+        },
+    ]);
+    let mut task = IndexerTask::new(handle, chain);
+    assert!(matches!(task.step_batch(), IndexerPoll::Idle));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert_eq!(store.read_undo(1).unwrap(), undo);
+    assert!(store
+        .read_tx(&Digest32::from_bytes(
+            *transaction_id(&first.transactions[0]).unwrap().as_bytes(),
+        ))
+        .unwrap()
+        .is_some());
+    for index in 0..first.transactions[0].output_candidates.len() {
+        assert!(!store
+            .read_box(&sealed_box_id(&first.transactions[0], index as u16))
+            .unwrap()
+            .unwrap()
+            .is_spent());
+    }
+}
+
+#[test]
+fn step_batch_holds_when_height_zero_has_a_nonzero_tip_id() {
+    let (handle, _tmp) = open_handle();
+    let first = genesis_block(Digest32::from_bytes([0x11; 32]));
+    apply_via_handle(&handle, &first);
+    let store = handle.store().unwrap();
+    let before = store.read_meta().unwrap();
+    let undo = store.read_undo(1).unwrap();
+    let chain = Arc::new(ScriptedChain::new());
+    chain.set_tip(0, first.header_id);
+    chain.put_block(first);
+    let mut task = IndexerTask::new(handle, chain);
+    assert!(matches!(task.step_batch(), IndexerPoll::Idle));
+    assert_eq!(store.read_meta().unwrap(), before);
+    assert_eq!(store.read_undo(1).unwrap(), undo);
 }
 
 #[test]
