@@ -769,6 +769,10 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             get(|| async { js(JS_WALLET_PRIVATE) }),
         )
         .route(
+            "/js/wallet-maintenance.js",
+            get(|| async { js(JS_WALLET_MAINTENANCE) }),
+        )
+        .route(
             "/js/wallet-builder.js",
             get(|| async { js(JS_WALLET_BUILDER) }),
         )

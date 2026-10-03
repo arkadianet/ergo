@@ -18,6 +18,7 @@ import { copyBtn } from './table.js';
 import { fetchTokenMeta, tokenName, getTokenMeta } from './token-meta.js';
 import { createWalletBuilder } from './wallet-builder.js';
 import { createPrivateMiningQueue } from './wallet-private.js';
+import { createWalletMaintenance } from './wallet-maintenance.js';
 import { decimal } from './wallet-transaction.js';
 
 let root = null;
@@ -38,6 +39,7 @@ let unlockRendered = false;
 // field. Refreshed every refreshBalances() poll tick.
 let myAssets = [];
 let privateQueue = null;
+let maintenance = null;
 let builder = null, walletBalance = null, walletStatus = null;
 let activeTab = 'assets', assetPage = 0, activityPage = 0, generation = 0, refreshing = false;
 let assetsRendered = false;
@@ -139,12 +141,16 @@ export function mount(el_) {
         <div class="panel__head"><h2 class="panel__title">Private mining transactions</h2></div>
         <div class="panel__body" data-private-body></div>
       </section>
+      <section class="panel wallet-view" data-wallet-view="maintenance" id="wallet-maintenance" role="tabpanel" aria-labelledby="wallet-tab-maintenance" hidden>
+        <div class="panel__head"><h2 class="panel__title">Private wallet maintenance</h2></div>
+        <div class="panel__body" data-maintenance-body></div>
+      </section>
       <section class="panel wallet-view" data-keys-panel data-wallet-view="manage" id="wallet-manage" role="tabpanel" aria-labelledby="wallet-tab-manage" hidden>
         <div class="panel__head"><h2 class="panel__title">Wallet management</h2></div>
         <div class="panel__body" data-keys-body></div>
       </section>
     </div>`;
-  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['private', 'Private mining'], ['manage', 'Manage']]) {
+  for (const [id, title] of [['assets', 'Assets'], ['build', 'Build transaction'], ['receive', 'Receive'], ['activity', 'Activity'], ['private', 'Private mining'], ['maintenance', 'Maintenance'], ['manage', 'Manage']]) {
     const tab = el('button', { type: 'button', role: 'tab', id: 'wallet-tab-' + id,
       'aria-controls': 'wallet-' + id, 'aria-selected': id === activeTab ? 'true' : 'false',
       tabindex: id === activeTab ? '0' : '-1', text: title, onclick: () => selectTab(id) });
@@ -183,7 +189,7 @@ export function onHide() {
 // Skip the 4 s poll while a recovery phrase is shown or a submit is in flight,
 // so a refresh can't navigate away from the mnemonic gate or fight a request.
 export function isBusy() {
-  return mnemonicGateOpen || submitInFlight;
+  return mnemonicGateOpen || submitInFlight || maintenance?.isBusy();
 }
 
 export function onSlow() {
@@ -235,6 +241,7 @@ function scrubSecrets() {
   generation++;
   privateQueue?.dispose(); privateQueue = null;
   builder?.dispose(); builder = null;
+  maintenance?.dispose(); maintenance = null;
   walletBalance = walletStatus = null; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
   q('[data-wallet-breakdown]').replaceChildren();
@@ -359,6 +366,7 @@ function renderScanBanner(s) {
 // ── reads: balances + addresses ──────────────────────────────────────────────
 function lockedNotes() {
   builder?.dispose(); builder = null;
+  maintenance?.dispose(); maintenance = null;
   walletBalance = null; myAssets = []; assetsRendered = false;
   q('[data-wallet-amount]').textContent = '—';
   q('[data-wallet-breakdown]').replaceChildren();
@@ -379,6 +387,7 @@ function selectTab(id, focus = false) {
   for (const panel of root.querySelectorAll('[data-wallet-view]')) panel.hidden = panel.dataset.walletView !== id;
   if (id === 'activity' && walletStatus?.isUnlocked) refreshActivity();
   if (id === 'private') showPrivateQueue();
+  if (id === 'maintenance' && walletStatus?.isUnlocked) showMaintenance();
 }
 
 async function refreshBalances(epoch = generation) {
@@ -832,6 +841,11 @@ function showPrivateQueue() {
     active: () => epoch === generation && key === getApiKey() && !q('[data-wallet-app]').hidden });
 }
 
+function showMaintenance() {
+  if (!maintenance) { maintenance = createWalletMaintenance(q('[data-maintenance-body]')); maintenance.update(walletStatus); maintenance.load(); }
+  else { maintenance.update(walletStatus); maintenance.refresh(); }
+}
+
 // ── refresh ──────────────────────────────────────────────────────────────────
 async function refresh() {
   if (!root || q('[data-wallet-app]').hidden || refreshing) return;
@@ -852,6 +866,7 @@ async function refresh() {
     setOnboarding(false); renderStatusPanel(walletStatus);
     if (walletStatus.isUnlocked) {
       showSendPanel(); showKeysPanel(); builder.update(walletBalance, walletStatus);
+      if (activeTab === 'maintenance') showMaintenance();
       await Promise.all([refreshBalances(epoch), refreshAddresses(epoch), ...(activeTab === 'activity' ? [refreshActivity(epoch)] : [])]);
     } else {
       lockedNotes();

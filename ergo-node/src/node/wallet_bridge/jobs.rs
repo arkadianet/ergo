@@ -152,6 +152,25 @@ fn save(db: &redb::Database, job_id: u64, record: &Record) -> Result<(), WalletA
     write.commit().map_err(internal)
 }
 
+/// Restore reservations before accepting commands following a crash during
+/// unsigned preparation. Signed Prepared records retain their exact bytes.
+pub(super) fn recover_preparing(db: &redb::Database) -> Result<(), WalletAdminError> {
+    for (job_id, mut record) in records(db)? {
+        if record.job.state == WalletJobState::Preparing {
+            if record.signed_hex.is_some() {
+                return Err(internal("preparing job contains signed bytes"));
+            }
+            transition(
+                &mut record,
+                WalletJobState::Waiting,
+                Some("recovering interrupted preparation".into()),
+            );
+            save(db, job_id, &record)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn list(db: &redb::Database) -> Result<WalletJobs, WalletAdminError> {
     let mut items: Vec<_> = records(db)?
         .into_iter()
@@ -196,7 +215,7 @@ pub(super) fn create_owned(
             "job deadline has already passed".into(),
         ));
     }
-    let reserved = reserved_inputs(ctx.db)?;
+    let reserved = ctx.chain.reserved_wallet_inputs()?;
     let read = ctx.db.begin_read().map_err(internal)?;
     let reader = WalletReader::new(&read);
     for value in task_box_ids(&request.task) {
@@ -602,51 +621,71 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             continue;
         }
         if let Some(tx_id) = record.job.tx_id.as_ref() {
-            if let Ok(Some(entry)) = ctx
+            match ctx
                 .submit_handle
                 .private_transaction_status(tx_id.clone())
                 .await
             {
-                let state = match entry.state.as_str() {
-                    "mined" => WalletJobState::Mined,
-                    "in_candidate" => WalletJobState::InCandidate,
-                    "conflicted" => WalletJobState::Conflicted,
-                    "cancelled" => WalletJobState::Cancelled,
-                    "expired" => WalletJobState::Expired,
-                    _ => WalletJobState::Queued,
-                };
-                if record.job.state != state {
-                    transition(&mut record, state, entry.reason.clone());
-                    save(ctx.db, job_id, &record)?;
+                Ok(Some(entry)) => {
+                    let state = match entry.state.as_str() {
+                        "mined" => WalletJobState::Mined,
+                        "in_candidate" => WalletJobState::InCandidate,
+                        "conflicted" => WalletJobState::Conflicted,
+                        "cancelled" => WalletJobState::Cancelled,
+                        "expired" => WalletJobState::Expired,
+                        "queued" => WalletJobState::Queued,
+                        _ => {
+                            continue;
+                        }
+                    };
+                    if record.job.state != state {
+                        transition(&mut record, state, entry.reason.clone());
+                        save(ctx.db, job_id, &record)?;
+                    }
+                    if state.terminal() {
+                        continue;
+                    }
                 }
-                if state.terminal() {
+                Ok(None) if record.job.state == WalletJobState::Mined => {
                     continue;
                 }
-            } else if matches!(
-                record.job.state,
-                WalletJobState::Queued | WalletJobState::InCandidate
-            ) {
-                transition(
-                    &mut record,
-                    WalletJobState::Prepared,
-                    Some("recovering private admission from durable signed bytes".into()),
-                );
-                save(ctx.db, job_id, &record)?;
+                Ok(None)
+                    if matches!(
+                        record.job.state,
+                        WalletJobState::Queued | WalletJobState::InCandidate
+                    ) =>
+                {
+                    transition(
+                        &mut record,
+                        WalletJobState::Prepared,
+                        Some("recovering private admission from durable signed bytes".into()),
+                    );
+                    save(ctx.db, job_id, &record)?;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    // Queue unavailability must not stop the wallet writer or
+                    // make an already admitted transaction appear cancelled.
+                    record.job.detail = error.detail.or(Some(error.reason));
+                    save(ctx.db, job_id, &record)?;
+                    continue;
+                }
             }
         }
         if height > record.job.request.expires_at_height {
             if let Some(tx_id) = record.job.tx_id.as_ref() {
-                if ctx
+                match ctx
                     .submit_handle
-                    .private_transaction_status(tx_id.clone())
+                    .cancel_private_transaction(tx_id.clone())
                     .await
-                    .map_err(sign_submit::map_submit_error)?
-                    .is_some()
                 {
-                    ctx.submit_handle
-                        .cancel_private_transaction(tx_id.clone())
-                        .await
-                        .map_err(sign_submit::map_submit_error)?;
+                    Ok(()) => {}
+                    Err(error) if error.reason == "not_found" => {}
+                    Err(error) => {
+                        record.job.detail = error.detail.or(Some(error.reason));
+                        save(ctx.db, job_id, &record)?;
+                        continue;
+                    }
                 }
             }
             transition(
@@ -721,10 +760,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
         )
         .map_err(internal)?;
         let options = ergo_api::mining::PrivateTransactionOptions {
-            label: Some(format!(
-                "Wallet job {}: {}",
-                record.job.id, record.job.request.label
-            )),
+            label: Some(format!("Wallet job {}", record.job.id)),
             ..Default::default()
         };
         match ctx

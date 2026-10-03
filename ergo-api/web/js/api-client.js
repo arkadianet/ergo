@@ -157,6 +157,10 @@ export const api = {
   // /lock and /deriveNextKey are GET routes (see ergo-api wallet/mod.rs).
   wallet: {
     status: () => walletReq('/wallet/status'),
+    boxes: (offset = 0, limit = 100) => walletReq(`/api/v1/wallet/boxes?offset=${offset}&limit=${limit}`),
+    miningJobs: () => walletReq('/api/v1/wallet/mining-jobs'),
+    createMiningJob: (request) => walletPost('/api/v1/wallet/mining-jobs', request),
+    cancelMiningJob: (id) => walletPost(`/api/v1/wallet/mining-jobs/${encodeURIComponent(id)}/cancel`, {}),
     init: (body) => walletPost('/wallet/init', body),
     restore: (body) => walletPost('/wallet/restore', body),
     unlock: (pass) => walletPost('/wallet/unlock', { pass }),
