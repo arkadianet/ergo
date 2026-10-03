@@ -166,12 +166,11 @@ mod tests {
     /// (`reference/ergo/.../AutolykosPowScheme.scala:104-111`) dispatches
     /// purely on `header.version`, and `HeaderValidator.validateChildBlockHeader`
     /// (`reference/ergo/.../HeadersProcessor.scala:418-430`) has no
-    /// version-vs-height check, so a v1 header is accepted at any
-    /// height as long as its EC equation holds — including across
-    /// what mainnet considers the v2 activation. Rejecting more here
-    /// would be the chain-split direction.
+    /// version-vs-height check. This finite test verifies the captured
+    /// height200 row; it does not transplant valid work to another height
+    /// or exercise a version transition. Height still enters the PoW message.
     #[test]
-    fn verify_pow_solution_accepts_real_v1_header_regardless_of_height() {
+    fn verify_pow_solution_accepts_captured_v1_header_at_height_200() {
         let data = std::fs::read_to_string("../test-vectors/mainnet/headers_1_2000.json")
             .expect("need headers_1_2000.json for this test");
         let headers: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap();

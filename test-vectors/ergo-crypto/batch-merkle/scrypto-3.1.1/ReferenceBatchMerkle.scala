@@ -1,38 +1,15 @@
-//> using scala 2.13
-//> using dep "org.scorexfoundation::scrypto:2.3.0"
-//
-// Extract Scala-anchored batch Merkle multiproof fixtures.
-//
-// Outputs a JSON array of fixture records to stdout. Each fixture:
-//
-//   {
-//     "label":          short identifier,
-//     "leaves":         array of hex strings (the leaf bytes the tree is built over),
-//     "indices":        array of u32 (leaf indices to prove),
-//     "expected_root":  hex string (Blake2b256 32-byte tree root),
-//     "expected_bytes": hex string (output of BatchMerkleProofSerializer.serialize),
-//     "expected_proof_indices":  array of u32 (sorted, deduplicated),
-//     "expected_proof_count":    number of sibling-digest proof entries,
-//     "note":           rationale for what edge case this covers
-//   }
-//
-// Reproducing locally:
-//
-//   scala-cli run test-vectors/scripts/scala/ExtractBatchMerkleProofs.scala \
-//     > test-vectors/ergo-crypto/batch-merkle/fixtures.json
-//
-// Historical capture: keep scrypto2.3.0 and the existing output unchanged.
-// Ergo v6.0.5 avldb uses3.1.1; the additive current-dependency wrapper,
-// captures and provenance live at ergo-crypto/batch-merkle/scrypto-3.1.1.
-// Seven finite historical cases match3.1.1 exactly; this is not a claim
-// that every artifact or algorithm is unchanged across versions.
+//> using scala 2.12.21
+//> using dep "org.scorexfoundation::scrypto:3.1.1"
+//> using dep "org.bouncycastle:bcprov-jdk15to18:1.85.1"
+// Finite batch-Merkle capture against the dependency used by Ergo v6.0.5.
+// Keep historical scrypto2.3.0 captures unchanged; see provenance.json.
 
 import scorex.crypto.authds.LeafData
 import scorex.crypto.authds.merkle.{BatchMerkleProof, MerkleTree}
 import scorex.crypto.authds.merkle.serialization.BatchMerkleProofSerializer
 import scorex.crypto.hash.{Blake2b256, Digest32}
 
-object ExtractBatchMerkleProofs {
+object ReferenceBatchMerkle {
   type HF = Blake2b256.type
   implicit val hf: HF = Blake2b256
 
@@ -46,6 +23,9 @@ object ExtractBatchMerkleProofs {
   )
 
   private val fixtures: Seq[Fixture] = Seq(
+    Fixture("duplicate_pair_both_positions", Seq(Array(1.toByte), Array(1.toByte)), Seq(0,1), "scrypto3.1.1 positional duplicate leaves"),
+    Fixture("odd_repeated_values_last_position", Seq(0,1,0,1,0).map(i => Array(i.toByte)), Seq(4), "scrypto3.1.1 positional duplicate leaves in odd tree"),
+    Fixture("sparse_repeated_values", Seq(0,1,2,0,1,2,0,1).map(i => Array(i.toByte)), Seq(0,3,7), "scrypto3.1.1 positional duplicate sparse proof"),
     Fixture(
       label = "single_leaf_prove_all",
       leafBytes = Seq(Array(0xAA.toByte)),

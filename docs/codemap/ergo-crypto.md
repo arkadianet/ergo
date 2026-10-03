@@ -24,7 +24,8 @@ no AVL+ state, no wire codecs — those live elsewhere.
 - `src/autolykos/v2.rs` — Autolykos v2: memory-hard Blake2b-only hit computation (`hit_for_v2`, general `hit_for_v2_pow`) and the `check_pow_v2` target comparison.
 - `src/difficulty.rs` — chain-aware retarget: epoch-length selection, predictive linear interpolation (`calculate`), EIP-37 predictive∪classic with ±50% cap (`eip37_calculate`), v2-activation special case, `get_target`, `next_n_bits`, `verify_nbits`. Re-exports `DifficultyParams` from `ergo-chain-spec`.
 - `src/merkle/mod.rs` — scorex-layout Blake2b256 Merkle trees: roots, single-leaf proofs (`MerkleProofRaw`), batch multiproofs (`merkle_proof_by_indices` → `IndexedBatchProof`), and verification.
-- `tests/` — mainnet/sigmastate oracle parity: `pow_mainnet.rs` (~9k-header corpus), `difficulty_mainnet.rs`, `merkle_mainnet.rs`, `merkle_proof_for_tx_oracle.rs`.
+- `tests/it/` — captured PoW, difficulty, root and transaction-proof parity. Curated fixtures run by default; large historical corpora are separately provisioned ignored tests. Every requested transaction witness is required, and extension roots are checked against the captured header commitment.
+- `test-vectors/ergo-crypto/batch-merkle/scrypto-3.1.1/` — ten official-library captures and pinned provenance, consumed by `ergo-validation/tests/it/batch_merkle_oracle.rs`; three cases cover duplicate leaf positions.
 
 ## Key types, traits & functions
 - `verify_pow_solution` (fn) — verify Autolykos solution against the header's own nBits target; dispatches v1/v2 by `header.solution` variant — `src/pow.rs:41`
@@ -57,6 +58,6 @@ no AVL+ state, no wire codecs — those live elsewhere.
 - **secp256k1 order q is pinned** to the SEC2/Bitcoin-Core constant; guards BigUint construction drift (`src/autolykos/v1.rs:162` test).
 - **Difficulty retarget matches Scala `DifficultyAdjustment`**: USE_LAST_EPOCHS=8, PRECISION=1e9, signed-BigInt least-squares interpolation; EIP-37 = average(classic, ±50%-capped predictive), capped again at ±50%.
 - **v2-activation special case returns fixed initial difficulty** when parent IS or precedes the v2-activation block; networks with no v1→v2 hardfork carry `v2_activation = None` and skip it (`src/difficulty.rs:280-284`).
-- **Difficulty math returns structured errors, never panics on caller misuse.** Empty/undersized epoch windows and height mismatches surface as `DifficultyError` (the EIP-37 ≥2-header precondition is intercepted before the inner `debug_assert!`).
+- **Difficulty caller context is trusted beyond the checked entry preconditions.** Empty/undersized epoch windows and child/parent height mismatches return `DifficultyError`. Supplied configurations and retarget windows must currently have supported nonzero intervals, correctly spaced heights and increasing timestamps; raw extreme contexts are not comprehensively checked.
 - **Merkle layout matches scorex**: leaf = `Blake2b256(0x00 ++ data)`, internal = `Blake2b256(0x01 ++ left ++ right)`, odd-trailing node paired with `EmptyNode` (hash `[]`), empty tree = `Blake2b256([])` (the `Algos.emptyMerkleTreeRoot` special case, not a prefixed empty leaf).
 - **Proofs and roots come from one reduction.** `merkle_proof_by_index` and `merkle_tree_root` share `build_levels`; empty siblings are synthesized at proof time from out-of-range lookups, never materialized as phantom nodes — every honest leaf is provable (proptest at `src/merkle/mod.rs:548`).
