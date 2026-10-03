@@ -347,6 +347,19 @@ impl IndexerQuery for IndexerHandle {
         self.read(|| self.query_store()?.read_tx(id).map_err(read_error))
     }
 
+    fn boxes_latest_paged(&self, page: Page) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let count = reader.read_meta().map_err(read_error)?.global_box_index;
+            let end = count.saturating_sub(u64::from(page.offset));
+            let start = end.saturating_sub(u64::from(page.limit));
+            (start..end)
+                .rev()
+                .map(|n| try_global_box(&reader, n))
+                .collect()
+        })
+    }
+
     fn tx_by_global_index(&self, n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
         self.read(|| {
             let store = self.query_store()?.page_reader().map_err(read_error)?;
@@ -381,6 +394,19 @@ impl IndexerQuery for IndexerHandle {
                 nano_ergs: balance.nano_ergs,
                 tokens: balance.tokens,
             }))
+        })
+    }
+
+    fn txs_latest_paged(&self, page: Page) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let count = reader.read_meta().map_err(read_error)?.global_tx_index;
+            let end = count.saturating_sub(u64::from(page.offset));
+            let start = end.saturating_sub(u64::from(page.limit));
+            (start..end)
+                .rev()
+                .map(|n| try_global_tx(&reader, n))
+                .collect()
         })
     }
 
