@@ -30,6 +30,7 @@ use ergo_wallet::storage::SecretStorage;
 
 pub mod chain_snapshot;
 mod jobs;
+mod swap_jobs;
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
 /// Abstracts the chain submit path so the wallet writer can submit a
@@ -189,6 +190,25 @@ fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::typ
 
 /// Command sent from the API task to the wallet writer task.
 pub enum WalletCommand {
+    MiningSwaps {
+        reply:
+            oneshot::Sender<Result<ergo_api::wallet::native::dto::MiningSwaps, WalletAdminError>>,
+    },
+    PreviewMiningSwap {
+        request: ergo_api::wallet::native::dto::MiningSwapRequest,
+        reply: oneshot::Sender<
+            Result<ergo_api::wallet::native::dto::MiningSwapPreview, WalletAdminError>,
+        >,
+    },
+    CreateMiningSwap {
+        request: ergo_api::wallet::native::dto::MiningSwapRequest,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::MiningSwap, WalletAdminError>>,
+    },
+    CancelMiningSwap {
+        swap_id: String,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::MiningSwap, WalletAdminError>>,
+    },
+
     MiningJobs {
         reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError>>,
     },
@@ -495,6 +515,34 @@ impl NodeWalletAdmin {
 
 #[async_trait]
 impl WalletAdmin for NodeWalletAdmin {
+    async fn mining_swaps(
+        &self,
+    ) -> Result<ergo_api::wallet::native::dto::MiningSwaps, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::MiningSwaps { reply })
+            .await
+    }
+    async fn preview_mining_swap(
+        &self,
+        request: ergo_api::wallet::native::dto::MiningSwapRequest,
+    ) -> Result<ergo_api::wallet::native::dto::MiningSwapPreview, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::PreviewMiningSwap { request, reply })
+            .await
+    }
+    async fn create_mining_swap(
+        &self,
+        request: ergo_api::wallet::native::dto::MiningSwapRequest,
+    ) -> Result<ergo_api::wallet::native::dto::MiningSwap, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CreateMiningSwap { request, reply })
+            .await
+    }
+    async fn cancel_mining_swap(
+        &self,
+        swap_id: String,
+    ) -> Result<ergo_api::wallet::native::dto::MiningSwap, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CancelMiningSwap { swap_id, reply })
+            .await
+    }
+
     async fn mining_jobs(
         &self,
     ) -> Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError> {
@@ -1083,6 +1131,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
         if let Some(queue) = &self.private_queue {
             reserved.extend(queue.reserved_inputs());
         }
+        reserved.extend(swap_jobs::reserved_inputs(&self.db)?);
         Ok(reserved)
     }
 
@@ -1434,7 +1483,9 @@ pub async fn run_wallet_writer_supervised(
     // `commands::admin::AttemptLimiter`.
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
-    let mut failure = jobs::recover_preparing(&db).err();
+    let mut failure = jobs::recover_preparing(&db)
+        .and_then(|()| swap_jobs::recover_preparing(&db))
+        .err();
     if failure.is_some() {
         rescan.stop();
         rx.close();
@@ -1474,6 +1525,11 @@ pub async fn run_wallet_writer_supervised(
                     rx.close();
                     break;
                 }
+                if let Err(error) = swap_jobs::tick(&ctx).await {
+                    tracing::error!(%error, "wallet mining swap journal failure");
+                    failure.get_or_insert(error);
+                    rescan.stop(); rx.close(); break;
+                }
                 continue;
             },
         };
@@ -1481,6 +1537,18 @@ pub async fn run_wallet_writer_supervised(
             continue;
         };
         match cmd {
+            WalletCommand::MiningSwaps { reply } => {
+                let _ = reply.send(swap_jobs::list(&db));
+            }
+            WalletCommand::PreviewMiningSwap { request, reply } => {
+                let _ = reply.send(swap_jobs::preview(&ctx, &request));
+            }
+            WalletCommand::CreateMiningSwap { request, reply } => {
+                let _ = reply.send(swap_jobs::create_owned(&ctx, request));
+            }
+            WalletCommand::CancelMiningSwap { swap_id, reply } => {
+                let _ = reply.send(swap_jobs::cancel(&ctx, &swap_id).await);
+            }
             WalletCommand::MiningJobs { reply } => {
                 let _ = reply.send(jobs::list(&db));
             }
