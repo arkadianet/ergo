@@ -14,8 +14,9 @@
 //! `(DIGEST_HISTORY[prev_height], CHAIN_STATE_HISTORY[prev_height],
 //! STATE_META["root_digest"], CHAIN_STATE_META["chain_state"],
 //! CHAIN_INDEX[new_height], voted_params row if epoch boundary)`
-//! inside one redb `write_txn`. A crash mid-apply rolls the whole
-//! transition back; no half-applied state survives. Rollback is the
+//! inside one redb `write_txn`. Transaction commit publishes the transition
+//! atomically; power-loss survival also depends on the configured durability
+//! and the operating system/device synchronization contract. Rollback is the
 //! same shape in reverse: read the per-height history rows, restore
 //! `(root_digest, chain_state)`, truncate every height-indexed table
 //! (`DIGEST_HISTORY`, `CHAIN_STATE_HISTORY`, `CHAIN_INDEX`,
@@ -55,22 +56,13 @@
 //! applied heights, voted-params key placement). The store embeds the
 //! shared `header_store::HeaderSectionTables`, so it persists headers
 //! and block sections and serves the read-side `StateBackend` traits
-//! (`ChainStateRead`, `HeaderSectionStore`). What remains deferred to
-//! a later layer is the apply-bridge that anchors the persisted digest
-//! to a header's `state_root`: that needs the ADProofs section, the
-//! boxChanges derivation, and a real-corpus oracle, none of which this
-//! read/persist layer owns.
-//!
-//! The seam is `pub(crate)` and the module is `#![allow(dead_code)]`:
-//! no in-crate caller reaches it yet. The boot dispatch and the
-//! shared `StateBackend` trait that consume it live in higher
-//! layers; this module persists the schema and the atomic-commit
-//! invariant on its own. Deferred to those layers (each needs state
-//! this schema-only sibling does not own): header-anchored digest
-//! validation, intermediate voted-params epoch-row continuity (the
-//! section/extension reconcile Mode 1 runs in `reconcile_voted_params`),
-//! bounded history retention, and reorg-abort rebuild-from-committed.
-#![allow(dead_code)]
+//! (`ChainStateRead`, `HeaderSectionStore`). The production Mode 5 sync
+//! orchestrator owns ADProofs verification, box-change derivation and full
+//! transaction validation before calling this store. Open checks persisted
+//! epoch-row placement and requires the genesis baseline; unlike the
+//! UTXO backend, it does not reconstruct missing intermediate rows from
+//! extensions. History retention remains unbounded and is distinct from the
+//! configured header-age gate.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

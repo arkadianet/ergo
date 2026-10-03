@@ -6,20 +6,15 @@
 //! blob from a different header cannot be paired with this header
 //! even when the root hash matches. The verifier's constructor takes
 //! `(modifier_id, proof_bytes, header)` together so the binding is
-//! unforgeable at the API boundary — a caller cannot construct the
-//! verifier without naming both the header and the persisted
-//! section's id, and the verifier rejects mismatches.
+//! checked at the API boundary: the caller names the header and persisted
+//! section ID, and the verifier rejects byte-hash/linkage mismatches. The
+//! caller still supplies a validated header and the trusted parent root.
 //!
 //! This module exposes only the operations the digest-backed block
 //! apply seam needs (proof construction, batch insert/remove,
-//! final-digest extraction). It does NOT touch persistence; a later
-//! phase lifts the persisted backend.
-//!
-//! Items below have no in-crate production callers yet — the
-//! persisted store, rollback, and boot-dispatch phases that will
-//! consume the seam are not in tree. `#![allow(dead_code)]` keeps
-//! the lib-only build clean while the seam is being wired up.
-#![allow(dead_code)]
+//! final-digest extraction). The production Mode 5 sync path consumes this
+//! verifier, validates transactions through `DigestUtxoView`, then persists
+//! through `DigestStateStore`. Verification here does not commit state.
 
 use std::collections::BTreeMap;
 

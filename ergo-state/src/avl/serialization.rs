@@ -1,6 +1,7 @@
 //! AVL+ node and allocator-metadata byte codecs.
 //!
-//! Persisted layouts (any change here is consensus-affecting):
+//! Local persisted layouts (changes require storage compatibility/migration;
+//! authenticated labels use the separate consensus digest codec):
 //!
 //! * Leaf:        `0x00 || key[32] || value_len[4] || value[var] || next_key[32]`
 //! * Internal v2: `0x02 || key[32] || left[8] || right[8] || balance[1]
@@ -13,7 +14,7 @@
 //! kept separate from consensus state so `committed_root` stays purely
 //! about consensus data.
 //!
-//! `node_to_bytes` and `node_from_bytes` panic on malformed input today.
+//! `node_from_bytes` returns typed errors for malformed/truncated nodes.
 //! The write path's `expect(...)` on missing child labels is an
 //! *internal mutation invariant*, not a corrupt-DB path: every mutation
 //! site (insert, delete, rotate, rebalance) must populate child labels

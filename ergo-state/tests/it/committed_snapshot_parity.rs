@@ -1,15 +1,14 @@
 //! Phase 2a coverage: `CommittedSnapshot` — the single-read-transaction
 //! committed view that the off-loop mining-candidate engine builds from.
 //!
-//! The headline property is **consensus parity**: a candidate dry-run run
+//! The tested property is committed-tree hydration parity: a candidate dry-run
 //! against a `CommittedSnapshot` must produce byte-identical
 //! `(state_root, ad_proof_bytes, tip)` to the on-loop
 //! `StateStore::candidate_dry_run` for the same parent and change-set.
 //! Both paths hydrate a `BatchAVLProver` from equivalent committed state
-//! and then run the identical mutation/digest/proof sequence, so the only
-//! thing this proves — and the only thing that could break consensus — is
-//! that the snapshot's redb-txn-sourced hydration reproduces the live
-//! arena's tree exactly.
+//! and run the same mutation/digest/proof sequence. These comparisons check
+//! that snapshot hydration reproduces the live arena for the tested change
+//! sets; they do not establish whole-candidate or reference-node acceptance.
 //!
 //! Also covers: the single-transaction inputs (tip, header, last-10
 //! window, params, settings, root) all come from one frozen MVCC view,
@@ -61,11 +60,12 @@ fn synthetic_header_with_ts_base(height: u32, parent_id: ModifierId, ts_base: u6
 }
 
 /// Apply `n` synthetic blocks (each with a real, decodable header) on top
-/// of genesis. Returns the tip header id.
+/// of the current applied tip. Returns the tip header id.
 fn apply_n_blocks(store: &mut StateStore, n: u32) -> [u8; 32] {
-    let mut parent_id: ModifierId = Digest32::from_bytes([0u8; 32]).into();
-    let mut tip = [0u8; 32];
-    for h in 1..=n {
+    let first = store.height() + 1;
+    let mut tip = store.chain_state().best_full_block_id;
+    let mut parent_id = ModifierId::from_bytes(tip);
+    for h in first..first + n {
         let hdr = synthetic_header(h, parent_id);
         let (bytes, id) = serialize_header(&hdr).expect("serialize header");
         let id_bytes: [u8; 32] = *id.as_bytes();
@@ -84,9 +84,10 @@ fn apply_n_blocks(store: &mut StateStore, n: u32) -> [u8; 32] {
 /// chain of the same height gets DIFFERENT header ids (the id hashes the
 /// timestamp). Used only by the equal-height reorg cache test.
 fn apply_n_blocks_with_timestamp_base(store: &mut StateStore, n: u32, ts_base: u64) -> [u8; 32] {
-    let mut parent_id: ModifierId = Digest32::from_bytes([0u8; 32]).into();
-    let mut tip = [0u8; 32];
-    for h in 1..=n {
+    let first = store.height() + 1;
+    let mut tip = store.chain_state().best_full_block_id;
+    let mut parent_id = ModifierId::from_bytes(tip);
+    for h in first..first + n {
         let hdr = synthetic_header_with_ts_base(h, parent_id, ts_base);
         let (bytes, id) = serialize_header(&hdr).expect("serialize header");
         let id_bytes: [u8; 32] = *id.as_bytes();
@@ -235,6 +236,7 @@ fn cached_tip_advance_rebuilds_and_matches() {
 
     // Advance one block; the committed tip id changes.
     let tip_b = apply_n_blocks(&mut store, 1);
+    assert_eq!(store.height(), 11);
     assert_ne!(tip_a, tip_b, "applying a block changes the tip id");
 
     let oracle = store.candidate_dry_run(&[]).expect("uncached oracle at B");
