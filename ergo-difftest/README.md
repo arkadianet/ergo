@@ -305,7 +305,9 @@ divergence family (#238: 10 headers in Rust vs 9 in Scala) **cannot** surface
 here. Closing it needs a header window on both sides — a fixed agreed set of
 serialized headers, or a third `ctx_expr` frame field carrying them on the wire.
 That is an oracle-contract change, deliberately not folded into the guard; the
-replay driver reaches the class in the meantime.
+early replay supplies Rust parent headers, but has no independent scripted
+reference reduction with a matched nonempty window. It does not close that
+comparison by itself.
 
 ### Debugging the pipe
 
