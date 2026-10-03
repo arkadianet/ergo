@@ -76,6 +76,9 @@ get /api/v1/mining/miner-stats
 get /api/v1/mining/minerStats
 get /api/v1/mining/policy
 put /api/v1/mining/policy
+get /api/v1/mining/private-transactions
+post /api/v1/mining/private-transactions
+post /api/v1/mining/private-transactions/{tx_id}/cancel
 get /api/v1/mining/reward-address
 get /api/v1/mining/reward-pubkey
 post /api/v1/mining/solution
