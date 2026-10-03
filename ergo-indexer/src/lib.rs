@@ -32,6 +32,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod handle;
+mod jvm_int;
 pub mod rebuild;
 pub mod rollback;
 pub mod scratch;

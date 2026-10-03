@@ -14,8 +14,8 @@
 //! either applies one block, rolls one block back, sleeps when caught
 //! up, or surfaces a halt/race condition. The blocking [`IndexerTask::run`]
 //! driver loop turns those outcomes into a long-running task — backing
-//! off on section-missing (5 × 1 s), tight-looping while behind, and
-//! idling on `Idle`.
+//! off on section-missing (5 × 1 s), continuing after committed progress,
+//! and waiting at least 50 ms after `Idle` or `Race`. Waits observe cancellation.
 //! Production uses [`IndexerTask::spawn`] to run this synchronous I/O and
 //! compute work on a dedicated thread, outside the node's async worker pool.
 //!
@@ -61,21 +61,26 @@ pub struct IndexerFullBlock {
 
 /// Read surface the polling task depends on. Production wires this
 /// against `ChainStoreReader`; tests use a scripted impl.
+///
+/// `Ok(None)` means absent data. Storage and decode failures must return
+/// `Err`, preserving their cause where available; the task halts and abandons
+/// any uncommitted batch. Each call may use a different chain snapshot, so
+/// the task rechecks canonicality before committing forward progress.
 pub trait IndexerChainSource: Send + Sync {
     /// Committed tip as `(height, header_id)`. Must be a single atomic
     /// snapshot — two reads from the same poll may otherwise see
     /// different values (the chain reader opens a fresh redb txn per
     /// call, so callers cannot count on snapshot stability).
-    fn committed_tip(&self) -> ChainTip;
+    fn committed_tip(&self) -> Result<ChainTip, IndexerError>;
 
     /// Canonical header_id at `height`, or `None` if past the tip / no
     /// chain has been written / the height has been pruned.
-    fn header_id_at(&self, height: u32) -> Option<HeaderId>;
+    fn header_id_at(&self, height: u32) -> Result<Option<HeaderId>, IndexerError>;
 
     /// Block (height + header_id + parsed transactions) by header_id.
     /// `None` when the chain has the header but section bytes haven't
     /// landed yet — driver retries with bounded backoff.
-    fn full_block(&self, header_id: &HeaderId) -> Option<IndexerFullBlock>;
+    fn full_block(&self, header_id: &HeaderId) -> Result<Option<IndexerFullBlock>, IndexerError>;
 }
 
 /// Outcome of one `step` iteration. The blocking [`IndexerTask::run`]
@@ -92,11 +97,22 @@ pub enum IndexerPoll {
     /// Header is canonical but section bytes are missing — chain crash
     /// window. Driver retries with bounded backoff.
     SectionRetry { header_id: HeaderId, height: u64 },
-    /// Mid-load fork flip: header_id at the target height changed
-    /// between the "load" and "re-verify" reads. Retry next iteration.
+    /// Mid-load fork flip or absent canonical height. Retry after a
+    /// cancellation-aware delay so persistent races cannot spin.
     Race,
     /// Indexer halted with this error. Terminal — driver exits.
     Halted(IndexerError),
+}
+
+// Missing data retains the ordinary retry contract; read failures halt and
+// abandon any uncommitted batch instead of becoming a genesis or race value.
+macro_rules! chain_read {
+    ($read:expr) => {
+        match $read {
+            Ok(value) => value,
+            Err(error) => return IndexerPoll::Halted(error),
+        }
+    };
 }
 
 /// Polling task. Holds the indexer handle (status + height mirror), an
@@ -193,14 +209,24 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// Order: reorg check → caught-up check → forward
     /// load+verify+apply.
     pub fn step(&mut self) -> IndexerPoll {
-        self.step_with_budget(1, Duration::ZERO, 0)
+        let poll = self.step_with_budget(1, Duration::ZERO, 0);
+        self.finish_poll(poll)
     }
 
     /// Catch up in a bounded atomic batch. Limits are checked between blocks;
     /// one slow/large block still finishes atomically. Rollback remains per block.
     /// The driver uses this method while `step()` retains single-block semantics.
     pub fn step_batch(&mut self) -> IndexerPoll {
-        self.step_with_budget(16, Duration::from_millis(50), 8 * 1024 * 1024)
+        let poll = self.step_with_budget(16, Duration::from_millis(50), 8 * 1024 * 1024);
+        self.finish_poll(poll)
+    }
+
+    fn finish_poll(&self, poll: IndexerPoll) -> IndexerPoll {
+        if let IndexerPoll::Halted(error) = &poll {
+            self.handle
+                .set_status(IndexerStatus::Halted(error.halt_reason()));
+        }
+        poll
     }
 
     fn step_with_budget(
@@ -221,7 +247,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             Err(e) => return IndexerPoll::Halted(e),
         };
 
-        let tip = self.chain.committed_tip();
+        let tip = chain_read!(self.chain.committed_tip());
 
         // Self-repair gate — MUST run before the reorg + forward-apply paths.
         // If a tolerated drift flagged the derived template/token index degraded
@@ -266,7 +292,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                     });
                 }
             };
-            let diverged = match self.chain.header_id_at(our_h) {
+            let diverged = match chain_read!(self.chain.header_id_at(our_h)) {
                 None => true,
                 Some(id) => id != prev_id,
             };
@@ -283,8 +309,8 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 // `UndoMissing` — the testnet 431,366 bystander wedge
                 // shredded 201 index heights exactly this way while the
                 // chain state (correctly) never moved.
-                let state_reorged =
-                    tip.height > 0 && self.chain.header_id_at(tip.height) == Some(tip.header_id);
+                let state_reorged = tip.height > 0
+                    && chain_read!(self.chain.header_id_at(tip.height)) == Some(tip.header_id);
                 if !state_reorged {
                     if !self.hold_logged {
                         tracing::warn!(
@@ -323,12 +349,12 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             }
         };
 
-        let header_id = match self.chain.header_id_at(next_h32) {
+        let header_id = match chain_read!(self.chain.header_id_at(next_h32)) {
             Some(id) => id,
             None => return IndexerPoll::Race,
         };
 
-        let mut block = match self.chain.full_block(&header_id) {
+        let mut block = match chain_read!(self.chain.full_block(&header_id)) {
             Some(b) => b,
             None => {
                 return IndexerPoll::SectionRetry {
@@ -338,7 +364,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             }
         };
 
-        if self.chain.header_id_at(next_h32) != Some(header_id) || block.header_id != header_id {
+        if chain_read!(self.chain.header_id_at(next_h32)) != Some(header_id)
+            || block.header_id != header_id
+        {
             return IndexerPoll::Race;
         }
         if self.cancel.load(Ordering::Acquire) {
@@ -393,15 +421,16 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 break;
             }
             let height = (next.indexed_height + 1) as u32; // bounded by the captured u32 tip
-            let Some(id) = self.chain.header_id_at(height) else {
+            let Some(id) = chain_read!(self.chain.header_id_at(height)) else {
                 break;
             };
-            let Some(loaded) = self.chain.full_block(&id) else {
+            let Some(loaded) = chain_read!(self.chain.full_block(&id)) else {
                 break;
             };
-            if self.chain.header_id_at(height) != Some(id)
+            if chain_read!(self.chain.header_id_at(height)) != Some(id)
                 || loaded.header_id != id
-                || self.chain.header_id_at(next.indexed_height as u32) != next.indexed_header_id
+                || chain_read!(self.chain.header_id_at(next.indexed_height as u32))
+                    != next.indexed_header_id
             {
                 return IndexerPoll::Race; // discard the entire batch on a fork flip
             }
@@ -410,7 +439,9 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             }
             block = loaded;
         }
-        if self.chain.header_id_at(next.indexed_height as u32) != next.indexed_header_id {
+        if chain_read!(self.chain.header_id_at(next.indexed_height as u32))
+            != next.indexed_header_id
+        {
             return IndexerPoll::Race;
         }
         if let Err(error) = write.commit() {
@@ -433,7 +464,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     ) -> IndexerPoll {
         self.handle.set_status(IndexerStatus::Syncing);
 
-        let block = match self.chain.full_block(&prev_id) {
+        let block = match chain_read!(self.chain.full_block(&prev_id)) {
             Some(b) => b,
             None => {
                 return IndexerPoll::SectionRetry {
@@ -470,10 +501,10 @@ impl<C: IndexerChainSource> IndexerTask<C> {
     /// never call it directly on a shared async runtime worker.
     ///
     /// Sleeping policy:
-    /// - `Idle`: sleep `poll_idle`.
+    /// - `Idle`: sleep `poll_idle`, with a 50 ms minimum.
     /// - `Applied` / `RolledBack`: tight loop (no sleep — backfill
     ///   throughput is bound by I/O, not wall clock).
-    /// - `Race`: tight loop (the chain just raced under us).
+    /// - `Race`: a cancellation-aware 50 ms delay.
     /// - `SectionRetry`: 1 s backoff per attempt; halt
     ///   `SectionMissing` after [`MAX_SECTION_RETRIES`].
     /// - `Halted`: set status, exit.
@@ -481,6 +512,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
         // Share the driver's cancel flag with `step` so an in-progress
         // secondary-index rebuild can drain promptly on shutdown.
         self.cancel = cancel.clone();
+        let poll_idle = poll_idle.max(MIN_POLL_DELAY);
         let mut section_retry_count: u32 = 0;
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -493,8 +525,14 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                         return;
                     }
                 }
-                IndexerPoll::Applied(_) | IndexerPoll::RolledBack(_) | IndexerPoll::Race => {
+                IndexerPoll::Applied(_) | IndexerPoll::RolledBack(_) => {
                     section_retry_count = 0;
+                }
+                IndexerPoll::Race => {
+                    section_retry_count = 0;
+                    if !sleep_or_cancel(MIN_POLL_DELAY, &cancel) {
+                        return;
+                    }
                 }
                 IndexerPoll::SectionRetry { header_id, height } => {
                     section_retry_count += 1;
@@ -536,6 +574,7 @@ impl<C: IndexerChainSource> IndexerTask<C> {
 /// SectionMissing.
 pub const MAX_SECTION_RETRIES: u32 = 5;
 const SECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MIN_POLL_DELAY: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
 #[path = "task_batch_tests.rs"]

@@ -52,7 +52,7 @@ use crate::store::tables::{
 use crate::store::{meta as meta_io, undo as undo_io, IndexerMeta, IndexerStore, UndoEntry};
 use crate::template::{flush_templates, load_template_into_map, template_hash_for_box_bytes};
 use crate::token::{
-    flush_tokens, is_mint, load_token_into_map, try_load_token_into_map, IndexedToken,
+    flush_tokens, is_mint, load_required_token_into_map, load_token_into_map, IndexedToken,
 };
 use crate::HeaderId;
 use ergo_indexer_types::{is_protocol_genesis_box, IndexedErgoBox, TokenId};
@@ -343,33 +343,26 @@ pub(crate) fn apply_block_in_transaction(
                     // Token box-segment sign-flip on spend: for each
                     // token the spent box carried,
                     // flip the matching token's box-segment entry from
-                    // +gi to -gi. Skips tokens whose record doesn't
-                    // exist (matches Scala's `findAndUpdateToken`
-                    // empty-on-miss behavior — a chain-validated token
-                    // should always have a record from its prior mint).
+                    // +gi to -gi. Every token requires its prior mint metadata;
+                    // absence aborts this write transaction atomically.
                     for token in &existing.box_data.candidate.tokens {
-                        if let Some(record) = try_load_token_into_map(
+                        let record = load_required_token_into_map(
                             &token_table,
                             &mut scratch.touched_tokens,
                             token.token_id,
-                        )? {
-                            let parent_id = token_unique_id(&record.token_id);
-                            // Secondary index — degrade-not-halt on drift.
-                            let flip = flip_box_segment_entry(
-                                &parent_id,
-                                &mut record.segment,
-                                spent_global_index,
-                                &mut scratch.staged_spills,
-                                &segments_table,
-                            );
-                            if tolerate_secondary_drift(
-                                "token",
-                                &parent_id,
-                                spent_global_index,
-                                flip,
-                            )? {
-                                secondary_skipped = true;
-                            }
+                        )?;
+                        let parent_id = token_unique_id(&record.token_id);
+                        // Secondary index — degrade-not-halt on drift.
+                        let flip = flip_box_segment_entry(
+                            &parent_id,
+                            &mut record.segment,
+                            spent_global_index,
+                            &mut scratch.staged_spills,
+                            &segments_table,
+                        );
+                        if tolerate_secondary_drift("token", &parent_id, spent_global_index, flip)?
+                        {
+                            secondary_skipped = true;
                         }
                     }
 
@@ -527,25 +520,22 @@ pub(crate) fn apply_block_in_transaction(
                 // Token box-segment maintenance — independent of
                 // mint detection). For every token in this output —
                 // mint or plain transfer — append the output's
-                // global_box_index to the token's box-segment if a
-                // record exists. Skips tokens with no record (the
-                // chain-invariant says one should always exist via a
-                // prior mint, but the skip path matches Scala's
-                // `findAndUpdateToken` empty-on-miss behavior).
+                // global_box_index to the token's box-segment. A missing
+                // emission record prevents a complete projection and is an
+                // error rather than an empty secondary-index result.
                 for token in &candidate.tokens {
-                    if let Some(record) = try_load_token_into_map(
+                    let record = load_required_token_into_map(
                         &token_table,
                         &mut scratch.touched_tokens,
                         token.token_id,
-                    )? {
-                        let parent_id = token_unique_id(&record.token_id);
-                        append_box_entry(
-                            &parent_id,
-                            &mut record.segment,
-                            global,
-                            &mut scratch.staged_spills,
-                        );
-                    }
+                    )?;
+                    let parent_id = token_unique_id(&record.token_id);
+                    append_box_entry(
+                        &parent_id,
+                        &mut record.segment,
+                        global,
+                        &mut scratch.staged_spills,
+                    );
                 }
 
                 if scratch.tx_touched_seen.insert(owner_tree_hash) {

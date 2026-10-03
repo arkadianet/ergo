@@ -51,7 +51,10 @@ use crate::template::{
     flush_templates, load_template_into_map, read_indexed_template, template_hash_for_box_bytes,
     IndexedTemplate,
 };
-use crate::token::{flush_tokens, read_indexed_token, write_indexed_token, IndexedToken};
+use crate::token::{
+    flush_tokens, load_required_token_into_map, read_indexed_token, write_indexed_token,
+    IndexedToken,
+};
 use crate::TokenId;
 use ergo_indexer_types::IndexedErgoBox;
 use ergo_primitives::reader::VlqReader;
@@ -72,6 +75,9 @@ const WIPE_PARENT_CHUNK: usize = 20_000;
 /// also a public, destructive entrypoint — arming up front makes a direct/manual
 /// invocation crash-safe too (a crash mid-rebuild leaves the marker set, so the
 /// next poll resumes the rebuild rather than exposing a wiped/half-rebuilt index).
+/// A missing token emission record returns `TokenMetadataMissing` and retains
+/// the pending marker and last committed cursor. A primary transfer box cannot
+/// reconstruct the original mint metadata; repair never invents that record.
 pub fn rebuild_secondary_indexes(store: &IndexerStore) -> Result<(), IndexerError> {
     rebuild_secondary_indexes_until(store, &AtomicBool::new(false))
 }
@@ -402,19 +408,21 @@ fn rebuild_box_chunk(
             // Token segments (one entry per token the box carried — duplicates
             // intentionally produce multiple entries, matching apply).
             for token in &rec.box_data.candidate.tokens {
-                let rec_t = load_token_or_skip(&token_table, &mut touched_tokens, token.token_id)?;
-                if let Some(rec_t) = rec_t {
-                    let parent = token_unique_id(&rec_t.token_id);
-                    append_box_entry(&parent, &mut rec_t.segment, gi_i64, &mut staged);
-                    if spent {
-                        flip_box_segment_entry(
-                            &parent,
-                            &mut rec_t.segment,
-                            gi_i64,
-                            &mut staged,
-                            &segments_table,
-                        )?;
-                    }
+                let rec_t = load_required_token_into_map(
+                    &token_table,
+                    &mut touched_tokens,
+                    token.token_id,
+                )?;
+                let parent = token_unique_id(&rec_t.token_id);
+                append_box_entry(&parent, &mut rec_t.segment, gi_i64, &mut staged);
+                if spent {
+                    flip_box_segment_entry(
+                        &parent,
+                        &mut rec_t.segment,
+                        gi_i64,
+                        &mut staged,
+                        &segments_table,
+                    )?;
                 }
             }
         }
@@ -475,39 +483,6 @@ fn read_box(
             source: e,
         }
     })
-}
-
-/// Load a token record into the touched map, skipping (returning `None`) if no
-/// record exists — every chain-validated token has a mint record, so this is a
-/// defensive no-op rather than a fabricated default.
-fn load_token_or_skip<'a>(
-    token_table: &impl ReadableTable<&'static [u8], &'static [u8]>,
-    map: &'a mut HashMap<TokenId, IndexedToken>,
-    token_id: TokenId,
-) -> Result<Option<&'a mut IndexedToken>, IndexerError> {
-    use std::collections::hash_map::Entry;
-    match map.entry(token_id) {
-        Entry::Occupied(e) => Ok(Some(e.into_mut())),
-        Entry::Vacant(e) => {
-            let key = token_unique_id(&token_id);
-            let Some(g) = token_table.get(key.as_bytes().as_slice())? else {
-                return Ok(None);
-            };
-            let mut r = VlqReader::new(g.value());
-            let t = read_indexed_token(&mut r).map_err(|err| IndexerError::DbDecode {
-                context: "rebuild_load_token",
-                source: err,
-            })?;
-            if !r.is_empty() {
-                return Err(IndexerError::DbRowLength {
-                    context: "rebuild_load_token",
-                    expected: r.position(),
-                    got: g.value().len(),
-                });
-            }
-            Ok(Some(e.insert(t)))
-        }
-    }
 }
 
 fn digest_from_key(bytes: &[u8]) -> Result<Digest32, IndexerError> {

@@ -75,22 +75,25 @@ impl ScriptedChain {
 }
 
 impl IndexerChainSource for ScriptedChain {
-    fn committed_tip(&self) -> ChainTip {
-        *self.tip.lock().unwrap()
+    fn committed_tip(&self) -> Result<ChainTip, ergo_indexer::IndexerError> {
+        Ok(*self.tip.lock().unwrap())
     }
 
-    fn header_id_at(&self, height: u32) -> Option<Digest32> {
+    fn header_id_at(&self, height: u32) -> Result<Option<Digest32>, ergo_indexer::IndexerError> {
         let mut flips = self.flip_at.lock().unwrap();
         if let Some(queue) = flips.get_mut(&height) {
             if !queue.is_empty() {
-                return Some(queue.remove(0));
+                return Ok(Some(queue.remove(0)));
             }
         }
-        self.chain.lock().unwrap().get(&height).copied()
+        Ok(self.chain.lock().unwrap().get(&height).copied())
     }
 
-    fn full_block(&self, header_id: &Digest32) -> Option<IndexerFullBlock> {
-        self.blocks.lock().unwrap().get(header_id).cloned()
+    fn full_block(
+        &self,
+        header_id: &Digest32,
+    ) -> Result<Option<IndexerFullBlock>, ergo_indexer::IndexerError> {
+        Ok(self.blocks.lock().unwrap().get(header_id).cloned())
     }
 }
 
@@ -526,26 +529,29 @@ async fn worker_keeps_host_runtime_responsive_and_join_drains_step() {
         release: Mutex<std::sync::mpsc::Receiver<()>>,
     }
     impl IndexerChainSource for BlockingChain {
-        fn committed_tip(&self) -> ChainTip {
+        fn committed_tip(&self) -> Result<ChainTip, ergo_indexer::IndexerError> {
             if let Some(started) = self.started.lock().unwrap().take() {
                 let _ = started.send(std::thread::current().id());
-                // Bounded even if a test assertion panics before releasing us.
+                // Bound the wait even if an assertion prevents release.
                 self.release
                     .lock()
                     .unwrap()
                     .recv_timeout(Duration::from_secs(5))
                     .unwrap();
             }
-            ChainTip {
+            Ok(ChainTip {
                 height: 0,
-                header_id: Digest32::from_bytes([0; 32]),
-            }
+                header_id: Digest32::ZERO,
+            })
         }
-        fn header_id_at(&self, _: u32) -> Option<Digest32> {
-            None
+        fn header_id_at(&self, _: u32) -> Result<Option<Digest32>, ergo_indexer::IndexerError> {
+            Ok(None)
         }
-        fn full_block(&self, _: &Digest32) -> Option<IndexerFullBlock> {
-            None
+        fn full_block(
+            &self,
+            _: &Digest32,
+        ) -> Result<Option<IndexerFullBlock>, ergo_indexer::IndexerError> {
+            Ok(None)
         }
     }
     let (handle, tmp) = open_handle();
@@ -658,4 +664,68 @@ fn dropping_worker_requests_cancellation() {
 fn handle_status(h: &IndexerHandle) -> IndexerStatus {
     use ergo_indexer::IndexerQuery;
     h.status()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn zero_idle_and_persistent_races_wait_between_polls_and_cancel_promptly() {
+    struct Persistent {
+        race: bool,
+        cancel: Arc<AtomicBool>,
+        observations: Mutex<Vec<std::time::Instant>>,
+        done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+    impl IndexerChainSource for Persistent {
+        fn committed_tip(&self) -> Result<ChainTip, ergo_indexer::IndexerError> {
+            let mut times = self.observations.lock().unwrap();
+            times.push(std::time::Instant::now());
+            if times.len() == 2 {
+                self.cancel.store(true, Ordering::Release);
+                if let Some(done) = self.done.lock().unwrap().take() {
+                    let _ = done.send(());
+                }
+            }
+            Ok(ChainTip {
+                height: u32::from(self.race),
+                header_id: Digest32::ZERO,
+            })
+        }
+        fn header_id_at(&self, _: u32) -> Result<Option<Digest32>, ergo_indexer::IndexerError> {
+            Ok(None)
+        }
+        fn full_block(
+            &self,
+            _: &Digest32,
+        ) -> Result<Option<IndexerFullBlock>, ergo_indexer::IndexerError> {
+            Ok(None)
+        }
+    }
+    for race in [false, true] {
+        let (handle, _tmp) = open_handle();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let source = Arc::new(Persistent {
+            race,
+            cancel: cancel.clone(),
+            observations: Mutex::new(Vec::new()),
+            done: Mutex::new(Some(done_tx)),
+        });
+        let worker = IndexerTask::new(handle, source.clone())
+            .spawn(cancel, Duration::ZERO)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || worker.join()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let times = source.observations.lock().unwrap();
+        assert_eq!(times.len(), 2);
+        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(50));
+    }
 }
