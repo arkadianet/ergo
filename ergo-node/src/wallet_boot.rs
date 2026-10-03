@@ -32,7 +32,7 @@ impl RescanControl {
         }
         let id = self
             .generation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
             .ok()?
             + 1;
         self.active

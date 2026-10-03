@@ -8,7 +8,7 @@
 
 ```bash
 # Install a nightly toolchain (do NOT touch rust-toolchain.toml — it stays
-# pinned to stable 1.95.0 for the rest of the workspace) and cargo-fuzz.
+# pinned to stable 1.99.0 for the rest of the workspace) and cargo-fuzz.
 rustup toolchain install nightly --profile minimal
 cargo install cargo-fuzz --locked
 
@@ -50,7 +50,7 @@ time — see [CI](#ci-cargo-fuzz-nightly) below.
 ## Why nightly?
 
 `cargo-fuzz` wraps `libFuzzer`, which ships as part of the LLVM distribution
-bundled with the Rust nightly compiler. The stable toolchain (pinned 1.95.0)
+bundled with the Rust nightly compiler. The stable toolchain (pinned 1.99.0)
 does not include `libFuzzer`. See [cargo-fuzz docs](https://rust-fuzz.github.io/book/).
 
 ## Architecture

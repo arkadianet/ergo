@@ -28,7 +28,7 @@ Contents:
 
 ## Quick start
 
-Build the node binary (the workspace pins Rust 1.95.0 via
+Build the node binary (the workspace pins Rust 1.99.0 via
 [`../rust-toolchain.toml`](../rust-toolchain.toml); `rustup` installs it on
 first build). See the README [Building](../README.md#building) section for
 the full set of build commands.

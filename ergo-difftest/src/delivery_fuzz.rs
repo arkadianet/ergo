@@ -48,7 +48,7 @@ pub fn fuzz_delivery(data: &[u8]) {
     let mut now = Instant::now();
     let mut last_got = None;
 
-    for instruction in data.chunks_exact(5).take(MAX_STEPS) {
+    for instruction in data.as_chunks::<5>().0.iter().take(MAX_STEPS) {
         let peer = peers[instruction[1] as usize % PEERS];
         let index = u16::from_le_bytes([instruction[2], instruction[3]]) as usize;
         let id = modifier_id(index);

@@ -965,8 +965,7 @@ async fn diff_inner(state: &ScriptState, body: DiffBody) -> Result<DiffResponse,
             };
             Ok::<_, Box<Response>>((rust, tree_bytes, height))
         })
-        .await
-        .map_err(Box::new)??;
+        .await??;
     let scala = match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         oracle.reduce_tree(&tree_bytes, height),

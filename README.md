@@ -89,7 +89,7 @@ time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
 
 ## Quickstart
 
-The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
+The workspace pins Rust 1.99.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
 (`rustup` installs it on first build).
 
 ```bash

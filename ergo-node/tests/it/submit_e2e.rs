@@ -501,7 +501,7 @@ async fn http_post_in_flight_during_shutdown_drains_gracefully() {
     assert!(
         text.starts_with("HTTP/1.1"),
         "response must be well-formed HTTP after graceful shutdown; got: {:?}",
-        &text.chars().take(300).collect::<String>(),
+        text.chars().take(300).collect::<String>(),
     );
     // The structured-response assertion: with the action loop gone and
     // submit_rx dropped, the bridge surfaces `shutting_down` and the
@@ -513,7 +513,7 @@ async fn http_post_in_flight_during_shutdown_drains_gracefully() {
         text.contains("shutting_down"),
         "response should carry the `shutting_down` reason from the closed \
          bridge channel; got: {:?}",
-        &text.chars().take(300).collect::<String>(),
+        text.chars().take(300).collect::<String>(),
     );
 
     shutdown_task

@@ -15,7 +15,7 @@ See also: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (cross-crate design),
 ```text
 .
 ├── Cargo.toml                         workspace manifest (19 members, resolver v2)
-├── rust-toolchain.toml                pinned toolchain (1.95.0, rustfmt + clippy)
+├── rust-toolchain.toml                pinned toolchain (1.99.0, rustfmt + clippy)
 ├── deny.toml                          cargo-deny policy
 ├── ARCHITECTURE.md                    cross-crate architecture spec
 ├── CHANGELOG.md                       per-release notes (Keep a Changelog format)
@@ -117,7 +117,7 @@ project:
 
 ## Building
 
-The workspace pins Rust 1.95.0 via
+The workspace pins Rust 1.99.0 via
 [`../rust-toolchain.toml`](../rust-toolchain.toml); `rustup` installs it
 automatically on first build.
 

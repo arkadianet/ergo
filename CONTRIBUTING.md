@@ -22,13 +22,13 @@ data flow, and [`docs/compatibility.md`](./docs/compatibility.md) for what
 
 ## Prerequisites
 
-The toolchain is pinned to **Rust 1.95.0** via
+The toolchain is pinned to **Rust 1.99.0** via
 [`rust-toolchain.toml`](./rust-toolchain.toml) at the repo root. `rustup`
 installs it (with `rustfmt` and `clippy`) automatically on first build, so you
 do not need to select a toolchain by hand. The workspace is edition 2021.
 
 CI reads the stable compiler directly from `rust-toolchain.toml`. Every member
-inherits the workspace's `rust-version` requirement (currently 1.95.0) and lint
+inherits the workspace's `rust-version` requirement (currently 1.99.0) and lint
 policy. When raising the compiler requirement, update the toolchain channel and
 workspace `rust-version` together; `scripts/ci-policy.py` rejects drift. The
 compiler pin selects the development toolchain; `rust-version` tells downstream
