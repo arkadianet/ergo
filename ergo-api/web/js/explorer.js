@@ -749,6 +749,7 @@ async function renderAddress(addr, mySeq) {
     // keyboard users aren't dumped to <body> on every page.
     const focusPg = document.activeElement?.dataset?.pg || null;
     tabHost.replaceChildren(el('div', 'muted', 'loading…'));
+    try {
     if (mode === 'txs') {
       const r = await getJson(`/blockchain/transaction/byAddress/${encodeURIComponent(addr)}?offset=${offset}&limit=${PAGE}`);
       if (stale()) return;
@@ -790,6 +791,9 @@ async function renderAddress(addr, mySeq) {
       tabHost.append(pagerEl(offset, null, rows.length, move));
       refocusPager(tabHost, focusPg);
     }
+    } catch {
+      if (!stale()) tabHost.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Try another tab or retry.'));
+    }
   }
 
   select('txs');
@@ -825,6 +829,7 @@ async function renderToken(id, mySeq) {
   async function pageBoxes() {
     const myPage = ++pageEpoch;
     const focusPg = document.activeElement?.dataset?.pg || null;
+    try {
     const r = await getJson(`/blockchain/box/byTokenId/${id}?offset=${offset}&limit=${PAGE}`);
     if (mySeq !== seq || myPage !== pageEpoch) return;
     const items = r?.items || [];
@@ -859,6 +864,9 @@ async function renderToken(id, mySeq) {
     );
     boxSection.replaceChildren(bp);
     refocusPager(boxSection, focusPg);
+    } catch {
+      if (mySeq === seq && myPage === pageEpoch) boxSection.replaceChildren(banner('warn', 'Page unavailable — a node lookup failed. Reopen the token to retry.'));
+    }
   }
   await pageBoxes();
 }
