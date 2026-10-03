@@ -386,6 +386,7 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
+    let security = api_security(config)?;
     // Restore admitted delivery obligations before node-owned realtime observers
     // and the API listener start. An unavailable store disables webhooks rather
     // than acknowledging registrations that would disappear at restart.
@@ -470,7 +471,6 @@ pub(super) async fn bind(
         services: api_services.clone(),
         script_config: config.api_script.clone(),
     };
-    let security = api_security(config)?;
     let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
         api_ctx,
         listener,
