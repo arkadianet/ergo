@@ -1,44 +1,60 @@
 # ergo-difftest fuzz targets
 
 > **NIGHTLY ONLY.** These targets require `cargo-fuzz` and a nightly Rust
-> toolchain. They are NOT part of the stable CI gate (see D1 in
-> `ergo-difftest/docs/interface-contracts.md §6`).
+> toolchain. PR CI checks their separate lockfile with the pinned nightly;
+> the targets' longer build/run campaigns remain scheduled.
 
 ## Quick start
 
 ```bash
-# Install a nightly toolchain (do NOT touch rust-toolchain.toml — it stays
-# pinned to stable 1.95.0 for the rest of the workspace) and cargo-fuzz.
-rustup toolchain install nightly --profile minimal
-cargo install cargo-fuzz --locked
+# From the repository root, install the pinned nightly toolchain and cargo-fuzz.
+# Keep rust-toolchain.toml pinned to stable 1.95.0 for the rest of the workspace.
+FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
+FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
+rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
 
 # From ergo-difftest/fuzz/ (or ergo-difftest/, cargo-fuzz finds the sibling
 # fuzz/ dir either way):
 cd ergo-difftest/fuzz
 
 # Resolve this separate workspace against its committed dependency lock.
-cargo +nightly metadata --locked --format-version 1 > /dev/null
+cargo +"$FUZZ_TOOLCHAIN" metadata --locked --format-version 1 > /dev/null
 
 # Build every target (ASan-instrumented, release).
-cargo +nightly fuzz build
+cargo +"$FUZZ_TOOLCHAIN" fuzz build
 
 # Run one target with the committed seed corpus for a bounded time budget
 # (seconds) or a bounded run count — either works, pick one:
-cargo +nightly fuzz run ergo_tree -- -max_total_time=60
-cargo +nightly fuzz run constant -- -runs=20000
+cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree -- -max_total_time=60
+cargo +"$FUZZ_TOOLCHAIN" fuzz run constant -- -runs=20000
 
 # cargo-fuzz has no --locked flag; check that its build preserved the lock.
 # CI performs this check even when a fuzz target reports a crash.
 git diff --exit-code -- Cargo.lock
 
 # All surface/target names
-cargo +nightly fuzz list
+cargo +"$FUZZ_TOOLCHAIN" fuzz list
 
 # If a run finds a crash, minimize the failing input before filing an issue:
-cargo +nightly fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
+cargo +"$FUZZ_TOOLCHAIN" fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>
 # (run from ergo-difftest/, so the artifact path above is
 #  ergo-difftest/fuzz/artifacts/<target>/crash-<hash>)
 ```
+
+The tool versions come from [`.github/ci-tools.toml`](../../../.github/ci-tools.toml).
+When a workspace dependency changes, update this detached lock with Cargo from
+the repository root, then rerun the locked precheck and affected targets:
+
+```bash
+cargo +"$FUZZ_TOOLCHAIN" update --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  -p num-bigint --precise 0.5.1
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  --locked --format-version 1 > /dev/null
+```
+
+Use the changed dependency's package and version in the update command. Commit
+both workspace lockfiles together; do not edit lockfile package entries by hand.
 
 `fuzz/artifacts/` and `fuzz/target/` are gitignored — crash inputs never get
 committed by accident. When a crash reproduces, do not fix the underlying
@@ -132,33 +148,35 @@ help libFuzzer find interesting coverage quickly.
 
 ```bash
 # Seed from a larger set of real vectors (mutation basis, not committed)
-cargo +nightly fuzz run ergo_tree -- \
+cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree -- \
   -seed_inputs=corpus/ergo_tree            \
   -corpus=corpus/ergo_tree                 \
   -jobs=4
 ```
 
-## Stable CI gate
+## PR CI gates
 
 The stable, hermetic campaign runs on every PR/push via the `difftest` job
 in `.github/workflows/ci.yml`:
 
 ```bash
-cargo run --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
+cargo run --locked --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
 ```
 
-This is the gating check. The nightly scheduled job in `fuzz.yml` runs a
-longer campaign (2 000 000 iters + corpus mutation) and is NOT gating — it
-finds new bugs over time without blocking PRs.
+The separate `fuzz-dependencies` job resolves `fuzz/Cargo.toml` with the pinned
+nightly and `cargo metadata --locked`, so a dependency update cannot leave the
+detached fuzz lock stale. It does not build or run libFuzzer. The scheduled job
+in `fuzz.yml` runs a longer campaign (2 000 000 iters + corpus mutation) and is
+not a PR gate.
 
 ## CI: cargo-fuzz (nightly)
 
 The `cargo-fuzz-nightly` job in `.github/workflows/fuzz.yml` builds and runs
 all consensus and P2P targets on a real nightly toolchain — a `fail-fast: false` matrix, one
 job per target, each capped at `-max_total_time=600` (10 minutes) seeded
-from the committed `corpus/<target>/`. `ci.yml` (the PR gate) is untouched
-and stays stable-only; this job runs only on the nightly cron (02:00 UTC)
-and `workflow_dispatch`, and does not block PRs.
+from the committed `corpus/<target>/`. This build/run job runs only on the
+nightly cron (02:00 UTC) and `workflow_dispatch`, and does not block PRs. PR CI
+separately validates the detached dependency lock with the same nightly.
 
 A crash (`-error_exitcode=1`) fails that matrix leg. On failure the job
 uploads `fuzz/artifacts/<target>/` as a workflow artifact

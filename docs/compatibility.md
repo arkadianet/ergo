@@ -302,6 +302,12 @@ potentially breaking:
   calls out what moved.
 - Pin to a specific tag, not `latest`.
 
+Rust consumers upgrading to the `num-bigint 0.5` dependency must update their
+own direct dependency if they exchange `BigInt` or `BigUint` with this workspace
+(for example, through `SigmaValue`, evaluator values or difficulty helpers).
+Types from `num-bigint 0.4` and `0.5` are distinct. This dependency upgrade does
+not change the node's specified integer wire encodings.
+
 ## Reporting a consensus divergence
 
 A consensus divergence — this node accepting a block the Scala reference
