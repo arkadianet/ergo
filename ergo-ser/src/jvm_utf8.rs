@@ -11,11 +11,11 @@
 //! surrogate, and emits a SINGLE U+FFFD consuming all three. WHATWG/Rust
 //! emit three. e.g. `ed a0 80`: JVM → 1× U+FFFD, Rust → 3× U+FFFD.
 //!
-//! Consensus relevance: the node hashes the *original* wire bytes for box
-//! and transaction ids (so the decoded string never re-enters a consensus
-//! hash), but a decoded `SString` value is `EQ`-compared and length-costed
-//! at script evaluation, so the decoded codepoints MUST agree with the Scala
-//! node byte-for-byte. This module is the parity point.
+//! Decoded `SString` values participate in equality and length costing, so their
+//! codepoints must match the JVM. Canonical reserialization encodes the decoded
+//! string again and can change its bytes; transaction signing and newly sealed
+//! candidates use canonical forms. A parsed whole box can preserve a received
+//! wire ID independently. Decoding parity does not imply universal wire identity.
 //!
 //! Expected values in the test module come from the actual JVM (Corretto 17
 //! `new String(bytes, UTF_8)`), never from this function — see the

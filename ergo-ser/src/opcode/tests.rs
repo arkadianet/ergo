@@ -2027,3 +2027,17 @@ fn numeric_cast_and_select_field_match_scala_oracle() {
         }
     }
 }
+
+#[test]
+fn every_registered_opcode_has_a_diagnostic_name() {
+    for opcode in u8::MIN..=u8::MAX {
+        if opcode_pattern(opcode).is_some() {
+            assert_ne!(
+                opcode_name(opcode),
+                "???",
+                "registered opcode 0x{opcode:02x}"
+            );
+        }
+    }
+    assert_eq!(opcode_name(0), "???");
+}

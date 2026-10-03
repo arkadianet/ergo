@@ -119,6 +119,12 @@ pub(super) fn read_sigma_boolean_at_depth(
     Ok(node)
 }
 
+// Initial reservation is a resource policy, not a child-count acceptance cap.
+// Grow only after complete children are decoded; retain reference read order.
+fn initial_children(count: usize) -> Vec<SigmaBoolean> {
+    Vec::with_capacity(count.min(64))
+}
+
 fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoolean, ReadError> {
     let tag = r.get_u8()?;
     let next = depth + 1;
@@ -135,7 +141,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
         }
         SIGMA_AND => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -143,7 +149,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
         }
         SIGMA_OR => {
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -157,7 +163,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
             // the bound itself is an `IllegalArgumentException`: a hard reject.
             let k = r.get_u16()?;
             let count = r.get_u16()? as usize;
-            let mut children = Vec::with_capacity(count);
+            let mut children = initial_children(count);
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
@@ -185,6 +191,13 @@ mod tests {
     use crate::sigma_type::SigmaType;
     use crate::sigma_value::{read_value, write_constant, write_value, SigmaValue};
     use ergo_primitives::group_element::GroupElement;
+
+    #[test]
+    fn child_reservation_is_bounded_independently_of_declared_count() {
+        for count in [0, 1, 64, 255, u16::MAX as usize] {
+            assert!(initial_children(count).capacity() <= 64);
+        }
+    }
 
     // ----- helpers -----
 
