@@ -644,6 +644,11 @@ impl<'de> Deserialize<'de> for SendTxRequest {
             private_options: Option<crate::mining::PrivateTransactionOptions>,
         }
         let r = Raw::deserialize(d)?;
+        if r.private_options.is_some() && r.delivery != TxDelivery::MinePrivate {
+            return Err(D::Error::custom(
+                "privateOptions requires mine_private delivery",
+            ));
+        }
         match r.ty.as_str() {
             "intent" => {
                 if r.signed_transaction.is_some() {

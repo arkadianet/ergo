@@ -562,6 +562,20 @@ pub(super) fn handle_mining_request(
 
     if let Err(error) = super::private_mining::expire(state, handle) {
         tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
+        // A solution must not be accepted when its private queue deadlines
+        // cannot be established durably against the applied parent.
+        if matches!(
+            &req,
+            crate::mining_bridge::MiningRequest::SubmitSolution { .. }
+        ) {
+            handle.invalidate_operator_generation();
+            if let crate::mining_bridge::MiningRequest::SubmitSolution { reply, .. } = req {
+                let _ = reply.send(Err(ergo_api::MiningApiError::Unavailable(format!(
+                    "private mining deadline check failed: {error}"
+                ))));
+            }
+            return true;
+        }
     }
     let req = match req {
         crate::mining_bridge::MiningRequest::ListPrivateTransactions { reply } => {

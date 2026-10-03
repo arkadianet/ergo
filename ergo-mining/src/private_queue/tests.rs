@@ -232,3 +232,43 @@ fn corrupted_reservation_metadata_fails_startup_closed() {
     std::fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
     assert!(PrivateTransactionQueue::open(&path).is_err());
 }
+
+#[test]
+fn cancelling_a_conflict_prevents_reactivation_after_rollback() {
+    let queue = PrivateTransactionQueue::default();
+    let item = queue
+        .admit(&entry(1), PrivateTransactionOptions::default(), 10, 100)
+        .unwrap();
+    queue
+        .reconcile(
+            101,
+            "competing-spend".into(),
+            &BTreeMap::new(),
+            |_, _| false,
+            |_| false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        queue.entry(&item.tx_id).unwrap().state,
+        PrivateTransactionState::Conflicted
+    );
+    assert_eq!(
+        queue.cancel(&item.tx_id).unwrap().state,
+        PrivateTransactionState::Cancelled
+    );
+    queue
+        .reconcile(
+            100,
+            "fork".into(),
+            &BTreeMap::new(),
+            |_, _| false,
+            |_| true,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        queue.entry(&item.tx_id).unwrap().state,
+        PrivateTransactionState::Cancelled
+    );
+}

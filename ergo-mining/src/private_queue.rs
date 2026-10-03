@@ -286,7 +286,9 @@ impl PrivateTransactionQueue {
             if record.entry.state == PrivateTransactionState::Mined {
                 return Err("a confirmed transaction cannot be cancelled".into());
             }
-            if record.entry.state.is_active() {
+            if record.entry.state.is_active()
+                || record.entry.state == PrivateTransactionState::Conflicted
+            {
                 record.entry.state = PrivateTransactionState::Cancelled;
                 record.entry.reason = Some("cancelled by operator".into());
             }

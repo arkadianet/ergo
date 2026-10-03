@@ -242,3 +242,20 @@ async fn private_queue_routes_require_owner_key_before_parsing_signed_bytes() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[test]
+fn private_wallet_options_require_explicit_private_delivery() {
+    use ergo_api::wallet::native::dto::{SendTxRequest, TxDelivery};
+    let value = serde_json::json!({"type":"signed", "signedTransaction":{"type":"bytes", "bytes":"00"}, "privateOptions":{"expires_at_height":100}});
+    assert!(serde_json::from_value::<SendTxRequest>(value.clone()).is_err());
+    let mut private = value;
+    private["delivery"] = serde_json::json!("mine_private");
+    let request: SendTxRequest = serde_json::from_value(private).unwrap();
+    assert!(matches!(
+        request,
+        SendTxRequest::Signed {
+            delivery: TxDelivery::MinePrivate,
+            ..
+        }
+    ));
+}

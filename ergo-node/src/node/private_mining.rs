@@ -181,13 +181,16 @@ pub(super) fn admit(
 /// Called before every solution request as well as on ordinary loop ticks.
 pub(super) fn expire(state: &NodeState, handle: &MiningHandle) -> Result<bool, String> {
     let now = crate::snapshot::unix_now_ms();
+    let queue = handle.private_queue();
+    if queue.list().is_empty() {
+        return Ok(false);
+    }
     let height = state
         .store
         .reader_handle()
         .committed_tip()
         .map_err(|e| e.to_string())?
         .map_or(0, |(height, _)| height);
-    let queue = handle.private_queue();
     if !queue.list().iter().any(|entry| {
         matches!(
             entry.state,
