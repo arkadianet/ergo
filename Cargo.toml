@@ -74,7 +74,7 @@ bip39    = { version = "2", features = ["zeroize"] }
 hmac     = "0.12"
 
 # Numerics
-num-bigint  = "0.4"
+num-bigint  = "0.5"
 num-integer = "0.1"
 num-traits  = "0.2"
 

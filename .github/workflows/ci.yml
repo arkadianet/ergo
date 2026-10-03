@@ -235,19 +235,22 @@ jobs:
 
   check-required:
     # Preserve the existing branch-protection context. A failed, cancelled,
-    # or skipped matrix must never turn this required check green.
+    # or skipped matrix or fuzz-lock gate must never turn this check green.
     name: Check, clippy, test (${{ matrix.os }})
     strategy:
       matrix:
         os: [macos-latest, windows-latest]
-    needs: check
+    needs: [check, fuzz-dependencies]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Require all check legs to succeed
+      - name: Require all check legs and fuzz dependency resolution to succeed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
-        run: test "$CHECK_RESULT" = success
+          FUZZ_RESULT: ${{ needs.fuzz-dependencies.result }}
+        run: |
+          test "$CHECK_RESULT" = success
+          test "$FUZZ_RESULT" = success
 
   clippy-all-features:
     name: clippy (--all-features)
@@ -392,6 +395,29 @@ jobs:
         run: |
           cargo run --locked --release -p ergo-difftest -- \
             --structured --iters 50000 --min-coverage 0.80
+
+  fuzz-dependencies:
+    name: Locked fuzz workspace dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        id: rust
+        with:
+          nightly: 'true'
+          components: ''
+      # Path dependencies inherit the stable workspace's dependency versions,
+      # but Cargo resolves this detached workspace against its own lockfile.
+      # Catch stale locks on PRs before the scheduled libFuzzer builds run.
+      - name: Resolve committed fuzz dependencies with the pinned nightly
+        run: |
+          git ls-files --error-unmatch ergo-difftest/fuzz/Cargo.lock
+          cargo +${{ steps.rust.outputs.nightly }} metadata --manifest-path ergo-difftest/fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+          git diff --exit-code -- ergo-difftest/fuzz/Cargo.lock
 
   documentation:
     name: Strict public Rustdoc and engineering policy

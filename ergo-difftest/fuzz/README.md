@@ -1,8 +1,8 @@
 # ergo-difftest fuzz targets
 
 > **NIGHTLY ONLY.** These targets require `cargo-fuzz` and a nightly Rust
-> toolchain. They are NOT part of the stable CI gate (see D1 in
-> `ergo-difftest/docs/interface-contracts.md §6`).
+> toolchain. PR CI checks their separate lockfile with the pinned nightly;
+> the targets' longer build/run campaigns remain scheduled.
 
 ## Quick start
 
@@ -138,27 +138,56 @@ cargo +nightly fuzz run ergo_tree -- \
   -jobs=4
 ```
 
-## Stable CI gate
+## Pinned CI setup and lock maintenance
+
+Use the versions in [`.github/ci-tools.toml`](../../../.github/ci-tools.toml)
+to reproduce CI. From the repository root:
+
+```bash
+FUZZ_TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["toolchains"]["fuzz"])')
+FUZZ_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open(".github/ci-tools.toml", "rb"))["tools"]["fuzz"])')
+rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+cargo install cargo-fuzz --version "$FUZZ_VERSION" --locked
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  --locked --format-version 1 > /dev/null
+```
+
+When a workspace dependency changes, update the detached lock with Cargo,
+then rerun the locked precheck and affected targets. For example:
+
+```bash
+cargo +"$FUZZ_TOOLCHAIN" update --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  -p num-bigint --precise 0.5.1
+cargo +"$FUZZ_TOOLCHAIN" metadata --manifest-path ergo-difftest/fuzz/Cargo.toml \
+  --locked --format-version 1 > /dev/null
+```
+
+Use the changed dependency's package and version in the update command. Commit
+both workspace lockfiles together; do not edit lockfile package entries by hand.
+
+## PR CI gates
 
 The stable, hermetic campaign runs on every PR/push via the `difftest` job
 in `.github/workflows/ci.yml`:
 
 ```bash
-cargo run --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
+cargo run --locked --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
 ```
 
-This is the gating check. The nightly scheduled job in `fuzz.yml` runs a
-longer campaign (2 000 000 iters + corpus mutation) and is NOT gating — it
-finds new bugs over time without blocking PRs.
+The separate `fuzz-dependencies` job resolves `fuzz/Cargo.toml` with the pinned
+nightly and `cargo metadata --locked`, so a dependency update cannot leave the
+detached fuzz lock stale. It does not build or run libFuzzer. The scheduled job
+in `fuzz.yml` runs a longer campaign (2 000 000 iters + corpus mutation) and is
+not a PR gate.
 
 ## CI: cargo-fuzz (nightly)
 
 The `cargo-fuzz-nightly` job in `.github/workflows/fuzz.yml` builds and runs
 all consensus and P2P targets on a real nightly toolchain — a `fail-fast: false` matrix, one
 job per target, each capped at `-max_total_time=600` (10 minutes) seeded
-from the committed `corpus/<target>/`. `ci.yml` (the PR gate) is untouched
-and stays stable-only; this job runs only on the nightly cron (02:00 UTC)
-and `workflow_dispatch`, and does not block PRs.
+from the committed `corpus/<target>/`. This build/run job runs only on the
+nightly cron (02:00 UTC) and `workflow_dispatch`, and does not block PRs. PR CI
+separately validates the detached dependency lock with the same nightly.
 
 A crash (`-error_exitcode=1`) fails that matrix leg. On failure the job
 uploads `fuzz/artifacts/<target>/` as a workflow artifact

@@ -150,6 +150,12 @@ harness unit tests (`tests/it/smoke.rs`, `tests/it/selftest.rs`) are exercised b
 the standard `cargo test --locked --workspace` run above and do not need a
 Scala oracle.
 
+Dependency changes must also keep `ergo-difftest/fuzz/Cargo.lock`, the detached
+fuzz workspace's lockfile, current. CI resolves it with the pinned nightly
+and `cargo metadata --locked` on every PR; the longer libFuzzer campaigns remain
+scheduled. See [the fuzz workflow](ergo-difftest/fuzz/README.md) for the update
+and validation commands.
+
 ### Test profiles
 
 Defined in the workspace [`Cargo.toml`](./Cargo.toml):
