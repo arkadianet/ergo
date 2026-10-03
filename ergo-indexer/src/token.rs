@@ -302,8 +302,8 @@ pub(crate) fn flush_tokens(
 
 /// Decode R4 as a UTF-8 name. Default `""` on missing or wrong type.
 /// Mirrors `IndexedToken.scala:184` — `new String(bytes, "UTF-8")` with
-/// the JVM default replace-malformed action (U+FFFD), which Rust's
-/// `String::from_utf8_lossy` matches.
+/// the JVM replacement action. The shared JVM decoder preserves its
+/// malformed-sequence replacement count; Rust's lossy decoder can differ.
 pub(crate) fn decode_name_r4(regs: &AdditionalRegisters) -> String {
     decode_string_register(regs, RegisterId::R4)
 }
@@ -319,7 +319,7 @@ fn decode_string_register(regs: &AdditionalRegisters, id: RegisterId) -> String 
         Some(RegisterValue {
             value: SigmaValue::Coll(CollValue::Bytes(bytes)),
             ..
-        }) => String::from_utf8_lossy(bytes).into_owned(),
+        }) => ergo_ser::jvm_utf8::decode(bytes),
         _ => String::new(),
     }
 }
@@ -327,7 +327,7 @@ fn decode_string_register(regs: &AdditionalRegisters, id: RegisterId) -> String 
 /// Decode R6 as decimals. Branch order is load-bearing (`IndexedToken.scala:203-217`):
 ///
 /// 1. **Primary**: if R6 is `Coll[Byte]`, decode the bytes as UTF-8
-///    ASCII decimal and parse as `i32`. Fall through on type mismatch
+///    JVM decimal digits and parse as a signed `i32`. Fall through on type mismatch
 ///    or parse failure (NOT to 0).
 /// 2. **First fallback**: if R6 is `SInt`, return the int directly.
 ///    Fall through on type mismatch.
@@ -340,10 +340,8 @@ pub(crate) fn decode_decimals_r6(regs: &AdditionalRegisters) -> i32 {
         return 0;
     };
     if let SigmaValue::Coll(CollValue::Bytes(bytes)) = &reg.value {
-        if let Ok(s) = std::str::from_utf8(bytes) {
-            if let Ok(n) = s.parse::<i32>() {
-                return n;
-            }
+        if let Some(value) = crate::jvm_int::parse_i32(&ergo_ser::jvm_utf8::decode(bytes)) {
+            return value;
         }
     }
     if let SigmaValue::Int(i) = reg.value {
@@ -427,7 +425,7 @@ fn read_option_string(r: &mut VlqReader) -> Result<Option<String>, ReadError> {
         0x01 => {
             let len = r.get_u16()? as usize;
             let bytes = r.get_bytes(len)?;
-            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+            Ok(Some(ergo_ser::jvm_utf8::decode(bytes)))
         }
         other => Err(ReadError::InvalidData(format!(
             "IndexedToken string Option flag must be 0x00 or 0x01, got 0x{other:02x}"
@@ -771,6 +769,58 @@ mod tests {
             (SigmaType::SLong, SigmaValue::Long(12)),
         ]);
         assert_eq!(decode_decimals_r6(&regs), 0);
+    }
+
+    #[test]
+    fn from_box_register_text_matches_pinned_jvm_observations() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../test-vectors/ergo-indexer/token-text/stdout.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 26);
+        let token = Token {
+            token_id: TokenId::ZERO,
+            amount: 100,
+        };
+        for case in cases {
+            let bytes = hex::decode(case["hex"].as_str().unwrap()).unwrap();
+            let expected: String = case["codepoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|code| char::from_u32(code.as_u64().unwrap() as u32).unwrap())
+                .collect();
+            let registers = regs_with(
+                (0..3)
+                    .map(|_| {
+                        (
+                            SigmaType::SColl(Box::new(SigmaType::SByte)),
+                            SigmaValue::Coll(CollValue::Bytes(bytes.clone())),
+                        )
+                    })
+                    .collect(),
+            );
+            let record = IndexedToken::from_box(&BoxId::ZERO, &token, &registers);
+            assert_eq!(
+                record.name.as_deref(),
+                Some(expected.as_str()),
+                "{}",
+                case["hex"]
+            );
+            assert_eq!(
+                record.description.as_deref(),
+                Some(expected.as_str()),
+                "{}",
+                case["hex"]
+            );
+            assert_eq!(
+                record.decimals,
+                Some(case["parsed"].as_i64().unwrap_or(0) as i32),
+                "{}",
+                case["hex"]
+            );
+        }
     }
 
     // ---- from_box constructor ----
