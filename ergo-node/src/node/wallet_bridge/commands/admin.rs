@@ -2,6 +2,7 @@
 //!
 //! See `super::mod` for the WriterContext design and grouping rationale.
 
+use redb::ReadableDatabase;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::oneshot;

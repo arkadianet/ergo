@@ -2,6 +2,7 @@
 //! One held read transaction also resolves the page's numeric IDs and records,
 //! so an apply or rollback cannot mix database versions within a response.
 
+use redb::ReadableDatabase;
 use std::borrow::Cow;
 
 use ergo_indexer_types::{IndexedBoxDto, IndexedTxDto, Page, SortDir};

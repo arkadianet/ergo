@@ -19,7 +19,7 @@ use crate::HeaderId;
 /// the file is deleted and recreated, forcing a full resync. New
 /// tables introduced at the current version are lazy-created on first
 /// apply (`WriteTransaction::open_table` is create-or-open in redb
-/// 2.x), so the wipe-and-resync path is the only mechanism that
+/// 4.x), so the wipe-and-resync path is the only mechanism that
 /// backfills them — older DBs are deleted on first boot, never
 /// migrated in place.
 pub const INDEXER_SCHEMA_VERSION: u32 = 2;
@@ -298,6 +298,7 @@ where
 mod repair_marker_tests {
     use super::*;
     use crate::store::tables::INDEXER_META;
+    use redb::ReadableDatabase;
 
     fn temp_db() -> (redb::Database, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().unwrap();

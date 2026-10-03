@@ -82,6 +82,7 @@ pub enum ModifierIndexBackfillEvent {
 pub(super) const MODIFIER_INDEX_CHUNK_BYTES_BUDGET: usize = 32 * 1024 * 1024;
 pub(super) const MODIFIER_INDEX_CHUNK_ROWS_CAP: usize = 50_000;
 
+use redb::ReadableDatabase;
 use redb::{ReadableTable, ReadableTableMetadata};
 use tracing::{debug, info, warn};
 
@@ -341,7 +342,7 @@ impl StateStore {
 
             // === Write phase: tag header + 3 sections per row, commit ===
             let mut write_txn = crate::begin_write_qr(&self.db)?;
-            write_txn.set_durability(redb::Durability::None);
+            write_txn.set_durability(redb::Durability::None)?;
             let mut written_in_chunk: usize = 0;
             {
                 let sections = match write_txn.open_table(BLOCK_SECTIONS) {
@@ -817,7 +818,7 @@ impl StateStore {
             }
 
             let mut write_txn = crate::begin_write_qr(&self.db)?;
-            write_txn.set_durability(redb::Durability::None);
+            write_txn.set_durability(redb::Durability::None)?;
             {
                 let mut idx = write_txn.open_table(SECTION_HEIGHT_INDEX)?;
                 for (header_id, header_bytes) in chunk.iter() {

@@ -64,6 +64,7 @@ rand               = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
+redb_legacy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ergo-api           = { workspace = true }

@@ -8,6 +8,7 @@
 //! function on the same struct from `mod.rs`.
 
 use super::*;
+use redb::ReadableDatabase;
 
 impl StateStore {
     /// Disable commit durability for this database instance in logic tests.

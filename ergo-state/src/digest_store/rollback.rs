@@ -6,6 +6,7 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
+use redb::ReadableDatabase;
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::active_params;

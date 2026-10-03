@@ -3,6 +3,7 @@
 //! Implements the spec's atomicity invariant: undo_log + AVL mutations +
 //! chain_index + state_meta all in one redb write transaction.
 
+use redb::ReadableDatabase;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3887,7 +3888,7 @@ impl StateStore {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
 
         if !durable_this_block {
-            write_txn.set_durability(redb::Durability::None);
+            write_txn.set_durability(redb::Durability::None)?;
         }
         let t_begin = t0.elapsed();
 

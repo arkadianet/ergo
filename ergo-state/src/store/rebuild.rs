@@ -7,6 +7,7 @@
 //! rather than buried under either.
 
 use ergo_primitives::digest::Digest32;
+use redb::ReadableDatabase;
 
 use crate::avl::serialization::AllocMeta;
 use crate::chain::{ChainState, ChainStateMeta};

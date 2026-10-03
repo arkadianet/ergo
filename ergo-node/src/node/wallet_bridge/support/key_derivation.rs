@@ -1,6 +1,7 @@
 //! Derive-key + get-private-key helpers.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
 use crate::node::wallet_bridge::{ChainStateAccessor, WalletAdminError, WriterConfig};
 

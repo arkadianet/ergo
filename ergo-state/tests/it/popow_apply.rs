@@ -3,6 +3,7 @@
 //! only, prefix is witness-only), mode tag persistence, crash
 //! safety (reopen preserves state), and the precondition guard.
 
+use redb::ReadableDatabase;
 use std::collections::BTreeMap;
 use std::path::Path;
 

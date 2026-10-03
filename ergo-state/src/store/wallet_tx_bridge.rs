@@ -8,6 +8,7 @@
 
 use super::{ScanMatchRecord, StateError, BLOCK_SECTIONS, CHAIN_INDEX, HEADERS};
 use crate::wallet::scan::RescanReadError;
+use redb::ReadableDatabase;
 
 pub(crate) enum WalletBlockSections {
     MissingHeader,

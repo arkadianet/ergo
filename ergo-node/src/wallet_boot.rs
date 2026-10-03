@@ -1,6 +1,7 @@
 //! Production wallet boot orchestrator. Single unlock+hydrate+persist
 //! path shared by the production boot and integration tests.
 
+use redb::ReadableDatabase;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ergo_state::wallet::tables::*;

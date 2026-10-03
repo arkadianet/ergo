@@ -699,7 +699,7 @@ async fn run_inner_with_backend(
     boot_sentinel: u32,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
-    let (session_id, peer_manager) = peers::setup(&config);
+    let (session_id, peer_manager) = peers::setup(&config)?;
 
     // Phase 2: sync coordinator/executor, IBD/persist pipeline, indexer,
     // shadow validation, hydrate/recover, NiPoPoW resume classification.

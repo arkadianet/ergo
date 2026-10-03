@@ -2,6 +2,7 @@
 //! and the shared burn-aware unsigned-tx builder both the compat and native
 //! send paths route through.
 
+use redb::ReadableDatabase;
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;

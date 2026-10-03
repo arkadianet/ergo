@@ -8,6 +8,7 @@
 //! it produces — so the natural boot order is `build_scaffold` →
 //! (mining subsystem) → `bind`.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_state::HeaderSectionStore;

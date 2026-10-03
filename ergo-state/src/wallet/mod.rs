@@ -21,6 +21,7 @@ pub mod store;
 pub mod tables;
 pub mod types;
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use redb::Database;

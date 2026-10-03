@@ -20,6 +20,7 @@
 
 mod lazy;
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;

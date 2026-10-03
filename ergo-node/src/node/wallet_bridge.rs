@@ -4,6 +4,7 @@
 //! them serially and sends the responses back via the per-command
 //! oneshot channel.
 
+use redb::ReadableDatabase;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 

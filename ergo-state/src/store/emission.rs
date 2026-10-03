@@ -13,6 +13,7 @@ use ergo_ser::block_transactions::read_block_transactions;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+use redb::ReadableDatabase;
 use redb::{ReadableTable, TableDefinition, WriteTransaction};
 
 pub(crate) const EMISSION_IDENTITIES: TableDefinition<&[u8], &[u8]> =

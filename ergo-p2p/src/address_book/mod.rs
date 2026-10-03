@@ -14,7 +14,9 @@
 //! Diverges from Scala: Scala persists peers in LevelDB at `data_dir/peers/`
 //! but holds bans in-memory. We persist both.
 
+use redb::ReadableDatabase;
 use std::fs;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,6 +95,33 @@ fn open_address_book_db(path: &Path, cache_bytes: usize) -> Result<Database, Dat
     }
 
     Ok(db)
+}
+
+/// redb classifies future format versions as `Corrupted`. Preserve those
+/// files instead of feeding them to automatic corruption quarantine. These
+/// offsets are the documented redb v1-v3 header/commit-slot format; a partial
+/// or unreadable header is conservatively left to the normal open error.
+fn reject_future_file_format(path: &Path) -> Result<(), AddressBookError> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AddressBookError::Io(error.to_string())),
+    };
+    let mut header = [0u8; 193];
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(error) => return Err(AddressBookError::Io(error.to_string())),
+    }
+    const MAGIC: &[u8; 9] = b"redb\x1a\x0a\xa9\x0d\x0a";
+    if &header[..MAGIC.len()] == MAGIC {
+        for version in [header[64], header[192]] {
+            if version > 3 {
+                return Err(AddressBookError::UnsupportedFileFormat { version });
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---- Tables ----
@@ -181,6 +210,8 @@ pub enum AddressBookError {
     Db(String),
     #[error("schema mismatch: stored={stored}, current={current}")]
     SchemaMismatch { stored: u64, current: u64 },
+    #[error("unsupported redb file format {version}; database was preserved")]
+    UnsupportedFileFormat { version: u8 },
     #[error("io error: {0}")]
     Io(String),
 }
@@ -238,9 +269,10 @@ impl AddressBook {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| AddressBookError::Io(e.to_string()))?;
         }
+        reject_future_file_format(path)?;
         let db = match open_address_book_db(path, cache_bytes) {
             Ok(db) => db,
-            Err(e) => {
+            Err(e @ DatabaseError::Storage(redb::StorageError::Corrupted(_))) => {
                 // Corruption: rename the damaged file out of the way and
                 // start fresh. Don't lose data silently — operator sees
                 // the rename and can investigate.
@@ -264,6 +296,12 @@ impl AddressBook {
                 }
                 open_address_book_db(path, cache_bytes)?
             }
+            Err(DatabaseError::UpgradeRequired(version)) => {
+                return Err(AddressBookError::UnsupportedFileFormat { version });
+            }
+            // Unsupported formats, live-file locks and I/O errors are not
+            // corruption. Preserve the file and fail closed for the operator.
+            Err(e) => return Err(e.into()),
         };
 
         // Schema-version handshake. New file → write current. Existing file
@@ -755,7 +793,11 @@ mod tests {
             let book = AddressBook::open_at_with_cache(&path, 32768).unwrap();
             assert_eq!(book.cache_metrics().0, 32768);
         }
-        std::fs::write(&path, b"invalid redb file").unwrap();
+        // Real corruption is distinct from redb 4's I/O/invalid-input errors.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[176] ^= 0xff;
+        bytes[304] ^= 0xff;
+        std::fs::write(&path, bytes).unwrap();
         let book = AddressBook::open_at_with_cache(&path, 16384).unwrap();
         assert_eq!(book.cache_metrics().0, 16384);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);

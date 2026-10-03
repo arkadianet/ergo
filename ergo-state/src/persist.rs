@@ -888,8 +888,7 @@ impl PersistPipeline {
         //   - `None`: makes writes visible without a durability guarantee.
         //   - `Immediate`: periodic IBD commit points and every tip-sync batch.
         // The explicit mode guarantees a synchronous durability boundary on
-        // every supported backend; it does not depend on Eventual's current
-        // implementation on a particular operating system.
+        // every supported backend.
         let any_durable = jobs.iter().any(|j| j.durable);
         let durability = if any_durable {
             redb::Durability::Immediate
@@ -898,7 +897,9 @@ impl PersistPipeline {
         };
         #[cfg(any(test, feature = "test-utils"))]
         let durability = crate::redb_util::test_durability(db, durability);
-        write_txn.set_durability(durability);
+        write_txn
+            .set_durability(durability)
+            .observe_persist_error(failure_context, "background_persist_set_durability")?;
         let mut wallet_store = crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
 
         // 1. AVL_NODES — apply in job order so later blocks overwrite
@@ -1321,6 +1322,7 @@ impl Drop for PersistPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::ReadableDatabase;
     use std::time::Duration;
 
     use crate::test_helpers::SharedBuf;

@@ -6,6 +6,7 @@
 
 #![allow(clippy::result_large_err)] // RescanReadError is large; test closures can't avoid it
 
+use redb::ReadableDatabase;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 

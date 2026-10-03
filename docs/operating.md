@@ -21,6 +21,7 @@ Contents:
 - [First run vs resume](#first-run-vs-resume)
 - [Data directory layout and backup](#data-directory-layout-and-backup)
 - [Upgrading the node](#upgrading-the-node)
+- [Migrating legacy redb databases](#migrating-legacy-redb-databases)
 - [Monitoring](#monitoring)
 - [API security posture](#api-security-posture)
 - [Graceful shutdown](#graceful-shutdown)
@@ -306,7 +307,9 @@ digest backup only into a digest-configured node.
 2. Stop the node gracefully (see [Graceful shutdown](#graceful-shutdown)) so
    the final state commit and a clean redb close complete.
 3. Back up `data_dir` (see above) before any cross-minor upgrade.
-4. Swap in the new binary and restart against the same config and
+4. For a redb 2.6 → 4 upgrade, complete the [offline database migration](#migrating-legacy-redb-databases)
+   below before starting the new binary. Other upgrades follow their release notes.
+5. Swap in the new binary and restart against the verified config and
    `data_dir`.
 
 Notes:
@@ -328,6 +331,80 @@ Notes:
   [Status](../README.md#status) and [`../CHANGELOG.md`](../CHANGELOG.md)
   in view. If in doubt around an activation, cross-check the node's tip and
   verdicts against a Scala reference node.
+
+## Migrating legacy redb databases
+
+The redb 4 storage upgrade cannot open the file-format v2 databases normally
+created by redb 2.6. Normal startup fails closed with `UpgradeRequired(2)`;
+the peer address book also preserves unsupported files rather than quarantining
+them as corruption. The offline command below upgrades **a new copy**, preserves
+the original, and verifies table schemas and every key/value row with both the
+legacy and current readers. It applies to UTXO and digest `state.redb`, the
+embedded wallet tables, the peer book, and the optional indexer database.
+It does not change application schemas, consensus bytes, or encrypted seeds.
+
+1. Stop the old node gracefully and disable its automatic restart. Keep its
+   binary and config for rollback. Back up the **whole stopped data directory**,
+   including `wallet/`, with permissions intact; a set of databases copied at
+   different running-node heights is not a consistent backup.
+2. Create a separate destination directory. Copy config and `wallet/` into it
+   with their permissions intact, but do not copy database files into the
+   destination paths: publication refuses existing files, directories and even
+   dangling symlinks. Ensure disk space for the complete backup, migrated files,
+   and one temporary database copy with upgrade/repair overhead. Run as the
+   same account that owns the data and wallet files.
+3. Using the **new** binary, migrate each database from the same stopped source
+   directory. The destination parent must already exist. Adjust the indexer
+   filename if `[indexer] db_filename` overrides the default; omit that command
+   when no indexer database exists.
+
+   ```bash
+   mkdir ./ergo-data-redb4
+   # Copy your config and, when present, wallet/ into ergo-data-redb4 first.
+   ./ergo-node migrate-redb ./ergo-data/state.redb ./ergo-data-redb4/state.redb
+   ./ergo-node migrate-redb ./ergo-data/peers.redb ./ergo-data-redb4/peers.redb
+   ./ergo-node migrate-redb ./ergo-data/indexer.redb ./ergo-data-redb4/indexer.redb
+   ```
+
+   This command never loads node configuration or starts networking. It takes
+   a nonblocking exclusive lock compatible with the old writer on the source;
+   a live/open database fails immediately. It opens only a private copy for
+   recovery, upgrade and integrity checks. Unknown table types, multimaps,
+   persistent savepoints and unsupported file versions fail closed. A database
+   already readable by redb 4 reports that no legacy migration is needed and
+   creates no destination. For a mixed stopped v2/v3 set, copy already-current
+   files with permissions intact into the new directory instead.
+4. Start only after **all** required database copies succeed. Update the config's
+   data directory to use the new directory, or supply
+   `--data-dir ./ergo-data-redb4`. The wallet path is always `wallet/` inside that
+   directory; ensure it was copied there. Check any independently configured
+   absolute paths. Validate the resumed
+   state mode, chain tip/root, wallet scan/balances and indexer progress before
+   restoring automatic restart. Keep the original directory and backup.
+
+**Failure and recovery.** Failure before publication removes the temporary
+copy and leaves source bytes unchanged, including on malformed input or repair
+failure. Fix the reported cause and retry to a new destination. An interrupted
+process can leave `.ergo-redb-migrate-*` files in the destination directory;
+normal startup never uses them. Remove those temporary files only while all
+migration processes are stopped. A parent-directory sync failure on Unix or a
+permission-restoration failure on Windows can report an error **after** the
+verified destination was published. Keep it for inspection; retrying will
+refuse to replace it. The source is still preserved. The file is synced before
+publication and Unix also syncs its parent directory; Windows has no portable
+parent-directory sync and restores the source's readonly attribute after publish.
+
+**Rollback.** Stop the new node completely, then restore the old binary and its
+config against the original stopped directory or the full pre-upgrade backup.
+Do not point redb 2.6 at a directory subsequently written by redb 4. Do not mix
+old and new state, wallet or indexer files. Blocks received only by the new node
+must be downloaded again by the old node; confirm the resumed tip and wallet.
+
+The indexer now uses `Durability::Immediate` for every apply and repair commit.
+This replaces redb 2.6's `Eventual`: commits have a synchronous durability
+boundary on every supported OS, which can increase indexer flush latency.
+The state store retains its existing IBD policy (`None` between periodic
+`Immediate` boundaries); this upgrade does not weaken durable commits.
 
 ## Monitoring
 
