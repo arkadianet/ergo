@@ -51,7 +51,7 @@ use crate::evaluator::dispatch::eval_expr;
 use crate::evaluator::eval_ctx::EvalCtx;
 use crate::evaluator::helpers::{
     coll_elem_type, collection_to_values, infer_expr_type, sigma_type_compatible,
-    value_to_sigma_type, values_equal, values_to_collection, CollKind,
+    sigma_type_to_coll_kind, value_to_sigma_type, values_equal, values_to_collection, CollKind,
 };
 use crate::evaluator::opcodes::binding::check_closure_param_types;
 use crate::evaluator::types::{EvalError, Value};
@@ -375,24 +375,6 @@ pub(super) fn flat_map(
                 inner_colls.push(inner);
             }
 
-            // Only the exact token element type can use the Tokens carrier.
-            // The shared conversion is lossless: a short byte collection or
-            // another non-token pair keeps every element in CollGeneric.
-            let token_elem_type = SigmaType::STuple(vec![
-                SigmaType::SColl(Box::new(SigmaType::SByte)),
-                SigmaType::SLong,
-            ]);
-            for c in inner_colls.iter_mut() {
-                if let Value::CollGeneric(elems, elem) | Value::CollLegacyPair(elems, elem, _) = c {
-                    if !elems.is_empty() && **elem == token_elem_type {
-                        *c = values_to_collection(
-                            CollKind::Token,
-                            std::mem::take(elems),
-                            token_elem_type.clone(),
-                        )?;
-                    }
-                }
-            }
             // Capture the pre-filter shape so an all-empty
             // flatMap result preserves the original element
             // type instead of collapsing to `Coll[Byte]`.
@@ -403,7 +385,7 @@ pub(super) fn flat_map(
                 Value::CollLong(_) => Value::CollLong(vec![]),
                 Value::CollBool(_) => Value::CollBool(vec![]),
                 Value::CollSigmaProp(_) => Value::CollSigmaProp(vec![]),
-                Value::CollBox(_) => Value::CollBox(vec![]),
+                Value::CollBox(_) | Value::BoxCollection(_) => Value::CollBox(vec![]),
                 Value::CollHeader(_) => Value::CollHeader(vec![]),
                 Value::Tokens(_) => Value::Tokens(vec![]),
                 Value::CollGeneric(_, elem) | Value::CollLegacyPair(_, elem, _) => {
@@ -434,114 +416,31 @@ pub(super) fn flat_map(
                     })
                     .unwrap_or_else(|| Value::CollBytes(Vec::new()))
             } else {
-                match &inner_colls[0] {
-                    Value::CollBytes(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollBytes(b) = c {
-                                out.extend(b);
-                            }
-                        }
-                        Value::CollBytes(out)
-                    }
-                    Value::CollInt(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollInt(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollInt(out)
-                    }
-                    Value::CollLong(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollLong(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollLong(out)
-                    }
-                    Value::CollBool(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollBool(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollBool(out)
-                    }
-                    Value::CollShort(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollShort(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollShort(out)
-                    }
-                    Value::CollSigmaProp(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollSigmaProp(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollSigmaProp(out)
-                    }
-                    Value::CollHeader(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollHeader(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollHeader(out)
-                    }
-                    Value::Tokens(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::Tokens(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::Tokens(out)
-                    }
-                    Value::CollBox(_) => {
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            if let Value::CollBox(v) = c {
-                                out.extend(v);
-                            }
-                        }
-                        Value::CollBox(out)
-                    }
-                    // Boxed-element coll fallback — flatten all
-                    // elements into one `CollGeneric`. Handles
-                    // Coll[Coll[Byte]] and any other nested
-                    // boxed-element coll. The first inner's
-                    // elem_type drives the output tag (all
-                    // inners share the same element type under
-                    // the IR's static-type system).
-                    Value::CollGeneric(_, elem_type) | Value::CollLegacyPair(_, elem_type, _) => {
-                        let elem_type = elem_type.clone();
-                        let mut out = Vec::new();
-                        for c in inner_colls {
-                            match c {
-                                Value::CollGeneric(elems, _)
-                                | Value::CollLegacyPair(elems, _, _) => out.extend(elems),
-                                other => out.push(other),
-                            }
-                        }
-                        Value::CollGeneric(out, elem_type)
-                    }
-                    other => {
-                        return Err(EvalError::TypeError {
-                            expected: "collection result from flatMap body",
-                            got: format!("{other:?}"),
-                        })
-                    }
+                // Static element types can have several runtime carriers:
+                // token-width pairs use Tokens or CollGeneric, reverse uses
+                // boxed carriers, and INPUTS/OUTPUTS can remain lazy. Flatten
+                // their elements through one lossless conversion instead of
+                // filtering or nesting carriers that differ from the first.
+                let elem_type =
+                    coll_elem_type(&inner_colls[0]).ok_or_else(|| EvalError::TypeError {
+                        expected: "collection result from flatMap body",
+                        got: format!("{:?}", inner_colls[0]),
+                    })?;
+                let token_elem_type = SigmaType::STuple(vec![
+                    SigmaType::SColl(Box::new(SigmaType::SByte)),
+                    SigmaType::SLong,
+                ]);
+                let kind = if elem_type == token_elem_type {
+                    CollKind::Token
+                } else {
+                    sigma_type_to_coll_kind(&elem_type).unwrap_or(CollKind::Tuple)
+                };
+                let mut out = Vec::new();
+                for inner in inner_colls {
+                    let (_, items) = collection_to_values(inner, cx.ctx)?;
+                    out.extend(items);
                 }
+                values_to_collection(kind, out, elem_type)?
             };
             // FlatMapMethod_CostKind = PerItemCost(60, 10, 8) charged
             // over the OUTPUT (flattened) length — Scala flatMap_eval

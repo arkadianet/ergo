@@ -1,0 +1,41 @@
+Warning: setting /home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/mixed-carriers as the project root directory for this run.
+[[33mwarn[0m]  Using directives detected in multiple files:
+- Capture.scala:1:1-3:54
+- ErgoSerdeOracle.scala:1:1-23:48
+It is recommended to keep them centralized in the /home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/mixed-carriers/project.scala file.
+
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml.sha1
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scala-lang/scala-library/maven-metadata.xml.sha1
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/scorexfoundation/sigma-state_2.12/maven-metadata.xml.sha1
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Downloading https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://repo.maven.apache.org/maven2/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml
+Downloading https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+Failed to download https://gitlab.com/api/v4/projects/61211221/packages/maven/org/ergoplatform/ergo-core_2.12/maven-metadata.xml.sha1
+[[33mhint[0m] ./Capture.scala:3:15
+[[33mhint[0m] "sigma-state is outdated, update to 6.0.7"
+[[33mhint[0m]      sigma-state 6.0.6 -> org.scorexfoundation::sigma-state:6.0.7
+[[33mhint[0m] //> using dep org.scorexfoundation::sigma-state:6.0.6
+[[33mhint[0m]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
