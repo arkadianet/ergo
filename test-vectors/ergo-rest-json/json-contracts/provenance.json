@@ -1,0 +1,68 @@
+{
+  "command": [
+    "scala-cli",
+    "run",
+    "test-vectors/ergo-rest-json/json-contracts/Capture.scala",
+    "--server=false",
+    "--jvm",
+    "system"
+  ],
+  "exit_code": 0,
+  "java": "17.0.17",
+  "scala": "2.12.20",
+  "jars": {
+    "scala-library-2.12.20.jar": "4d8a8f984cce31a329a24f10b0bf336f042cb62aeb435290a1b20243154cfccb",
+    "sigma-state_2.12-6.0.6.jar": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+    "circe-parser_2.12-0.14.15.jar": "2d3542ebb5cc6a30518a11e54c3055c588ce19e8e10813134064ac6761cc590f",
+    "scala-reflect-2.12.20.jar": "5f1914cdc7a70580ea6038d929ebb25736ecf2234f677e2d47f8a4b2bc81e1fb",
+    "debox_2.12-0.10.0.jar": "7e1a47b430e6ad9bb7943b384805f99140554e4fe53aa787721dc4e49a7932e9",
+    "scala-collection-compat_2.12-2.7.0.jar": "fb68864a0248af0979d45921869eb1230b5926aa61e5c0a8737c3f73ae582e92",
+    "scorex-util_2.12-0.2.2.jar": "4e3b0422a747b02fc83a7fd7659fc4453abc813c7b95ab858d13f63832bdd80e",
+    "bcprov-jdk15to18-1.85.1.jar": "ffd4186dab3cb1663572f493814c4ecdfdc6c950783b566072907c6d32dc10bc",
+    "fastparse_2.12-2.3.3.jar": "99ebdabb902a79b9fedd90d6f2b459eff6982849ecd0a80f958218bad9175120",
+    "circe-core_2.12-0.14.15.jar": "1bb842f33a9f9e6540669a2926468500c7d8f782f417c15c76ca77eca26125b1",
+    "circe-generic_2.12-0.14.15.jar": "08da76041a9f216ef91e8d2fc2973672d45471e3127aea81fb9c971002714596",
+    "scrypto_2.12-3.1.1.jar": "a9b44951038cd4049b997cebfb24c64b3b664a2427ac550be09030ad4119830a",
+    "scodec-bits_2.12-1.1.34.jar": "3754e6ed81d25c872dee8383e27830eac474f77251af0bf5d06ec5bc78bcfb3d",
+    "circe-jawn_2.12-0.14.15.jar": "82744fca9206db561a81090715d79efaeb6c720d1bea753cc579f34eb1a82cc3",
+    "spire-macros_2.12-0.17.0-M1.jar": "8d687fc799a295a7c99751062bca24d8ce857bedaadbf7d0bdc98a819cce3316",
+    "scala-logging_2.12-3.9.5.jar": "392979e5525856737a6f2398e25789d0b2057c8e3c55045a6e8d9704c21de7a6",
+    "supertagged_2.12-2.0-RC2.jar": "a14e9782f09d747323dacac7adcdefa9aa105012c5c42017971868c5c663a7b7",
+    "sourcecode_2.12-0.2.3.jar": "f686fc27121eace778250557d391cbbfe46843ab91fe107a8600564a492c83d2",
+    "geny_2.12-0.6.10.jar": "07be2815eae87b0f0397f4ea628c4002d744b7be43a04b73fc62429e67ff6915",
+    "circe-numbers_2.12-0.14.15.jar": "a7bd4db65baa06d3f50b7488ec572cf1f49beab06e850b4012885b730e5a93c8",
+    "cats-core_2.12-2.13.0.jar": "4b92d574b01cf448018707de8bf20a2c37d0f6c6bd657a0f3c1be762761a310e",
+    "shapeless_2.12-2.3.13.jar": "b5e71ed111548ebff93272d710402a6c40fbcc6b50c2d2d6f164b0e3c315c001",
+    "jawn-parser_2.12-1.6.0.jar": "3ac478a24fd55caed61c2ccb10dda337549409684decc1279a2e71b45da3ea2f",
+    "machinist_2.12-0.6.8.jar": "570aede4e5e88f4f881aa6a49d958b76af3457aa3662bd590d254eb7d64c08e0",
+    "algebra_2.12-2.0.0-M2.jar": "461acb40d654f78288908cfb298600b9ee60f77c9e74f9e883c7b2f9a21fe0a5",
+    "slf4j-api-1.7.36.jar": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0",
+    "cats-kernel_2.12-2.13.0.jar": "daeb592b533bd9d6400aac1397d780ff22ca672e98f4dc69c08fd0ceba3fa0ed"
+  },
+  "sdk_source": {
+    "revision": "ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042",
+    "source_url": "https://raw.githubusercontent.com/ScorexFoundation/sigmastate-interpreter/ab0b15ceb9d34f2ccd6e68e3e2a8aa27cd16a042/sdk/shared/src/main/scala/org/ergoplatform/sdk/JsonCodecs.scala",
+    "sha256": "255d52b40a5e97c10b191625995c276a8ef987875a2eda44a872620be7898331"
+  },
+  "circe_sources": [
+    {
+      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.15/modules/numbers/shared/src/main/scala/io/circe/numbers/BiggerDecimal.scala",
+      "sha256": "251d637a1a6763ab382ab98d718452d1077f0fca3cb6b5584ab1226b8eb7e2fc",
+      "bytes": 13399
+    },
+    {
+      "source_url": "https://raw.githubusercontent.com/circe/circe/v0.14.15/modules/core/shared/src/main/scala/io/circe/JsonNumber.scala",
+      "sha256": "2458aef05e59557ee2b79dee5f3e1510cfe6c8109154088aa9596c5eb40dae46",
+      "bytes": 11142
+    }
+  ],
+  "files": {
+    "cases.json": "da92fb25b3e52194f55ce89cc214c412e3742982e360354820ecd6c3e62a841e",
+    "Capture.scala": "783c037ac7837b22ca04ae5b04bba8804082080ab3e20e67c8ecfdceb26b090a",
+    "scala.stderr": "dcecd0de513a0b4ace001f1ef59eed07ee5e01c0f83423de0b1d2230ee364283",
+    "scala.stdout": "851374ba45af81b19d06dfe26ee311e8cf2076bfb59c11b0350f639e310e355f",
+    "README.md": "b80447d3e0e2ab08118fd824dc9ec3cb574ba7c60fafcaf26ae72eb12585566a"
+  },
+  "scope": "Finite actual numeric and evaluated-value decodes. Unsigned field policy separately refuses negative nonzero magnitudes. No transaction, node or chain execution.",
+  "circe": "0.14.15"
+}

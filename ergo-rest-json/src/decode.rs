@@ -182,6 +182,8 @@ pub fn decode_output_with_mode(
     mode: DecodeMode,
 ) -> Result<ErgoBoxCandidate, DecodeError> {
     let value = so.value;
+    i64::try_from(value)
+        .map_err(|_| (DESERIALIZE, "value exceeds Scala Long.MAX_VALUE".to_owned()))?;
     let creation_height = so.creation_height;
 
     // ergoTree: parse → canonicalize. Submit rejects soft-fork;
@@ -193,6 +195,12 @@ pub fn decode_output_with_mode(
     // assets → Vec<Token>
     let mut tokens = Vec::with_capacity(so.assets.len());
     for (i, a) in so.assets.iter().enumerate() {
+        i64::try_from(a.amount).map_err(|_| {
+            (
+                DESERIALIZE,
+                format!("assets[{i}].amount exceeds Scala Long.MAX_VALUE"),
+            )
+        })?;
         let token_id_bytes = decode_digest32(&a.token_id, "tokenId")
             .map_err(|(r, d)| (r, format!("assets[{i}]: {d}")))?;
         tokens.push(Token {
