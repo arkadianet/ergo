@@ -16,7 +16,7 @@ The historical audit reviewed `5d62fd5851e74fcb965b4aba50e1b423127f46f1`. Remedi
 
 Statuses are copied from the owners. `remaining_evidence` can mean partial evidence, an external fixture prerequisite, or work still in progress; the full owner record preserves that distinction. A published draft is not merged work. Missing receipt fields do not imply a PASS.
 
-ST009 retains its partial cached-state/cost validation disposition. The historical fuzz ledger retains HASH_ONLY files and does not establish executed decoder or provenance checks.
+The full ST009 owner record distinguishes cached-state checks, captured activation costs and any remaining historical prerequisites. The historical fuzz ledger retains HASH_ONLY files and does not establish executed decoder or provenance checks.
 
 ## Finding and PR index
 
