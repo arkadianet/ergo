@@ -59,7 +59,7 @@ use crate::store::{meta as meta_io, undo::UndoEntry, IndexerMeta, IndexerStore};
 use crate::template::{
     flush_templates, load_template_into_map, template_hash_for_box_bytes, IndexedTemplate,
 };
-use crate::token::{flush_tokens, is_mint, try_load_token_into_map, IndexedToken};
+use crate::token::{flush_tokens, is_mint, load_required_token_into_map, IndexedToken};
 use ergo_indexer_types::{is_protocol_genesis_box, IndexedErgoBox, TokenId};
 
 /// Roll back the indexer's current tip block.
@@ -378,28 +378,29 @@ fn rollback_one_block_inner(
                 // Token box-segment rollback (mirror of apply step 2's
                 // per-output token segment append). For every token
                 // that this output carried, pop one entry from the
-                // token's box-segment. Skips tokens whose record
-                // doesn't exist (matches apply's `try_load` skip path).
+                // token's box-segment. Missing emission metadata aborts the
+                // write transaction, preserving the checkpoint and undo row.
                 for token in &existing.box_data.candidate.tokens {
-                    if let Some(record) =
-                        try_load_token_into_map(&token_table, &mut touched_tokens, token.token_id)?
-                    {
-                        let parent_id = token_unique_id(&record.token_id);
-                        let popped_token = pop_box_entry(
-                            &parent_id,
-                            &mut record.segment,
-                            &mut staged_spills,
-                            &mut deleted_spills,
-                            &segments_table,
-                        )?;
-                        if popped_token != global_index {
-                            return Err(IndexerError::SegmentTopologyError {
-                                detail: format!(
-                                    "rollback_one_block: token box-segment pop mismatch for {}: expected {global_index}, got {popped_token}",
-                                    hex::encode(token.token_id.as_bytes()),
-                                ),
-                            });
-                        }
+                    let record = load_required_token_into_map(
+                        &token_table,
+                        &mut touched_tokens,
+                        token.token_id,
+                    )?;
+                    let parent_id = token_unique_id(&record.token_id);
+                    let popped_token = pop_box_entry(
+                        &parent_id,
+                        &mut record.segment,
+                        &mut staged_spills,
+                        &mut deleted_spills,
+                        &segments_table,
+                    )?;
+                    if popped_token != global_index {
+                        return Err(IndexerError::SegmentTopologyError {
+                            detail: format!(
+                                "rollback_one_block: token box-segment pop mismatch for {}: expected {global_index}, got {popped_token}",
+                                hex::encode(token.token_id.as_bytes()),
+                            ),
+                        });
                     }
                 }
 
@@ -567,28 +568,27 @@ fn rollback_one_block_inner(
                     // token the spent box carried, flip the entry from
                     // -gi back to +gi.
                     for token in &existing.box_data.candidate.tokens {
-                        if let Some(record) = try_load_token_into_map(
+                        let record = load_required_token_into_map(
                             &token_table,
                             &mut touched_tokens,
                             token.token_id,
+                        )?;
+                        let parent_id = token_unique_id(&record.token_id);
+                        // Secondary index — degrade-not-halt on drift.
+                        let unflip = unflip_box_segment_entry(
+                            &parent_id,
+                            &mut record.segment,
+                            spent_global_index,
+                            &mut staged_spills,
+                            &segments_table,
+                        );
+                        if tolerate_secondary_drift(
+                            "token",
+                            &parent_id,
+                            spent_global_index,
+                            unflip,
                         )? {
-                            let parent_id = token_unique_id(&record.token_id);
-                            // Secondary index — degrade-not-halt on drift.
-                            let unflip = unflip_box_segment_entry(
-                                &parent_id,
-                                &mut record.segment,
-                                spent_global_index,
-                                &mut staged_spills,
-                                &segments_table,
-                            );
-                            if tolerate_secondary_drift(
-                                "token",
-                                &parent_id,
-                                spent_global_index,
-                                unflip,
-                            )? {
-                                secondary_skipped = true;
-                            }
+                            secondary_skipped = true;
                         }
                     }
 

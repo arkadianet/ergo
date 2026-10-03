@@ -20,7 +20,7 @@ use ergo_primitives::writer::VlqWriter;
 use crate::error::IndexerError;
 #[cfg(test)]
 use crate::segment::write_segment;
-use crate::segment::{read_segment, Segment};
+use crate::segment::{read_persisted_segment, Segment};
 use crate::store::tables::SEGMENTS;
 
 /// Test-only helper. Apply path writes `SEGMENTS` rows directly via the
@@ -76,12 +76,12 @@ pub(crate) fn read_spill_in(
     let bytes = guard.value();
     let total = bytes.len();
     let mut r = VlqReader::new(bytes);
-    let rec = read_segment(&mut r).map_err(|source| IndexerError::DbDecode {
+    let rec = read_persisted_segment(&mut r).map_err(|source| IndexerError::DbDecode {
         context: "segment",
         source,
     })?;
     if !r.is_empty() {
-        // Trailing-byte framing check: ergo-ser read_segment succeeded,
+        // Trailing-byte framing check: ergo-ser read_persisted_segment succeeded,
         // but the row carries extra bytes. This is a length mismatch,
         // not a decode failure inside ergo-ser.
         return Err(IndexerError::DbRowLength {
@@ -210,8 +210,8 @@ mod tests {
         assert!(!bytes.is_empty());
 
         let mut r = VlqReader::new(&bytes);
-        let decoded = read_segment(&mut r).unwrap();
-        assert!(r.is_empty(), "leftover bytes after read_segment");
+        let decoded = read_persisted_segment(&mut r).unwrap();
+        assert!(r.is_empty(), "leftover bytes after read_persisted_segment");
         assert_eq!(decoded, rec);
 
         let mut w2 = VlqWriter::new();
