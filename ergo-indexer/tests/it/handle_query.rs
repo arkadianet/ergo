@@ -330,3 +330,80 @@ fn global_ranges_use_indexed_bounds_and_preserve_order() {
     assert!(handle.boxes_by_global_range(3, 100).unwrap().is_empty());
     assert!(handle.txs_by_global_range(2, 100).unwrap().is_empty());
 }
+
+// ----- reference parity -----
+
+#[test]
+fn latest_pages_match_pinned_scala_route_windows() {
+    let (handle, _temporary, _genesis, _child) = setup_two_block_chain();
+    let windows: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-vectors/scala/blockchain-paging/windows.json"
+    ))
+    .unwrap();
+    for window in windows.as_array().unwrap() {
+        let page = ergo_indexer_types::Page {
+            offset: window["offset"].as_u64().unwrap() as u32,
+            limit: window["limit"].as_u64().unwrap() as u32,
+        };
+        let expected: Vec<i64> = window["indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_i64().unwrap())
+            .collect();
+        let actual = match window["counter"].as_u64().unwrap() {
+            3 => handle
+                .boxes_latest_paged(page)
+                .unwrap()
+                .into_iter()
+                .map(|b| b.global_index)
+                .collect::<Vec<_>>(),
+            2 => handle
+                .txs_latest_paged(page)
+                .unwrap()
+                .into_iter()
+                .map(|tx| tx.global_index)
+                .collect::<Vec<_>>(),
+            _ => continue,
+        };
+        assert_eq!(actual, expected, "{window}");
+    }
+}
+
+// ----- error paths -----
+
+#[test]
+fn latest_pages_bound_partial_and_out_of_range_requests() {
+    let (handle, _temporary, _genesis, _child) = setup_two_block_chain();
+    let page = ergo_indexer_types::Page {
+        offset: 1,
+        limit: 5,
+    };
+    assert_eq!(
+        handle
+            .boxes_latest_paged(page)
+            .unwrap()
+            .iter()
+            .map(|b| b.global_index)
+            .collect::<Vec<_>>(),
+        [1, 0]
+    );
+    assert_eq!(
+        handle
+            .txs_latest_paged(page)
+            .unwrap()
+            .iter()
+            .map(|tx| tx.global_index)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+    let page = ergo_indexer_types::Page {
+        offset: u32::MAX,
+        limit: 5,
+    };
+    assert!(handle.boxes_latest_paged(page).unwrap().is_empty());
+    assert!(handle.txs_latest_paged(page).unwrap().is_empty());
+    let unavailable = IndexerHandle::halted(IndexerHaltReason::DbCorruption);
+    assert!(unavailable.boxes_latest_paged(page).is_err());
+    assert!(unavailable.txs_latest_paged(page).is_err());
+}

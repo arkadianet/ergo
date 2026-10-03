@@ -391,6 +391,11 @@ pub(super) fn resolve_page(q: PagedQuery, noun: &str) -> Result<Page, Box<Respon
     if offset < 0 {
         return Err(Box::new(bad_request("offset is negative")));
     }
+    if offset > i64::from(i32::MAX) {
+        return Err(Box::new(bad_request(
+            "offset exceeds the signed 32-bit range",
+        )));
+    }
     if limit < 0 {
         return Err(Box::new(bad_request("limit is negative")));
     }
@@ -400,8 +405,8 @@ pub(super) fn resolve_page(q: PagedQuery, noun: &str) -> Result<Page, Box<Respon
         ))));
     }
     Ok(Page {
-        offset: offset as u32,
-        limit: limit as u32,
+        offset: u32::try_from(offset).expect("validated nonnegative signed 32-bit offset"),
+        limit: u32::try_from(limit).expect("validated nonnegative bounded limit"),
     })
 }
 
