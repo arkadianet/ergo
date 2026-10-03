@@ -243,6 +243,7 @@ function renderAuthGate(s) {
 }
 
 function scrubSecrets() {
+  miningSwaps?.update(null);
   if (!root) return;
   generation++;
   privateQueue?.dispose(); privateQueue = null;
@@ -371,6 +372,7 @@ function renderScanBanner(s) {
 
 // ── reads: balances + addresses ──────────────────────────────────────────────
 function lockedNotes() {
+  miningSwaps?.update(null);
   builder?.dispose(); builder = null;
   maintenance?.dispose(); maintenance = null;
   walletBalance = null; myAssets = []; assetsRendered = false;
@@ -861,11 +863,12 @@ async function refresh() {
     const res = await api.wallet.status();
     if (epoch !== generation || res.status === 403) return;
     if (!res.ok) {
-      walletStatus = null; unlockRendered = false;
+      walletStatus = null; miningSwaps?.update(null); unlockRendered = false;
       q('[data-status-body]').replaceChildren(el('p', { class: 'banner banner--warn', text: 'Wallet status unavailable. Reconnecting…' }));
       return;
     }
     walletStatus = res.data;
+    miningSwaps?.update(walletStatus);
     renderScanBanner(walletStatus);
     if (activeTab === 'private') showPrivateQueue();
     if (!walletStatus.isInitialized) { setOnboarding(true); showOnboard(); return; }

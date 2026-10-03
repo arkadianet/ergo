@@ -1,7 +1,8 @@
 import { getApiKey, report, subscribe } from './auth.js';
 
 export const SPECTRUM_N2T_TREE_HASH = '99f30ad579a2c98ad31b432676627fcd9e303d43c06e898725f6155d8ac40aa9';
-const terminal = new Set(['mined', 'conflicted', 'cancelled', 'expired', 'failed']);
+const terminal = new Set(['conflicted', 'cancelled', 'expired', 'failed']);
+export const canCancelSwap = (item) => !terminal.has(item.state) || (item.state === 'conflicted' && Boolean(item.txId));
 const decimal = (text) => {
   if (!/^[1-9][0-9]*$/.test(text) || BigInt(text) > 9223372036854775807n) throw new Error('Amounts must be positive whole raw units within the Ergo Long limit.');
   return text;
@@ -94,12 +95,20 @@ export function mountMiningSwaps(container) {
   const form = panel.querySelector('[data-swap-form]'), status = panel.querySelector('[data-swap-status]');
   const output = panel.querySelector('[data-swap-preview]'), list = panel.querySelector('[data-swap-list]');
   const approve = panel.querySelector('[data-swap-approve]');
-  let approvedDraft = null, unsubscribe = null, accessKey = null, generation = 0, active = false, busy = false;
-  const scrub = () => {
-    generation++; approvedDraft = null; approve.disabled = true; form.reset(); output.textContent = ''; output.hidden = true; list.replaceChildren();
+  let approvedDraft = null, unsubscribe = null, accessKey = null, walletUnlocked = false, authorized = false, generation = 0, active = false, busy = false;
+  const clearComposition = () => {
+    generation++; approvedDraft = null; approve.disabled = true; form.reset(); output.textContent = ''; output.hidden = true;
+  };
+  const scrub = () => { clearComposition(); list.replaceChildren(); };
+  const update = (walletStatus) => {
+    const unlocked = Boolean(walletStatus?.isInitialized && walletStatus?.isUnlocked);
+    if (!unlocked && walletUnlocked) clearComposition();
+    walletUnlocked = unlocked;
+    form.hidden = !authorized || !walletUnlocked;
+    if (authorized && !walletUnlocked) status.textContent = 'Unlock the node wallet to preview and approve swaps. Existing intents and cancellation remain available.';
   };
   const refresh = async () => {
-    if (!active || busy || !getApiKey()) return;
+    if (!active || busy || !authorized || !getApiKey()) return;
     const stamp = generation, response = await request('');
     if (!active || stamp !== generation || response.stale) return;
     if (!response.ok) { status.textContent = response.detail; return; }
@@ -109,8 +118,8 @@ export function mountMiningSwaps(container) {
       const text = document.createElement('p');
       text.textContent = `#${item.id} ${item.request.label}: ${item.state} · generation ${item.generation} · attempts ${item.attempts}/${item.request.maxAttempts}${item.quotedOutputAmount ? ' · output ' + item.quotedOutputAmount : ''}${item.detail ? ' · ' + item.detail : ''}`;
       row.append(text);
-      if (!terminal.has(item.state)) {
-        const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = 'Cancel and retire private work';
+      if (canCancelSwap(item)) {
+        const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = item.state === 'mined' ? 'Stop future intent retries' : 'Cancel and retire private work';
         cancel.addEventListener('click', async () => {
           cancel.disabled = true;
           const result = await request('/' + encodeURIComponent(item.id) + '/cancel', 'POST', {});
@@ -124,7 +133,8 @@ export function mountMiningSwaps(container) {
   };
   form.addEventListener('input', () => { generation++; approvedDraft = null; approve.disabled = true; output.hidden = true; });
   form.addEventListener('submit', async (event) => {
-    event.preventDefault(); if (busy) return;
+    event.preventDefault(); if (busy || !authorized || !walletUnlocked) return;
+    approvedDraft = null; approve.disabled = true; output.textContent = ''; output.hidden = true;
     try {
       const draft = swapDraft(Object.fromEntries(new FormData(form))), stamp = generation;
       busy = true; status.textContent = 'Checking pinned pool and owned funding…';
@@ -139,7 +149,7 @@ export function mountMiningSwaps(container) {
     finally { busy = false; }
   });
   approve.addEventListener('click', async () => {
-    if (!approvedDraft || busy) return;
+    if (!approvedDraft || busy || !authorized || !walletUnlocked) return;
     busy = true; approve.disabled = true; const stamp = generation;
     const result = await request('', 'POST', approvedDraft);
     busy = false;
@@ -150,16 +160,19 @@ export function mountMiningSwaps(container) {
   panel.querySelector('[data-swap-reload]').addEventListener('click', refresh);
   return {
     refresh,
+    update,
     onShow() {
       active = true;
-      unsubscribe?.(); unsubscribe = subscribe(() => {
-        const key = getApiKey();
-        if (accessKey !== key) { scrub(); accessKey = key; }
-        form.hidden = !key; list.hidden = !key;
-        if (!key) status.textContent = 'Authorize to manage private swap intents.';
+      unsubscribe?.(); unsubscribe = subscribe((authState) => {
+        const key = getApiKey(), permitted = authState === 'authorized' && Boolean(key);
+        if (accessKey !== key || !permitted) { scrub(); accessKey = key; }
+        authorized = permitted;
+        form.hidden = !authorized || !walletUnlocked; list.hidden = !authorized;
+        if (!authorized) status.textContent = 'Authorize to manage private swap intents.';
+        else if (!walletUnlocked) status.textContent = 'Unlock the node wallet to preview and approve swaps. Existing intents and cancellation remain available.';
         void refresh();
       });
     },
-    onHide() { active = false; unsubscribe?.(); unsubscribe = null; scrub(); },
+    onHide() { active = false; authorized = false; walletUnlocked = false; unsubscribe?.(); unsubscribe = null; scrub(); },
   };
 }
