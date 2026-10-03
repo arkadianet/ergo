@@ -282,7 +282,6 @@ pub(crate) struct NodeState {
     /// request fan-out, proof apply, and the bounded forward catchup
     /// kickoff. Read by `drive_popow_bootstrap` (sync_tick.rs) and
     /// `handle_inbound_popow_proof` (messaging.rs).
-    #[allow(dead_code)]
     pub(super) popow_bootstrap: Option<ergo_sync::popow_bootstrap::PopowBootstrap>,
     /// Mirror of `config.utxo_bootstrap`. The outbound discovery
     /// fan-out checks this flag at each sync_tick to decide whether

@@ -71,6 +71,8 @@ fn app(local_reverse_proxy: bool) -> axum::Router {
         emission_scripts: None,
         utxo_reads_supported: true,
         local_reverse_proxy,
+        services: Arc::new(ergo_api::ApiServices::new()),
+        script_config: Default::default(),
     };
     let security = Arc::new(
         ApiSecurity::new(

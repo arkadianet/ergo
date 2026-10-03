@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "ergo-node", about = "Ergo Rust full node")]
+#[command(name = "ergo-node", version, about = "Ergo Rust full node")]
 pub struct Cli {
     /// Path to config file (default: ergo-node.toml in data dir)
     #[arg(long, short = 'c')]

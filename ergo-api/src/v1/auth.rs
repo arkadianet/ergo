@@ -79,7 +79,7 @@ pub struct V1AuthConfig {
     /// When `true`, a reverse proxy terminates in front of the v1 API on
     /// loopback, so a loopback peer socket is the PROXY, not a real local
     /// client — the Admin loopback-preferred check must not trust it. Default
-    /// `false` (direct bind). See [`super::is_trusted_loopback`].
+    /// `false` (direct bind). See `super::is_trusted_loopback`.
     pub local_reverse_proxy: bool,
 }
 
@@ -103,7 +103,7 @@ impl V1AuthConfig {
     /// Declare that a reverse proxy terminates in front of the v1 API on
     /// loopback. When set, the Admin loopback-preferred check no longer trusts
     /// a loopback peer socket (it is the proxy), closing a spoofed-loopback
-    /// privilege-escalation path. See [`super::is_trusted_loopback`].
+    /// privilege-escalation path. See `super::is_trusted_loopback`.
     pub fn with_local_reverse_proxy(mut self, behind_proxy: bool) -> Self {
         self.local_reverse_proxy = behind_proxy;
         self

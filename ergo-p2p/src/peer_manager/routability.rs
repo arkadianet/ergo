@@ -27,7 +27,7 @@ use std::net::{IpAddr, SocketAddr};
 ///
 /// * **Never dialable, whatever the setting** — unspecified, multicast,
 ///   port 0, and the IANA special-purpose ranges (documentation,
-///   benchmarking, reserved, and similar — see [`is_never_dialable`]).
+///   benchmarking, reserved, and similar — see `is_never_dialable`).
 ///   These are not addresses a peer can listen on.
 /// * **Local-network addresses** — loopback, RFC1918 / site-local,
 ///   link-local, IPv6 unique-local, and carrier-grade NAT. Rejected

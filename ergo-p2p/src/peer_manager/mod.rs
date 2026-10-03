@@ -5,7 +5,7 @@
 //! - Target 96 outbound, up to 256 inbound (decoupled — a full outbound
 //!   set never reduces inbound capacity)
 //! - 1 connection per IP
-//! - Max 3 from same /16 subnet [inherited, relaxed]
+//! - Max 3 from one IPv4 /16 or native IPv6 /48 connection group
 //!
 //! Peer selection currently sorts by most-recently-seen. Full bucketed
 //! ranking with throughput metrics and randomization is queued for a
@@ -1172,7 +1172,7 @@ impl PeerManager {
     /// Expired bans are already unenforced (`is_banned` / `currently_banned_ips`
     /// compare against `until`), so this is pure hygiene: without it, entries
     /// linger in memory until restart and their redb rows forever. Cadence is
-    /// gated internally to [`BAN_SWEEP_INTERVAL`] — the first call runs
+    /// gated internally to `BAN_SWEEP_INTERVAL` — the first call runs
     /// immediately, later calls between sweeps are cheap no-ops. Returns the
     /// number of entries removed.
     pub fn sweep_expired_bans(&mut self, now: Instant) -> usize {

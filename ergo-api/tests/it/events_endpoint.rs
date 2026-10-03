@@ -173,6 +173,8 @@ fn activity_app(configured: bool, read: Arc<dyn NodeReadState>) -> axum::Router 
             emission_scripts: None,
             utxo_reads_supported: true,
             local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None,
         Arc::new(ergo_api::wallet::NoopWalletAdmin),

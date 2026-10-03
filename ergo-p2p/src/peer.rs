@@ -3,7 +3,7 @@
 //! Each connected peer transitions through states:
 //!   Connecting → Handshaking → Active → Degraded → Banned/Disconnected
 //!
-//! Scoring uses penalty accumulation with time decay [proposed]:
+//! Scoring uses penalty accumulation with time decay proposed:
 //! - Degraded at score ≥ 50 (rate-limited, deprioritized)
 //! - Temp ban at score > 500 (disconnect, escalating ban duration)
 //! - Score decays 10 points per 10 minutes
@@ -294,7 +294,7 @@ pub struct PeerInfo {
     /// Bounding a determined attacker is the job of `max_inbound` and the
     /// per-IP / subnet limits.
     ///
-    /// [proposed] divergence from Scala, which drops a connection purely
+    /// proposed divergence from Scala, which drops a connection purely
     /// on `lastStoredActivityTime` age (`NetworkController.scala:307-325`,
     /// `inactiveConnectionDeadline = 10m` in `application.conf:543`) and
     /// so refreshes on any handled message. The divergence is safe for
@@ -422,7 +422,7 @@ impl PeerInfo {
     /// skip score accumulation and route straight to the year-long ban
     /// (`apply_permanent_ban`), matching Scala's
     /// `addToBlacklist(... PermanentPenalty)` which uses
-    /// `(360 * 10).days`; we cap at one year as a [proposed] divergence
+    /// `(360 * 10).days`; we cap at one year as a proposed divergence
     /// since at that horizon "banned" is operationally indistinguishable
     /// from "forever" and the address-book ban record stays bounded.
     pub fn penalize(&mut self, penalty: Penalty, now: Instant) -> PenaltyOutcome {

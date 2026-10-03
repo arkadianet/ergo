@@ -41,7 +41,12 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]`, `[api]`, `[api.security]`, `[api.script]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[mining]` |
+
+**Upgrade:** Formerly ignored unknown keys in `[api]`, `[api.security]` and
+`[api.script]` now fail configuration loading and prevent startup. Remove
+unsupported keys or rename misspelled keys to their documented names in
+existing configs before upgrading.
 
 ## Top-level keys
 
@@ -226,6 +231,31 @@ lookups. Database type and build date appear in the peer drawer. Country and cit
 describe an approximate network endpoint, not a verified operator location. An
 ASN organization is the network operator and need not be the node operator or
 retail ISP. These display-only details never affect peer selection or scoring.
+
+### `[api.script]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `require_api_key` | bool | `false` | Requires the operator API key on all seven native `/api/v1/script/*` endpoints. The Scala-compatible `/script/p2sAddress` and `/script/p2shAddress` routes keep their public parity policy. |
+| `max_cost` | integer | `8001091` | Maximum interpreter cost per native script request. Must be between 1 and 8001091; a request may lower this ceiling. Invalid values and unknown API policy keys fail configuration loading. |
+
+Compiler, decoder, and interpreter work runs away from the async runtime. One
+node shares capacity across native and Scala-compatible script routes: two
+running jobs and eight queued requests. Admission waits at most two seconds;
+responses time out after thirty seconds. A timed out or disconnected request
+keeps its running permit until the underlying work finishes. Explicit node
+shutdown closes admission and waits for those jobs before closing storage;
+after five seconds it logs the continuing wait. Dropping a node closes admission
+and leaves already started synchronous work to finish naturally. Capacity refusals
+answer `503 overloaded` with `Retry-After: 1`.
+
+Realtime subscriptions, mempool-depth sampling, and the webhook registry belong
+to one node, including when several nodes run in one process. Router construction
+starts no background workers; the API listener owns them and stops them at
+shutdown. Webhook registrations remain in memory. Delivery permits only public
+DNS destinations by default, checks every resolved address before connecting,
+and disables redirects and environment HTTP proxies so those checks also apply
+to retries and cannot be bypassed by alternate routing.
 
 ### `[api.security]`
 

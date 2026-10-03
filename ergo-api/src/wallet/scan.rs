@@ -7,7 +7,7 @@
 //! predicate is carried opaquely as a JSON value here; `ergo-node` parses and
 //! validates it against `ergo_wallet::scan::ScanningPredicate` when it handles
 //! the command. These handlers adapt the DTOs to HTTP and map
-//! `WalletAdminError` to status codes via [`super::lifecycle::map_err`].
+//! `WalletAdminError` to status codes via `super::lifecycle::map_err`.
 
 use std::sync::Arc;
 

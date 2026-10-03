@@ -133,7 +133,7 @@ impl HostAllowlist {
         self.enforce
     }
 
-    /// Public mirror of [`Self::enforce`] for boot-time diagnostic
+    /// Public mirror of `Self::enforce` for boot-time diagnostic
     /// logging (P1-2) — callers outside this module can log the
     /// resolved enforcement posture without reaching into a private
     /// field.

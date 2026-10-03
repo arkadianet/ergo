@@ -3,10 +3,10 @@
 //! `RunHandle`, identity helpers) used by the binary entry point and
 //! library embedders.
 //!
-//! Boot sequence lives in [`boot`]; the action loop body in
-//! [`action_loop`]; per-event/message handlers in [`events`] /
-//! [`messaging`]; mempool admission in [`admission`]; peer
-//! plumbing in [`peer_actions`].
+//! Boot sequence lives in `boot`; the action loop body in
+//! `action_loop`; per-event/message handlers in `events` /
+//! `messaging`; mempool admission in `admission`; peer
+//! plumbing in `peer_actions`.
 
 /// Panic-safe stderr write used inside the shutdown sequence.
 ///

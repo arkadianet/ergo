@@ -196,7 +196,7 @@ fn app(addrs: Vec<String>) -> Router {
             "/script/p2shAddress",
             post(ergo_api::script::p2sh_address_handler),
         )
-        .with_state((NetworkPrefix::Mainnet, admin))
+        .with_state((NetworkPrefix::Mainnet, admin, Default::default()))
 }
 
 async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
@@ -351,7 +351,7 @@ async fn p2s_address_route_locked_wallet_maps_to_400_not_500() {
             "/script/p2sAddress",
             post(ergo_api::script::p2s_address_handler),
         )
-        .with_state((NetworkPrefix::Mainnet, admin));
+        .with_state((NetworkPrefix::Mainnet, admin, Default::default()));
     let body = serde_json::json!({ "source": "sigmaProp(true)", "treeVersion": 0 }).to_string();
     let (status, json) = post_json(router, "/script/p2sAddress", &body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

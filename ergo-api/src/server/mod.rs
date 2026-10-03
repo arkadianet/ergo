@@ -62,7 +62,9 @@ mod openapi;
 mod route_registry;
 mod rust_api;
 mod scala_api;
+mod services;
 mod shared;
+pub use services::ApiServices;
 
 pub(crate) use openapi::NativeOpenApi;
 pub use openapi::{
@@ -130,6 +132,10 @@ pub struct ServerCtx {
     /// rate-limit exemption and use the remote Admin policy (warn-and-allow
     /// in production). Forwarded headers never determine client identity.
     pub local_reverse_proxy: bool,
+    /// Services owned by this node, shared by router rebuilds.
+    pub services: Arc<ApiServices>,
+    /// Resolved production configuration for every native script endpoint.
+    pub script_config: crate::v1::ScriptConfig,
 }
 
 /// Bind a TCP listener for the API server without starting axum.
@@ -143,24 +149,6 @@ pub async fn bind(addr: SocketAddr) -> std::io::Result<(SocketAddr, tokio::net::
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     Ok((actual, listener))
-}
-
-/// The process-wide realtime handle (WS fan-out bus + connection limiter).
-/// Constructed once, on first call, and shared for the life of the
-/// process — same singleton the router uses internally to feed the
-/// `blocks` coarse-ring bridge, so a caller reaching for it before or
-/// after router assembly gets the identical `Arc<RealtimeBus>`.
-///
-/// This is the seam `ergo-node` uses to publish mempool `tx_accepted` /
-/// `tx_dropped` events directly (bypassing the coarse ring, which only
-/// carries block/reorg/peer events): grab the bus here, wrap it in an
-/// adapter that implements `ergo_mempool::MempoolObserver`, and hand it to
-/// `Mempool::set_observer`.
-pub fn realtime_handle() -> crate::v1::RealtimeHandle {
-    static V1_REALTIME: std::sync::OnceLock<crate::v1::RealtimeHandle> = std::sync::OnceLock::new();
-    V1_REALTIME
-        .get_or_init(crate::v1::RealtimeHandle::blocks_and_mempool)
-        .clone()
 }
 
 /// Start serving on a pre-bound `listener`. Spawns the axum task and
@@ -205,6 +193,8 @@ pub fn serve_on(
         emission_scripts: None,
         utxo_reads_supported,
         local_reverse_proxy: false,
+        services: Arc::new(crate::ApiServices::new()),
+        script_config: Default::default(),
     };
     serve_on_with_mempool(ctx, listener, shutdown_rx, None)
 }
@@ -292,6 +282,8 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
     if let Some(addr) = bind_addr {
         crate::v1::warn_startup_posture(security.as_deref(), addr);
     }
+    let services = ctx.services.clone();
+    let worker_read = ctx.read.clone();
     let app = router_with_mempool_and_wallet_and_security(ctx, admin, wallet_admin, security);
     // Host-header allowlist: the outermost layer, added after the router
     // is fully assembled (with its own `TraceLayer` / `spa_security_headers`
@@ -334,6 +326,7 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
         }
     }
     tokio::spawn(async move {
+        let workers = services.start(worker_read);
         // `into_make_service_with_connect_info` installs `ConnectInfo<SocketAddr>`
         // so the v1 governor / auth tier can read the real peer IP for per-IP
         // rate-bucketing and the loopback exemption (v1 `client_ip`). Absent it,
@@ -347,6 +340,10 @@ pub fn serve_on_with_mempool_and_wallet_and_security_and_hosts(
         });
         if let Err(e) = server.await {
             error!(error = %e, "api server exited with error");
+        }
+        services.shutdown_blocking().await;
+        if let Some(workers) = workers {
+            workers.shutdown().await;
         }
     })
 }
@@ -577,6 +574,8 @@ pub fn router_with_wallet(
         emission_scripts: None,
         utxo_reads_supported,
         local_reverse_proxy: false,
+        services: Arc::new(crate::ApiServices::new()),
+        script_config: Default::default(),
     };
     router_with_mempool_and_wallet_and_security(ctx, None, wallet_admin, None)
 }
@@ -688,6 +687,8 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         emission_scripts,
         utxo_reads_supported,
         local_reverse_proxy,
+        services,
+        script_config,
     } = ctx;
     // Native `/api/v1/*` product-API route group inputs (chain/* + transactions/*
     // reads). Cloned up front because the compat / submit handles are moved into
@@ -847,6 +848,7 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
             emission,
             emission_scripts,
             security.clone(),
+            services.compute.clone(),
         ),
     );
 
@@ -896,92 +898,13 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
     // fronted by the per-IP governor at route-class `HeavyRead`. The shared
     // governor is one per node, so later route groups reuse the same per-IP
     // budget.
-    // Shared mempool-depth ring. Fed by a background sampler
-    // (production only — guarded on a live Tokio runtime so non-async test
-    // router builds never spawn a task), read by `mempool/summary?history=` and
-    // the future `stats/mempool-depth`.
-    // Shared once per process for the same reason as the realtime bus /
-    // webhook engine below: the `_once` sampler feeds the FIRST ring only.
-    static V1_MEMPOOL_DEPTH: std::sync::OnceLock<
-        std::sync::Arc<crate::v1::mempool_depth::MempoolDepthRing>,
-    > = std::sync::OnceLock::new();
-    let v1_mempool_depth = V1_MEMPOOL_DEPTH
-        .get_or_init(|| std::sync::Arc::new(crate::v1::mempool_depth::MempoolDepthRing::new()))
-        .clone();
-    if tokio::runtime::Handle::try_current().is_ok() {
-        // Guarded to spawn exactly one sampler per process even though router
-        // assembly can run many times (the whole test suite builds routers).
-        crate::v1::mempool_depth::spawn_depth_sampler_once(
-            v1_read.clone(),
-            v1_mempool_depth.clone(),
-            crate::v1::mempool_depth::DEFAULT_SAMPLE_INTERVAL,
-        );
-    }
-    // Real-time subscriptions. The `RealtimeBus` is constructed once and
-    // shared like the mempool-depth ring above. It is fed by the coarse-ring bridge task
-    // (production only — same live-runtime + once-per-process guards as the
-    // depth sampler so non-async test router builds never spawn it and repeated
-    // router assembly never stacks pollers). `realtime_handle()` uses
-    // `RealtimeHandle::blocks_and_mempool()`, which marks `blocks`, `mempool`,
-    // `peers`, and `tx` live. Node boot enables address/box/token classes after
-    // installing a real indexer writer observer.
-    // Process singletons: the `*_once` workers below bind the FIRST bus/engine
-    // they see, so every router assembly must share those exact instances — a
-    // per-assembly bus/engine would leave later routers holding handles no
-    // worker feeds (registrations that never deliver, subscriptions that never
-    // fire).
-    static V1_WEBHOOKS_ENGINE: std::sync::OnceLock<std::sync::Arc<crate::v1::WebhookEngine>> =
-        std::sync::OnceLock::new();
-    let v1_realtime = realtime_handle();
-    if tokio::runtime::Handle::try_current().is_ok() {
-        crate::v1::spawn_event_bridge_once(
-            v1_read.clone(),
-            v1_realtime.bus.clone(),
-            crate::v1::realtime::DEFAULT_BRIDGE_INTERVAL,
-        );
-    }
-    // Webhooks — the durable, retried, signed sibling of WS. An internal
-    // subscriber to the SAME `RealtimeBus` (one event source, one global seq).
-    // The registry + delivery-log + retry/backoff/HMAC state machine, and the
-    // production `ReqwestSink` (rustls-TLS only — no system OpenSSL, see
-    // `ergo-api/Cargo.toml`), are constructed here; the delivery worker is
-    // spawned exactly once per process (guarded to a live Tokio runtime, same
-    // idiom as the mempool-depth sampler / realtime-bridge feeder above), so
-    // registered webhooks now actually deliver. Persistence is the one
-    // remaining deferral: the registry + delivery log are in-memory, so
-    // registrations are lost on restart until a durable `*-db` store lands
-    // (documented in the webhooks module docs).
-    let v1_webhooks_engine = V1_WEBHOOKS_ENGINE
-        .get_or_init(|| std::sync::Arc::new(crate::v1::WebhookEngine::new(Default::default())))
-        .clone();
-    let mut v1_webhooks_handle = Some(crate::v1::WebhooksHandle {
-        engine: v1_webhooks_engine.clone(),
-        bus: v1_realtime.bus.clone(),
-        url_policy: crate::v1::webhooks::model::UrlPolicy::default(),
-    });
-    if tokio::runtime::Handle::try_current().is_ok() {
-        match crate::v1::ReqwestSink::new() {
-            Ok(sink) => crate::v1::spawn_webhook_worker_once(
-                v1_realtime.bus.clone(),
-                v1_webhooks_engine,
-                std::sync::Arc::new(sink),
-                crate::v1::webhooks::worker::DEFAULT_WORKER_TICK,
-            ),
-            Err(error) => {
-                // Webhooks are auxiliary — a sink build failure must not take
-                // the node down. Without a sink, registrations would accept
-                // but never deliver, so answer `webhooks_disabled` instead.
-                tracing::error!(%error, "webhook HTTP sink failed to build; webhooks disabled");
-                v1_webhooks_handle = None;
-            }
-        }
-    }
+    let v1_mempool_depth = services.mempool_depth.clone();
+    let v1_realtime = services.realtime.clone();
     let v1_webhooks_state = crate::v1::WebhooksState {
-        handle: v1_webhooks_handle,
+        handle: services.webhooks.clone(),
         network,
     };
-    let v1_blocking = crate::v1::BlockingReads::new(Default::default())
-        .expect("default BlockingReadsConfig is valid");
+    let v1_blocking = services.reads.clone();
     let v1_state = crate::v1::V1State {
         blocking: v1_blocking.clone(),
         read: v1_read,
@@ -1013,7 +936,8 @@ pub fn router_with_mempool_and_wallet_and_security_and_inventory(
         chain: v1_script_chain,
         network,
         oracle: None,
-        config: crate::v1::script::ScriptConfig::default(),
+        config: script_config,
+        compute: services.compute.clone(),
     };
     // Operator/control group (`node/*`, `network/*`, `mining/*`, `voting/*`).
     // Mixed tiers over one `OperatorState`: T0 reads share the same

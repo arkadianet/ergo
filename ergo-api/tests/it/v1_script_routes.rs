@@ -43,6 +43,7 @@ fn app(oracle: Option<Arc<dyn ScalaOracle>>) -> Router {
         network: NetworkPrefix::Mainnet,
         oracle,
         config: ScriptConfig::default(),
+        compute: Default::default(),
     };
     let governor =
         ergo_api::v1::governor::Governor::new(Default::default()).expect("valid governor config");
