@@ -228,7 +228,7 @@ pub struct MiningHandle {
     serve_notify: Arc<tokio::sync::watch::Sender<u64>>,
     private_queue: Arc<crate::private_queue::PrivateTransactionQueue>,
     policy: Arc<RwLock<(u64, crate::policy::BlockPolicy)>>,
-    outcomes: Arc<Mutex<std::collections::VecDeque<crate::inspection::MiningOutcome>>>,
+    outcomes: Arc<Mutex<crate::outcome_journal::OutcomeJournal>>,
     reward_key: RewardKeySource,
     monetary: Arc<MonetarySettings>,
     /// `None` on networks that don't enable EIP-27 reemission
@@ -315,7 +315,7 @@ impl MiningHandle {
             serve_notify: Arc::new(tokio::sync::watch::channel(0u64).0),
             private_queue: Arc::new(crate::private_queue::PrivateTransactionQueue::default()),
             policy: Arc::new(RwLock::new((0, crate::policy::BlockPolicy::default()))),
-            outcomes: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            outcomes: Arc::new(Mutex::new(crate::outcome_journal::OutcomeJournal::default())),
             reward_key,
             monetary: Arc::new(monetary),
             reemission: reemission.map(Arc::new),
@@ -485,32 +485,53 @@ impl MiningHandle {
         detail: Option<String>,
         at_ms: u64,
     ) {
-        let template_seq = msg.and_then(|id| {
-            self.inspect_template(Some(id), None)
-                .map(|s| s.template.identity.template_seq)
-        });
-        let mut events = self.outcomes.lock().expect("outcomes poisoned");
-        events.push_back(crate::inspection::MiningOutcome {
-            msg,
-            template_seq,
-            block_id,
-            at_ms,
-            outcome: outcome.into(),
-            detail,
-        });
-        while events.len() > MAX_MINING_OUTCOMES {
-            events.pop_front();
-        }
+        let template = msg.and_then(|id| self.inspect_template(Some(id), None));
+        let template_seq = template.as_ref().map(|s| s.template.identity.template_seq);
+        let accounting = (outcome == "accepted")
+            .then(|| {
+                template
+                    .as_ref()
+                    .map(|s| crate::inspection::outcome_accounting(&s.template))
+            })
+            .flatten();
+        let detail = detail.map(|text| text.chars().take(4096).collect());
+        self.outcomes
+            .lock()
+            .expect("outcomes poisoned")
+            .append(crate::inspection::MiningOutcome {
+                msg,
+                template_seq,
+                block_id,
+                at_ms,
+                outcome: outcome.chars().take(64).collect(),
+                detail,
+                accounting,
+            });
+    }
+
+    /// Hydrate durable local submission history at boot; corrupt files fail
+    /// closed so the operator does not unknowingly lose accounting history.
+    pub fn with_outcome_journal(self, path: &std::path::Path) -> Result<Self, MiningError> {
+        *self.outcomes.lock().expect("outcomes poisoned") =
+            crate::outcome_journal::OutcomeJournal::open(path)
+                .map_err(MiningError::InvalidConfig)?;
+        Ok(self)
     }
 
     pub fn mining_outcomes(&self) -> Vec<crate::inspection::MiningOutcome> {
         self.outcomes
             .lock()
             .expect("outcomes poisoned")
+            .events
             .iter()
             .rev()
             .cloned()
             .collect()
+    }
+
+    pub fn outcome_journal_status(&self) -> (bool, Option<String>) {
+        let journal = self.outcomes.lock().expect("outcomes poisoned");
+        (journal.persistent(), journal.last_error.clone())
     }
 
     /// Record the suspect ids from a just-published Full build.

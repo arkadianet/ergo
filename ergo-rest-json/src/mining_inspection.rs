@@ -124,7 +124,9 @@ pub struct MiningHistoryJson {
     pub retention: usize,
     pub retained_templates: Vec<TemplateSummaryJson>,
     pub outcomes: Vec<MiningOutcomeJson>,
+    /// Applies to outcomes; template cache always resets on restart.
     pub resets_on_restart: bool,
+    pub journal_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +151,7 @@ pub struct MiningOutcomeJson {
     pub at_ms: u64,
     pub outcome: String,
     pub detail: Option<String>,
+    pub accounting: Option<MiningAccountingJson>,
 }
 
 /// Public freshness contains no transaction IDs, values, or wallet contents.
@@ -159,4 +162,13 @@ pub struct MiningFreshnessJson {
     pub last_template_height: Option<u32>,
     pub last_template_age_ms: Option<u64>,
     pub template_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MiningAccountingJson {
+    pub height: u32,
+    pub emission_nano_erg: String,
+    pub fees_nano_erg: String,
+    pub rent_nano_erg: String,
+    pub recovered_tokens: Vec<MiningAssetJson>,
 }

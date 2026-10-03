@@ -62,6 +62,8 @@ pub(super) fn build_subsystem(
         config.chain_spec.voting,
     )
     .with_network(config.network)
+    .with_outcome_journal(&config.data_dir.join("mining-history.json"))
+    .map_err(|e| -> NodeError { format!("[mining] {e}").into() })?
     .with_rent_config(
         config.mining_config.claim_storage_rent,
         config.mining_config.max_storage_rent_claims,

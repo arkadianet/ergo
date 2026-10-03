@@ -2750,3 +2750,22 @@ a.btn { text-decoration: none; }
   .wb-token-row > div { grid-column: 1 / -1; }
   .wb-review { padding: 16px; }
 }
+
+/* Exact mining-template inventory, with bounded row pages. */
+.mining-inspector__context, .mining-inspector__rewards { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px 24px; margin-bottom: 20px; }
+.mining-inspector__toolbar, .mining-inspector__pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.mining-inspector__toolbar select { max-width: 100%; }
+.mining-inspector__section { padding: 12px 0; border-top: 1px solid var(--bd2); }
+.mining-inspector__section > summary { cursor: pointer; font-weight: 600; }
+.mining-inspector__section-body { padding-top: 16px; min-width: 0; }
+.mining-inspector__id { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.mining-inspector__assets { display: grid; gap: 8px; padding: 8px 0; }
+.mining-inspector__asset { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.mining-inspector__output { padding: 12px; margin-block: 10px; background: var(--s1); border: 1px solid var(--bd2); border-radius: 8px; }
+.mining-inspector__tx-detail { display: grid; gap: 14px; }
+.mining-inspector__tx-detail h3, .mining-inspector__section-body h3 { margin: 8px 0; font-size: 12px; }
+.mining-inspector__tx-detail .mining-inspector__id { display: block; padding-block: 4px; }
+.mining-inspector__hex { display: block; overflow-wrap: anywhere; white-space: pre-wrap; text-align: left; max-width: 100%; }
+.mining-inspector__bytes { width: 100%; resize: vertical; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.mining-inspector__burn { color: var(--red); }
+@media (max-width: 720px) { .mining-inspector__context, .mining-inspector__rewards { grid-template-columns: 1fr; } }

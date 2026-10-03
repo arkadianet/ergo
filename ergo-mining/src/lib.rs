@@ -21,6 +21,7 @@ pub mod error;
 pub mod extension_builder;
 pub mod handle;
 pub mod inspection;
+mod outcome_journal;
 pub mod policy;
 pub mod private_queue;
 pub mod reemission;

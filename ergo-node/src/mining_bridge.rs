@@ -294,7 +294,9 @@ impl NodeMining for MiningBridge {
     async fn mining_history(
         &self,
     ) -> Result<ergo_rest_json::mining_inspection::MiningHistoryJson, MiningApiError> {
-        use ergo_rest_json::mining_inspection::{MiningHistoryJson, MiningOutcomeJson};
+        use ergo_rest_json::mining_inspection::{
+            MiningAccountingJson, MiningAssetJson, MiningHistoryJson, MiningOutcomeJson,
+        };
         let handle = self.inspection_handle()?;
         Ok(MiningHistoryJson {
             retention: ergo_mining::handle::MAX_RETAINED_TEMPLATES,
@@ -313,9 +315,24 @@ impl NodeMining for MiningBridge {
                     at_ms: e.at_ms,
                     outcome: e.outcome,
                     detail: e.detail,
+                    accounting: e.accounting.map(|a| MiningAccountingJson {
+                        height: a.height,
+                        emission_nano_erg: a.emission_nano_erg,
+                        fees_nano_erg: a.fees_nano_erg,
+                        rent_nano_erg: a.rent_nano_erg,
+                        recovered_tokens: a
+                            .recovered_tokens
+                            .into_iter()
+                            .map(|t| MiningAssetJson {
+                                token_id: t.token_id,
+                                amount: t.amount,
+                            })
+                            .collect(),
+                    }),
                 })
                 .collect(),
-            resets_on_restart: true,
+            resets_on_restart: !handle.outcome_journal_status().0,
+            journal_error: handle.outcome_journal_status().1,
         })
     }
 

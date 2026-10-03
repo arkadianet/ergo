@@ -45,7 +45,7 @@ pub struct ExcludedTransaction {
 
 /// One bounded lifecycle observation. This is local diagnostics, not a durable
 /// accounting ledger or evidence that a block remains on the canonical chain.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MiningOutcome {
     pub msg: Option<[u8; 32]>,
     pub template_seq: Option<u64>,
@@ -53,6 +53,7 @@ pub struct MiningOutcome {
     pub at_ms: u64,
     pub outcome: String,
     pub detail: Option<String>,
+    pub accounting: Option<OutcomeAccounting>,
 }
 
 /// Cheap snapshot of a retained template. The Arc avoids copying transactions
@@ -61,4 +62,77 @@ pub struct MiningOutcome {
 pub struct InspectionSnapshot {
     pub template: std::sync::Arc<crate::engine::Template>,
     pub status: &'static str,
+}
+
+/// Actual output amounts in a locally applied mined block. Canonical-chain
+/// membership must be checked separately after reorgs.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutcomeAccounting {
+    pub height: u32,
+    pub emission_nano_erg: String,
+    pub fees_nano_erg: String,
+    pub rent_nano_erg: String,
+    pub recovered_tokens: Vec<OutcomeAsset>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutcomeAsset {
+    pub token_id: String,
+    pub amount: String,
+}
+
+pub(crate) fn outcome_accounting(template: &crate::engine::Template) -> OutcomeAccounting {
+    let reward_script = crate::reward_script::reward_output_script(&template.work.pk);
+    let plain_script = ergo_ser::address::build_p2pk_tree_bytes(&template.work.pk).ok();
+    let mut emission = 0u128;
+    let mut fees = 0u128;
+    let mut rent = 0u128;
+    let mut tokens = std::collections::BTreeMap::<[u8; 32], u128>::new();
+    for (tx, observation) in template
+        .candidate
+        .transactions
+        .iter()
+        .zip(&template.candidate.observation.transactions)
+    {
+        for (index, output) in tx.output_candidates.iter().enumerate() {
+            let amount = u128::from(output.value);
+            let received = match observation.category {
+                "emission" if output.ergo_tree_bytes() == reward_script => {
+                    emission += amount;
+                    true
+                }
+                "fees" if output.ergo_tree_bytes() == reward_script => {
+                    fees += amount;
+                    true
+                }
+                "rent"
+                    if index + 1 == tx.output_candidates.len()
+                        && plain_script.as_deref() == Some(output.ergo_tree_bytes()) =>
+                {
+                    rent += amount;
+                    true
+                }
+                _ => false,
+            };
+            if received {
+                for token in &output.tokens {
+                    *tokens.entry(*token.token_id.as_bytes()).or_default() +=
+                        u128::from(token.amount);
+                }
+            }
+        }
+    }
+    OutcomeAccounting {
+        height: template.candidate.header.height,
+        emission_nano_erg: emission.to_string(),
+        fees_nano_erg: fees.to_string(),
+        rent_nano_erg: rent.to_string(),
+        recovered_tokens: tokens
+            .into_iter()
+            .map(|(id, amount)| OutcomeAsset {
+                token_id: hex::encode(id),
+                amount: amount.to_string(),
+            })
+            .collect(),
+    }
 }
