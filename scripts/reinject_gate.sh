@@ -6,26 +6,27 @@
 #
 #   1. CLEAN HEAD: run the detection command; assert it exits 0 (no divergence).
 #   2. PATCHED HEAD: apply the patch to a scratch worktree, build difftest, run the
-#      detection command; assert it exits non-zero (bug detected).
+#      detection command; assert finding exit 1 AND the declared class/surface marker.
 #   3. Tear down the scratch worktree.
 #
 # Usage:
 #   scripts/reinject_gate.sh [--generated] [--only <id>] [--oracle-script <path>]
 #
 # Options:
-#   --generated      Structured-generator mode: instead of the pinned trigger_hex,
-#                    run a short oracle campaign (--oracle --surface <s> --iters N).
-#                    Skipped cleanly when structured generators are not present.
+#   --generated      Unsupported generated-rediscovery obligation. Refused with
+#                    usage exit 2; skipping every check is never a passing gate.
 #   --only <id>      Run the gate only for the named bug id (useful for debugging).
 #   --oracle-script  Path to ErgoSerdeOracle.scala (default: scripts/jvm_serde_oracle/ErgoSerdeOracle.scala).
 #
 # Exit codes:
-#   0  all bugs passed both assertions (or were skipped with explanation)
-#   1  at least one assertion failed (false positive on clean HEAD or missed on patched)
+#   0  at least one detector pair ran; all executed pairs passed
+#   1  at least one assertion/build failed
+#   2  usage error or unsupported generated mode
+#   3  no detector pair executed (all selected entries were skipped)
 #
-# The verify class patches an isolated copy inside the current worktree.
-# Other classes create temporary git worktrees and remove them on exit.
-# It never pushes or modifies the main working tree's git history.
+# Every selected class uses owned source copies. Build and detector logs survive
+# cleanup of those copies. No caller source or Git worktree is patched.
+# A passing source/unit test does not certify clean/patched detector execution.
 
 set -euo pipefail
 
@@ -38,6 +39,10 @@ GENERATED=false
 ONLY=""
 
 while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --only|--oracle-script)
+            [[ $# -ge 2 && -n "$2" ]] || { echo >&2 "missing value for $1"; exit 2; } ;;
+    esac
     case "$1" in
         --generated)   GENERATED=true ;;
         --only)        ONLY="$2"; shift ;;
@@ -53,6 +58,11 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if $GENERATED; then
+    echo >&2 "reinject_gate: --generated rediscovery is unsupported; no generated detector checks ran."
+    exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Parse manifest.toml into arrays (pure bash, no external TOML library).
@@ -170,27 +180,15 @@ flush_bug
 # Detection command per bug class
 # ---------------------------------------------------------------------------
 
-detection_cmd() {
-    local id="$1"
-    local class="${BUG_CLASS[$id]}"
-    local surface="${BUG_SURFACE[$id]}"
-    local trigger="${BUG_TRIGGER[$id]}"
-    local expected="${BUG_EXPECTED[$id]}"
-    local difftest="$2"   # path to the difftest binary
-
-    case "$class" in
-        canonical)
-            echo "$difftest --repro $trigger --surface $surface --check-canonical $expected"
-            ;;
-        panic)
-            echo "$difftest --repro $trigger --surface $surface"
-            ;;
+detection_args() {
+    local id="$1" difftest="$2"
+    DETECTION_ARGS=("$difftest" --repro "${BUG_TRIGGER[$id]}" --surface "${BUG_SURFACE[$id]}")
+    case "${BUG_CLASS[$id]}" in
+        canonical) DETECTION_ARGS+=(--check-canonical "${BUG_EXPECTED[$id]}") ;;
+        panic) ;;
         accept-reject|cost|reduce|verify)
-            echo "$difftest --oracle --oracle-script $ORACLE_SCRIPT --repro $trigger --surface $surface"
-            ;;
-        *)
-            echo ""
-            ;;
+            DETECTION_ARGS+=(--oracle --oracle-script "$ORACLE_SCRIPT") ;;
+        *) return 1 ;;
     esac
 }
 
@@ -201,6 +199,10 @@ detection_cmd() {
 PASS=0
 FAIL=0
 SKIP=0
+if [[ -n "$ONLY" && -z "${BUG_CLASS[$ONLY]:-}" ]]; then
+    echo >&2 "reinject_gate: unknown catalog id: $ONLY"
+    exit 2
+fi
 
 for id in "${BUG_IDS[@]}"; do
     # Filter by --only if set
@@ -275,128 +277,101 @@ for id in "${BUG_IDS[@]}"; do
         continue
     fi
 
-    if $GENERATED; then
-        if [[ "$class" != "canonical" && "$class" != "panic" ]]; then
-            # Only oracle surfaces support structured generators
-            echo "[SKIP] $id: --generated mode — structured generators not present"
-            ((SKIP++)) || true
-            continue
-        fi
-        echo "[SKIP] $id: --generated mode for hermetic surfaces (canonical/panic) uses trigger_hex path"
-        ((SKIP++)) || true
-        continue
-    fi
-
-    if [[ "$class" == "verify" ]]; then
-        # Copy tracked sources, including uncommitted edits, into an isolated tree.
-        # The gate never patches or restores the caller's source files.
-        gate_dir="$REPO_ROOT/.superpowers/reinject-$id"
-        mkdir -p "$gate_dir"
-        scratch="$(mktemp -d "$gate_dir/source.XXXXXX")"
-        cleanup_verify() {
-            rm -rf "$scratch"
-        }
-        trap cleanup_verify EXIT
-        git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -z |
-            tar -C "$REPO_ROOT" --null -T - -cf - | tar -xf - -C "$scratch"
-        (
-            cd "$scratch"
-            cargo build -p ergo-difftest --quiet
-            target_dir="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-            binary="$target_dir/debug/difftest"
-            "$binary" --oracle --oracle-script "$ORACLE_SCRIPT" --repro "$trigger" --surface verify > "$gate_dir/clean.log" 2>&1
-            cat "$gate_dir/clean.log"
-            patch --batch --forward -p1 < "$patch_file"
-            cargo build -p ergo-difftest --quiet
-            set +e
-            "$binary" --oracle --oracle-script "$ORACLE_SCRIPT" --repro "$trigger" --surface verify > "$gate_dir/patched.log" 2>&1
-            patched_exit=$?
-            set -e
-            cat "$gate_dir/patched.log"
-            printf '%s\n' "$patched_exit" > "$gate_dir/patched.exit"
-        )
-        patched_exit="$(cat "$gate_dir/patched.exit")"
-        cleanup_verify
-        trap - EXIT
-        cargo build -p ergo-difftest --quiet
-        if [[ "$patched_exit" -eq 1 ]] && grep -q '\[Canonical\] verify' "$gate_dir/patched.log"; then
-            echo "[PASS] $id: clean agrees; injected cost produces verify delta"
-            ((PASS++)) || true
-        else
-            echo "[FAIL] $id: expected cost divergence, got exit $patched_exit"
-            ((FAIL++)) || true
-        fi
-        continue
-    fi
-
-    echo ""
-    echo "=== $id ($class) ==="
-
-    # --- Step 1: clean HEAD — detection command must exit 0 ---
-    clean_difftest="$(cargo build -p ergo-difftest --release --quiet 2>/dev/null && \
-        echo "$REPO_ROOT/target/release/difftest" || true)"
-    if [[ -z "$clean_difftest" || ! -x "$clean_difftest" ]]; then
-        # Fall back to cargo run
-        clean_difftest="cargo run -p ergo-difftest --release -q --"
-    fi
-
-    cmd="$(detection_cmd "$id" "$clean_difftest")"
-    if [[ -z "$cmd" ]]; then
+    if ! detection_args "$id" difftest; then
         echo "[SKIP] $id: no detection command for class '$class'"
         ((SKIP++)) || true
         continue
     fi
 
-    echo "  [clean HEAD] $cmd"
-    set +e
-    eval "$cmd" > /tmp/reinject_clean_${id}.out 2>&1
-    clean_exit=$?
-    set -e
-    cat /tmp/reinject_clean_${id}.out
-
-    if [[ $clean_exit -ne 0 ]]; then
-        echo "  [FAIL] clean HEAD: expected exit 0, got $clean_exit (false positive — bad trigger?)"
+    echo ""
+    echo "=== $id ($class) ==="
+    gate_dir="$(mktemp -d "${TMPDIR:-/tmp}/ergo-reinject.XXXXXX")"
+    scratch="$gate_dir/source"
+    mkdir "$scratch"
+    cleanup_source() { rm -rf -- "$scratch"; }
+    trap cleanup_source EXIT
+    echo "  preserved build/detector logs: $gate_dir"
+    # Copy the current authored source, including uncommitted edits. Both clean
+    # and patched builds use this same snapshot, rather than mixing it with HEAD.
+    if ! git -C "$REPO_ROOT" ls-files --cached --others --exclude-standard -z |
+        tar -C "$REPO_ROOT" --null -T - -cf - | tar -xf - -C "$scratch"; then
+        echo "  [FAIL] $id: source snapshot failed"
         ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
         continue
     fi
-    echo "  [ok] clean HEAD: exit 0 (no divergence)"
-
-    # --- Step 2: patched HEAD — apply patch, build, detection must exit non-zero ---
-    SCRATCH="$(mktemp -d)"
-    SCRATCH_BRANCH="reinject-${id}-$$"
-
-    cleanup_scratch() {
-        git worktree remove --force "$SCRATCH" 2>/dev/null || true
-    }
-    trap cleanup_scratch EXIT
-
-    git worktree add --detach "$SCRATCH" HEAD 2>/dev/null
-    (
-        cd "$SCRATCH"
-        git apply "$patch_file"
-        cargo build -p ergo-difftest --release --quiet \
-            --target-dir "$SCRATCH/target-reinject" 2>&1 | grep -v "^   Compiling\|^    Finished" || true
-        PATCHED_BIN="$SCRATCH/target-reinject/release/difftest"
-        patched_cmd="$(detection_cmd "$id" "$PATCHED_BIN")"
-        echo "  [patched] $patched_cmd"
-        set +e
-        eval "$patched_cmd" > /tmp/reinject_patched_${id}.out 2>&1
-        patched_exit=$?
-        set -e
-        cat /tmp/reinject_patched_${id}.out
-        echo "$patched_exit" > /tmp/reinject_patched_exit_${id}.txt
-    )
-    patched_exit_val="$(cat /tmp/reinject_patched_exit_${id}.txt 2>/dev/null || echo 0)"
-
-    cleanup_scratch
-    trap - EXIT
-
-    if [[ "$patched_exit_val" -eq 0 ]]; then
-        echo "  [FAIL] patched HEAD: expected non-zero exit, got 0 (bug NOT detected — coverage gap)"
+    if ! (cd "$scratch" && cargo build --locked --release -p ergo-difftest --target-dir "$gate_dir/target" \
+        >"$gate_dir/clean-build.log" 2>&1); then
+        echo "  [FAIL] $id: clean build failed; see $gate_dir/clean-build.log"
         ((FAIL++)) || true
-    else
-        echo "  [PASS] patched HEAD: exit $patched_exit_val (bug detected as expected)"
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    if ! target_dir="$(cd "$scratch" && CARGO_TARGET_DIR="$gate_dir/target" cargo metadata --locked --no-deps --format-version 1 \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"; then
+        echo "  [FAIL] $id: cannot resolve the actual Cargo output directory"
+        ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    binary="$target_dir/release/difftest"
+    if [[ ! -x "$binary" ]]; then
+        echo "  [FAIL] $id: compiled detector binary missing at $binary"
+        ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    detection_args "$id" "$binary"
+    printf '%q ' "${DETECTION_ARGS[@]}" > "$gate_dir/command.txt"
+    printf '\n' >> "$gate_dir/command.txt"
+    set +e
+    (cd "$scratch" && "${DETECTION_ARGS[@]}") > "$gate_dir/clean.log" 2>&1
+    clean_exit=$?
+    set -e
+    printf '%s\n' "$clean_exit" > "$gate_dir/clean.exit"
+    cat "$gate_dir/clean.log"
+    if [[ $clean_exit -ne 0 ]]; then
+        echo "  [FAIL] $id: clean detector expected exit0, got $clean_exit"
+        ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    if ! (cd "$scratch" && patch --batch --forward -p1 < "$patch_file" \
+        > "$gate_dir/patch.log" 2>&1); then
+        echo "  [FAIL] $id: patch failed; see $gate_dir/patch.log"
+        ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    if ! (cd "$scratch" && cargo build --locked --release -p ergo-difftest --target-dir "$gate_dir/target" \
+        > "$gate_dir/patched-build.log" 2>&1); then
+        echo "  [FAIL] $id: patched build failed; not a detected finding"
+        ((FAIL++)) || true
+        cleanup_source
+        trap - EXIT
+        continue
+    fi
+    set +e
+    (cd "$scratch" && "${DETECTION_ARGS[@]}") > "$gate_dir/patched.log" 2>&1
+    patched_exit=$?
+    set -e
+    printf '%s\n' "$patched_exit" > "$gate_dir/patched.exit"
+    cat "$gate_dir/patched.log"
+    cleanup_source
+    trap - EXIT
+    if python3 "$REPO_ROOT/scripts/reinject-result.py" --class "$class" \
+        --surface "${BUG_SURFACE[$id]}" --exit-code "$patched_exit" --log "$gate_dir/patched.log"; then
+        echo "  [PASS] $id: clean exit0; patched finding exit1 matches $class/${BUG_SURFACE[$id]}"
         ((PASS++)) || true
+    else
+        echo "  [FAIL] $id: patched exit $patched_exit did not establish the declared detector result"
+        ((FAIL++)) || true
     fi
 done
 
@@ -406,5 +381,9 @@ echo "  PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
 
 if [[ $FAIL -gt 0 ]]; then
     exit 1
+fi
+if [[ $PASS -eq 0 ]]; then
+    echo "reinject_gate: INCOMPLETE — no clean/patched detector pair executed."
+    exit 3
 fi
 exit 0

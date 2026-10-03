@@ -83,7 +83,7 @@ grep -q "not a real calendar date" "$out1" || fail "impossible_date: expected 'n
 # ----- valid future date: must be accepted and SKIPped (not FAILed) as still-blocked -----
 run_gate valid_future_date
 out2="$WORK/out.valid_future_date"
-[[ $gate_rc -eq 0 ]] || fail "valid_future_date: expected exit 0 (a valid not-yet-passed blocked_until is a clean SKIP), got $gate_rc"
+[[ $gate_rc -eq 3 ]] || fail "valid_future_date: expected incomplete exit3 when the only selected pair is skipped, got $gate_rc"
 grep -q "not a real calendar date" "$out2" && fail "valid_future_date: a real calendar date must not be rejected"
 grep -q "SKIP.*valid_future_date: blocked on PR #2 until $FUTURE_DATE" "$out2" || fail "valid_future_date: expected the ordinary still-blocked SKIP line"
 
