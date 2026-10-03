@@ -1,0 +1,11 @@
+{
+  "scope": "Large actual native-result JSONL inventoried by exact raw digest and size; no whole raw transcript is copied into the compact review archive. Provenance and strict verdict are retained separately.",
+  "raw_relative_path": "integration-evidence/final-cost-ledger/results.json",
+  "raw_sha256": "0a3f0da8b63396f2b0e6c7235a9f70f947b595c7c18057f364dabc26cf2f5b5d",
+  "raw_bytes": 2390507,
+  "records": 16447,
+  "record_types": {
+    "suite": 110,
+    "test": 16337
+  }
+}

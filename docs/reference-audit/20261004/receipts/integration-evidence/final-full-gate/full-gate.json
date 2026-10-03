@@ -1,0 +1,373 @@
+{
+  "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+  "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+  "status": "",
+  "started_utc": "2026-10-03T21:50:24.368028+00:00",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:50:24.381144+00:00",
+      "exit_code": 0,
+      "duration_seconds": 2.21,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:50:26.599915+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.442,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:50:27.051728+00:00",
+      "exit_code": 0,
+      "duration_seconds": 10.945,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/clippy.log",
+      "log_sha256": "68004ec684d33bd7048c1c3ec1b6dd9cb6e74aea20c43961779bdf22d4679e1b",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:50:38.006600+00:00",
+      "exit_code": 0,
+      "duration_seconds": 246.775,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/workspace-tests.log",
+      "log_sha256": "692edc2a365aec2e6e5dc0e263ac4e9d3128dde29a13f0ed9fd6710988a83617",
+      "tests_passed": 8076,
+      "tests_failed": 0,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:44.791451+00:00",
+      "exit_code": 0,
+      "duration_seconds": 5.998,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/rustdoc.log",
+      "log_sha256": "81deb444259d95ddb00a1e8f35057f7d13b4d6db45f2c4a1cdbb90a2bf205957",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:50.799043+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.04,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "python-tools",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_*.py"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:50.847948+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.391,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/python-tools.log",
+      "log_sha256": "f313f6b1437987f27c8b08ae747bb9831d2cd4cacd69a86e2a4458c87f5dd387",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "review-record",
+      "argv": [
+        "python3",
+        "scripts/reference-review-record.py",
+        "--check"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:51.247834+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.057,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/review-record.log",
+      "log_sha256": "cbc4e2b3e9c9be092dcf9def32915614d2e4dc51cbd066ee1126f58c907cc0fe",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "dashboard",
+      "argv": [
+        "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/tools/node-v24.21.0-linux-x64/bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "ergo-api/web/tests/activity.test.mjs",
+        "ergo-api/web/tests/auth.test.mjs",
+        "ergo-api/web/tests/capabilities.test.mjs",
+        "ergo-api/web/tests/chain-activity.test.mjs",
+        "ergo-api/web/tests/explorer-source.test.mjs",
+        "ergo-api/web/tests/mempool-read-state.test.mjs",
+        "ergo-api/web/tests/mining-work.test.mjs",
+        "ergo-api/web/tests/node-guidance.test.mjs",
+        "ergo-api/web/tests/peers.test.mjs",
+        "ergo-api/web/tests/storage-rent.test.mjs",
+        "ergo-api/web/tests/sync-rings.test.mjs",
+        "ergo-api/web/tests/wallet-transaction.test.mjs"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:51.314286+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.112,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/dashboard.log",
+      "log_sha256": "c0b7df448619658821496e34f579964547550a12acfa7c943293dc2cc93f1a99",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ledger-selftests",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger.py",
+        "--selftest"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:51.436039+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.076,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/ledger-selftests.log",
+      "log_sha256": "5bc91b956c66dca0e609ff610a44bda38b77b6abc7deb445a496717849f1fcd1",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ledger-integrity",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger.py",
+        "check"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:51.521702+00:00",
+      "exit_code": 0,
+      "duration_seconds": 1.082,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/ledger-integrity.log",
+      "log_sha256": "5ca2f02138a116eae3f5c9c6cdcaa982950dece8a470860f0d236fd3ab87e0ed",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ledger-diff",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger-diff.py"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:52.613353+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.085,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/ledger-diff.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "artifact-integrity",
+      "argv": [
+        "python3",
+        "scripts/jvm_cost_constants_extractor/verify.py"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:54:52.707826+00:00",
+      "exit_code": 0,
+      "duration_seconds": 0.074,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-full-gate/artifact-integrity.log",
+      "log_sha256": "1a21a94e62dfa72214ead869405b3c4479b8c2806f702e27cbc329bf3553f37d",
+      "tests_passed": 0,
+      "tests_failed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

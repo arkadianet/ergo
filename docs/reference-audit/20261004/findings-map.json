@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-10-03T21:50:12.833122+00:00",
+  "captured_at": "2026-10-03T22:35:38.548204+00:00",
   "audit_revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1",
   "implementation_base": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
   "scope": "Remediation snapshot of owner dispositions and published drafts, not current whole-source review or reference certification.",
@@ -12,7 +12,7 @@
       "fixed": 128,
       "remaining_evidence": 4
     },
-    "published_prs": 73
+    "published_prs": 75
   },
   "findings": [
     {
@@ -5574,6 +5574,19 @@
           ],
           "supplied": "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7",
           "exact_commit": "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7",
+          "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+        },
+        {
+          "head": "codex/reference-audit-20261004-script-policy-test",
+          "base": "codex/reference-audit-20261004-node-config",
+          "commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+          "findings": [
+            "NODE008"
+          ],
+          "url": "https://github.com/arkadianet/ergo/pull/572",
+          "number": 572,
+          "supplied": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+          "exact_commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
           "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
         }
       ]
@@ -13890,12 +13903,13 @@
     {
       "head": "codex/reference-audit-20261004-record",
       "base": "codex/reference-audit-20261004-ge-scan",
-      "commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+      "commit": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
       "findings": [],
       "url": "https://github.com/arkadianet/ergo/pull/563",
       "number": 563,
-      "supplied": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
-      "exact_commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+      "previous_published_commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+      "supplied": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
+      "exact_commit": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
       "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
     },
     {
@@ -13994,6 +14008,31 @@
       "number": 570,
       "supplied": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
       "exact_commit": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
+      "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+    },
+    {
+      "head": "codex/reference-audit-20261004-integration",
+      "base": "main",
+      "commit": "deed44be85489b9ccb520e73e5b47da08345f369",
+      "findings": [],
+      "url": "https://github.com/arkadianet/ergo/pull/571",
+      "number": 571,
+      "previous_published_commit": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+      "supplied": "deed44be85489b9ccb520e73e5b47da08345f369",
+      "exact_commit": "deed44be85489b9ccb520e73e5b47da08345f369",
+      "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+    },
+    {
+      "head": "codex/reference-audit-20261004-script-policy-test",
+      "base": "codex/reference-audit-20261004-node-config",
+      "commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+      "findings": [
+        "NODE008"
+      ],
+      "url": "https://github.com/arkadianet/ergo/pull/572",
+      "number": 572,
+      "supplied": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+      "exact_commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
       "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
     }
   ],
@@ -15935,6 +15974,182 @@
       "archive_path": "receipts/indexer-evidence/integrated-gate/full-gate.json"
     },
     {
+      "reference": "integration-evidence/final-cost-ledger-followup/results-archive.json",
+      "sha256": "911caa63d4e38600231e1c67fd0052bb51805b39c2ac5b9f0f89a2db3fecd0f0",
+      "bytes": 550,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "deed44be85489b9ccb520e73e5b47da08345f369"
+        ],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger-followup/results-archive.json"
+    },
+    {
+      "reference": "integration-evidence/final-cost-ledger-followup/results.json.provenance.json",
+      "sha256": "2c1fbe4d97e08aeaccfce2b8bdbcc33cff18285a9801fd62fa464e0e375d6f0b",
+      "bytes": 1602,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "deed44be85489b9ccb520e73e5b47da08345f369"
+        ],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger-followup/results.json.provenance.json"
+    },
+    {
+      "reference": "integration-evidence/final-cost-ledger-followup/strict-gate.json",
+      "sha256": "783ad79408795fdc42b6b66930351da7fc1c486367c0d5407ea3f1d9f29e879d",
+      "bytes": 2425,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "deed44be85489b9ccb520e73e5b47da08345f369"
+        ],
+        "recorded_result": "PASS",
+        "recorded_complete": true,
+        "recorded_command_count": 2,
+        "recorded_exit_codes": [
+          0,
+          0
+        ],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger-followup/strict-gate.json"
+    },
+    {
+      "reference": "integration-evidence/final-cost-ledger/results-archive.json",
+      "sha256": "fca8c1c4973fd62803c41053e1736ef4bf8ccb4f705d9fef8ddf65e553225377",
+      "bytes": 481,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger/results-archive.json"
+    },
+    {
+      "reference": "integration-evidence/final-cost-ledger/results.json.provenance.json",
+      "sha256": "3b1bbc4135fffc604b90fc4b81b96c9cc479edb80bf817ca1a9428867f03049c",
+      "bytes": 1602,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "660763bb48ea80b63473b6b9bdab3f3bd3922253"
+        ],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger/results.json.provenance.json"
+    },
+    {
+      "reference": "integration-evidence/final-cost-ledger/strict-gate.json",
+      "sha256": "ced65109ab20854c8745a9f2e6c142235f22a851f5b9f21f6d16ae6e874fef33",
+      "bytes": 2398,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "660763bb48ea80b63473b6b9bdab3f3bd3922253"
+        ],
+        "recorded_result": "PASS",
+        "recorded_complete": true,
+        "recorded_command_count": 2,
+        "recorded_exit_codes": [
+          0,
+          0
+        ],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-cost-ledger/strict-gate.json"
+    },
+    {
+      "reference": "integration-evidence/final-full-gate-followup/full-gate.json",
+      "sha256": "9e53ba2912751f25d22e5772fee6d54ca3f7c589a1d49e642a08500025b00ad5",
+      "bytes": 12855,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "deed44be85489b9ccb520e73e5b47da08345f369"
+        ],
+        "recorded_result": "PASS",
+        "recorded_complete": true,
+        "recorded_command_count": 13,
+        "recorded_exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-full-gate-followup/full-gate.json"
+    },
+    {
+      "reference": "integration-evidence/final-full-gate/full-gate.json",
+      "sha256": "87dcc76cd7c1282aed12a729b3b7dfe37d8789e31e1f256f844c5b57b38a94ef",
+      "bytes": 12738,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "660763bb48ea80b63473b6b9bdab3f3bd3922253"
+        ],
+        "recorded_result": "PASS",
+        "recorded_complete": true,
+        "recorded_command_count": 13,
+        "recorded_exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/integration-evidence/final-full-gate/full-gate.json"
+    },
+    {
       "reference": "integration-evidence/initial-full-gate/full-gate.json",
       "sha256": "ff577f9c6d6b7d890c7b78704a8d29d2421aa65d5be592a8e0ab4ac366444870",
       "bytes": 6108,
@@ -16062,6 +16277,22 @@
       "archive_path": "receipts/record-evidence/final-ledger-integrity.json"
     },
     {
+      "reference": "record-evidence/final-remote-drafts.json",
+      "sha256": "89a628be67ca418ec75b0a220a22d27b924b42aa217c72798c567153641dbd06",
+      "bytes": 73893,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/record-evidence/final-remote-drafts.json"
+    },
+    {
       "reference": "record-evidence/fuzz-source-review.json",
       "sha256": "04700a29ec307d1d313e3a191a4599440415c05880b8150f8c0dd793806e8acb",
       "bytes": 10462,
@@ -16185,6 +16416,38 @@
       "archive_path": "receipts/record-evidence/record-v1-full-gate.json"
     },
     {
+      "reference": "record-evidence/remote-pr-checks/bounded-job-reruns.json",
+      "sha256": "5f70946a3102495614e68dbd108d6c1f13e0ce5b3cc18ba8d9bf11d76274dda0",
+      "bytes": 15942,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/record-evidence/remote-pr-checks/bounded-job-reruns.json"
+    },
+    {
+      "reference": "record-evidence/remote-pr-checks/retry-job-latest.json",
+      "sha256": "97e095f0f45dd228ba3e27620c6a2a5851f83af1c2988d42f304bac1bf1a268b",
+      "bytes": 65161,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/record-evidence/remote-pr-checks/retry-job-latest.json"
+    },
+    {
       "reference": "rest-evidence/final-gate/full-gate.json",
       "sha256": "73ab57d6c040bb95d8eb7e80ef1fa168f01f52c00179879970ccd5d0e885eed0",
       "bytes": 5933,
@@ -16262,6 +16525,124 @@
         "scope": "Recorded fields only; an absent result/head is not inferred."
       },
       "archive_path": "receipts/root-control-preservation.json"
+    },
+    {
+      "reference": "root-control-script-policy-followup.json",
+      "sha256": "544bb07f832bc0176a1f78e95b38aa64a3a0b69f14644be380fddeb15fc94c56",
+      "bytes": 854,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/root-control-script-policy-followup.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-final-clippy.json",
+      "sha256": "ec4b598d831fb9954b79d2324378deab6b8c19d74e1330c55e675e54e2a59ac1",
+      "bytes": 979,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-final-clippy.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-final-fmt.json",
+      "sha256": "8eebc880f77377e28287a5de39c43e510700878bb64e0fb514b963872a724e00",
+      "bytes": 890,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-final-fmt.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-final-test.json",
+      "sha256": "1a4d6d33ecccd4d9c847eee34721f73b5eba95322f2fa3a901d55e7476a31a9c",
+      "bytes": 1034,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-final-test.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-normalized.json",
+      "sha256": "b7f3a4bac6d77826b7d97e3be83d407d2797890da1caf7bc8978a18ce2be3767",
+      "bytes": 759,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-normalized.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-ready.json",
+      "sha256": "6fad3ba55dfc15305afab7463566a8f503b5fe1f9156a2bda5406991969c8df7",
+      "bytes": 9381,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [
+          "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d"
+        ],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 3,
+        "recorded_exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-ready.json"
+    },
+    {
+      "reference": "sigma-evidence/ci-558-script-auth-windows-receipt.json",
+      "sha256": "a27adc4fa221966b7484828b3a3a3c5d165834b2fd474e1277a64ed25904022b",
+      "bytes": 1815,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/sigma-evidence/ci-558-script-auth-windows-receipt.json"
     },
     {
       "reference": "sigma-evidence/ci-559-compat-final-check.json",
@@ -17695,6 +18076,22 @@
         "scope": "Recorded fields only; an absent result/head is not inferred."
       },
       "archive_path": "receipts/state-evidence/group15-historical-costs-tests-attempt4/result.json"
+    },
+    {
+      "reference": "state-evidence/native-script-boot-readonly.json",
+      "sha256": "8e07009b1d0c8d6e14d56d50fce43ef154fa1a01ff2364429e9297b83d06fe4e",
+      "bytes": 14296,
+      "available_at_snapshot": true,
+      "archived": true,
+      "recorded_scope": {
+        "recorded_heads": [],
+        "recorded_result": null,
+        "recorded_complete": null,
+        "recorded_command_count": 0,
+        "recorded_exit_codes": [],
+        "scope": "Recorded fields only; an absent result/head is not inferred."
+      },
+      "archive_path": "receipts/state-evidence/native-script-boot-readonly.json"
     }
   ]
 }

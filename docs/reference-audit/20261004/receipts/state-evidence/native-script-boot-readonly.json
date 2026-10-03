@@ -1,0 +1,445 @@
+{
+  "task": "Independent read-only Windows native script TOML boot timeout diagnosis",
+  "source_head": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+  "executed_checks": "NONE: no source changes, native test runs, workflow reruns, HTTP/network, reference/JVM, guard/upload or signing controls.",
+  "findings": [
+    "API [api] bind=127.0.0.1:0 is correct and resolves through actual listener local_addr before api_addr publication. P2P bind key is [peers] bind_addr; absent disables inbound, so original test has no default9030 bind collision.",
+    "NodeConfig::load defaults mainnet and appends13 public bootstrap seeds after the configured127.0.0.1:1. common::make_test_config instead constructs only unreachable loopback. Original test is consequently not isolated from ordinary outbound attempts/background sync; causal relation to this timeout is not proved.",
+    "Top-level network=devnet selects an empty seed list; known loopback peer remains valid. Explicit [peers] bind_addr=127.0.0.1:0 is accepted and adds an ephemeral inbound listener; omit/empty keeps outbound-only.",
+    "CLI ibd_flush_interval defaults500 (not a TOML field); common test uses0. Fresh UTXO boot initializes genesis before enabling the64-job persist worker. Policy routes do not wait for a future full-block durable commit, and no persistence deadlock is established.",
+    "All seven script POST routes share outer Tier::Operator auth selected by config.api_script.require_api_key. API boot copies config to ServerCtx, then ScriptState, and mounts all seven. Missing key responds401 before JSON parsing/governor. Valid key plusJSON{} has the exact statuses/reasons listed; bare404/500/429/503 or a noncanonical401 must not satisfy the positive assertion.",
+    "API server delegates to axum0.7.9/hyper1.9.0 without a custom connection-lifetime gate. Hyper parses Connection:close to disabled keep-alive, closes after body/response completion, and polls socket shutdown. Middleware rejection of an unread tiny body is drained or closed rather than requiring node shutdown.",
+    "Windows receipt only records Elapsed at read_to_end timeout line600 and a9.48-second test total. It does not record route, key case, status headers, byte count or partial response. Therefore it cannot distinguish delayed admission/body from complete response awaiting FIN and cannot establish or rule out a production transport issue.",
+    "Reading a protocol-framed response under a bounded meaningful test deadline, checking exact HTTP status plus JSON reason/detail, and reporting route/key/partial bytes on failures directly tests auth policy without making EOF timing its assertion. Isolation removes unrelated public outbound work. This is a recommended test-contract repair, not proof of the physical Windows cause."
+  ],
+  "route_expectations_from_source": [
+    {
+      "method": "POST",
+      "path": "/api/v1/script/compile",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "missing field `source`"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/inspect",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "one input is required"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/execute",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "one script input is required"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/cost",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "one script input is required"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/simulate",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "missing field `box_id`"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/explain",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 400,
+        "reason": "bad_request",
+        "detail_contains": "missing field `box_id`"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/script/diff",
+      "no_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "valid_hello_key_empty_json": {
+        "status": 501,
+        "reason": "oracle_unavailable",
+        "detail_contains": "configure a Scala node or bundled reducer to enable script/diff"
+      }
+    }
+  ],
+  "windows_receipt": {
+    "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/record-evidence/remote-pr-checks/558-111288096886-newly-observed.log",
+    "sha256": "88d47fa200d5f0dc8e0ba695417518a3b81b58fba5266205ba97e24c1077e5fc",
+    "selected_lines": [
+      2193,
+      2213
+    ],
+    "assertion": "Elapsed only; no per-request response evidence"
+  },
+  "sources": [
+    {
+      "path": "ergo-node/tests/it/submit_e2e.rs",
+      "sha256": "874cf0e3a60e40149b12528c11db7c7eba0af738d15f643ae9b50df12f03ff73",
+      "selected_source_ranges": [
+        [
+          555,
+          618
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/tests/common/mod.rs",
+      "sha256": "f27f587e5c631965480968baa02142e5eac259ef0ecae14129f138cc42e813ac",
+      "selected_source_ranges": [
+        [
+          1,
+          141
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/config/load.rs",
+      "sha256": "0d0a67884014ee86d72fb689ab6cafb6ca8d6cc61e56300424224a2254ee1233",
+      "selected_source_ranges": [
+        [
+          49,
+          175
+        ],
+        [
+          675,
+          750
+        ],
+        [
+          1120,
+          1165
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/config/cli.rs",
+      "sha256": "a7359016ae58d07bb6245e3c93240f730227da60b4f7a4d51ebbbc2752096ed8",
+      "selected_source_ranges": [
+        [
+          50,
+          70
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/config/toml_sections.rs",
+      "sha256": "3b266c0bd936e6a9db53637e95b8843ba08029bffe06cef99008917f06199305",
+      "selected_source_ranges": [
+        [
+          1,
+          30
+        ],
+        [
+          316,
+          377
+        ],
+        [
+          410,
+          442
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-chain-spec/src/lib.rs",
+      "sha256": "604d9153a272eb56deb00a75202c9f91b2a225c10d3396de316f97d5e2335a87",
+      "selected_source_ranges": [
+        [
+          633,
+          655
+        ],
+        [
+          1437,
+          1444
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/node/boot/mod.rs",
+      "sha256": "9b96dd161282e45043ff265e96fe06a496185016b40890d3e6b0ed5b131689b6",
+      "selected_source_ranges": [
+        [
+          495,
+          501
+        ],
+        [
+          835,
+          912
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/node/boot/sync_setup.rs",
+      "sha256": "5017b075f861fe057e7afc7836366bc91d47faa995468287377c9263d473fabd",
+      "selected_source_ranges": [
+        [
+          325,
+          348
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-node/src/node/boot/api_wiring.rs",
+      "sha256": "221e72055f9a4413da62e9200701c0f8e8b0a0ea0facea1eec8a13bc655cec37",
+      "selected_source_ranges": [
+        [
+          303,
+          355
+        ],
+        [
+          446,
+          485
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/server/mod.rs",
+      "sha256": "8d1e8d99380c0607e9e1b92c1fbca7df5b3f5c6890c58080659df567cb5841bf",
+      "selected_source_ranges": [
+        [
+          290,
+          353
+        ],
+        [
+          931,
+          941
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/script/mod.rs",
+      "sha256": "db4707a3e26ebc67c1b0d93e0db1b07083be9146cc6954666589918a636b4ffe",
+      "selected_source_ranges": [
+        [
+          159,
+          189
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/auth.rs",
+      "sha256": "d2f0a947984726ce9ae49b2d8eacf6cf15d0fc8706d172f359d0e5de246ee188",
+      "selected_source_ranges": [
+        [
+          142,
+          180
+        ],
+        [
+          200,
+          219
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/routes/extract.rs",
+      "sha256": "017b4b6b7719195a780a599e873ef51c5609235181aacd033cf101c61f9695a1",
+      "selected_source_ranges": [
+        [
+          45,
+          68
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/script/handlers.rs",
+      "sha256": "b053e18f4275910f6745aa90b74b8dba2f2cd9cb05233ee5571df0b6ddaa1a14",
+      "selected_source_ranges": [
+        [
+          43,
+          78
+        ],
+        [
+          134,
+          145
+        ],
+        [
+          278,
+          304
+        ],
+        [
+          393,
+          415
+        ],
+        [
+          559,
+          571
+        ],
+        [
+          893,
+          907
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/error.rs",
+      "sha256": "d65e2b658aa73cad14141595f5dcde27c456f55420afa59e6f0ec43cd6e9cf56",
+      "selected_source_ranges": [
+        [
+          201,
+          295
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/governor.rs",
+      "sha256": "80b54f1e95c4a42f8474134aed2ad2460e47de87871d93f0f37b10217873cf49",
+      "selected_source_ranges": [
+        [
+          106,
+          119
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "ergo-api/src/v1/compute.rs",
+      "sha256": "9619a8b47a66e106c604becd43c6af351b85cb79f9af27cb55188a206fc02621",
+      "selected_source_ranges": [
+        [
+          104,
+          146
+        ],
+        [
+          224,
+          228
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "cfc9760372dc165f7a0b42bd44b1b4884fcff5ace4afde1155ab8e27ad9beada",
+      "selected_source_ranges": [
+        [
+          165,
+          178
+        ],
+        [
+          1507,
+          1518
+        ]
+      ],
+      "coverage": "SELECTED_ONLY; no claim of a fresh full-file/package review."
+    }
+  ],
+  "external_primary_source": [
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/axum-0.7.9/src/serve.rs",
+      "sha256": "b20cacd8af7b3ab00559a393aacedef5710a9f48f780ebe214d10c4ed06722e2",
+      "selected_source_ranges": [
+        [
+          399,
+          438
+        ]
+      ],
+      "scope": "Pinned Cargo.lock version local primary source, selected only. Earlier exploratory newer dependency source was excluded from conclusions."
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-1.9.0/src/proto/h1/role.rs",
+      "sha256": "c13307092a033ae9696893c83f27f75f3dbe5da50d17a2c58cd8e98ebfbf1917",
+      "selected_source_ranges": [
+        [
+          294,
+          303
+        ]
+      ],
+      "scope": "Pinned Cargo.lock version local primary source, selected only. Earlier exploratory newer dependency source was excluded from conclusions."
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-1.9.0/src/proto/h1/conn.rs",
+      "sha256": "a662c22cc6603dc7644660b33c5742be4164c7b811a097f3fb967b05d0406667",
+      "selected_source_ranges": [
+        [
+          292,
+          296
+        ],
+        [
+          834,
+          846
+        ],
+        [
+          849,
+          870
+        ],
+        [
+          1072,
+          1086
+        ]
+      ],
+      "scope": "Pinned Cargo.lock version local primary source, selected only. Earlier exploratory newer dependency source was excluded from conclusions."
+    },
+    {
+      "path": "/home/arkadias/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-1.9.0/src/proto/h1/dispatch.rs",
+      "sha256": "073a2bf94418e2eb2f000c5ffb7f2a95891c616ea3d025b7ebfaaaf7a8234038",
+      "selected_source_ranges": [
+        [
+          145,
+          161
+        ],
+        [
+          221,
+          246
+        ]
+      ],
+      "scope": "Pinned Cargo.lock version local primary source, selected only. Earlier exploratory newer dependency source was excluded from conclusions."
+    }
+  ],
+  "known_runtime_evidence": "Existing final-full-gate/workspace-tests.log native Linux PASS retained; no new runtime receipt generated.",
+  "ledger_unchanged_sha256": "0558c281e376583f385f7a9e41745db32c1eb2ed097e75c886184a852a19a679"
+}

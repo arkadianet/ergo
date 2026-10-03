@@ -1,0 +1,11 @@
+{
+  "normalized_head": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+  "branch": "codex/reference-audit-20261004-script-policy-test",
+  "tested_head": "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d",
+  "path": "ergo-node/tests/it/submit_e2e.rs",
+  "source_bytes": 28428,
+  "sha256": "a097dbb79f8d0d1d69abe17eacef67c8fdf65f286b1d889afe7bcc61a1b2849b",
+  "identity_check": "Both entire files are byte-identical. Tested source checks ran on the original combined base; this is not an executed check at the normalized head or a whole-tree equality claim.",
+  "ready": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-ready.json",
+  "ready_sha256": "6fad3ba55dfc15305afab7463566a8f503b5fe1f9156a2bda5406991969c8df7"
+}

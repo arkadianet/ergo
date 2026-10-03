@@ -1,0 +1,28 @@
+{
+  "git_start": {
+    "revision": "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d",
+    "tree": "78962e5ab13ae93e4c03b06fba7dc84153ed77fd",
+    "dirty": ""
+  },
+  "git_end": {
+    "revision": "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d",
+    "tree": "78962e5ab13ae93e4c03b06fba7dc84153ed77fd",
+    "dirty": ""
+  },
+  "command": [
+    "cargo",
+    "fmt",
+    "--all",
+    "--",
+    "--check"
+  ],
+  "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-script-auth-test",
+  "start": "2026-10-03T22:16:34.911234+00:00",
+  "elapsed_seconds": 2.1245105320122093,
+  "exit_code": 0,
+  "environment_overrides": {
+    "CARGO_TARGET_DIR": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/targets/integration",
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-fmt.log"
+}

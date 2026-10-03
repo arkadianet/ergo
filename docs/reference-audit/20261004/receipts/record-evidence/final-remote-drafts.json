@@ -1,0 +1,2179 @@
+{
+  "kind": "read_only_remote_focused_draft_reconciliation",
+  "started_utc": "2026-10-03T21:53:04.992041+00:00",
+  "finished_utc": "2026-10-03T21:53:14.074170+00:00",
+  "registry_sha256": "7fb67ead5815dd2a7a231fa4faf35f4950abeca42d5ce0e081d1c4298bd89b77",
+  "registry_unchanged_during_reads": true,
+  "scope": "73 focused published draft PRs only; excludes combined draft not yet opened. Timestamped observations can change later.",
+  "api_method": "GET only via gh api; bounded six request workers",
+  "published_rows": 73,
+  "unique_registry_urls": 73,
+  "unique_observed_urls": 73,
+  "matched": 73,
+  "problems": [],
+  "status": "PR_METADATA_PASS_CI_PENDING_AND_FAILURES",
+  "prs": [
+    {
+      "number": 498,
+      "observed_utc": "2026-10-03T21:53:05.690103+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/498",
+        "head_ref": "codex/reference-audit-20261004-sigma-collections",
+        "head_sha": "9e187e88298c8082cef50cab69672ecb17419dea",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 499,
+      "observed_utc": "2026-10-03T21:53:05.687450+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/499",
+        "head_ref": "codex/reference-audit-20261004-api-paging",
+        "head_sha": "2af7dab5895aaf1da070bf0f0b4f0accece04931",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 500,
+      "observed_utc": "2026-10-03T21:53:05.719579+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/500",
+        "head_ref": "codex/reference-audit-20261004-ser-tree-identity",
+        "head_sha": "6c5d125d78dafdc3222011e67c4870f769d85c24",
+        "base_ref": "codex/reference-audit-20261004-sigma-collections"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 501,
+      "observed_utc": "2026-10-03T21:53:05.680724+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/501",
+        "head_ref": "codex/reference-audit-20261004-state-snapshot",
+        "head_sha": "d139da22104843c72adfd70b99ae297d3d4b96dd",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 502,
+      "observed_utc": "2026-10-03T21:53:05.684102+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/502",
+        "head_ref": "codex/reference-audit-20261004-wallet-derivation",
+        "head_sha": "11ba533603a10ede6f65dda3fc41dd1f1a882a3b",
+        "base_ref": "codex/reference-audit-20261004-api-paging"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 503,
+      "observed_utc": "2026-10-03T21:53:05.716416+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/503",
+        "head_ref": "codex/reference-audit-20261004-operator-docs",
+        "head_sha": "c4e738dba9a751743a8c98fd42a2287d3f4a0547",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 504,
+      "observed_utc": "2026-10-03T21:53:06.400200+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/504",
+        "head_ref": "codex/reference-audit-20261004-ser-box-identity",
+        "head_sha": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+        "base_ref": "codex/reference-audit-20261004-ser-tree-identity"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 505,
+      "observed_utc": "2026-10-03T21:53:06.344360+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/505",
+        "head_ref": "codex/reference-audit-20261004-api-tree",
+        "head_sha": "7a59aee0d6a8935685d1037772ecfa469cee2fcf",
+        "base_ref": "codex/reference-audit-20261004-ser-tree-identity"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 506,
+      "observed_utc": "2026-10-03T21:53:06.319535+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/506",
+        "head_ref": "codex/reference-audit-20261004-sigma-mixed-collections",
+        "head_sha": "1387561821eac701aa6639ec240f80e0211a50bd",
+        "base_ref": "codex/reference-audit-20261004-ser-box-identity"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 507,
+      "observed_utc": "2026-10-03T21:53:06.354248+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/507",
+        "head_ref": "codex/reference-audit-20261004-ledger-evidence",
+        "head_sha": "302fb893c48cde5d1843d633f1e9432b7386b639",
+        "base_ref": "codex/reference-audit-20261004-operator-docs"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 508,
+      "observed_utc": "2026-10-03T21:53:06.407911+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/508",
+        "head_ref": "codex/reference-audit-20261004-oracle-tools",
+        "head_sha": "01c5ddf96f38a67c5f49ac8e373ae2f5c52e5aa4",
+        "base_ref": "codex/reference-audit-20261004-ledger-evidence"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 509,
+      "observed_utc": "2026-10-03T21:53:06.354825+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/509",
+        "head_ref": "codex/reference-audit-20261004-state-api",
+        "head_sha": "ecc21c78114fe775cdf1dd027678b1e8d5e85088",
+        "base_ref": "codex/reference-audit-20261004-state-snapshot"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 510,
+      "observed_utc": "2026-10-03T21:53:07.020732+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/510",
+        "head_ref": "codex/reference-audit-20261004-chain-spec-api",
+        "head_sha": "fde552a4c50c1965dca01ab15491e2bd4e3ad0e9",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 511,
+      "observed_utc": "2026-10-03T21:53:07.018365+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/511",
+        "head_ref": "codex/reference-audit-20261004-validation-api",
+        "head_sha": "e1670370a4136735b56ec6623792c9e5355d4e4a",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 512,
+      "observed_utc": "2026-10-03T21:53:07.002460+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/512",
+        "head_ref": "codex/reference-audit-20261004-wallet-secrets",
+        "head_sha": "d8dbf3a2fdb5a198a966f7ea242c696568001e1a",
+        "base_ref": "codex/reference-audit-20261004-wallet-derivation"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 513,
+      "observed_utc": "2026-10-03T21:53:07.011294+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/513",
+        "head_ref": "codex/reference-audit-20261004-mempool-cost-cache",
+        "head_sha": "101c1c30f37a26aaf5715e6b57374a8380404537",
+        "base_ref": "codex/reference-audit-20261004-wallet-secrets"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 514,
+      "observed_utc": "2026-10-03T21:53:07.058052+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/514",
+        "head_ref": "codex/reference-audit-20261004-crypto-assurance",
+        "head_sha": "685649cd3db660d733589c58b9045440c9ec4874",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 515,
+      "observed_utc": "2026-10-03T21:53:07.072333+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/515",
+        "head_ref": "codex/reference-audit-20261004-ge-scan",
+        "head_sha": "38b11f2b68c0892118d7a0ca5bc53faae502e96f",
+        "base_ref": "codex/reference-audit-20261004-oracle-tools"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 516,
+      "observed_utc": "2026-10-03T21:53:07.684763+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/516",
+        "head_ref": "codex/reference-audit-20261004-compiler-contracts",
+        "head_sha": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+        "base_ref": "codex/reference-audit-20261004-sigma-mixed-collections"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 517,
+      "observed_utc": "2026-10-03T21:53:07.711436+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/517",
+        "head_ref": "codex/reference-audit-20261004-testnet-launch",
+        "head_sha": "7e6a4da39259d01ca56c890722d00431a0564f8b",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 518,
+      "observed_utc": "2026-10-03T21:53:07.663516+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/518",
+        "head_ref": "codex/reference-audit-20261004-ser-bounds",
+        "head_sha": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+        "base_ref": "codex/reference-audit-20261004-compiler-contracts"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 519,
+      "observed_utc": "2026-10-03T21:53:07.889816+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/519",
+        "head_ref": "codex/reference-audit-20261004-mempool-package-sources",
+        "head_sha": "ce6b2cffdbf719eacccc461156806f65a1a2ccdd",
+        "base_ref": "codex/reference-audit-20261004-mempool-cost-cache"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 520,
+      "observed_utc": "2026-10-03T21:53:07.751476+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/520",
+        "head_ref": "codex/reference-audit-20261004-mempool-frontier-v2",
+        "head_sha": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+        "base_ref": "codex/reference-audit-20261004-mempool-package-sources"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 521,
+      "observed_utc": "2026-10-03T21:53:07.764725+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/521",
+        "head_ref": "codex/reference-audit-20261004-mempool-diagnostics",
+        "head_sha": "1978058d92c8ec897db49618b7210c8cde0d4803",
+        "base_ref": "codex/reference-audit-20261004-mempool-frontier-v2"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 522,
+      "observed_utc": "2026-10-03T21:53:08.370147+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/522",
+        "head_ref": "codex/reference-audit-20261004-rest-numbers",
+        "head_sha": "c6e0f64ae3e7869203d939341040c619fd549e19",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 523,
+      "observed_utc": "2026-10-03T21:53:08.357870+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/523",
+        "head_ref": "codex/reference-audit-20261004-rest-fields",
+        "head_sha": "ba370b793ca6bf2c1704303b162bbbf10c9edee2",
+        "base_ref": "codex/reference-audit-20261004-rest-numbers"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 524,
+      "observed_utc": "2026-10-03T21:53:08.453394+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/524",
+        "head_ref": "codex/reference-audit-20261004-primitives-provenance",
+        "head_sha": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+        "base_ref": "codex/reference-audit-20261004-ser-bounds"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 525,
+      "observed_utc": "2026-10-03T21:53:08.454566+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/525",
+        "head_ref": "codex/reference-audit-20261004-wallet-custody",
+        "head_sha": "32114cc5d14fdb1abfd792acc663a1492b0ad946",
+        "base_ref": "codex/reference-audit-20261004-wallet-secrets"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 526,
+      "observed_utc": "2026-10-03T21:53:08.409497+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/526",
+        "head_ref": "codex/reference-audit-20261004-indexer-checkpoint",
+        "head_sha": "c398576f1932a7fc748041fb5688dd6967a937cc",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 527,
+      "observed_utc": "2026-10-03T21:53:08.547656+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/527",
+        "head_ref": "codex/reference-audit-20261004-wallet-selection",
+        "head_sha": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+        "base_ref": "codex/reference-audit-20261004-wallet-custody"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 528,
+      "observed_utc": "2026-10-03T21:53:09.130085+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/528",
+        "head_ref": "codex/reference-audit-20261004-p2p-contracts",
+        "head_sha": "250cd142dd206d9e477f9b8328ca600081d42eb5",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 529,
+      "observed_utc": "2026-10-03T21:53:09.153467+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/529",
+        "head_ref": "codex/reference-audit-20261004-p2p-v1",
+        "head_sha": "f74079dd9c44aab013bd5543b9a4cd5da8b2ae42",
+        "base_ref": "codex/reference-audit-20261004-p2p-contracts"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 530,
+      "observed_utc": "2026-10-03T21:53:09.205725+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/530",
+        "head_ref": "codex/reference-audit-20261004-crypto-difficulty",
+        "head_sha": "ff383a8ca4c3019e451c6f88385cb8875ec43e1a",
+        "base_ref": "codex/reference-audit-20261004-crypto-assurance"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 531,
+      "observed_utc": "2026-10-03T21:53:09.182066+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/531",
+        "head_ref": "codex/reference-audit-20261004-difftest-checks",
+        "head_sha": "025a9cbfcb68891f702d35eadec6801a268890b5",
+        "base_ref": "codex/reference-audit-20261004-primitives-provenance"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 532,
+      "observed_utc": "2026-10-03T21:53:09.148467+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/532",
+        "head_ref": "codex/reference-audit-20261004-node-config",
+        "head_sha": "9d1fcdcd2d17dbd7a4b96f4550a9afc66bf4c4e7",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 533,
+      "observed_utc": "2026-10-03T21:53:09.276975+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/533",
+        "head_ref": "codex/reference-audit-20261004-wallet-cache",
+        "head_sha": "18b9272e23783157cfae15ed42b487e559758cee",
+        "base_ref": "codex/reference-audit-20261004-wallet-selection"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 534,
+      "observed_utc": "2026-10-03T21:53:09.818694+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/534",
+        "head_ref": "codex/reference-audit-20261004-wallet-visibility",
+        "head_sha": "705dd19637f4885d09b80362270f89e61fda8d1b",
+        "base_ref": "codex/reference-audit-20261004-wallet-cache"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 535,
+      "observed_utc": "2026-10-03T21:53:09.814574+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/535",
+        "head_ref": "codex/reference-audit-20261004-node-derivation-v2",
+        "head_sha": "59a63d39399c5c7971df5a77d6939f564a5b4832",
+        "base_ref": "codex/reference-audit-20261004-wallet-visibility"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 536,
+      "observed_utc": "2026-10-03T21:53:09.809695+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/536",
+        "head_ref": "codex/reference-audit-20261004-node-info",
+        "head_sha": "703f8b0a3d84337c1e604143c7353bab727fdc14",
+        "base_ref": "codex/reference-audit-20261004-node-config"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 537,
+      "observed_utc": "2026-10-03T21:53:09.865617+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/537",
+        "head_ref": "codex/reference-audit-20261004-node-rescan-v2",
+        "head_sha": "eaf4f1fa631fa04966825189a6a16983c435693d",
+        "base_ref": "codex/reference-audit-20261004-node-derivation-v2"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 538,
+      "observed_utc": "2026-10-03T21:53:09.887707+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/538",
+        "head_ref": "codex/reference-audit-20261004-node-shadow",
+        "head_sha": "19c2ae4e040b965f8a985ec84e4a4bba5a27f94f",
+        "base_ref": "codex/reference-audit-20261004-node-info"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 539,
+      "observed_utc": "2026-10-03T21:53:10.139552+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/539",
+        "head_ref": "codex/reference-audit-20261004-node-wallet-writes-v2",
+        "head_sha": "d9a6063fb9f3d6d4bb05e22ed48d6397df9ac263",
+        "base_ref": "codex/reference-audit-20261004-node-rescan-v2"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 540,
+      "observed_utc": "2026-10-03T21:53:10.478170+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/540",
+        "head_ref": "codex/reference-audit-20261004-difftest-transport",
+        "head_sha": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
+        "base_ref": "codex/reference-audit-20261004-difftest-checks"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 541,
+      "observed_utc": "2026-10-03T21:53:11.619541+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/541",
+        "head_ref": "codex/reference-audit-20261004-state-assurance",
+        "head_sha": "51cd707c24e4711b6488a358adc6b838df3252cb",
+        "base_ref": "codex/reference-audit-20261004-state-api"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 542,
+      "observed_utc": "2026-10-03T21:53:10.621609+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/542",
+        "head_ref": "codex/reference-audit-20261004-mining-contracts",
+        "head_sha": "6ac5520a58f187fb9ad435c145d0aaf40a5528eb",
+        "base_ref": "codex/reference-audit-20261004-validation-api"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 543,
+      "observed_utc": "2026-10-03T21:53:10.524968+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/543",
+        "head_ref": "codex/reference-audit-20261004-difftest-pending-evidence",
+        "head_sha": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+        "base_ref": "codex/reference-audit-20261004-difftest-transport"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 544,
+      "observed_utc": "2026-10-03T21:53:10.611971+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/544",
+        "head_ref": "codex/reference-audit-20261004-indexer-integrity",
+        "head_sha": "88e22a71171d2ef37b2bcb803d6dbb86b16f56bd",
+        "base_ref": "codex/reference-audit-20261004-indexer-checkpoint"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 545,
+      "observed_utc": "2026-10-03T21:53:10.806546+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/545",
+        "head_ref": "codex/reference-audit-20261004-indexer-token-text",
+        "head_sha": "ccbb8f81330eb7e07f5eb58fc5374c11ad8dcffa",
+        "base_ref": "codex/reference-audit-20261004-indexer-integrity"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 546,
+      "observed_utc": "2026-10-03T21:53:11.215005+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/546",
+        "head_ref": "codex/reference-audit-20261004-indexer-chain-source",
+        "head_sha": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+        "base_ref": "codex/reference-audit-20261004-indexer-token-text"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 547,
+      "observed_utc": "2026-10-03T21:53:11.163893+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/547",
+        "head_ref": "codex/reference-audit-20261004-indexer-types-docs",
+        "head_sha": "67c99532777a496c9ab127c6250d8d551051233b",
+        "base_ref": "codex/reference-audit-20261004-api-paging"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 548,
+      "observed_utc": "2026-10-03T21:53:11.320829+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/548",
+        "head_ref": "codex/reference-audit-20261004-openapi-ids",
+        "head_sha": "8d8bf7bc74a644ef2dd3b4f0e97e354beee3ee1c",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 549,
+      "observed_utc": "2026-10-03T21:53:11.291961+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/549",
+        "head_ref": "codex/reference-audit-20261004-dashboard-lookups-v2",
+        "head_sha": "63edffdb58cead555dff081a826b533b81962740",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 550,
+      "observed_utc": "2026-10-03T21:53:11.470945+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/550",
+        "head_ref": "codex/reference-audit-20261004-node-pruning",
+        "head_sha": "168cd4728a0c446f6a28302f30f735db47d6a731",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 551,
+      "observed_utc": "2026-10-03T21:53:11.832281+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/551",
+        "head_ref": "codex/reference-audit-20261004-api-schemas",
+        "head_sha": "48b4668e9593c0963e2f18add76debc2425f63fa",
+        "base_ref": "codex/reference-audit-20261004-openapi-ids"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 552,
+      "observed_utc": "2026-10-03T21:53:11.917686+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/552",
+        "head_ref": "codex/reference-audit-20261004-dashboard-capabilities",
+        "head_sha": "d46fd596a82b9c5ae5102d43355bccc8e378ab06",
+        "base_ref": "codex/reference-audit-20261004-dashboard-lookups-v2"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 553,
+      "observed_utc": "2026-10-03T21:53:11.997419+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/553",
+        "head_ref": "codex/reference-audit-20261004-validation-context",
+        "head_sha": "26aabd7875e76bb84d55811393338a406d1d690e",
+        "base_ref": "main"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 554,
+      "observed_utc": "2026-10-03T21:53:11.993034+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/554",
+        "head_ref": "codex/reference-audit-20261004-node-validation-context",
+        "head_sha": "8bf3fe704f3dd9075f8bbb8fe0761346751896da",
+        "base_ref": "codex/reference-audit-20261004-validation-context"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 555,
+      "observed_utc": "2026-10-03T21:53:12.140850+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/555",
+        "head_ref": "codex/reference-audit-20261004-pruning-docs",
+        "head_sha": "e56c29798c7ac7dd8f0aa806c2369e383e81cf64",
+        "base_ref": "codex/reference-audit-20261004-node-pruning"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 556,
+      "observed_utc": "2026-10-03T21:53:13.256703+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/556",
+        "head_ref": "codex/reference-audit-20261004-dashboard-read-state",
+        "head_sha": "87b486602bb94a4ef353e12355dc6f5c2ab4e704",
+        "base_ref": "codex/reference-audit-20261004-dashboard-capabilities"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 557,
+      "observed_utc": "2026-10-03T21:53:12.450338+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/557",
+        "head_ref": "codex/reference-audit-20261004-validation-assurance",
+        "head_sha": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+        "base_ref": "codex/reference-audit-20261004-validation-context"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 558,
+      "observed_utc": "2026-10-03T21:53:12.561342+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/558",
+        "head_ref": "codex/reference-audit-20261004-difftest-authority",
+        "head_sha": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+        "base_ref": "codex/reference-audit-20261004-difftest-pending-evidence"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 559,
+      "observed_utc": "2026-10-03T21:53:12.636152+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/559",
+        "head_ref": "codex/reference-audit-20261004-sync-contracts",
+        "head_sha": "4134a5f99e2bd416ff7a607819ea6d3e3cb751c0",
+        "base_ref": "codex/reference-audit-20261004-crypto-difficulty"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 560,
+      "observed_utc": "2026-10-03T21:53:12.651371+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/560",
+        "head_ref": "codex/reference-audit-20261004-node-header-errors",
+        "head_sha": "14a8223c3776dc642425620ef2bae846aab4b3b7",
+        "base_ref": "codex/reference-audit-20261004-sync-contracts"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 561,
+      "observed_utc": "2026-10-03T21:53:12.827791+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/561",
+        "head_ref": "codex/reference-audit-20261004-state-context-assurance",
+        "head_sha": "a79e52a6589cf4a4a1fd214b9ccddded5f01f052",
+        "base_ref": "codex/reference-audit-20261004-state-assurance"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 562,
+      "observed_utc": "2026-10-03T21:53:13.108971+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/562",
+        "head_ref": "codex/reference-audit-20261004-difftest-reinject-source",
+        "head_sha": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+        "base_ref": "codex/reference-audit-20261004-difftest-authority"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 563,
+      "observed_utc": "2026-10-03T21:53:13.267467+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/563",
+        "head_ref": "codex/reference-audit-20261004-record",
+        "head_sha": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
+        "base_ref": "codex/reference-audit-20261004-ge-scan"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 564,
+      "observed_utc": "2026-10-03T21:53:13.304396+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/564",
+        "head_ref": "codex/reference-audit-20261004-difftest-replay",
+        "head_sha": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+        "base_ref": "codex/reference-audit-20261004-difftest-reinject-source"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 565,
+      "observed_utc": "2026-10-03T21:53:13.316497+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/565",
+        "head_ref": "codex/reference-audit-20261004-sync-index",
+        "head_sha": "25803fc9731eaa2d7b4d74e1e898e4618c15d4c6",
+        "base_ref": "codex/reference-audit-20261004-sync-contracts"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 566,
+      "observed_utc": "2026-10-03T21:53:13.453764+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/566",
+        "head_ref": "codex/reference-audit-20261004-indexer-bounds-followup",
+        "head_sha": "6c71dc7cf633ed8743ac699b2d8154d90b671777",
+        "base_ref": "codex/reference-audit-20261004-indexer-chain-source"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 567,
+      "observed_utc": "2026-10-03T21:53:13.919102+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/567",
+        "head_ref": "codex/reference-audit-20261004-indexer-applied-chain",
+        "head_sha": "90191a99fc1d9463e845cc3b6b3229f5318b1a7a",
+        "base_ref": "codex/reference-audit-20261004-indexer-bounds-followup"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 568,
+      "observed_utc": "2026-10-03T21:53:13.908246+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/568",
+        "head_ref": "codex/reference-audit-20261004-fuzz-evidence",
+        "head_sha": "c361b104c74f8009b55b6a682b4b069405149d95",
+        "base_ref": "codex/reference-audit-20261004-difftest-replay"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 569,
+      "observed_utc": "2026-10-03T21:53:14.073906+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/569",
+        "head_ref": "codex/reference-audit-20261004-indexer-zero-tip-review",
+        "head_sha": "efb1358367de1802804bfe71f523676051e3f32c",
+        "base_ref": "codex/reference-audit-20261004-indexer-applied-chain"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    },
+    {
+      "number": 570,
+      "observed_utc": "2026-10-03T21:53:13.913147+00:00",
+      "observed": {
+        "state": "open",
+        "draft": true,
+        "url": "https://github.com/arkadianet/ergo/pull/570",
+        "head_ref": "codex/reference-audit-20261004-state-historical-costs",
+        "head_sha": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
+        "base_ref": "codex/reference-audit-20261004-validation-context"
+      },
+      "matches": {
+        "open": true,
+        "draft": true,
+        "url": true,
+        "head_branch": true,
+        "head_commit": true,
+        "base_branch": true
+      },
+      "status": "MATCH"
+    }
+  ],
+  "limits": [
+    "GitHub PR metadata observations only; no source/gate/consensus verdict inferred.",
+    "No workflow reruns, native diagnostics, detectors, reinjection, JVM/guard or uploads executed.",
+    "Owner ledgers, source and review record unmodified. Check-run refresh is recorded separately.",
+    "CI statuses are point-in-time; successful metadata reconciliation does not certify checks or source.",
+    "No whole workflow, extra job, diagnostic/detector/reinjection/nativeBug/JVM/guard/upload rerun requested.",
+    "One native HTTP-response timeout is an actual test failure; its cause remains unestablished.",
+    "All six first failures and both newly completed failures retained; no request retry beyond one per authorized job.",
+    "Current registry has appended combined draft571 while this task ran. Its metadata/checks were not part of the 73-focused reconciliation."
+  ],
+  "metadata_status": "PASS",
+  "metadata_receipt_snapshot": {
+    "path": "record-evidence/final-remote-drafts-metadata-only.json",
+    "sha256": "c1edefb76c15eff4de9f1e4d06aa68f581254e2df488ba3dfe9da481b872d576"
+  },
+  "registry_snapshot_path": "record-evidence/registry-73-focused-snapshot.json",
+  "current_registry_at_finalization": {
+    "sha256": "35357cc73ca8882c509b03da4ff839a77eb53afc6bc0396cde785b15b37472c3",
+    "rows": 74,
+    "excluded_new_rows": [
+      {
+        "number": 571,
+        "url": "https://github.com/arkadianet/ergo/pull/571",
+        "commit": "660763bb48ea80b63473b6b9bdab3f3bd3922253"
+      }
+    ],
+    "original_73_rows_byte_identical": true
+  },
+  "checks": {
+    "read_method": "existing refresh-pr-checks.py (bounded six concurrent read-only GET commit check-runs at registry heads)",
+    "finalized_receipt_utc": "2026-10-03T22:09:41.594666+00:00",
+    "scope": "73 focused drafts only; newly appended combined #571 excluded",
+    "snapshot_earliest_utc": "2026-10-03T22:05:45.839683+00:00",
+    "snapshot_latest_utc": "2026-10-03T22:05:52.384334+00:00",
+    "summary_path": "pr-checks/refresh-summary.json",
+    "summary_sha256": "b2a88961dda6cace9c3eada77ec3b9e527ca72044e6b3368c00be339b2a11d2a",
+    "all_responses_have_full_single_page": true,
+    "prs": 73,
+    "check_runs": 1384,
+    "all_success_prs": 51,
+    "incomplete_prs": 22,
+    "failed_prs": 6,
+    "failed_jobs": 7,
+    "failure_classifications": {
+      "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS": 6,
+      "ACTUAL_TEST_TIMEOUT_CAUSE_UNESTABLISHED": 1
+    },
+    "failures": [
+      {
+        "number": 555,
+        "head": "e56c29798c7ac7dd8f0aa806c2369e383e81cf64",
+        "name": "Check, clippy, test (windows-latest) shard 4/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37151351071/job/111285740360",
+        "job_id": 111285740360,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/555-111285740360.log",
+        "log_sha256": "a2cb0070ed75d6b4d385e23657d55312968095246ec9bedaf87baa1cde02ae6d",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      },
+      {
+        "number": 557,
+        "head": "33b54e8fc60f138ea3055aeebd327ecec8cfdea8",
+        "name": "Check, clippy, test (windows-latest) shard 4/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37151674199/job/111286673914",
+        "job_id": 111286673914,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/557-111286673914.log",
+        "log_sha256": "d036e99ff6a0bb081c611f13ded94e65c09a9867565fa0dce246cc2cebee872d",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      },
+      {
+        "number": 558,
+        "head": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+        "name": "Check, clippy, test (windows-latest) shard 4/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37152163703/job/111288096938",
+        "job_id": 111288096938,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/558-111288096938.log",
+        "log_sha256": "9fe32c56719df02b7a09cb3cb330cf4be23b8541545ecc36131492d0d893fc61",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      },
+      {
+        "number": 558,
+        "head": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+        "name": "Check, clippy, test (windows-latest) shard 2/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37152163703/job/111288096886",
+        "job_id": 111288096886,
+        "classification": "ACTUAL_TEST_TIMEOUT_CAUSE_UNESTABLISHED",
+        "log": "record-evidence/remote-pr-checks/558-111288096886-newly-observed.log",
+        "log_sha256": "88d47fa200d5f0dc8e0ba695417518a3b81b58fba5266205ba97e24c1077e5fc",
+        "detail": "native_script_toml_policy_gates_all_routes_at_boot timed out in the 2-second HTTP stream.read_to_end wait at submit_e2e.rs600; 78/95 passed,16 not run after fail-fast. No auth assertion verdict or product root cause established."
+      },
+      {
+        "number": 562,
+        "head": "96066a3f2950e65853efbb2219b3cc464dc3ced5",
+        "name": "Check, clippy, test (windows-latest) shard 3/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37152965807/job/111290441412",
+        "job_id": 111290441412,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/562-111290441412-newly-observed.log",
+        "log_sha256": "dd75fd1bde6e2c1a471875a4c0635fa38594315aee097ed94005cfc6942272f1",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      },
+      {
+        "number": 564,
+        "head": "1a7ef8a58b6844edf8131d77978159c11c97f70b",
+        "name": "Check, clippy, test (windows-latest) shard 4/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37153655223/job/111292475340",
+        "job_id": 111292475340,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/564-111292475340.log",
+        "log_sha256": "933974f63c2b056a760c3d2ee6e42e86ed904b737379413a2e77d785cca3b652",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      },
+      {
+        "number": 566,
+        "head": "6c71dc7cf633ed8743ac699b2d8154d90b671777",
+        "name": "Check, clippy, test (windows-latest) shard 1/4",
+        "url": "https://github.com/arkadianet/ergo/actions/runs/37154266259/job/111294283988",
+        "job_id": 111294283988,
+        "classification": "SCCACHE_SETUP_SERVICE_FAILURE_BEFORE_TESTS",
+        "log": "record-evidence/remote-pr-checks/566-111294283988.log",
+        "log_sha256": "0391d690cbf5ad1624610b4190542d755225849929603e51647b6bf9ea8141c4",
+        "detail": "sccache setup failed with service availability/timeout, followed by cleanup executable undefined; did not reach workspace tests."
+      }
+    ],
+    "pending_pr_numbers": [
+      547,
+      548,
+      549,
+      551,
+      553,
+      554,
+      555,
+      556,
+      557,
+      558,
+      559,
+      560,
+      561,
+      562,
+      563,
+      564,
+      565,
+      566,
+      567,
+      568,
+      569,
+      570
+    ],
+    "response_receipts": [
+      {
+        "number": 498,
+        "path": "pr-checks/498-refresh.json",
+        "sha256": "88384f111097c2b76a1f6299982e9f42b9d3c3293e02ac2785b1b54868007644",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.932410+00:00"
+      },
+      {
+        "number": 499,
+        "path": "pr-checks/499-refresh.json",
+        "sha256": "7b0ba5c67357b9bdb2edf798eeadef375ccab367a4d0a7336307ef34cd39b613",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.864311+00:00"
+      },
+      {
+        "number": 500,
+        "path": "pr-checks/500-refresh.json",
+        "sha256": "a86717dfbecca788021a5cf790ef1f602c15add503cd770caf6fddaf42901a94",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.863774+00:00"
+      },
+      {
+        "number": 501,
+        "path": "pr-checks/501-refresh.json",
+        "sha256": "7d83f20a2114d117642964af98b759df288343b59bae3a8a24a772c32dd7489d",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.839683+00:00"
+      },
+      {
+        "number": 502,
+        "path": "pr-checks/502-refresh.json",
+        "sha256": "db6e9301a8edacd92fc818cfb5b9bac7d8f8558646ad2fbed188893ac7aeaf0d",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.871328+00:00"
+      },
+      {
+        "number": 503,
+        "path": "pr-checks/503-refresh.json",
+        "sha256": "e7962464d28fedcee03252e153b3634121952bf814351d32c8e3a7b20b3efa40",
+        "captured_file_mtime_utc": "2026-10-03T22:05:45.856159+00:00"
+      },
+      {
+        "number": 504,
+        "path": "pr-checks/504-refresh.json",
+        "sha256": "bfa5eb7034df8faa51132c073b1d7fd352de068a8b2f31d98da14b1721707e04",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.465910+00:00"
+      },
+      {
+        "number": 505,
+        "path": "pr-checks/505-refresh.json",
+        "sha256": "4937cd6d8ec4bd86eec2a93072d231b7a3115a3ca737ffa158752e5ea6182ed6",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.423092+00:00"
+      },
+      {
+        "number": 506,
+        "path": "pr-checks/506-refresh.json",
+        "sha256": "065a0fef1397543fb0c558327b83324f42d1b625d1318878595940dbe94832e4",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.434146+00:00"
+      },
+      {
+        "number": 507,
+        "path": "pr-checks/507-refresh.json",
+        "sha256": "e0389b6f359d8b71fb87c6d856da03eb3bbbe0e70f35ebb8449b578729f1d0c1",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.409955+00:00"
+      },
+      {
+        "number": 508,
+        "path": "pr-checks/508-refresh.json",
+        "sha256": "2e068285e1ad5d734d32efea780a6891fbad206e4de4ff884b900ff708eaee21",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.425292+00:00"
+      },
+      {
+        "number": 509,
+        "path": "pr-checks/509-refresh.json",
+        "sha256": "238e66a9e57b82156da2097579ee89c18aced35bffb9d1541d889556edaf33d6",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.450309+00:00"
+      },
+      {
+        "number": 510,
+        "path": "pr-checks/510-refresh.json",
+        "sha256": "54479231a61c0f6b11ddfb8452829d6ced495489f08057712dca5bf48ce873d2",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.004418+00:00"
+      },
+      {
+        "number": 511,
+        "path": "pr-checks/511-refresh.json",
+        "sha256": "622dbb13a518f8b9116d7da4c1207d3c59f785fbf7c7bd24a483d02a60a048d3",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.004894+00:00"
+      },
+      {
+        "number": 512,
+        "path": "pr-checks/512-refresh.json",
+        "sha256": "bbe074e3654df2d39f7762be44514b50eab64fb7ab26a4744d5f517ec3086d31",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.971774+00:00"
+      },
+      {
+        "number": 513,
+        "path": "pr-checks/513-refresh.json",
+        "sha256": "6de5af886f0242ce32030dfcde4c15798d0d1552356bc6a36e592b6047080697",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.023160+00:00"
+      },
+      {
+        "number": 514,
+        "path": "pr-checks/514-refresh.json",
+        "sha256": "176d00a23e09f1077fd0269b1dbd8cf756b56e8274e5978a749443f32c1618a5",
+        "captured_file_mtime_utc": "2026-10-03T22:05:46.995508+00:00"
+      },
+      {
+        "number": 515,
+        "path": "pr-checks/515-refresh.json",
+        "sha256": "21295ecf60c01ba8d6831a300e8ff6f26457548e00d202b96266011af1cb8ea9",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.026664+00:00"
+      },
+      {
+        "number": 516,
+        "path": "pr-checks/516-refresh.json",
+        "sha256": "9a82130f6f2bc355490b54c580988937e97ee189860c95577d475bbee693a029",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.527715+00:00"
+      },
+      {
+        "number": 517,
+        "path": "pr-checks/517-refresh.json",
+        "sha256": "796207614b55e665a9b2389d064f9ce38d35b73e2d507cd7d6d76a8b570490db",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.549080+00:00"
+      },
+      {
+        "number": 518,
+        "path": "pr-checks/518-refresh.json",
+        "sha256": "83d0efe5c32f6eff8a84e3998f37dae27d5afd7f7eae61092fcbe266bb6ac184",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.933764+00:00"
+      },
+      {
+        "number": 519,
+        "path": "pr-checks/519-refresh.json",
+        "sha256": "f6ff04711a76fef1877c7a7a25500be92fe6cc76f3b010b4399e3cc7f1ea6bf8",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.538047+00:00"
+      },
+      {
+        "number": 520,
+        "path": "pr-checks/520-refresh.json",
+        "sha256": "2dd523a4d709a8b344b1702d6955de2de3d6b98e2dfd38f6e147e51af4a533e8",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.546958+00:00"
+      },
+      {
+        "number": 521,
+        "path": "pr-checks/521-refresh.json",
+        "sha256": "ed4f935ffba8b30c2a3137b36ba37a1cc1124b8e6deb5ae8042ecb5a57b700fe",
+        "captured_file_mtime_utc": "2026-10-03T22:05:47.589588+00:00"
+      },
+      {
+        "number": 522,
+        "path": "pr-checks/522-refresh.json",
+        "sha256": "88761c1b673de3bbf7b0694b8ba5648b23e947880038b71a0689f30862dc25ca",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.048644+00:00"
+      },
+      {
+        "number": 523,
+        "path": "pr-checks/523-refresh.json",
+        "sha256": "0a807dd5291d3ba0461fcea58d39b75db04bad227fb62d5a1b79887a1c57bfa4",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.107788+00:00"
+      },
+      {
+        "number": 524,
+        "path": "pr-checks/524-refresh.json",
+        "sha256": "6bc7ce0d767307a79dfb1a633c1bd11ba4a16a1ac6ee534875d0dadabd488678",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.063802+00:00"
+      },
+      {
+        "number": 525,
+        "path": "pr-checks/525-refresh.json",
+        "sha256": "e6a1312abc419eedd2061748d8466b5a794e74eba37d6f11f5eaf9cc3b9ed45f",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.076820+00:00"
+      },
+      {
+        "number": 526,
+        "path": "pr-checks/526-refresh.json",
+        "sha256": "9f622b0f45c714d4e3be7ff2a6bb93b3929ec243d817f5c35d76c6c275a9e601",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.121089+00:00"
+      },
+      {
+        "number": 527,
+        "path": "pr-checks/527-refresh.json",
+        "sha256": "97ead45ed2ca899eded9315ab40df3d39df1158b5e532f6f155f01975c601b3d",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.508356+00:00"
+      },
+      {
+        "number": 528,
+        "path": "pr-checks/528-refresh.json",
+        "sha256": "9563b34f552c952449458c662766563750d274fa697c2fbfe8a33d67f351824a",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.599772+00:00"
+      },
+      {
+        "number": 529,
+        "path": "pr-checks/529-refresh.json",
+        "sha256": "dc409cb8b109dbbe138642147d09af4dfe26b2bc2f8d6840ae46f896ab8b4c27",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.581328+00:00"
+      },
+      {
+        "number": 530,
+        "path": "pr-checks/530-refresh.json",
+        "sha256": "cb917bfccda934c6f7a3c92c26c21ea291350e6b40fd4a211c251dc0095bf03e",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.613710+00:00"
+      },
+      {
+        "number": 531,
+        "path": "pr-checks/531-refresh.json",
+        "sha256": "36c7d2c790582f3b1575684895961828d1aed4a56c171654cb8b50bcc904a703",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.648819+00:00"
+      },
+      {
+        "number": 532,
+        "path": "pr-checks/532-refresh.json",
+        "sha256": "e83eb6521e6eca25763c8eb2382ae66eeb45fefb2193d46a7e060e097b657ce7",
+        "captured_file_mtime_utc": "2026-10-03T22:05:48.687759+00:00"
+      },
+      {
+        "number": 533,
+        "path": "pr-checks/533-refresh.json",
+        "sha256": "648a1100f415f679397b605cc05cb6724823a8730e11631f155be2f826f13332",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.044531+00:00"
+      },
+      {
+        "number": 534,
+        "path": "pr-checks/534-refresh.json",
+        "sha256": "03e0e16481b7a944fcc8db4d496b1dbfd08634ef37c3e3cf76f5db2257b437b5",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.116405+00:00"
+      },
+      {
+        "number": 535,
+        "path": "pr-checks/535-refresh.json",
+        "sha256": "307e16b2ad29c69eb51944195118cc5b48b34bbf4f7a5273181ce07d14dd1954",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.140728+00:00"
+      },
+      {
+        "number": 536,
+        "path": "pr-checks/536-refresh.json",
+        "sha256": "e5385cea6ae09d6028cae9cb78a5a0576f5b2c402c30890e6b3a147b6253e773",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.215059+00:00"
+      },
+      {
+        "number": 537,
+        "path": "pr-checks/537-refresh.json",
+        "sha256": "9031c38ae1b58a6fb7b82f3cc3925e122e3ca89e8b37e4bfd4934019a679131d",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.183536+00:00"
+      },
+      {
+        "number": 538,
+        "path": "pr-checks/538-refresh.json",
+        "sha256": "35dc110df1ba2da17435c7acbd9f087ebcf39b646776ac12004a964e1a2c5157",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.225274+00:00"
+      },
+      {
+        "number": 539,
+        "path": "pr-checks/539-refresh.json",
+        "sha256": "cdd0083cee48c4ca0d21730e3cf06125070cf525ac6fbac31ab0e50f29d2d33a",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.578015+00:00"
+      },
+      {
+        "number": 540,
+        "path": "pr-checks/540-refresh.json",
+        "sha256": "3baa222348e1120f846bec5546cc0d8944ba07519b0edc1b3d20fb7cef2e1afe",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.665992+00:00"
+      },
+      {
+        "number": 541,
+        "path": "pr-checks/541-refresh.json",
+        "sha256": "4bc0435858570996ffef24b9ddaa449e2cca7ac854219056dad1cf680ca5e497",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.683393+00:00"
+      },
+      {
+        "number": 542,
+        "path": "pr-checks/542-refresh.json",
+        "sha256": "ffb7b2eefd865192ae009a8f02bc4f9be735e6ee91bc82f86055d6f962a3fb40",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.748446+00:00"
+      },
+      {
+        "number": 543,
+        "path": "pr-checks/543-refresh.json",
+        "sha256": "175cd090491811b005e3a1c89dc69ff03192a0d397adc76cf38899928a0a049f",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.792647+00:00"
+      },
+      {
+        "number": 544,
+        "path": "pr-checks/544-refresh.json",
+        "sha256": "4624a1daca0a970c3c46cbecece839ce4092c16c11c8599ab5b1bf3459dbed78",
+        "captured_file_mtime_utc": "2026-10-03T22:05:49.790223+00:00"
+      },
+      {
+        "number": 545,
+        "path": "pr-checks/545-refresh.json",
+        "sha256": "19784239314e1b0af11f1762ef46c8813bfeb4c16817250907788a1dcf29f71f",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.103164+00:00"
+      },
+      {
+        "number": 546,
+        "path": "pr-checks/546-refresh.json",
+        "sha256": "28b0d13dd4fb9122d055ddb69b2deea4b76580281f7f91e0068e51130acb183a",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.211836+00:00"
+      },
+      {
+        "number": 547,
+        "path": "pr-checks/547-refresh.json",
+        "sha256": "9bf909e8f3a55dc4be55305ad5959a01dbd791bca3c1dc7a4d2593de472f2693",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.229443+00:00"
+      },
+      {
+        "number": 548,
+        "path": "pr-checks/548-refresh.json",
+        "sha256": "d1015c63f84175e780a8640aab1c19cf4bbd4f73b9eaeff8f13cc110caf219c3",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.284087+00:00"
+      },
+      {
+        "number": 549,
+        "path": "pr-checks/549-refresh.json",
+        "sha256": "c18f0dd37ee2ccdaaf4bf16453cd8482163fac336b587ac3224bcecbdb6f358e",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.340313+00:00"
+      },
+      {
+        "number": 550,
+        "path": "pr-checks/550-refresh.json",
+        "sha256": "ea71486b25bba415d8a17a33cf4ed22ef86b487e5573dc16b41806af9c6a2139",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.343317+00:00"
+      },
+      {
+        "number": 551,
+        "path": "pr-checks/551-refresh.json",
+        "sha256": "f363b04570fc2273bc5b79045127053c75c9dae72fadd2312446a0d857438c56",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.657985+00:00"
+      },
+      {
+        "number": 552,
+        "path": "pr-checks/552-refresh.json",
+        "sha256": "770b1c1fab7d01c800cdb26c64c1585eb0506707b4428c50959d50458e10ecb0",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.748240+00:00"
+      },
+      {
+        "number": 553,
+        "path": "pr-checks/553-refresh.json",
+        "sha256": "796898e958517ba899e7766c81c05adc01a4ea2b30dfc2dcb0aa0d193c4fd2df",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.803227+00:00"
+      },
+      {
+        "number": 554,
+        "path": "pr-checks/554-refresh.json",
+        "sha256": "24910de4aa19267e308049fe7e1c66c607386bd4c31f7dae0007b24b6c1302d6",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.847966+00:00"
+      },
+      {
+        "number": 555,
+        "path": "pr-checks/555-refresh.json",
+        "sha256": "3d626190853da68de7758291d5b8399a4a53999c0aa40dcff5c0a29ec8ba6e66",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.904892+00:00"
+      },
+      {
+        "number": 556,
+        "path": "pr-checks/556-refresh.json",
+        "sha256": "f47b12c4a5aaf20903576525ced2def09b1f0a2ec4f55fa5c4400a99a1c802a7",
+        "captured_file_mtime_utc": "2026-10-03T22:05:50.891925+00:00"
+      },
+      {
+        "number": 557,
+        "path": "pr-checks/557-refresh.json",
+        "sha256": "807849e495e385fdce8dfaf714ddf4976b14c1daebd6da4ead28d94176df5aff",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.214405+00:00"
+      },
+      {
+        "number": 558,
+        "path": "pr-checks/558-refresh.json",
+        "sha256": "252c16056b5238cdf98a9f2337028c5de4d3344889e79f098d783ecea44035f7",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.294462+00:00"
+      },
+      {
+        "number": 559,
+        "path": "pr-checks/559-refresh.json",
+        "sha256": "0c804a9b695f85e206a2185cdc1a86126ff72537b65346c62a6ac944c58e4cac",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.285586+00:00"
+      },
+      {
+        "number": 560,
+        "path": "pr-checks/560-refresh.json",
+        "sha256": "f82a6536d99b9687dd869af411b7c42b4a940afc0b120fe2989640d460e1c305",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.372145+00:00"
+      },
+      {
+        "number": 561,
+        "path": "pr-checks/561-refresh.json",
+        "sha256": "3c2a11bb1e207800f9ab38c17cb934b5686a9b3e03ce7a676df76bd74c96923c",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.438858+00:00"
+      },
+      {
+        "number": 562,
+        "path": "pr-checks/562-refresh.json",
+        "sha256": "224295994ecb24dc943ef4c1f2ae1d11db7ca25319aa625ef07275d1e6a65b6b",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.433637+00:00"
+      },
+      {
+        "number": 563,
+        "path": "pr-checks/563-refresh.json",
+        "sha256": "bce559811df093033565e7c02283e30c0e533671221eb911aeab9957486bc224",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.686837+00:00"
+      },
+      {
+        "number": 564,
+        "path": "pr-checks/564-refresh.json",
+        "sha256": "7c2435dd18623a64a05f2c4382dc07eece792e575c93c5468bd3200db99f5fe2",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.844625+00:00"
+      },
+      {
+        "number": 565,
+        "path": "pr-checks/565-refresh.json",
+        "sha256": "671e9558a24eba5051ea32c8b0950e18e3d68d53016ab87a681367421e7f6851",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.779140+00:00"
+      },
+      {
+        "number": 566,
+        "path": "pr-checks/566-refresh.json",
+        "sha256": "816232b45cac3a27ac45ed0cee6bb06b34a2c25d42eeae34a84475bda7725ad1",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.912909+00:00"
+      },
+      {
+        "number": 567,
+        "path": "pr-checks/567-refresh.json",
+        "sha256": "384da13d8da0a5655271925778dd829c232501ffa78a07eb93883580d831271d",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.979176+00:00"
+      },
+      {
+        "number": 568,
+        "path": "pr-checks/568-refresh.json",
+        "sha256": "d617faa41dd2513234c23b248eef24d562943d55aa6f82d92eec2d61df1b4c7f",
+        "captured_file_mtime_utc": "2026-10-03T22:05:51.986545+00:00"
+      },
+      {
+        "number": 569,
+        "path": "pr-checks/569-refresh.json",
+        "sha256": "ffb36c7c1cc333953c9a15eb86b0f64d030b00fccde15b5395776fe4d3a22253",
+        "captured_file_mtime_utc": "2026-10-03T22:05:52.227757+00:00"
+      },
+      {
+        "number": 570,
+        "path": "pr-checks/570-refresh.json",
+        "sha256": "76facc031722e3aad609fe783689a364ae45d1cec227d0c74f1be5dcdafd4a92",
+        "captured_file_mtime_utc": "2026-10-03T22:05:52.384334+00:00"
+      }
+    ]
+  },
+  "authorized_retry": {
+    "scope": "One bounded retry request for six exact original failed jobs only. Installed gh disallows run-id together with --job; local argument errors preserved separately before corrected exact-job requests.",
+    "receipts": [
+      {
+        "path": "record-evidence/remote-pr-checks/bounded-job-reruns.json",
+        "sha256": "5f70946a3102495614e68dbd108d6c1f13e0ce5b3cc18ba8d9bf11d76274dda0"
+      },
+      {
+        "path": "record-evidence/remote-pr-checks/retry-job-latest.json",
+        "sha256": "97e095f0f45dd228ba3e27620c6a2a5851f83af1c2988d42f304bac1bf1a268b"
+      },
+      {
+        "path": "record-evidence/remote-pr-checks/retry-job-source-scopes.json",
+        "sha256": "963a95a792a4149c33b4428e8fc2aeac2fb954d432ca0a2b57d82137bfab79e7"
+      },
+      {
+        "path": "record-evidence/remote-pr-checks/failing-job-log-receipts.json",
+        "sha256": "67b0bae848e4b4b2dcff65de4bc9b20ba5dc660e52b9cbc175e20f1decb23e0a"
+      },
+      {
+        "path": "record-evidence/remote-pr-checks/newly-observed-failure-logs.json",
+        "sha256": "ad9fbe80caf34013c7e6649a7969e32bbfc5ac58389677a3ed2e175ac02a7ea1"
+      }
+    ],
+    "accepted_requests": 1,
+    "rejected_requests": 5,
+    "accepted_retry": {
+      "number": 566,
+      "run_id": 37154266238,
+      "old_job_id": 111294283806,
+      "latest_job_id": 111302937314,
+      "latest_run_attempt": 2,
+      "latest_status": "queued",
+      "original_failure": "33 tracked cost tests passed, then hash-pinned fixture fetch HTTP503; no L4 replay verdict in original attempt"
+    },
+    "rejected_retry_detail": "All five Windows gh requests returned cannot be rerun. Latest parent run reads show unfinished siblings and attempt1, consistent with refusal while run unfinished; no second request made."
+  },
+  "registry_unchanged_through_receipt": false
+}

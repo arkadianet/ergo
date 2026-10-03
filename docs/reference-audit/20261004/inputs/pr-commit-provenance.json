@@ -325,8 +325,8 @@
     "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
   },
   "563": {
-    "supplied": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
-    "exact_commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+    "supplied": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
+    "exact_commit": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
     "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
   },
   "564": {
@@ -362,6 +362,16 @@
   "570": {
     "supplied": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
     "exact_commit": "14377429dc6c0e9cdc660dcf7ee68981ce5e4496",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "571": {
+    "supplied": "deed44be85489b9ccb520e73e5b47da08345f369",
+    "exact_commit": "deed44be85489b9ccb520e73e5b47da08345f369",
+    "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
+  },
+  "572": {
+    "supplied": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+    "exact_commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
     "scope": "Local resolution of the registry's cited immutable commit; no live GitHub state is inferred."
   }
 }

@@ -1,0 +1,42 @@
+{
+  "status": "OBSERVED_WINDOWS_TEST_TIMEOUT_CAUSE_UNDETERMINED",
+  "pr": 558,
+  "original_head": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+  "original_head_authority": "parent task and API reviewer handoff",
+  "job_url": "https://github.com/arkadianet/ergo/actions/runs/37152163703/job/111288096886",
+  "test": "submit_e2e::native_script_toml_policy_gates_all_routes_at_boot",
+  "failure": "2s timeout around TcpStream::read_to_end returned Elapsed at submit_e2e.rs600",
+  "selected_log_lines": [
+    [
+      2193,
+      2210
+    ],
+    [
+      2228,
+      2231
+    ]
+  ],
+  "raw_log": {
+    "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/record-evidence/remote-pr-checks/558-111288096886-newly-observed.log",
+    "sha256": "88d47fa200d5f0dc8e0ba695417518a3b81b58fba5266205ba97e24c1077e5fc",
+    "bytes": 333116
+  },
+  "outcome": {
+    "passed": 78,
+    "failed": 1,
+    "not_run": 16,
+    "test_elapsed_seconds": 9.565
+  },
+  "proof_limits": [
+    "No failed authentication/status assertion was logged.",
+    "No route/key/partial response diagnostics were present, so timeout cause is undetermined.",
+    "Other DB tests were slow on Windows; this is contextual evidence only.",
+    "No workflow rerun or Windows-native reproduction executed."
+  ],
+  "source_confirmed_test_issues": [
+    "Raw TCP EOF is unnecessary to assert a framed HTTP response.",
+    "The 2s request read bound is narrower than general production compute queue/execution limits; empty requests are expected to fail promptly, so this does not prove the cause.",
+    "Default-mainnet TOML loading appends public bootstrap peers; absence of peers.bind_addr disables inbound and does not bind9030.",
+    "The valid-key assertion only excluded unauthorized and could accept missing-route/server responses."
+  ]
+}

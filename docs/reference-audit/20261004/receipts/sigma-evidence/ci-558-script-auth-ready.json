@@ -1,0 +1,304 @@
+{
+  "status": "READY_FOR_ROOT_REVIEW_AND_LEAF_PUBLICATION",
+  "branch": "codex/reference-audit-20261004-script-auth-test",
+  "worktree": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-script-auth-test",
+  "base": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+  "head": "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d",
+  "commits": [
+    "469012671ded8619a189f14130bacd6ea44f9737",
+    "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d"
+  ],
+  "clean": true,
+  "source_file": {
+    "path": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-script-auth-test/ergo-node/tests/it/submit_e2e.rs",
+    "sha256": "a097dbb79f8d0d1d69abe17eacef67c8fdf65f286b1d889afe7bcc61a1b2849b",
+    "bytes": 28428
+  },
+  "diff": {
+    "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth.patch",
+    "sha256": "180f0de57c647196afc96fb45eb2f6ae4dae3e892f56ab28a2520e37f093b50e",
+    "bytes": 5903
+  },
+  "summary": "Test-only change: reqwest framed response and 10s total request/body deadline; loopback-only devnet TOML plus ephemeral inbound bind; exact auth/body-validation/oracle statuses and structured envelopes for all seven routes.",
+  "checks": [
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-test.json",
+      "sha256": "1a4d6d33ecccd4d9c847eee34721f73b5eba95322f2fa3a901d55e7476a31a9c",
+      "bytes": 1034,
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "ergo-node",
+        "--test",
+        "it",
+        "submit_e2e::native_script_toml_policy_gates_all_routes_at_boot",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 1.987978575984016,
+      "source_binding": "same clean final commit at command start and end",
+      "log": {
+        "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-test.log",
+        "sha256": "200856e0b2f4472fc6dd99148bdeec85cefa9be2baaccd62632e133ff07e6613",
+        "bytes": 729
+      }
+    },
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-fmt.json",
+      "sha256": "8eebc880f77377e28287a5de39c43e510700878bb64e0fb514b963872a724e00",
+      "bytes": 890,
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 2.1245105320122093,
+      "source_binding": "same clean final commit at command start and end",
+      "log": {
+        "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-fmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-clippy.json",
+      "sha256": "ec4b598d831fb9954b79d2324378deab6b8c19d74e1330c55e675e54e2a59ac1",
+      "bytes": 979,
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "ergo-node",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 19.21351708000293,
+      "source_binding": "same clean final commit at command start and end",
+      "log": {
+        "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-final-clippy.log",
+        "sha256": "a341445209ca7aa704e78b5f4bde897dea5a2e108780b3ee1e7e08a35573b985",
+        "bytes": 9593
+      }
+    }
+  ],
+  "test_outcome": {
+    "passed": 1,
+    "filtered_out": 94,
+    "asserted_http_requests": 14,
+    "test_runtime_seconds": 0.31,
+    "platform": "Linux x86_64"
+  },
+  "expected_route_contracts": [
+    {
+      "route": "compile",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "inspect",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "execute",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "cost",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "simulate",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "explain",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 400,
+        "reason": "bad_request"
+      }
+    },
+    {
+      "route": "diff",
+      "without_key": {
+        "status": 401,
+        "reason": "unauthorized"
+      },
+      "with_hello_key": {
+        "status": 501,
+        "reason": "oracle_unavailable"
+      }
+    }
+  ],
+  "source_proof": [
+    {
+      "path": "ergo-node/src/config/load.rs",
+      "sha256": "0d0a67884014ee86d72fb689ab6cafb6ca8d6cc61e56300424224a2254ee1233",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          49,
+          105
+        ],
+        [
+          164,
+          173
+        ]
+      ]
+    },
+    {
+      "path": "ergo-chain-spec/src/lib.rs",
+      "sha256": "604d9153a272eb56deb00a75202c9f91b2a225c10d3396de316f97d5e2335a87",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          635,
+          655
+        ]
+      ]
+    },
+    {
+      "path": "ergo-api/src/v1/script/mod.rs",
+      "sha256": "db4707a3e26ebc67c1b0d93e0db1b07083be9146cc6954666589918a636b4ffe",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          159,
+          189
+        ]
+      ]
+    },
+    {
+      "path": "ergo-api/src/v1/script/handlers.rs",
+      "sha256": "b053e18f4275910f6745aa90b74b8dba2f2cd9cb05233ee5571df0b6ddaa1a14",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          41,
+          79
+        ],
+        [
+          134,
+          143
+        ],
+        [
+          298,
+          304
+        ],
+        [
+          548,
+          561
+        ],
+        [
+          899,
+          910
+        ],
+        [
+          561,
+          573
+        ]
+      ]
+    },
+    {
+      "path": "ergo-api/src/v1/routes/extract.rs",
+      "sha256": "017b4b6b7719195a780a599e873ef51c5609235181aacd033cf101c61f9695a1",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          58,
+          73
+        ]
+      ]
+    },
+    {
+      "path": "ergo-api/src/v1/error.rs",
+      "sha256": "d65e2b658aa73cad14141595f5dcde27c456f55420afa59e6f0ec43cd6e9cf56",
+      "inspection": "SELECTED_SOURCE_RANGES",
+      "ranges": [
+        [
+          274,
+          284
+        ]
+      ]
+    }
+  ],
+  "original_windows_observation": {
+    "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-windows-receipt.json",
+    "sha256": "a27adc4fa221966b7484828b3a3a3c5d165834b2fd474e1277a64ed25904022b",
+    "bytes": 1815
+  },
+  "failed_initial_expectation": {
+    "receipt": {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-test.json",
+      "sha256": "e244d13268174f4cfc8ef191138fc302f9008606380261bb4a2c982e9d6b2e97",
+      "bytes": 1030
+    },
+    "log": {
+      "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/ci-558-script-auth-test.log",
+      "sha256": "8a3fd4586794de7f0f953dcccbae701eb8eb2c42b4def542eb381f138209bb49",
+      "bytes": 11417
+    },
+    "head": "469012671ded8619a189f14130bacd6ea44f9737",
+    "classification": "Test expectation was too specific: V1Json exposes generic JsonRejection display detail, not nested Serde missing-field text. Corrected in final commit; not a production defect."
+  },
+  "independent_source_review": {
+    "path": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/native-script-boot-readonly.json",
+    "scope": "Read-only source corroboration, no independent new runtime. Actual extractor wire detail is pinned by final ordinary HTTP test.",
+    "sha256": "8e07009b1d0c8d6e14d56d50fce43ef154fa1a01ff2364429e9297b83d06fe4e"
+  },
+  "limits": [
+    "Original Windows timeout cause is undetermined.",
+    "Scoped Linux ordinary test, formatting and Clippy only; full cumulative gate and Windows checks are root followups.",
+    "No workflow rerun, external services, production node/wallet state, JVM/differential/guard/native diagnostic/detector/reinjection/upload controls executed."
+  ],
+  "publication": "Root owns normalization to the appropriate focused leaf, push/draft registration, integration and cumulative gate."
+}

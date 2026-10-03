@@ -1,6 +1,6 @@
 # Reference audit review record
 
-Snapshot: 2026-10-03T21:50:12.833122+00:00.
+Snapshot: 2026-10-03T22:35:38.548204+00:00.
 
 This record connects 160 original findings to 157 causes, owner dispositions and published draft PRs. It is a remediation record, not a current full source review or a reference-node certification.
 
@@ -93,7 +93,7 @@ The full ST009 owner record distinguishes cached-state checks, captured activati
 | NODE005 | NODE005 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#525](https://github.com/arkadianet/ergo/pull/525) |
 | NODE006 | NODE006 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#537](https://github.com/arkadianet/ergo/pull/537) |
 | NODE007 | NODE007 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#539](https://github.com/arkadianet/ergo/pull/539) |
-| NODE008 | NODE008 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#532](https://github.com/arkadianet/ergo/pull/532) |
+| NODE008 | NODE008 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#532](https://github.com/arkadianet/ergo/pull/532), [#572](https://github.com/arkadianet/ergo/pull/572) |
 | NODE009 | NODE009 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#536](https://github.com/arkadianet/ergo/pull/536) |
 | NODE010 | NODE010 | fixed | [ergo-node](historical/reports/ergo-node.md) | [#515](https://github.com/arkadianet/ergo/pull/515) |
 | NODE011 | NODE011 | already_fixed | [ergo-node](historical/reports/ergo-node.md) | — |

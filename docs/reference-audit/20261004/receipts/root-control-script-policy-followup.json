@@ -1,0 +1,13 @@
+{
+  "original_finding": "NODE008",
+  "original_pr": 532,
+  "followup_pr": 572,
+  "published_head": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+  "implementation_tested_head": "0e4ace4bcf40ec814dfba9fd40a28264f9579b1d",
+  "combined_source_head": "deed44be85489b9ccb520e73e5b47da08345f369",
+  "changed_file": "ergo-node/tests/it/submit_e2e.rs",
+  "changed_file_sha256": "a097dbb79f8d0d1d69abe17eacef67c8fdf65f286b1d889afe7bcc61a1b2849b",
+  "qualification": "Whole changed file matches tested implementation; no whole-tree equality or focused-head execution claimed.",
+  "scope": "Ordinary Linux HTTP policy harness follow-up; Windows timeout cause remains undetermined and a Windows-native rerun is not claimed.",
+  "validation": "All14 framed responses passed in one scoped test; final frozen combined checks in progress; no production-source changes."
+}

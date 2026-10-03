@@ -733,10 +733,11 @@
   {
     "head": "codex/reference-audit-20261004-record",
     "base": "codex/reference-audit-20261004-ge-scan",
-    "commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe",
+    "commit": "a28fc480de5bd7a0df1e157f9d804fcf34dcf686",
     "findings": [],
     "url": "https://github.com/arkadianet/ergo/pull/563",
-    "number": 563
+    "number": 563,
+    "previous_published_commit": "f5a72f091a324c4eb2335918f14e3a5b2d027ebe"
   },
   {
     "head": "codex/reference-audit-20261004-difftest-replay",
@@ -814,5 +815,24 @@
     ],
     "url": "https://github.com/arkadianet/ergo/pull/570",
     "number": 570
+  },
+  {
+    "head": "codex/reference-audit-20261004-integration",
+    "base": "main",
+    "commit": "deed44be85489b9ccb520e73e5b47da08345f369",
+    "findings": [],
+    "url": "https://github.com/arkadianet/ergo/pull/571",
+    "number": 571,
+    "previous_published_commit": "660763bb48ea80b63473b6b9bdab3f3bd3922253"
+  },
+  {
+    "head": "codex/reference-audit-20261004-script-policy-test",
+    "base": "codex/reference-audit-20261004-node-config",
+    "commit": "bcfc1a39ea3acf6497dbaa879fda8707795fd9cc",
+    "findings": [
+      "NODE008"
+    ],
+    "url": "https://github.com/arkadianet/ergo/pull/572",
+    "number": 572
   }
 ]

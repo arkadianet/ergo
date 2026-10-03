@@ -1,0 +1,67 @@
+{
+  "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+  "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+  "checks": [
+    {
+      "name": "producer",
+      "argv": [
+        "python3",
+        "scripts/cost_ledger_evidence.py",
+        "--results",
+        "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-cost-ledger/results.json"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T21:57:14.354800+00:00",
+      "duration_seconds": 332.223,
+      "exit_code": 0,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-cost-ledger/producer.log",
+      "log_sha256": "cffcddc15075d40cfa27016c90aa118bee3fc7a2c20d8884fcfbc78e38db18cf"
+    },
+    {
+      "name": "strict",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger.py",
+        "check",
+        "--strict"
+      ],
+      "start": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "end": {
+        "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+        "tree": "374f28a2e9bc4cee12deeda5843d61f539812b5e",
+        "status": ""
+      },
+      "started_utc": "2026-10-03T22:02:46.597120+00:00",
+      "duration_seconds": 1.384,
+      "exit_code": 0,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/integration-evidence/final-cost-ledger/strict.log",
+      "log_sha256": "dd58cb099390ef03d682f5f9870960a3a95b6f9d673c56422b798493a00d802b"
+    }
+  ],
+  "complete": true,
+  "result": "PASS",
+  "receipt_files": {
+    "results.json.provenance.json": {
+      "bytes": 1602,
+      "sha256": "3b1bbc4135fffc604b90fc4b81b96c9cc479edb80bf817ca1a9428867f03049c"
+    },
+    "results.json": {
+      "bytes": 2390507,
+      "sha256": "0a3f0da8b63396f2b0e6c7235a9f70f947b595c7c18057f364dabc26cf2f5b5d"
+    }
+  },
+  "scope": "Actual current native executions against committed/pinned historical JVM cost captures; not a new full Scala node oracle run."
+}

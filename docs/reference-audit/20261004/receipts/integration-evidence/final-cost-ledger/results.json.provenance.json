@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "revision": "660763bb48ea80b63473b6b9bdab3f3bd3922253",
+  "inputs_sha256": "1baff64fd3eff8c03563b86c9b9432deadae8ad840088404a026d5f469d0658a",
+  "commands": [
+    [
+      "cargo",
+      "nextest",
+      "run",
+      "--locked",
+      "--workspace",
+      "--features",
+      "ergo-validation/diagnostics",
+      "--no-fail-fast",
+      "-E",
+      "not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))",
+      "--message-format",
+      "libtest-json"
+    ],
+    [
+      "cargo",
+      "nextest",
+      "run",
+      "--locked",
+      "-p",
+      "ergo-validation",
+      "--features",
+      "diagnostics",
+      "--no-fail-fast",
+      "--run-ignored",
+      "only",
+      "-E",
+      "test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)",
+      "--message-format",
+      "libtest-json"
+    ]
+  ],
+  "results_sha256": "0a3f0da8b63396f2b0e6c7235a9f70f947b595c7c18057f364dabc26cf2f5b5d",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+  "nextest": "cargo-nextest 0.9.146 (8af696ddc 2026-09-21)\nrelease: 0.9.146\ncommit-hash: 8af696ddcce8fff2962d6a5168b6d138b8616a35\ncommit-date: 2026-09-21\nhost: x86_64-unknown-linux-gnu"
+}
