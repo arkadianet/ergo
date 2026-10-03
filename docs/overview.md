@@ -200,10 +200,11 @@ With the bundled default config the node:
 - Runs as a **full-archival** node (keeps + validates every block) with the
   `/blockchain/*` extra-index enabled.
 - Persists state under `./ergo-data/` by default.
-- Serves the REST API on `127.0.0.1:9099`. `/wallet/*` and `/node/shutdown`
-  require an `api_key` request header that Blake2b-256-hashes to the configured
-  `[api.security].api_key_hash` (mandatory at config-load whenever the API
-  server is enabled).
+- Serves the REST API on `127.0.0.1:9099`. API credentials are optional;
+  privileged routes remain closed until `[api.security].api_key_hash` is set.
+  Requests to those routes require a matching `api_key` header. The
+  [configuration reference](configuration.md#apisecurity) lists the protected
+  wallet, node-control, peer, voting, block and mining routes.
 - Serves browser UIs at `/` (operator dashboard) and `/wallet/ui` (wallet), plus
   Scala API docs at `/swagger` and RUST API docs at `/swagger/native`.
   `/swagger/v1` is a compatibility URL for the same RUST API page.

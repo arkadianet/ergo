@@ -31,7 +31,7 @@ Contents:
 
 Build the node binary (the workspace pins Rust 1.99.0 via
 [`../rust-toolchain.toml`](../rust-toolchain.toml); `rustup` installs it on
-first build). See the README [Building](../README.md#building) section for
+first build). See the overview [Building](overview.md#building) section for
 the full set of build commands.
 
 ```bash
@@ -56,7 +56,7 @@ With the bundled defaults the node connects on mainnet (P2P port 9030),
 persists state under `./ergo-data/`, and serves the REST API on
 `127.0.0.1:9099`. The first run performs an Initial Block Download (IBD)
 from genesis; later runs resume from the persisted tip. See
-[Running](../README.md#running) in the README for the cargo one-shot form
+[Running](overview.md#running) in the overview for the cargo one-shot form
 and CLI help.
 
 For the authoritative description of every config key, read the source
@@ -318,7 +318,9 @@ digest backup only into a digest-configured node.
 
 Notes:
 
-- Every tagged release through 1.0 is marked **pre-release** on GitHub;
+- Tags with a prerelease suffix (for example `v0.11.0-rc.1`) are marked
+  **pre-release** on GitHub. A plain version tag is not marked pre-release;
+  pre-1.0 compatibility and readiness limits still apply;
   treat any pre-1.0 deployment as experimental.
 - Configuration is unstable until 1.0 — a minor-version upgrade may rename
   or reshape config keys. The node validates the whole config at load and
@@ -843,9 +845,12 @@ until sync catches up.
 **Disk usage growing faster than expected.** Enabling the extra-index
 (`[indexer] enabled = true`) adds an `indexer.redb` file and roughly doubles
 the on-disk footprint. Disable it if you are not querying the
-address/token/template indices. Pruning (positive `[node] blocks_to_keep`)
-is not a supported posture today; the supported way to run without keeping
-full blocks is Mode 6 (headers-only).
+address/token/template indices. Mode 3 supports bounded pruning with a
+retention window at least as large as `[node] keep_versions` plus the safety
+margin, and the extra index disabled. Mode 6 retains headers without
+downloading full blocks.
+See the [mode table](#state-modes-and-how-to-choose) for boot combinations
+and the remaining external-validation limits.
 
 **Reorgs.** The node handles reorgs automatically with delta-based rollback
 through the undo log. You will see a brief dip in `best_full_block_height`
