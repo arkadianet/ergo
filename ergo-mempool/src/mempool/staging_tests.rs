@@ -726,6 +726,89 @@ fn package_admitted_when_child_completes_held_parent_threshold() {
 }
 
 #[test]
+fn package_admission_traces_each_members_original_source() {
+    use tracing_subscriber::prelude::*;
+    #[derive(Clone, Default)]
+    struct Events(Arc<std::sync::Mutex<Vec<(String, String, tracing::Level)>>>);
+    #[derive(Default)]
+    struct Fields(HashMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            self.0.insert(f.name().into(), format!("{v:?}"));
+        }
+        fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+            self.0.insert(f.name().into(), v.into());
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+        fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            let mut fields = Fields::default();
+            e.record(&mut fields);
+            if fields.0.get("event").map(String::as_str) == Some("mempool_tx_admitted") {
+                self.0.lock().unwrap().push((
+                    fields.0["tx_id"].clone(),
+                    fields.0["source"].clone(),
+                    *e.metadata().level(),
+                ));
+            }
+        }
+    }
+    let mut mp = Mempool::new(
+        MempoolConfig {
+            max_pool_size: 2,
+            ..base_cfg()
+        },
+        Box::new(ByCost),
+    );
+    let utxo = FakeUtxo::with(&[0x90, 0x91, 0x70]);
+    let tip = TestTip::new();
+    let v = PoolAwareProbe::new()
+        .plan(10, 1_000_000, &[0x90], &[0x9A])
+        .plan(11, 3_000_000, &[0x91], &[0x9B])
+        .plan(1, 1_000_000, &[0x70], &[0x71])
+        .plan(2, 10_000_000, &[0x71], &[0x72]);
+    let now = Instant::now();
+    for b in [10, 11] {
+        mp.process(&tx_bytes(b), TxSource::Api, now, &tip.view(&utxo), &v);
+    }
+    mp.process(
+        &tx_bytes(1),
+        TxSource::Peer("127.0.0.1:9001".parse().unwrap()),
+        now,
+        &tip.view(&utxo),
+        &v,
+    );
+    let events = Events::default();
+    let subscriber = tracing_subscriber::registry().with(events.clone());
+    let (outcome, actions) = tracing::subscriber::with_default(subscriber, || {
+        mp.process(&tx_bytes(2), TxSource::Wallet, now, &tip.view(&utxo), &v)
+    });
+    assert!(matches!(outcome, AdmissionOutcome::Admitted { .. }));
+    assert_eq!(
+        *events.0.lock().unwrap(),
+        vec![
+            (
+                hex::encode(d(1).as_bytes()),
+                "peer".into(),
+                tracing::Level::DEBUG
+            ),
+            (
+                hex::encode(d(2).as_bytes()),
+                "local".into(),
+                tracing::Level::INFO
+            ),
+        ]
+    );
+    assert!(
+        actions
+            .iter()
+            .filter(|a| matches!(a, MempoolAction::BroadcastInv { .. }))
+            .all(|a| matches!(a, MempoolAction::BroadcastInv { except: None, .. })),
+        "routing exclusion follows the triggering Wallet child"
+    );
+}
+
+#[test]
 fn package_child_stops_when_initial_unresolved_validation_spends_the_budget() {
     for source in [TxSource::Api, TxSource::PublicApi] {
         let mut mp = Mempool::new(

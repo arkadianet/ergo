@@ -852,9 +852,9 @@ impl Mempool {
         });
 
         // Per-member observability data captured before the vec is consumed.
-        let member_meta: Vec<(TxId, u64, u32, u64)> = members
+        let member_meta: Vec<(TxId, u64, u32, u64, TxSource)> = members
             .iter()
-            .map(|m| (m.tx_id, m.fee, m.size_bytes, m.weight))
+            .map(|m| (m.tx_id, m.fee, m.size_bytes, m.weight, m.source.clone()))
             .collect();
 
         match self.commit_package(members, tip_ctx) {
@@ -884,7 +884,7 @@ impl Mempool {
                 // observer/journal per member (staging itself never gossips —
                 // these go out only because the package really entered the
                 // pool via the atomic commit).
-                for (tx_id, fee, size, weight) in &member_meta {
+                for (tx_id, fee, size, weight, member_source) in &member_meta {
                     let member_action_start = actions.len();
                     actions.push(MempoolAction::BroadcastInv {
                         tx_id: *tx_id,
@@ -908,7 +908,7 @@ impl Mempool {
                             size: *size,
                         },
                         &actions[member_action_start..],
-                        source,
+                        member_source,
                         self.pool.len(),
                         self.pool.total_bytes(),
                         self.observer.as_deref(),
@@ -920,7 +920,7 @@ impl Mempool {
                 // waiting orphans.
                 let member_outputs: Vec<Digest32> = member_meta
                     .iter()
-                    .filter_map(|(id, _, _, _)| self.pool.get(id).map(|e| e.outputs.clone()))
+                    .filter_map(|(id, _, _, _, _)| self.pool.get(id).map(|e| e.outputs.clone()))
                     .flatten()
                     .collect();
                 let cascade = self.resolve_orphans(member_outputs, now, tip_ctx, validator);
