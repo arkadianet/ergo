@@ -39,11 +39,9 @@ pub enum BootstrapKind {
 /// from the three protocol-visible dimensions: `state_type`,
 /// `verify_transactions`, and `blocks_to_keep`.
 ///
-/// Live arms today: Mode 1 (archive), Mode 2 (utxo-bootstrapped via
-/// the `utxo_bootstrap` short-circuit), Mode 3 (pruned, `n > 0` after
-/// the rollback-window floor check), and Mode 6 (canonical
-/// headers-only, `(Digest, false, 0)`). Mode 5 (Digest Verifier
-/// without headers-only) is the remaining deferred arm.
+/// The classifier names canonical Modes 1–6. Runtime support additionally
+/// checks bootstrap intent, subsystem compatibility and the pruning floor;
+/// a mode label alone does not certify historical reference parity.
 #[cfg(test)]
 pub(crate) fn mode_label_for(config: &NodeConfig) -> String {
     mode_label_for_inputs(&IdentityInputs::from_config(config), 1, BootstrapKind::None)
@@ -119,9 +117,8 @@ pub enum NodeMode {
         utxo: bool,
         nipopow: bool,
     },
-    /// Mode 5 — Digest Verifier (deferred): digest + verify_tx +
-    /// keep = -1. Reachable through classification but rejected at
-    /// the runtime activation gate.
+    /// Mode 5 — Digest Verifier: digest + verify_tx + keep = -1.
+    /// Runtime support also requires both bootstrap flags to be disabled.
     DigestVerifier,
     /// Mode 6 — canonical headers-only: digest + !verify_tx +
     /// keep = 0 + !utxo_bootstrap. NiPoPoW may augment the header
@@ -295,11 +292,8 @@ pub fn classify_node_mode(inputs: &IdentityInputs) -> NodeMode {
             };
         }
         if inputs.verify_transactions && inputs.blocks_to_keep == -1 {
-            // Mode 5 (digest verifier) is deferred; the runtime
-            // gate at `validate_runtime_mode_support` rejects boot
-            // attempts. Classification still names the mode so the
-            // operator's diagnostic surface knows what they
-            // intended.
+            // Runtime support separately checks bootstrap flags and
+            // subsystems before admitting the canonical digest verifier.
             return NodeMode::DigestVerifier;
         }
         return NodeMode::Invalid {
