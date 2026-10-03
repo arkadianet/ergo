@@ -1,0 +1,54 @@
+{
+  "group": "04-sigma-mixed-collection-carriers",
+  "base": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+  "head": "1387561821eac701aa6639ec240f80e0211a50bd",
+  "fixes": [
+    "SIG001"
+  ],
+  "follow_up_to": "https://github.com/arkadianet/ergo/pull/498",
+  "gate": "sigma-evidence/group04-gate.json",
+  "tests": {
+    "passed": 7898,
+    "failed": 0,
+    "ignored": 98,
+    "result_lines": 65
+  },
+  "files": [
+    {
+      "path": "ergo-sigma/src/evaluator/opcodes/method_call/coll.rs",
+      "sha256": "b7f9b979aee44b97f6b1a0be220b1bc4fb9175c138d854c363e6dc797d96b139"
+    },
+    {
+      "path": "ergo-sigma/tests/it/collection_types.rs",
+      "sha256": "ce45d7d79cc597e8a1f15554f7d7da5a461d2f4fabaf53fac9109ef4e0959421"
+    },
+    {
+      "path": "test-vectors/ergo-sigma/mixed-collection-types/Capture.scala",
+      "sha256": "2254f25bed01189b39484093d8c0d7c2ae993c122c31b355dd4fac29e9dd9781"
+    },
+    {
+      "path": "test-vectors/ergo-sigma/mixed-collection-types/README.md",
+      "sha256": "c0843576d195806199db52aee673cd7cb1df3cd20316f40dedf39f0e625d3f26"
+    },
+    {
+      "path": "test-vectors/ergo-sigma/mixed-collection-types/cases.json",
+      "sha256": "f3e0487d60786e651414084c1df5e55057ea65a4b29eae8e42a1845d58f84abc"
+    },
+    {
+      "path": "test-vectors/ergo-sigma/mixed-collection-types/scala.stderr",
+      "sha256": "fd31af1fdc0608c0f01f0320beca7220bc0c9938cf9b355b3f28a46fd5373486"
+    },
+    {
+      "path": "test-vectors/ergo-sigma/mixed-collection-types/scala.stdout",
+      "sha256": "7822f0a2ef1186b8e86c9caf379af4ed37a54138e514931de500103c99733e84"
+    }
+  ],
+  "reference": "Fresh executed independent sigma-state6.0.6 compiler/parser/reducer and ergo-core6.0.6 verify, six valid contracts exact JIT665/384/338, before5/6different after6/6match; original7contracts continue matching",
+  "reference_receipt": "sigma-evidence/mixed-carriers/receipt-typed.json",
+  "before": "sigma-evidence/group04-before.json",
+  "after": "sigma-evidence/group04-after.json",
+  "limits": [
+    "No chain-occurrence/full transaction or arbitrary proof topology claim",
+    "Scala initial setup failures and initially ill-typed explicit-byte literal cases preserved distinctly, not denominator exclusions or reference verdicts for valid six"
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "group": "07-primitives-contracts-direct-provenance",
+  "base": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+  "head": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+  "fixes": [
+    "EP-001",
+    "EP-002",
+    "EP-003",
+    "EP-004"
+  ],
+  "gate": "sigma-evidence/group07-gate.json",
+  "tests": {
+    "passed": 7911,
+    "failed": 0,
+    "ignored": 98,
+    "result_lines": 65
+  },
+  "additional_validation": {
+    "python_producer_tests": 5,
+    "pinned_scala_direct_cases": 10,
+    "exact_historical_stdout_hashes_match": true
+  },
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "d609a445d52dc36bee0a451ec87ae3d07f4659c7e111c6a8f0f6a04b2294c020"
+    },
+    {
+      "path": "docs/codemap/ergo-primitives.md",
+      "sha256": "f98aaa8c62c508a97f959c8c3249cdee65ca02ffd6cf2adef9af61c2c0d5c35f"
+    },
+    {
+      "path": "ergo-primitives/src/cost.rs",
+      "sha256": "2fb918439f33ec7eb39191d95cb86ca4082771ee0ec2367e103155c2a138c2f5"
+    },
+    {
+      "path": "ergo-primitives/src/group_element.rs",
+      "sha256": "2f57622890e3a3226fa9b74249f641b61069090829ef307f864370fdbe094039"
+    },
+    {
+      "path": "ergo-primitives/src/reader.rs",
+      "sha256": "8e9afd59e31b745dc42fb59cc3b39ea80b65d01bd82104655807cb6c86c70a8c"
+    },
+    {
+      "path": "ergo-primitives/src/writer.rs",
+      "sha256": "be91889943aee0ee28cb52cd0a912db5331bf8b9f9ebbe8ac4cd7fb4614c0c88"
+    },
+    {
+      "path": "scripts/gen-evaluated-probe.py",
+      "sha256": "f45a9a8bbec959b10e9519819fc57047fa5732f3116855d97d088a283b9576ab"
+    },
+    {
+      "path": "scripts/test_evaluated_probe.py",
+      "sha256": "902232a6920955c9d6595d6f7893e76a559d75608235dd59dc23dea657bb8818"
+    },
+    {
+      "path": "test-vectors/scala/accumulator_initial_scope.json",
+      "sha256": "6b63dd80768f3055932690fd5ecd1ab5e62ab47347d618e2f2a0705e75143875"
+    },
+    {
+      "path": "test-vectors/scala/direct-cost-recapture.json",
+      "sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24"
+    },
+    {
+      "path": "test-vectors/scala/jitcost_bounds.json",
+      "sha256": "c9174deb0a708a63ee83937a55b22f3b0583067883089075e074135728518cf9"
+    },
+    {
+      "path": "test-vectors/scala/source-snapshots/README.md",
+      "sha256": "c91bb9e27a2bb2c2ec032a22ef9ce3a4e937f586886340fb723fc121d0b9318c"
+    },
+    {
+      "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f/DirectProbeRuntime.scala",
+      "sha256": "9095c3d3dd84e34695b18bfaa704d9cf983514cf52581094dc8d79fcfcfc323f"
+    },
+    {
+      "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+      "sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93"
+    },
+    {
+      "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/accumulator_probe.response.json",
+      "sha256": "5bd460929b40fe8d27a7d940390c69875e67bd91d5325d241dd7a594d1c70dbf"
+    },
+    {
+      "path": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/jitcost_probe.response.json",
+      "sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f"
+    }
+  ],
+  "limits": [
+    "Original historical checkout clean/dirty and execution revision remain UNKNOWN; recovered matching source revision is explicitly not relabeled as execution provenance.",
+    "Finite standalone probes do not certify live voted caps, individual production charge reachability, or full transaction/chain acceptance.",
+    "Validation-owner parsed dynamic parameter integration remains separate from the corrected leaf assurance contract."
+  ],
+  "initial_failed_gate": "sigma-evidence/group07-initial-gate.json (constant-valued assertion moved into const block, no allow added)"
+}

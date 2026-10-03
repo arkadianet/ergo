@@ -1,0 +1,162 @@
+{
+  "group": "05-compiler-validation-contracts",
+  "base": "1387561821eac701aa6639ec240f80e0211a50bd",
+  "head": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+  "fixes": [
+    "ES-010",
+    "EC001",
+    "EC002",
+    "EC003",
+    "EC004",
+    "EC005",
+    "EC007"
+  ],
+  "gate": "sigma-evidence/group05-followup-gate.json",
+  "tests": {
+    "passed": 7903,
+    "failed": 0,
+    "ignored": 98,
+    "result_lines": 65
+  },
+  "files": [
+    {
+      "path": "docs/codemap/ergo-compiler.md",
+      "sha256": "482d36dbdef4a6b7e3b950445f524ed40f4101f212db2d6d7ff3e468c38b88bf"
+    },
+    {
+      "path": "docs/compiler-design-ledger.md",
+      "sha256": "4d938b7147e9457be03b3ccd950fb2225abed66b9b23383731c2858e246b27ef"
+    },
+    {
+      "path": "ergo-compiler/Cargo.toml",
+      "sha256": "101c3b3fc115e8d8958f397c91e0468a6364928cf183d1e3abe54d03eabb4c06"
+    },
+    {
+      "path": "ergo-compiler/src/contract_template.rs",
+      "sha256": "0d1b1d690d94a2cbc5b7fd0ace653fd6975b0a7aa910d6f766b2eec87386371c"
+    },
+    {
+      "path": "ergo-compiler/src/cse/key.rs",
+      "sha256": "42837ce0828a30986bb5b4d406d85d760d0ebed7decbeef33d4bfa808885c061"
+    },
+    {
+      "path": "ergo-compiler/src/fold.rs",
+      "sha256": "6c4aa7b07905a8cce291f71531bf09fa8ab7dac0686ecaf1326a5d8a123bccbc"
+    },
+    {
+      "path": "ergo-compiler/src/parse/block/definitions.rs",
+      "sha256": "9e3216d80588009a7878e617bd95147500d74a91b28f26253312df355246040e"
+    },
+    {
+      "path": "ergo-compiler/src/parse/cursor.rs",
+      "sha256": "7b4bceed7fedbd3891de76a80909743585344d3cefc657e2b3f52c49c6be28ad"
+    },
+    {
+      "path": "ergo-compiler/src/parse/depth.rs",
+      "sha256": "aea7ac83d5405e19940bbe5fc371523ee929ef2fea61c96151fcd15754b3a4f8"
+    },
+    {
+      "path": "ergo-compiler/src/parse/mod.rs",
+      "sha256": "f366753132af8065b215acc136def4a85affbe8b3c160f787095aa258d19962d"
+    },
+    {
+      "path": "ergo-compiler/src/tree/mod.rs",
+      "sha256": "562857dd26fd1b45fb089eff40d8d60107fab2674e7a98eff8eff0e73ad286bc"
+    },
+    {
+      "path": "ergo-compiler/src/typed.rs",
+      "sha256": "07b03b3ca8372a45c1e48e8da87e2ae74fabfcc22786aa141570f12b61d1d100"
+    },
+    {
+      "path": "ergo-compiler/src/typed_print.rs",
+      "sha256": "a8faa575198c87ccf4cad34c5b3e2e7da1e470af5f1e83583f83d093dda5db48"
+    },
+    {
+      "path": "ergo-compiler/src/typer/assign/apply.rs",
+      "sha256": "c4319c97134c72bd08a537b3862ee6a0fd08a2e0d074527077d173cca1747202"
+    },
+    {
+      "path": "ergo-compiler/tests/it/compile_semantic_parity.rs",
+      "sha256": "031b30dc4b9f05dc4e47318aacfd95db754eb76cbec1596c57bf8e5c4351e1dd"
+    },
+    {
+      "path": "ergo-compiler/tests/it/corpus_smoke.rs",
+      "sha256": "54d463694f3973d69eec92aaee614c1d7f86dda8e4bbe4ccd79fa5d0d28aff52"
+    },
+    {
+      "path": "ergo-compiler/tests/it/main.rs",
+      "sha256": "d7d367071e55d2cb733ad950bdcbc80733148ed2af5de4945e322080bbea5ba6"
+    },
+    {
+      "path": "ergo-compiler/tests/it/numeric_arguments.rs",
+      "sha256": "7eb6952b3d96ca0db5fdd8e730a9d4cd31f8acde7b7cdd12129a367dca29c665"
+    },
+    {
+      "path": "ergo-compiler/tests/it/typer_oracle_parity.rs",
+      "sha256": "5992f2fa030df7aadbf4652aa0f1c2624bce4f469b0ca3898e735084bbdb4f59"
+    },
+    {
+      "path": "ergo-primitives/src/reader.rs",
+      "sha256": "378e3ff690e47c44238fc87ba3166fad603bbbcabf971496b7f12c8f1fd520c9"
+    },
+    {
+      "path": "ergo-ser/src/ergo_tree/read.rs",
+      "sha256": "55ed9669ff0ad2208a3be1c39ab81090ffce0e8b4f5ba8737eb97338f424c220"
+    },
+    {
+      "path": "ergo-ser/src/ergo_tree/tests.rs",
+      "sha256": "4c79b6d8d8ddcf282946bcdb9b870289df7d5fef295b018ed6bdede8c3126d8e"
+    },
+    {
+      "path": "ergo-ser/src/sigma_type/mod.rs",
+      "sha256": "43a2fd8ff2c1ee59c770d19bc3db1e48048a58eb0bef43e68162a11a60f73165"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/Capture.scala",
+      "sha256": "38c294e4b07531318ab0384eb02010e37cbbad90226c2022bd1ec3bce2702f9c"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/CapturePositive.scala",
+      "sha256": "5fd8d1031c97559760c4417b57d198918980fe0519dfcf5acabba693c344874f"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/README.md",
+      "sha256": "2baada51aa0d0e596eb42fe9f2fcd08ba5b0471b97e3b915864128a76bc5294c"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/cases.json",
+      "sha256": "a57828f071c0d292ceeb258d70dfb2c5d53bbd8a573a035f423de7e334ed56aa"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+      "sha256": "2cd8367c1892df45b20d383c56f64666efd79eea887d1c1b215b77cda4429a16"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stderr",
+      "sha256": "2c840e0bac83800a4a3e463eda8320a8cf38b3e4d81d58d820ec6341dbdd22bc"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/scala-folded.stdout",
+      "sha256": "73dfc397bd56254119cf45a94ee9a40a67cf91f25e277647472401f3236cc2bb"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/scala.stderr",
+      "sha256": "c213edce58041918a50b60890edb1138ce4afd551685e439a3939dc4ce872286"
+    },
+    {
+      "path": "test-vectors/ergoscript/compiled-reader/scala.stdout",
+      "sha256": "c353d6e5d96cf9e5ccb4ecf5a0cd81659d92e5049e7db5bef3ed0921cc8d4565"
+    }
+  ],
+  "reference": "Fresh real sigma-state6.0.6 frontend3/header0 compile7/read21reject plus header3control7accept; bounded existing pinned live typer replay passed; no whole spending claim",
+  "reference_receipt": "sigma-evidence/compiler-reader/receipt-compiled.json",
+  "live_typer": "sigma-evidence/group05-live-typer-02.json",
+  "limits": [
+    "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+    "Representative structural/depth tests are not universal caller-platform stack guarantees",
+    "Independent Sigma measured-runtime embeddable override unchanged"
+  ],
+  "previous_frozen_head": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+  "positive_reference": "test-vectors/ergoscript/compiled-reader/receipt-folded.json",
+  "followup_controls": "val-bound Coll[UnsignedBigInt]().size exact external bytes + executeFromVar all five numeric categories and out-of-range structured errors"
+}

@@ -1,0 +1,137 @@
+[
+  {
+    "name": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 2.988661724026315,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/fmt.log",
+    "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "name": "rust-fragments",
+    "command": [
+      "python3",
+      "scripts/check-rust-fragments.py"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 0.7591071010101587,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/rust-fragments.log",
+    "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22"
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 12.221810642979108,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/clippy.log",
+    "log_sha256": "bc5a9640af996444b3de6ce7e369d12332e11fc22864055b1ed1b6a341c1c307"
+  },
+  {
+    "name": "workspace-tests",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 338.6376526489621,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/workspace-tests.log",
+    "log_sha256": "0834bcdc6b641421d5a48a40bb1924379ddb617187f089c17b426463336ee56b"
+  },
+  {
+    "name": "strict-rustdoc",
+    "command": [
+      "cargo",
+      "doc",
+      "--locked",
+      "--workspace",
+      "--all-features",
+      "--no-deps"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target",
+      "RUSTDOCFLAGS": "-D warnings"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 9.397028459992725,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/strict-rustdoc.log",
+    "log_sha256": "60f48b04feb141521bcb136d78673066b62d5e313cf1634b3e3f55df7220164f"
+  },
+  {
+    "name": "ci-policy",
+    "command": [
+      "python3",
+      "scripts/ci-policy.py"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 0.1208112119929865,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/ci-policy.log",
+    "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601"
+  },
+  {
+    "name": "release-python",
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "scripts",
+      "-p",
+      "test_release*.py"
+    ],
+    "cwd": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state",
+    "environment": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_TARGET_DIR": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-state/target"
+    },
+    "exit_code": 0,
+    "elapsed_seconds": 0.5331880599842407,
+    "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/state-evidence/group02-split-gate/release-python.log",
+    "log_sha256": "5680eba9259f51f28c34231fc4d90546e6a6317404809bff77f8267bfa92e0b6"
+  }
+]

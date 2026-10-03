@@ -1,0 +1,178 @@
+{
+  "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+  "checks": [
+    {
+      "name": "indexer-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "ergo-indexer"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 63.122,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/indexer-tests.log",
+      "log_sha256": "19b09c3a1b8d77f7772a6be4c8a070aa4629cb760c2fb0305d30d928b9f1e9ba"
+    },
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 2.725,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.973,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22"
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 14.466,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/clippy.log",
+      "log_sha256": "8b825e91ba705492747bab7cd531b415c36882f87d41534d5419a71c2da40c45"
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 496.445,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/workspace-tests.log",
+      "log_sha256": "44ab5619d2525a74cfbe2e1cbe6d0327f35db4e8506e5d68fe926fc5e835b7fe"
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 9.075,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/rustdoc.log",
+      "log_sha256": "d95eb430349f8776b9790d1f4eb8a9d8872cfe4ccb0ca46286837a36f15e769f"
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.124,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601"
+    },
+    {
+      "name": "python-tools",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_*.py"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.707,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/python-tools.log",
+      "log_sha256": "ee84567353e91f22d2eb9cffd8bad52183fb0a41099cbd982808b45fb5fa3967"
+    },
+    {
+      "name": "ledger-selftests",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger.py",
+        "--selftest"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.386,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/ledger-selftests.log",
+      "log_sha256": "2938f9e362778378a547d2d08427525d467b191d5585dab7ca4cac0cf47fdc29"
+    },
+    {
+      "name": "ledger-integrity",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger.py",
+        "check"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 1.363,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/ledger-integrity.log",
+      "log_sha256": "6094daa99e13429a96f9b70a1cde98b28eec79adc37faf6468fe01048a93f36d"
+    },
+    {
+      "name": "ledger-diff",
+      "argv": [
+        "python3",
+        "scripts/cost-ledger-diff.py"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.082,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/ledger-diff.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "artifact-integrity",
+      "argv": [
+        "python3",
+        "scripts/jvm_cost_constants_extractor/verify.py"
+      ],
+      "revision": "15e010555fb2b942f2ee19d945e63f4fedaffbbf",
+      "exit_code": 0,
+      "duration_seconds": 0.067,
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/indexer-evidence/integrated-gate/artifact-integrity.log",
+      "log_sha256": "1a21a94e62dfa72214ead869405b3c4479b8c2806f702e27cbc329bf3553f37d"
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

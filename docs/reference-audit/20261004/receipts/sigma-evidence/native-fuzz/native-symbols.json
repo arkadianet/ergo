@@ -1,0 +1,156 @@
+{
+  "method": "nm -g selected ASan and libFuzzer entry symbols; no crash-detector or export exercise",
+  "targets": [
+    {
+      "target": "ergo_tree",
+      "binary_sha256": "0ebf9ee94208e54ee2bb2a28e331f24233468fad5e5e95fbaf2d470674cda1a4",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a347f0 T LLVMFuzzerTestOneInput",
+        "00000000004b6310 T __asan_init",
+        "0000000000a5e340 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e220 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e100 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5dfc0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "constant",
+      "binary_sha256": "cc7f99b7e9877f1a3fc7f3f6b3fb1f9ba4a302e9b82715860978804e69e7f55b",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a347f0 T LLVMFuzzerTestOneInput",
+        "00000000004b6310 T __asan_init",
+        "0000000000a5e340 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e220 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e100 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5dfc0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "ergo_box_candidate",
+      "binary_sha256": "25c2747d14bddce676fa7eb7aced7bca6f270cb77f2b2537f8a8f77172ed0569",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a34830 T LLVMFuzzerTestOneInput",
+        "00000000004b6350 T __asan_init",
+        "0000000000a5e380 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e260 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e140 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5e000 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "transaction",
+      "binary_sha256": "3940894f16341a6e3ef618ad9b9ce99ac20594be69d50283e2c565ff8f1697c4",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a347f0 T LLVMFuzzerTestOneInput",
+        "00000000004b6310 T __asan_init",
+        "0000000000a5e340 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e220 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e100 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5dfc0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "header",
+      "binary_sha256": "13c2c3dd9de74b3c0e7cf57252f796fbb82b9f78e793bbdfe587e26d9ebdbe71",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a347f0 T LLVMFuzzerTestOneInput",
+        "00000000004b6310 T __asan_init",
+        "0000000000a5e340 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e220 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e100 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5dfc0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "sigma_expr",
+      "binary_sha256": "f55066f14dc0866119c05f43cd747b62f727122f7c42f7ab2e17f47df535dc47",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000a347f0 T LLVMFuzzerTestOneInput",
+        "00000000004b6310 T __asan_init",
+        "0000000000a5e340 T __sanitizer_cov_trace_cmp1",
+        "0000000000a5e220 T __sanitizer_cov_trace_cmp2",
+        "0000000000a5e100 T __sanitizer_cov_trace_cmp4",
+        "0000000000a5dfc0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "p2p_frame",
+      "binary_sha256": "8255c049824c639405e68998fd635ea920baf160822d0cbe1a4ad4243117cf40",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "000000000018cab0 T LLVMFuzzerTestOneInput",
+        "0000000000128fa0 T __asan_init",
+        "00000000001b6570 T __sanitizer_cov_trace_cmp1",
+        "00000000001b63c0 T __sanitizer_cov_trace_cmp4",
+        "00000000001b6280 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "p2p_handshake",
+      "binary_sha256": "b10f638ee130239384945f6427a80e4e477358679f8e79ba0779cb73b6d52411",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000162c70 T LLVMFuzzerTestOneInput",
+        "0000000000119500 T __asan_init",
+        "000000000018c6a0 T __sanitizer_cov_trace_cmp1",
+        "000000000018c440 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "p2p_message",
+      "binary_sha256": "374aa4d803c4f7c9ab9a62ece0ec66297d2883d2abbc96f616ea74716f04a072",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "000000000017fb20 T LLVMFuzzerTestOneInput",
+        "0000000000124060 T __asan_init",
+        "00000000001a9550 T __sanitizer_cov_trace_cmp1",
+        "00000000001a92f0 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "p2p_delivery",
+      "binary_sha256": "22fe0349a83eea8ce0ef98e64b7604a464f7946ce5e425c61774f30aa6cb6ece",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "00000000001db3c0 T LLVMFuzzerTestOneInput",
+        "0000000000141a40 T __asan_init",
+        "0000000000204f10 T __sanitizer_cov_trace_cmp1",
+        "0000000000204df0 T __sanitizer_cov_trace_cmp2",
+        "0000000000204cd0 T __sanitizer_cov_trace_cmp4",
+        "0000000000204b90 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "compiler_source",
+      "binary_sha256": "9a1738416be5d774ab9d966ad83247eb12ce20b589112122704e36f5d5234bec",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000741660 T LLVMFuzzerTestOneInput",
+        "000000000037d410 T __asan_init",
+        "000000000076b1b0 T __sanitizer_cov_trace_cmp1",
+        "000000000076b090 T __sanitizer_cov_trace_cmp2",
+        "000000000076af70 T __sanitizer_cov_trace_cmp4",
+        "000000000076ae30 T __sanitizer_cov_trace_cmp8"
+      ]
+    },
+    {
+      "target": "bounded_evaluator",
+      "binary_sha256": "03edc759fd11cd50948929e6b3a32642ebdadec8a9416463f5c4f1ceac263907",
+      "nm_exit": 0,
+      "selected_symbols": [
+        "0000000000b61e40 T LLVMFuzzerTestOneInput",
+        "000000000052a8e0 T __asan_init",
+        "0000000000b8b990 T __sanitizer_cov_trace_cmp1",
+        "0000000000b8b870 T __sanitizer_cov_trace_cmp2",
+        "0000000000b8b750 T __sanitizer_cov_trace_cmp4",
+        "0000000000b8b610 T __sanitizer_cov_trace_cmp8"
+      ]
+    }
+  ]
+}

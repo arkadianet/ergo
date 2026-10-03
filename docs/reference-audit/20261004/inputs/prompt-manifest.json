@@ -1,0 +1,117 @@
+[
+  {
+    "path": "docs/audit-prompts/COMMON.md",
+    "sha256": "c9340fd89bf0bf99bec8aad728cd23086f3ac3e2672cce85109b7b5ec043c2b1",
+    "bytes": 26730
+  },
+  {
+    "path": "docs/audit-prompts/README.md",
+    "sha256": "c328ed555b58e9d76c4e33cef37fbb431560c7719787fa1f691da5cb32fc5a0c",
+    "bytes": 6375
+  },
+  {
+    "path": "docs/audit-prompts/WORKSPACE.md",
+    "sha256": "c493fae4326ff4c70b4dc55e93fea90771e8a52828933d5a6523715b0b232ed0",
+    "bytes": 9926
+  },
+  {
+    "path": "docs/audit-prompts/ergo-api.md",
+    "sha256": "c3df3b9e42bbc171d177af71800bf6f13875055ed8fffeaad1fcf84de6d68487",
+    "bytes": 12074
+  },
+  {
+    "path": "docs/audit-prompts/ergo-chain-spec.md",
+    "sha256": "2e1387503c0e2531f99b744602fe9dbdd56e4636eb3fd73a1c5f246102bf4fef",
+    "bytes": 8561
+  },
+  {
+    "path": "docs/audit-prompts/ergo-compiler.md",
+    "sha256": "77b715580ad797a23d584326faf900b129d1ec87548f41fa47ef51808f5c306b",
+    "bytes": 9690
+  },
+  {
+    "path": "docs/audit-prompts/ergo-crypto.md",
+    "sha256": "c1b1632d32c6ab59e619e0a457e282b259d36827bbdf7891d8e4ef11abbdcb03",
+    "bytes": 8868
+  },
+  {
+    "path": "docs/audit-prompts/ergo-difftest-fuzz.md",
+    "sha256": "aa8f7a140e9035a6b566556b12750719abfe70bf7d86a56049e4dc17e776de8d",
+    "bytes": 8081
+  },
+  {
+    "path": "docs/audit-prompts/ergo-difftest.md",
+    "sha256": "a59ededf79d32c8133f509c43b07f606d13e40bb7d03622922750c13aeddef60",
+    "bytes": 10671
+  },
+  {
+    "path": "docs/audit-prompts/ergo-indexer-types.md",
+    "sha256": "dd133a9b00d0caf52de0e0f341fa9faa995fbbf8704c9922bc27c126660d8615",
+    "bytes": 8016
+  },
+  {
+    "path": "docs/audit-prompts/ergo-indexer.md",
+    "sha256": "74bbcd51ee35b3cc130f4c97238de6b8ad7ca1634eb2b8934b7ce0c8ceabc1b3",
+    "bytes": 10049
+  },
+  {
+    "path": "docs/audit-prompts/ergo-mempool.md",
+    "sha256": "f076f0d6dfd62080e78932b910ddc412fe1b113d23bc0ce1d9c0db8757067ec0",
+    "bytes": 13169
+  },
+  {
+    "path": "docs/audit-prompts/ergo-mining.md",
+    "sha256": "a38f8c5b5955e74e877627759a4e127f12881bfe02aea68f7e28cb805af0dc24",
+    "bytes": 12759
+  },
+  {
+    "path": "docs/audit-prompts/ergo-node.md",
+    "sha256": "e13ea030ea7ba8e9fcf51975fa5f0f821ee0a9a8968b6af2b0f71c1ad18438e4",
+    "bytes": 14516
+  },
+  {
+    "path": "docs/audit-prompts/ergo-p2p.md",
+    "sha256": "b5c70dab8edb9c544f44da9815399eb38bcba02a2bb04b1fc30029ec6e4d9fd2",
+    "bytes": 12338
+  },
+  {
+    "path": "docs/audit-prompts/ergo-primitives.md",
+    "sha256": "9e555b84f178f6f89a40e0029df7cc09089859b23eebc9c1db353ad42e1decfd",
+    "bytes": 8373
+  },
+  {
+    "path": "docs/audit-prompts/ergo-rest-json.md",
+    "sha256": "6f871cb4a2c9d8e7810895474a9ef4869b40a8aa6afbd7632bd8943aa068af49",
+    "bytes": 8873
+  },
+  {
+    "path": "docs/audit-prompts/ergo-ser.md",
+    "sha256": "f4a54c2778be9bf11555397e88bb734720508a881f245f7a55738fc558ad175a",
+    "bytes": 9443
+  },
+  {
+    "path": "docs/audit-prompts/ergo-sigma.md",
+    "sha256": "94a3856a81d9e69dae1ec44fff8f5d0e51a13157c1b8f44d9fa679300cb2a009",
+    "bytes": 9435
+  },
+  {
+    "path": "docs/audit-prompts/ergo-state.md",
+    "sha256": "38855abdaadb8fffcd2eb9609fd7ac10beb40902ba056ce926e554656f2037a7",
+    "bytes": 12513
+  },
+  {
+    "path": "docs/audit-prompts/ergo-sync.md",
+    "sha256": "d601c0117091f9988593bd9bdedc817925f96e2fd31884324ec4b7510c65a1cc",
+    "bytes": 13293
+  },
+  {
+    "path": "docs/audit-prompts/ergo-validation.md",
+    "sha256": "4a230a06a8f5455735bd496b081ba65656425a67e723a330b8a015c1017499a1",
+    "bytes": 11298
+  },
+  {
+    "path": "docs/audit-prompts/ergo-wallet.md",
+    "sha256": "f191821b5fbec9457a8f98722741e5520abff573d0077feccadb49976002e52a",
+    "bytes": 10122
+  }
+]

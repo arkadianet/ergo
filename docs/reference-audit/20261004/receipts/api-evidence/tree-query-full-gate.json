@@ -1,0 +1,141 @@
+{
+  "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T16:55:27.654541+00:00",
+      "duration_seconds": 2.798,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T16:55:30.452288+00:00",
+      "duration_seconds": 0.713,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T16:55:31.165799+00:00",
+      "duration_seconds": 19.286,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-clippy.log",
+      "log_sha256": "507102ede4946fa236f3fc0a8dc366a1cc42af81e64d4a453c7e1c1d753640d6",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T16:55:50.517747+00:00",
+      "duration_seconds": 527.288,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-workspace-tests.log",
+      "log_sha256": "4257cb3534c844df25ed3468cbd8211c6544cb19636936dce5039a49d1a2f30d",
+      "tests_passed": 7899,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T17:04:37.808459+00:00",
+      "duration_seconds": 7.8,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-rustdoc.log",
+      "log_sha256": "c8c92c8e34bf219c0b471d15f3b441069c3122ed9be83c3b820a3f95e24963e2",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T17:04:45.608805+00:00",
+      "duration_seconds": 0.033,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "c5472e58a47428e295b5a0328ff7130a4afd21fa",
+      "started_utc": "2026-10-03T17:04:45.642620+00:00",
+      "duration_seconds": 0.166,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/tree-query-gate-release-tests.log",
+      "log_sha256": "e4ac42a1e007590ae6d0f1aaf7860286e652c5cabaf26091792af1dd944f23aa",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

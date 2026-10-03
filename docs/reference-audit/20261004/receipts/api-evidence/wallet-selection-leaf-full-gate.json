@@ -1,0 +1,141 @@
+{
+  "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:38:11.366396+00:00",
+      "duration_seconds": 2.659,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:38:14.026025+00:00",
+      "duration_seconds": 0.709,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:38:14.735070+00:00",
+      "duration_seconds": 29.144,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-clippy.log",
+      "log_sha256": "4e82d05500c5b8e5c2ac209cd9b30ac1eca36b9c9511c78e6386d32f71b556c6",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:38:43.879507+00:00",
+      "duration_seconds": 756.622,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-workspace-tests.log",
+      "log_sha256": "48dc08aa15f12772c55cf736141177173c37e5e43cd7e75872c0aa5269564d90",
+      "tests_passed": 7905,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:51:20.508176+00:00",
+      "duration_seconds": 33.79,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-rustdoc.log",
+      "log_sha256": "e0af9af7c2c69bb2b52f204363ebbbf202adb6cb95f475b8499db745974ac40a",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:51:54.298242+00:00",
+      "duration_seconds": 0.11,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "c3900ca4cf6b2cdd5d9d0f17db428fac75ccbd72",
+      "started_utc": "2026-10-03T18:51:54.408856+00:00",
+      "duration_seconds": 1.158,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/wallet-selection-leaf-gate-release-tests.log",
+      "log_sha256": "f7a380b264c9c54091add8bcb9f98a9819320e47feb6abaa4b7f4cfc504568e1",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

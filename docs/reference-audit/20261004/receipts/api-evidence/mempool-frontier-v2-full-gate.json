@@ -1,0 +1,141 @@
+{
+  "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+  "checks": [
+    {
+      "name": "fmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:18:46.304228+00:00",
+      "duration_seconds": 2.038,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "rust-fragments",
+      "argv": [
+        "python3",
+        "scripts/check-rust-fragments.py"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:18:48.342881+00:00",
+      "duration_seconds": 0.419,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-rust-fragments.log",
+      "log_sha256": "5a0e6e2cc71b0df5d457c2a308207904e57cbe934c5767e89d7055b097adff22",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:18:48.761815+00:00",
+      "duration_seconds": 26.814,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-clippy.log",
+      "log_sha256": "c19fe4023a7424f2a90b94a5490ff1994a0b4f686238f5ef2839c6cd82f4213f",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "workspace-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "--workspace"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:19:15.576218+00:00",
+      "duration_seconds": 384.579,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-workspace-tests.log",
+      "log_sha256": "edf29068a6ec791484e4d7950e8306d9e2e32988c8cd90cdf851bcbd75dd60e0",
+      "tests_passed": 7910,
+      "tests_ignored": 98
+    },
+    {
+      "name": "rustdoc",
+      "argv": [
+        "cargo",
+        "doc",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--no-deps"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:25:40.156840+00:00",
+      "duration_seconds": 34.3,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-rustdoc.log",
+      "log_sha256": "66591a006f7ba0cb7bcc167e0c6db060f2fd8cf2a62a45582b0fbb326b878183",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "ci-policy",
+      "argv": [
+        "python3",
+        "scripts/ci-policy.py"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:26:14.456743+00:00",
+      "duration_seconds": 0.058,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-ci-policy.log",
+      "log_sha256": "c5398f3625b50324a5fffeb4a1d2994cb75905b5da8af1f7a92ea21edd605601",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    },
+    {
+      "name": "release-tests",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_release*.py"
+      ],
+      "revision": "80bd8c451b307e45cce89bead4b6a3da4cbe6619",
+      "started_utc": "2026-10-03T18:26:14.514854+00:00",
+      "duration_seconds": 0.349,
+      "exit_code": 0,
+      "result": "PASS",
+      "log": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/mempool-frontier-v2-gate-release-tests.log",
+      "log_sha256": "46b15601862cc71fa3237a737a7bbb66cc1c00973e08a7541e840879c48578ba",
+      "tests_passed": 0,
+      "tests_ignored": 0
+    }
+  ],
+  "complete": true,
+  "result": "PASS"
+}

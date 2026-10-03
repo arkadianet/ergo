@@ -1,0 +1,727 @@
+[
+  {
+    "path": "Cargo.toml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "68327c7b54408a673c3804486cad85691b115ee82c675907da57f62fe539c9fa",
+    "lines": 157,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": "rust-toolchain.toml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "d7242b5484be792b55defffc92a7124b049ac64d9d23713ab1b243543a4209a5",
+    "lines": 7,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": "deny.toml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "268c43c5853223e6bfc357008c7f8277b95128cb0ccf3ce2be7cc8686569eb81",
+    "lines": 67,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".github/workflows/release.yml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "3628cd659eeacf1e45e4cf2345cea8568adcedddf75f8be6dd559b70ad9a8256",
+    "lines": 170,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".github/workflows/cost-ledger.yml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "06a7b710ccb05f26e599a96c4a080b86faabcc8c5882e3378e0f5fe2e3e9eb93",
+    "lines": 80,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "e6420e5f3593c82d02de2530d712d0d5a3b5fd4467e95f7ab8b0cd179fca4ee1",
+    "lines": 316,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".github/workflows/fuzz.yml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "e2955ccbffd56d7fd61cb3732f61735cb9256a9fe820122b73486f92876cb06c",
+    "lines": 356,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": "scripts/ci-shards.py",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "945e42686c0df957c42700a0a71fc85710b48d9df32af37dfa9bf2416b23a43f",
+    "lines": 146,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".coderabbit.yaml",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "587f36e8e8349759838ba945761e49df7c295a893da5dedbf06e8dac86d6a698",
+    "lines": 10,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".gitignore",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "697be95f064ebcff4e24ec8c3ee1942e75f0db9c2c5758fb7039f0062a733b5c",
+    "lines": 83,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": ".gitattributes",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "8d54c19f0eb70b8e38adeb321f927f63de51fcafb68b244694c2fb3a086f8a9b",
+    "lines": 20,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03; reusable for workspace integration",
+    "notes": "Root inspected CI/release scope, coverage graph, feature gates and dependency rationale; overall readiness remains subject to workspace integration"
+  },
+  {
+    "path": "docs/audit-prompts/COMMON.md",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "c9340fd89bf0bf99bec8aad728cd23086f3ac3e2672cce85109b7b5ec043c2b1",
+    "lines": 408,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03",
+    "notes": "Relevant contracts reviewed; validation file ownership remains with independent crate audit. Testnet launch-source discrepancy and profile-sensitive custom voting arithmetic require pinned reference/call path proof."
+  },
+  {
+    "path": "docs/audit-prompts/WORKSPACE.md",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "c493fae4326ff4c70b4dc55e93fea90771e8a52828933d5a6523715b0b232ed0",
+    "lines": 149,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03",
+    "notes": "Relevant contracts reviewed; validation file ownership remains with independent crate audit. Testnet launch-source discrepancy and profile-sensitive custom voting arithmetic require pinned reference/call path proof."
+  },
+  {
+    "path": "ergo-validation/src/active_params/launch.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "189f4308cdd90d5cee5e68315167314d7accda140e2f091aaad0f4783bec6b2b",
+    "lines": 138,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03",
+    "notes": "Relevant contracts reviewed; validation file ownership remains with independent crate audit. Testnet launch-source discrepancy and profile-sensitive custom voting arithmetic require pinned reference/call path proof."
+  },
+  {
+    "path": "ergo-validation/src/voting/recompute/update_fork.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "1e0359825faf7df6fd83d56217cb7fdcc1563e58090f510e276cc41bc4ddeb8e",
+    "lines": 402,
+    "scope": "all authored text",
+    "evidence": "Complete untruncated source output and source review on 2026-10-03",
+    "notes": "Relevant contracts reviewed; validation file ownership remains with independent crate audit. Testnet launch-source discrepancy and profile-sensitive custom voting arithmetic require pinned reference/call path proof."
+  },
+  {
+    "path": "ergo-difftest/src/bin/difftest.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "d58ba099e95c8bbff6619280eb5ed61176dfd2ce0e6e3d08a668fcf310e8f603",
+    "scope": "specific finding branches only",
+    "evidence": "Independent source challenge of difftest report leads; no new runtime demonstration",
+    "notes": "Selected run_check_canonical(304-340) and minimize_and_file(710-780) branches: rejection returns success; only EOF/BrokenPipe mark minimization error fatal; other errors skip filing. Full authored read belongs to difftest auditor."
+  },
+  {
+    "path": "scripts/difftest-guard.sh",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "db8d49e73c10f4e06ed422d06e299de96f54043b721bdf5f66adf52789a514dc",
+    "scope": "specific finding branches only",
+    "evidence": "Independent source challenge of difftest report leads; no new runtime demonstration",
+    "notes": "Selected liveness(216-260) and final verdict branches: permits exit1; checks query counts/error marker; final pass depends on filed pending records. Need complete divergence-to-record accounting to avoid false success. Full authored read belongs to difftest/workspace auditor."
+  },
+  {
+    "path": "scripts/cost-ledger.py",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "c865ed4cb88ad135e5e3926071c64c11933fd227068dc258957266d4c7b31bf3",
+    "lines": 477,
+    "scope": "all authored text, including every selftest",
+    "evidence": "Untruncated full-file outputs and source reasoning; shared checks already passed; new strict evidence absence observation saved separately",
+    "notes": "cost-ledger: strict release mode accepts absent runtime results; event outcomes require exact one ok when present, but absence bypasses and no revision/features provenance. diff: additions/deletions/formula/registry identity checked against audited denominator; ordinary methods do not compare costKind except their name/versions (constants verifier/workflow owns numeric authority). L4: current hardcoded reference paths/tool metadata collected even manifest-only; no mutation executed."
+  },
+  {
+    "path": "scripts/cost-ledger-diff.py",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "b6976d3e73cd6a95f04d328aacf93391a4342ec2f8c552709a31630f0e910f8d",
+    "lines": 352,
+    "scope": "all authored text, including every selftest",
+    "evidence": "Untruncated full-file outputs and source reasoning; shared checks already passed; new strict evidence absence observation saved separately",
+    "notes": "cost-ledger: strict release mode accepts absent runtime results; event outcomes require exact one ok when present, but absence bypasses and no revision/features provenance. diff: additions/deletions/formula/registry identity checked against audited denominator; ordinary methods do not compare costKind except their name/versions (constants verifier/workflow owns numeric authority). L4: current hardcoded reference paths/tool metadata collected even manifest-only; no mutation executed."
+  },
+  {
+    "path": "scripts/l4-results-manifest.py",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "91275192c11f3d454adeb2d89bba1b4b08b73a5a4be067bf781c63abb528817d",
+    "lines": 196,
+    "scope": "all authored text, including every selftest",
+    "evidence": "Untruncated full-file outputs and source reasoning; shared checks already passed; new strict evidence absence observation saved separately",
+    "notes": "cost-ledger: strict release mode accepts absent runtime results; event outcomes require exact one ok when present, but absence bypasses and no revision/features provenance. diff: additions/deletions/formula/registry identity checked against audited denominator; ordinary methods do not compare costKind except their name/versions (constants verifier/workflow owns numeric authority). L4: current hardcoded reference paths/tool metadata collected even manifest-only; no mutation executed."
+  },
+  {
+    "path": "ergo-node/src/config/toml_sections.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "36ed75ea930696595719681754aa1dbba0493985bf950a75fd4985827d7718d8",
+    "scope": "config-specific source branches only",
+    "evidence": "Independent source challenge; no config payload/runtime request generated",
+    "notes": "Selected API/TomlConfig fields: missing script knob and no unknown-field rejection in API/security. Full node audit remains owner."
+  },
+  {
+    "path": "ergo-api/src/server/mod.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "ab39564a70153ced9f317990aba5c19e592a09596426b3d5af3fc0fcb2d8919c",
+    "scope": "config-specific source branches only",
+    "evidence": "Independent source challenge; no config payload/runtime request generated",
+    "notes": "Selected script construction990-1020: always default ScriptConfig; advertised TOML auth switch absent in wiring."
+  },
+  {
+    "path": "ergo-api/src/v1/script/mod.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "77494a5b8512a8b89e38c409bad746944ea10b721a9cfecaa69556d66abb6f9c",
+    "scope": "config-specific source branches only",
+    "evidence": "Independent source challenge; no config payload/runtime request generated",
+    "notes": "Selected docs/config/default1-105: advertised operator auth knob, bounded public default and per-request max-cost semantics. Full API audit remains owner."
+  },
+  {
+    "path": "ergo-node/src/decode_stack.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "a399581c4687df08154753868ff4bdf7fea240b087a9427f2b7eaf726e24bbb5",
+    "lines": 2,
+    "scope": "all authored text/comments/tests",
+    "evidence": "Complete untruncated source read on2026-10-03; existing package/workspace tests cover decode tests, no duplicate runtime test",
+    "notes": "8MiB shared constant; regression threads test53accepted/400+rejected nested boxes/registers at4MiB, notmaximum-input/platform proof"
+  },
+  {
+    "path": "ergo-ser/src/decode_stack.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "4cd3e91eea5df6ec934f2f6339d219c2e3a8ac934da1cdb4f168e01c15a6ae81",
+    "lines": 184,
+    "scope": "all authored text/comments/tests",
+    "evidence": "Complete untruncated source read on2026-10-03; existing package/workspace tests cover decode tests, no duplicate runtime test",
+    "notes": "8MiB shared constant; regression threads test53accepted/400+rejected nested boxes/registers at4MiB, notmaximum-input/platform proof"
+  },
+  {
+    "path": "ergo-node/src/main.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "da4de7d5315517f908c5bf65efd2d209b9c86af70ed42ef6bbc2a09a02c38d0e",
+    "scope": "specific source seam portions",
+    "evidence": "Selected source proof; no production request/reproduction",
+    "notes": "PARTIAL: source17/35/47 routes startup/globalRayon/Tokio to8MiB; full-output request was aggregate-truncated, no full-read claim."
+  },
+  {
+    "path": "ergo-rest-json/src/decode.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "1f7fbe8ed5e974b923eb7cbb75da7e73ca99c6c081c90ba5d5e43c43779a55e5",
+    "scope": "specific source seam portions",
+    "evidence": "Selected source proof; no production request/reproduction",
+    "notes": "PARTIAL:183\u2013221 Preserve output path from_trusted_raw_parts;153checkedSpendingProof differs; independent boxed ID/JVM authority gap with serializer owner."
+  },
+  {
+    "path": "ergo-node/src/node/wallet_bridge/commands/scan.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "7ccbfc3e1583545a243f71f3c25c2d9794c694f4e19d8b2d52456b6e0f2d8bc4",
+    "scope": "specific source seam portions",
+    "evidence": "Selected source proof; no production request/reproduction",
+    "notes": "PARTIAL:500\u2013562 wallet add_box Preserve parses, computes box_id and serializes for storage; fullnodeowner later."
+  },
+  {
+    "path": "ergo-state/src/store/mod.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "75059915bab5e061f18d152439a52a1fd5ef89707f69d48f7b54c205439b2dae",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected894-930,1260-1450,3700-3738: worker arena watermark capture; installation metadata/tree replacement; per-apply AllocMeta serialization."
+  },
+  {
+    "path": "ergo-state/src/store/open.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "fc0c33963d409ae9480dddf5056eb2060904375cc85bf4b838093d49261ca763",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected95-175: existing allocator row is reused, fallbackscan only absentrow; AvlTree restored withthatcounter."
+  },
+  {
+    "path": "ergo-state/src/avl/arena.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "3becf61c1b036473746dd41674910edce8f2fbe747496edff1bbf1cbd6db3ca7",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected430-505,790-838,885-936: fresh CachedDiskArena owns newArc watermark0; PendingJob uses it forpins/release/readsession."
+  },
+  {
+    "path": "ergo-state/src/avl/tree.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "850b11e56c6436d5d688cd7969a0b3349e5350ff87ced8a6d81d692fd7c39f3e",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected200-250,482-507: restored tree usespassedcounter; alloc storesatcounter without collisioncheck."
+  },
+  {
+    "path": "ergo-node/src/node/boot/sync_setup.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "dcad4e220859fba6a0b0cd0f61b3ee7fba8df35a1fe54ef4d4b5c86aa61feceb",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected310-355: UTXO production setup capturesarena handleinpipelinebefore actionloop."
+  },
+  {
+    "path": "ergo-node/src/node/sync_tick.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "a8e7ac5cd2ef682990eb963859b2117fc3bf6a5af9d9410bfbb7fac5e098579d",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected1140-1275: snapshotinstall successupdatesSyncState/sentinels/identity/recovery; no subsequentpipeline rebindin installsuccessbranch."
+  },
+  {
+    "path": "ergo-state/src/header_store.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "aad28d591b97234cf369d92539797493c4ae5b463873add1d0eca2d4189b9475",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no concurrent reproduction",
+    "notes": "Selected630-690,769-825: best-header batches/nonbatch replace wholeCHAIN_STATE_META snapshot."
+  },
+  {
+    "path": "ergo-state/src/persist.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "84366b2bbc7ed9eeef6717026ce1506a95eccbbd5c7ba945dc55e6e204bbb5b9",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no concurrent reproduction",
+    "notes": "Selected923-945: last asyncjob replaces wholeCHAIN_STATE_META from earliercapturedbytes."
+  },
+  {
+    "path": "ergo-state/src/store/open.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "fc0c33963d409ae9480dddf5056eb2060904375cc85bf4b838093d49261ca763",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no concurrent reproduction",
+    "notes": "Additionalselected186-247: presentchainstate recoveredas-is; derivesfrom STATE_META onlywhenrowabsent."
+  },
+  {
+    "path": "ergo-state/src/reader.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "b9a243df5dedade667f12d3426deb55caa47075d71f3a43f767bee78b8303445",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected748-787: lookup_box_in_txn returnsOkNone immediatelyfor NULL_NODE; rootreadfrom persistedStateMeta."
+  },
+  {
+    "path": "ergo-state/src/store/snapshot/mod.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "fa2264c4d59350ad72aaa7c52773ad4f69cf6609c6d77905a704712480712607",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection; no custom demonstration",
+    "notes": "Selected402-438 and searchscope: snapshotboxlookup delegates shared reader; hydrate_tree rejects NULL root withInternalInvariant. Earlier draft iteration wording corrected after inspecting exact branch; no fullsnapshotiteration claim."
+  },
+  {
+    "path": "ergo-sigma/src/evaluator/opcodes/method_call/coll.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "b72137c7b7cdddfe7ce0fd47be408263a9a9b2656486fde343e695f3925eafbd",
+    "scope": "specific source seam portions",
+    "evidence": "Independent selected source inspection, no custom demonstration",
+    "notes": "Selected344-439: CollGeneric/CollLegacyPair normalization examines onlyfirstbytesfield andlen2 then filter_map drains tuples rejecting nonInt/Long second orbytearray length!=32. Reachable serializedscript/Scala result proof awaitsowner; no fullconsensusverdictclaim.",
+    "additional_ranges": "265-315,406-455",
+    "additional_notes": "SIG003: empty flatMap static mapper inference omits ValUse, and empty receiver falls back to CollBytes. Existing SIG001 selected-source review retained; no new execution."
+  },
+  {
+    "path": "ergo-validation/src/block/layering.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "e15ac6e59274b21c343f7d710bcf7f4dd82b004f92378567c9a7a539e2729b77",
+    "lines": 409,
+    "reviewed_ranges": [
+      [
+        1,
+        144
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Selected complete layering production routine only; future producer suppression independently corroborated, Scala/provider semantics challenged.",
+    "reviewed_at": "2026-10-03T12:10:46.739054+00:00"
+  },
+  {
+    "path": "ergo-validation/src/block/validate.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "fd3816d74df6b6853df7382ba18c3541d0a9781456460ecaa46180e24ec8dc6b",
+    "lines": 840,
+    "reviewed_ranges": [
+      [
+        545,
+        715
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Layer input resolution, per-layer validation and overlay commits; no actual fullblock replay.",
+    "reviewed_at": "2026-10-03T12:10:46.739280+00:00"
+  },
+  {
+    "path": "ergo-validation/src/block/overlay.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "041444e435cc875d1f7f31d096e7c97f2d9a68d49e8a4a7e244244492d13ca59",
+    "lines": 93,
+    "reviewed_ranges": [
+      [
+        1,
+        110
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Input/data lookup contract and comments independently checked against Scala all-output callback; complete owner audit remains separate.",
+    "reviewed_at": "2026-10-03T12:10:46.739362+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/ergo-scala/src/main/scala/org/ergoplatform/nodeView/state/ErgoState.scala",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "a0463a6b524b22a9e532871d524e8a3e090f298ebc4cd816b281c8da6aae40c2",
+    "lines": 310,
+    "reviewed_ranges": [
+      [
+        66,
+        205
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Pinnedneighbor6.0.5 callback transaction processing and net changes; not entire class.",
+    "reviewed_at": "2026-10-03T12:10:46.739443+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/ergo-scala/src/main/scala/org/ergoplatform/nodeView/state/UtxoState.scala",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "4bc8c1b8f9a49087f50cbd3e45f54bba1e83482f85dde396db13ad89e9b45e6e",
+    "lines": 326,
+    "reviewed_ranges": [
+      [
+        52,
+        97
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "All block outputs are available to transaction-validation lookup; final UTXO operations remain separately ordered.",
+    "reviewed_at": "2026-10-03T12:10:46.739523+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/ergo-scala/src/main/scala/org/ergoplatform/nodeView/state/DigestState.scala",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "7b7eadafb4f368271f011d59efbb48b909e82699566551283eaf5056e51e79c5",
+    "lines": 215,
+    "reviewed_ranges": [
+      [
+        36,
+        63
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "All block outputs plus proof boxes supplied before transaction validation.",
+    "reviewed_at": "2026-10-03T12:10:46.739590+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/scala-builds/.work-a1bd938e/sigma/data/shared/src/main/scala/org/ergoplatform/ErgoBox.scala",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "224c120027f94330f2e048cf2b91ca665ce0037ef1b137009a91e660a8141130",
+    "lines": 227,
+    "reviewed_ranges": [
+      [
+        1,
+        118
+      ],
+      [
+        188,
+        232
+      ]
+    ],
+    "scope": "selected source ranges only",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Source hash matches v6.0.6; whole-wire cached identity and new-box canonical identity independently executed on existing fixture.",
+    "reviewed_at": "2026-10-03T12:10:46.739665+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/scala-builds/.work-a1bd938e/sigma/data/shared/src/main/scala/sigma/ast/JitCost.scala",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "973ab7c7ae1b57fa0d434cd38692037ac807b1cb3a3d3044b9e419ef46b895d1",
+    "lines": 37,
+    "reviewed_ranges": [
+      [
+        1,
+        37
+      ]
+    ],
+    "scope": "all authored text",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Pinned6.0.6 checked multiply/add; no Rust-specific dynamic-cap overflow inferred.",
+    "reviewed_at": "2026-10-03T12:10:46.739730+00:00"
+  },
+  {
+    "path": "/home/arkadias/Coding/remote/scala-builds/.work-a1bd938e/sigma/interpreter/shared/src/main/scala/sigmastate/interpreter/CostAccumulator.scala",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "17aac17727f6ca6278c8a26e35ceca453a13799e7e4e0e0243bf2a27b1c0de23",
+    "lines": 79,
+    "reviewed_ranges": [
+      [
+        1,
+        79
+      ]
+    ],
+    "scope": "all authored text",
+    "evidence": "Untruncated selected output/source review; source comments assessed against ordinary caller/reference contracts",
+    "notes": "Pinned6.0.6 add before cap; static literal cap cannot bound arbitrary pending charge.",
+    "reviewed_at": "2026-10-03T12:10:46.739792+00:00"
+  },
+  {
+    "path": "ergo-compiler/src/typer/assign/apply.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "6d085e270327603abb6b2a1174344b868cb7af380f57ab230233526314cb1f95",
+    "lines": 845,
+    "reviewed_ranges": [
+      [
+        60,
+        114
+      ],
+      [
+        320,
+        372
+      ],
+      [
+        585,
+        648
+      ],
+      [
+        725,
+        775
+      ]
+    ],
+    "scope": "EC001 numeric helper guard/source call order independent corroboration",
+    "evidence": "Untruncated selected tool source output",
+    "notes": "BigInt included in parts then reaches unreachable before type unification; no custom runtime/Scala/fulltx test. Not whole-file root coverage.",
+    "reviewed_at": "2026-10-03T13:22:19.322989+00:00"
+  },
+  {
+    "path": "ergo-p2p/src/address_book/codec.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "76c6030c130bf7b61e95954d7c7ed52615d07ed125b29ee7d1299bfa5cb487dc",
+    "lines": 293,
+    "reviewed_ranges": [
+      [
+        100,
+        125
+      ],
+      [
+        222,
+        250
+      ]
+    ],
+    "scope": "EP2P004 stored-time units and unchecked SystemTime add",
+    "evidence": "Untruncated selected source output",
+    "notes": "u64 seconds, not milliseconds; native representability precondition retained. Not whole file root coverage or corruption experiment.",
+    "reviewed_at": "2026-10-03T13:34:13.286946+00:00"
+  },
+  {
+    "path": "ergo-mempool/src/mempool.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "7fabd6794d6c412d4414bdac045ed7eac545d322f2a49a0165a78a7397275249",
+    "lines": 1946,
+    "reviewed_ranges": [
+      [
+        275,
+        405
+      ],
+      [
+        648,
+        688
+      ],
+      [
+        795,
+        884
+      ]
+    ],
+    "scope": "Independent Mempool duplicate-charge/package-outcome production caller corroboration",
+    "evidence": "Untruncated selected source output and exact source hashes",
+    "notes": "API directly uses process/check; packageactions flushed even originalRejected outcome. PeerDAAccept gates path. No custom replay/load/exhaustion/fulltx test; not whole-file root coverage.",
+    "reviewed_at": "2026-10-03T13:46:24.714613+00:00"
+  },
+  {
+    "path": "ergo-mempool/src/admission/mod.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "03a4537bd57f15b23dbc4b03451633f24990773f99f63b8e226a83d7da399bf4",
+    "lines": 799,
+    "reviewed_ranges": [
+      [
+        315,
+        410
+      ]
+    ],
+    "scope": "Independent Mempool duplicate-charge/package-outcome production caller corroboration",
+    "evidence": "Untruncated selected source output and exact source hashes",
+    "notes": "API directly uses process/check; packageactions flushed even originalRejected outcome. PeerDAAccept gates path. No custom replay/load/exhaustion/fulltx test; not whole-file root coverage.",
+    "reviewed_at": "2026-10-03T13:46:24.714699+00:00"
+  },
+  {
+    "path": "ergo-node/src/node/admission.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "4cfabf3af08235e26635af34aec167affbb015b8878aa1c0e91640bc0ab97f14",
+    "lines": 397,
+    "reviewed_ranges": [
+      [
+        1,
+        272
+      ]
+    ],
+    "scope": "Independent Mempool duplicate-charge/package-outcome production caller corroboration",
+    "evidence": "Untruncated selected source output and exact source hashes",
+    "notes": "API directly uses process/check; packageactions flushed even originalRejected outcome. PeerDAAccept gates path. No custom replay/load/exhaustion/fulltx test; not whole-file root coverage.",
+    "reviewed_at": "2026-10-03T13:46:24.714753+00:00"
+  },
+  {
+    "path": "ergo-node/src/node/messaging/dispatch.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "73f1e06a034e07a396149ef4bcb7ea0cde71eda28da72fdfe273b790082281e1",
+    "lines": 1039,
+    "reviewed_ranges": [
+      [
+        713,
+        768
+      ],
+      [
+        960,
+        1080
+      ]
+    ],
+    "scope": "Independent Mempool duplicate-charge/package-outcome production caller corroboration",
+    "evidence": "Untruncated selected source output and exact source hashes",
+    "notes": "API directly uses process/check; packageactions flushed even originalRejected outcome. PeerDAAccept gates path. No custom replay/load/exhaustion/fulltx test; not whole-file root coverage.",
+    "reviewed_at": "2026-10-03T13:46:24.714834+00:00"
+  },
+  {
+    "path": "ergo-sigma/src/evaluator/opcodes/property_call.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "36a18f153009ce484885fb43daa1e70dd9a478de455bde22bd29918bfe6b1dcd",
+    "scope": "Selected source ranges only",
+    "evidence": "Untruncated selected source output independently inspected by root",
+    "additional_ranges": "925-990",
+    "additional_notes": "SIG002: reverse preserves five primitive carriers and uses CollGeneric for SigmaProp; no new execution."
+  },
+  {
+    "path": "ergo-sigma/src/evaluator/opcodes/sigma.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "697d4ea95a7ccbd346f1982a806cd6337e195c38fa54ebf7fe4cafcd6353fb96",
+    "scope": "Selected source ranges only",
+    "evidence": "Untruncated selected source output independently inspected by root",
+    "additional_ranges": "430-486",
+    "additional_notes": "SIG002: AtLeast accepts CollSigmaProp only and rejects the generic carrier; no full-transaction/proof result asserted."
+  },
+  {
+    "path": "ergo-sigma/src/evaluator/cost.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "9074cdf1962eedf64a6327506957261dfaa6b6bb756313c5d792f0e20904036c",
+    "scope": "Selected source ranges only",
+    "evidence": "Untruncated selected source output independently inspected by root",
+    "additional_ranges": "450-510",
+    "additional_notes": "SIG002: descriptor equality item supports generic/legacy/box/header carriers but omits CollSigmaProp; selected-source corroboration only."
+  },
+  {
+    "path": "ergo-difftest/src/surfaces.rs",
+    "reviewer": "root",
+    "status": "PARTIAL_READ",
+    "sha256": "0e8a3474a84602defa4d2e1a7b85df4415872b3c670fbb468c80ca77064c83a4",
+    "scope": "Selected source ranges only",
+    "evidence": "Untruncated selected source output independently inspected by root",
+    "additional_ranges": "35-205,274-337,700-780,1285-1370",
+    "additional_notes": "Selected fixed-point and historical regression boundaries; initial prefix decoding has no EOF check. Full read belongs to crate reviewer; root did not read all 1490 lines."
+  },
+  {
+    "path": "ergo-difftest/src/fuzz.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "f4763b5fb98cde10791d204f9f7067ea9554e5ebfc58e600023b607417bb8c0b",
+    "scope": "All authored text",
+    "evidence": "Complete untruncated source output inspected by root; parent existing tests reused, no new execution"
+  },
+  {
+    "path": "ergo-difftest/tests/it/nightly_fuzz_regressions.rs",
+    "reviewer": "root",
+    "status": "FULL_READ",
+    "sha256": "0031662c06c0095ac6ed45ea624f44ad01a9b760306d674e05787210202b8daa",
+    "scope": "All authored text",
+    "evidence": "Complete untruncated source output inspected by root; parent existing tests reused, no new execution"
+  }
+]

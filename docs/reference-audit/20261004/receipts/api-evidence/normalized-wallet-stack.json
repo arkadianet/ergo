@@ -1,0 +1,25 @@
+[
+  {
+    "branch": "codex/reference-audit-20261004-node-derivation-v2",
+    "published_head": "59a63d39399c5c7971df5a77d6939f564a5b4832",
+    "executed_head": "def9e2403b110edccb53bd7a564349346ef7f2c2",
+    "parent": "705dd19637f4885d09b80362270f89e61fda8d1b",
+    "tree": "50891b356930e1f1a6e57bff8bc2b59bc2d22955",
+    "body": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-derivation-v2-pr-body.md"
+  },
+  {
+    "branch": "codex/reference-audit-20261004-node-rescan-v2",
+    "published_head": "eaf4f1fa631fa04966825189a6a16983c435693d",
+    "executed_head": "a55b270d39cb4d34224a24b84c3846799fb403e9",
+    "parent": "59a63d39399c5c7971df5a77d6939f564a5b4832",
+    "tree": "5806132157a22e89df5b23abaf787ff2c96c281f",
+    "body": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/api-evidence/node-rescan-v2-pr-body.md"
+  },
+  {
+    "branch": "codex/reference-audit-20261004-node-wallet-writes-v2",
+    "published_head": "d9a6063fb9f3d6d4bb05e22ed48d6397df9ac263",
+    "executed_head": "8ab99c994c3b6824c2614cf4764941c2b08ff1ec",
+    "parent": "eaf4f1fa631fa04966825189a6a16983c435693d",
+    "tree": "32e1d481f0a579d98f41046efaecd64aeabeb29f"
+  }
+]

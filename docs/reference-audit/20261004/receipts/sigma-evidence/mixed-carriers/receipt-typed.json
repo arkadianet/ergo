@@ -1,0 +1,54 @@
+{
+  "command": [
+    "/home/arkadias/.local/kdex-toolchain/bin/scala-cli",
+    "run",
+    "Capture.scala",
+    "ErgoSerdeOracle.scala",
+    "--server=false",
+    "--jvm",
+    "system",
+    "--main-class",
+    "AuditMixedCollectionProbe"
+  ],
+  "cwd": "/home/arkadias/Coding/remote/ergo/audit/remediation/20261004-audit/sigma-evidence/mixed-carriers",
+  "start": "2026-10-03T17:14:12.420552+00:00",
+  "elapsed_seconds": 11.397304569021799,
+  "exit_code": 0,
+  "environment_overrides": {
+    "JAVA_HOME": "/home/arkadias/.local/kdex-toolchain/amazon-corretto-17.0.17.10.1-linux-x64",
+    "COURSIER_REPOSITORIES": "ivy2Local|https://repo.maven.apache.org/maven2"
+  },
+  "PATH_prefix": "/home/arkadias/.local/kdex-toolchain/bin",
+  "artifacts": [
+    {
+      "path": "Capture.scala",
+      "sha256": "2254f25bed01189b39484093d8c0d7c2ae993c122c31b355dd4fac29e9dd9781",
+      "bytes": 3416
+    },
+    {
+      "path": "ErgoSerdeOracle.scala",
+      "sha256": "7035ee2453e49c171951dedb192458034e4b276bf603a7f8d3746f6a7083ae88",
+      "bytes": 22528
+    },
+    {
+      "path": "scala-typed.stdout",
+      "sha256": "7822f0a2ef1186b8e86c9caf379af4ed37a54138e514931de500103c99733e84",
+      "bytes": 4466
+    },
+    {
+      "path": "scala-typed.stderr",
+      "sha256": "fd31af1fdc0608c0f01f0320beca7220bc0c9938cf9b355b3f28a46fd5373486",
+      "bytes": 4268
+    },
+    {
+      "path": "ergo-core_2.12.jar",
+      "sha256": "382da71e318f662da713dc7a6542b0e4527e7d035aaa65aea97545d85f9ece9f",
+      "bytes": 989547
+    },
+    {
+      "path": "sigma-state_2.12-6.0.6.jar",
+      "sha256": "91423ee0dc5857ee53568e655fcc77abdc36f67f735897eefee576a4e37f1898",
+      "bytes": 6251429
+    }
+  ]
+}

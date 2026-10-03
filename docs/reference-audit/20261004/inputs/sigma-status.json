@@ -1,0 +1,1051 @@
+{
+  "lane": "sigma",
+  "base_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+  "worktree": "/home/arkadias/Coding/worktrees/ergo-reference-audit-20261004-sigma",
+  "findings": [
+    {
+      "crate": "ergo-sigma",
+      "original_id": "SIG001",
+      "original_title": "SIG001 \u2014 valid flatMap pairs are silently discarded by a token adapter",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma.md",
+      "status": "fixed",
+      "revalidation": "FRESH_PINNED_MIXED_CARRIER_COMPARISON_AND_FULL_GATE_PASS",
+      "current_commit": "1387561821eac701aa6639ec240f80e0211a50bd",
+      "pr_group": "04-sigma-mixed-collection-carriers",
+      "evidence": [
+        "sigma-evidence/group01-before-runtime.json",
+        "sigma-evidence/group01-after.json",
+        "sigma-evidence/group01-gate.json",
+        "sigma-evidence/group01-test-counts.json",
+        "test-vectors/ergo-sigma/collection-types/cases.json",
+        "sigma-evidence/mixed-carriers/receipt-typed.json",
+        "sigma-evidence/group04-before.json",
+        "sigma-evidence/group04-after.json"
+      ],
+      "fix_commit": "1387561821eac701aa6639ec240f80e0211a50bd",
+      "limits": "Original homogeneous pairs and six fresh ordinary mixed-carrier contracts now match independent6.0.6 reduction/cost/verification. No full transaction or chain occurrence claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/498",
+      "pr_head": "codex/reference-audit-20261004-sigma-collections",
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Original homogeneous pairs and five previously differing mixed-carrier cases corrected; all six fresh mixed cases and original seven pass independent-reference regressions and the full gate.",
+      "fix_commits": [
+        "9e187e88298c8082cef50cab69672ecb17419dea",
+        "1387561821eac701aa6639ec240f80e0211a50bd"
+      ],
+      "follow_up_evidence": [
+        "sigma-evidence/group04-ready.json",
+        "sigma-evidence/group04-gate.json"
+      ],
+      "draft_prs": [
+        "https://github.com/arkadianet/ergo/pull/498",
+        "https://github.com/arkadianet/ergo/pull/506"
+      ],
+      "follow_up_pr": "https://github.com/arkadianet/ergo/pull/506"
+    },
+    {
+      "crate": "ergo-sigma",
+      "original_id": "SIG002",
+      "original_title": "SIG002 \u2014 reverse loses the SigmaProp collection carrier required by consumers",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_BASELINE_REPRODUCED_AND_PINNED_REFERENCE_REGRESSIONS_PASS",
+      "current_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
+      "pr_group": "01-sigma-collection-types",
+      "evidence": [
+        "sigma-evidence/group01-before-runtime.json",
+        "sigma-evidence/group01-after.json",
+        "sigma-evidence/group01-gate.json",
+        "sigma-evidence/group01-test-counts.json",
+        "test-vectors/ergo-sigma/collection-types/cases.json"
+      ],
+      "fix_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
+      "limits": "Seven independently captured sigma-state6.0.6 scripts, exact reduction costs and Rust public spending-proof entry point. No fresh Scala recapture, full transaction, arbitrary proof or chain-occurrence claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/498",
+      "pr_head": "codex/reference-audit-20261004-sigma-collections"
+    },
+    {
+      "crate": "ergo-sigma",
+      "original_id": "SIG003",
+      "original_title": "SIG003 \u2014 empty flatMap returning a bound collection is incorrectly typed Byte",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_BASELINE_REPRODUCED_AND_PINNED_REFERENCE_REGRESSIONS_PASS",
+      "current_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
+      "pr_group": "01-sigma-collection-types",
+      "evidence": [
+        "sigma-evidence/group01-before-runtime.json",
+        "sigma-evidence/group01-after.json",
+        "sigma-evidence/group01-gate.json",
+        "sigma-evidence/group01-test-counts.json",
+        "test-vectors/ergo-sigma/collection-types/cases.json"
+      ],
+      "fix_commit": "9e187e88298c8082cef50cab69672ecb17419dea",
+      "limits": "Seven independently captured sigma-state6.0.6 scripts, exact reduction costs and Rust public spending-proof entry point. No fresh Scala recapture, full transaction, arbitrary proof or chain-occurrence claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/498",
+      "pr_head": "codex/reference-audit-20261004-sigma-collections"
+    },
+    {
+      "crate": "ergo-sigma",
+      "original_id": "SIG004",
+      "original_title": "SIG004 \u2014 strict public Rustdoc fails on six links",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-sigma.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_STRICT_WORKSPACE_RUSTDOC_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-doc-repairs",
+      "evidence": [
+        "sigma-evidence/group01-gate-doc.json"
+      ],
+      "limits": "Same strict public documentation gate passed on current source; no documentation source changed in this group.",
+      "prior_fix_commits": [
+        "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "bc3befeae957481456ffff06534be2d823f7c3d6"
+      ]
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-006",
+      "original_title": "ES-006 \u2014 Tree and template helpers use the wrong byte ownership",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_CONFIRMED_AND_PINNED_RECEIVED_BYTE_REFERENCE_REGRESSION_PASS",
+      "current_commit": "6c5d125d78dafdc3222011e67c4870f769d85c24",
+      "pr_group": "02-ser-received-tree-identity",
+      "evidence": [
+        "sigma-evidence/group02-ser.json",
+        "sigma-evidence/group02-gate.json",
+        "test-vectors/scala/tree-cached-identity/cases.json"
+      ],
+      "fix_commit": "6c5d125d78dafdc3222011e67c4870f769d85c24",
+      "limits": "Finite pinned cached-tree/template ownership capture; no full transaction or chain-occurrence proof.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/500",
+      "pr_head": "codex/reference-audit-20261004-ser-tree-identity"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-007",
+      "original_title": "ES-007 \u2014 Checked raw box construction omits canonical serialization",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_CONFIRMED_AND_PINNED_PARSED_WHOLE_VS_NEW_CANDIDATE_REFERENCE_REGRESSIONS_PASS",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": "03-ser-whole-box-identity",
+      "evidence": [
+        "sigma-evidence/group03-ser-final.json",
+        "sigma-evidence/group03-gate-ready.json",
+        "sigma-evidence/group03-test-counts.json",
+        "test-vectors/scala/box-cached-identity/cases.json"
+      ],
+      "fix_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "limits": "Parsed whole cached wire ID and new candidate canonical ID are separately pinned. Direct mutation of value,height,tokens,txId,index and private register replacement invalidates identity; stale metadata cannot hide writer error. No chain or full-tx claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/504",
+      "pr_head": "codex/reference-audit-20261004-ser-box-identity"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-012",
+      "original_title": "ES-012 \u2014 Parsed whole-box identity incorrectly follows canonical reserialization",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_CONFIRMED_AND_PINNED_PARSED_WHOLE_VS_NEW_CANDIDATE_REFERENCE_REGRESSIONS_PASS",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": "03-ser-whole-box-identity",
+      "evidence": [
+        "sigma-evidence/group03-ser-final.json",
+        "sigma-evidence/group03-gate-ready.json",
+        "sigma-evidence/group03-test-counts.json",
+        "test-vectors/scala/box-cached-identity/cases.json"
+      ],
+      "fix_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "limits": "Parsed whole cached wire ID and new candidate canonical ID are separately pinned. Direct mutation of value,height,tokens,txId,index and private register replacement invalidates identity; stale metadata cannot hide writer error. No chain or full-tx claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/504",
+      "pr_head": "codex/reference-audit-20261004-ser-box-identity"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-008",
+      "original_title": "ES-008 \u2014 Public register mutation leaves box serialization and identity stale",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_SOURCE_AND_EXISTING_BOUNDARY_REGRESSIONS_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-serialized-invariant-repairs",
+      "evidence": [
+        "sigma-evidence/group03-gate-ready-test.json"
+      ],
+      "prior_fix_commits": [
+        "4449b727"
+      ],
+      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement."
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-011",
+      "original_title": "ES-011 \u2014 Context-extension writer permits counts the reference refuses",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_SOURCE_AND_EXISTING_BOUNDARY_REGRESSIONS_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-serialized-invariant-repairs",
+      "evidence": [
+        "sigma-evidence/group03-gate-ready-test.json"
+      ],
+      "prior_fix_commits": [
+        "4449b727"
+      ],
+      "limits": "Private registers/atomic setter and signed-byte extension count bound already present at start. Group03 also invalidates newly added received-ID metadata during register replacement."
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-004",
+      "original_title": "ES-004 \u2014 Expression collection writer silently narrows its element count",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_BOUNDED_REGRESSIONS_FULL_GATE_PASS",
+      "current_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "pr_group": "06-ser-construction-allocation-contracts",
+      "evidence": [
+        "sigma-evidence/group06-ready.json",
+        "sigma-evidence/group06-gate.json",
+        "sigma-evidence/group06-ser.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "ConcreteCollection and BoolCollection still narrow length to u16 without a fallible bound; boolean compaction also needs the same bound. Repair queued.",
+      "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "limits": [
+        "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+        "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+        "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+      ],
+      "draft_pr": 518,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-009",
+      "original_title": "ES-009 \u2014 SigmaBoolean reserves a large input-declared child array before reading children",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_BOUNDED_REGRESSIONS_FULL_GATE_PASS",
+      "current_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "pr_group": "06-ser-construction-allocation-contracts",
+      "evidence": [
+        "sigma-evidence/group06-ready.json",
+        "sigma-evidence/group06-gate.json",
+        "sigma-evidence/group06-ser.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Upstream shared SigmaBoolean representation reduces element size; three input-declared with_capacity(count) reservations remain. Repair queued with unchanged child/failure order.",
+      "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "limits": [
+        "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+        "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+        "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+      ],
+      "draft_pr": 518,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-010",
+      "original_title": "ES-010 \u2014 Compiler embeddable override asserts reference acceptance contradicted by the pinned parser",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Public compiler reader still substitutes the activated-version embeddable table for emitted header scope. Existing exact pinned6.0.6 rejection remains relevant; incoming consensus gates must not be speculatively tightened.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-001",
+      "original_title": "ES-001 \u2014 Strict crate Rustdoc fails on 19 links",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_STRICT_WORKSPACE_RUSTDOC_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-doc-repairs",
+      "evidence": [
+        "sigma-evidence/group01-gate-doc.json"
+      ],
+      "limits": "Same strict public documentation gate passed on current source; no documentation source changed in this group.",
+      "prior_fix_commits": [
+        "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "bc3befeae957481456ffff06534be2d823f7c3d6"
+      ]
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-002",
+      "original_title": "ES-002 \u2014 Public comments/codemap misstate byte, boundary and feature contracts",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_BOUNDED_REGRESSIONS_FULL_GATE_PASS",
+      "current_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "pr_group": "06-ser-construction-allocation-contracts",
+      "evidence": [
+        "sigma-evidence/group06-ready.json",
+        "sigma-evidence/group06-gate.json",
+        "sigma-evidence/group06-ser.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Upstream docs repairs fixed several boundaries; remaining canonicality/count-reader/trusted-constructor/feature and codemap claims need precise cleanup. Runtime findings deduplicated separately.",
+      "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "limits": [
+        "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+        "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+        "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+      ],
+      "draft_pr": 518,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-003",
+      "original_title": "ES-003 \u2014 Opcode diagnostics omit nine supported names",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_BOUNDED_REGRESSIONS_FULL_GATE_PASS",
+      "current_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "pr_group": "06-ser-construction-allocation-contracts",
+      "evidence": [
+        "sigma-evidence/group06-ready.json",
+        "sigma-evidence/group06-gate.json",
+        "sigma-evidence/group06-ser.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "opcode_name still omits B6,B7,F2-F8 while payload vocabulary supports them. Diagnostic repair queued.",
+      "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "limits": [
+        "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+        "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+        "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+      ],
+      "draft_pr": 518,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+    },
+    {
+      "crate": "ergo-ser",
+      "original_id": "ES-005",
+      "original_title": "ES-005 \u2014 Batch-proof size sum is unchecked on 32-bit hosts",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_BOUNDED_REGRESSIONS_FULL_GATE_PASS",
+      "current_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "pr_group": "06-ser-construction-allocation-contracts",
+      "evidence": [
+        "sigma-evidence/group06-ready.json",
+        "sigma-evidence/group06-gate.json",
+        "sigma-evidence/group06-ser.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Each multiplication checked; 8+indices_size+proofs_size still uses unchecked additions. Native64-bit tests do not prove32-bit arithmetic. Repair queued.",
+      "fix_commit": "9ae5df91203224189d6bbe989027f2b6b5e5dc02",
+      "limits": [
+        "Native32-bit target not executed; pure checked-size arithmetic helper boundary tests cover products and sums without allocation",
+        "Soft child64 reservation grows as successful children arrive; no allocator/RSS/workload demonstration",
+        "Upstream docs/module-path/diagnostics-manifest repairs retained; this group completes remaining ownership/normalization/boundary prose"
+      ],
+      "draft_pr": 518,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/518"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC001",
+      "original_title": "EC001 \u2014 BigInt constants reach an unreachable argument guard",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "numeric_constant_parts includes BigInt while numeric_const_value ends in unreachable for it; callers use only is_some guards. Structured checked narrowing already exists downstream. Repair queued.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC002",
+      "original_title": "EC002 \u2014 The compiler self-check certifies bytes the pinned reader rejects",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Public compile still emits exact independently rejected header0/type9 fixture and certifies with override. Same cause as ES010; repair requires pinned reference scope, not Rust self-roundtrip closure.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC003",
+      "original_title": "EC003 \u2014 The counter does not prove the documented whole-pipeline depth bound",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Upstream iterative constructed-tree checks credited; remaining discarded pattern/type-parameter recursion now guarded and universal stack guarantee removed.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "prior_fix_commits": [
+        "eecaa671"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC004",
+      "original_title": "EC004 \u2014 Manual live parity mixes v2 expectations with a forced v3 oracle",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Ignored live parity still batches v2 expectations under forced3; normal test handles versions correctly. Fix/live existing-test execution queued.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC005",
+      "original_title": "EC005 \u2014 Public IR/template values omit validation preconditions",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Public manual IR/template fields still depend on validated compiler invariants without precise precondition/Panics docs. Documentation repair queued.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC006",
+      "original_title": "EC006 \u2014 Strict public documentation fails",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_STRICT_WORKSPACE_RUSTDOC_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-doc-repairs",
+      "evidence": [
+        "sigma-evidence/group01-gate-doc.json"
+      ],
+      "limits": "Same strict public documentation gate passed on current source; no documentation source changed in this group.",
+      "prior_fix_commits": [
+        "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "bc3befeae957481456ffff06534be2d823f7c3d6"
+      ]
+    },
+    {
+      "crate": "ergo-compiler",
+      "original_id": "EC007",
+      "original_title": "EC007 \u2014 Current comments and manual test instructions have drifted",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-compiler.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED_FOCUSED_AND_FULL_GATE_PASS",
+      "current_commit": "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e",
+      "pr_group": "05-compiler-validation-contracts",
+      "evidence": [
+        "sigma-evidence/group05-ready.json",
+        "sigma-evidence/group05-gate-02.json",
+        "sigma-evidence/group05-live-typer-02.json",
+        "test-vectors/ergoscript/compiled-reader/cases.json",
+        "sigma-evidence/group05-ready-followup.json",
+        "sigma-evidence/group05-followup-gate.json",
+        "test-vectors/ergoscript/compiled-reader/receipt-folded.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Milestone description and CSE comments still stale; some strict docs/path references repaired upstream. Current test target is it; remaining prose/commands repair queued.",
+      "fix_commit": "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+      "limits": [
+        "Compiler output refusal is explicit local policy; Scala compilation acceptance remains recorded separately",
+        "Representative structural/depth tests are not universal caller-platform stack guarantees",
+        "Independent Sigma measured-runtime embeddable override unchanged"
+      ],
+      "fix_commits": [
+        "3e554a2e21d84dbbbf5d5b5c538b411ace82e164",
+        "ec3d71e6c5716b6e774c8aec34b2e9ff6304e02e"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/516",
+      "pr_head": "codex/reference-audit-20261004-compiler-contracts"
+    },
+    {
+      "crate": "ergo-primitives",
+      "original_id": "EP-001",
+      "original_title": "EP-001 \u2014 Historical cap test cannot detect a future voted-cap change",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-primitives.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+      "pr_group": "07-primitives-contracts-direct-provenance",
+      "evidence": [
+        "sigma-evidence/group07-ready.json",
+        "sigma-evidence/group07-gate.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Corrected source/documentation contracts with ordinary regressions; direct fixture source recovery and independent pinned recapture complete, with historical attribution uncertainty explicit.",
+      "fix_commits": [
+        "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
+      ],
+      "limits": [
+        "Finite standalone probes do not certify live voted caps, individual production charge reachability, or full transaction/chain acceptance.",
+        "Validation-owner parsed dynamic parameter integration remains separate from the corrected leaf assurance contract."
+      ],
+      "draft_pr": 524,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+    },
+    {
+      "crate": "ergo-primitives",
+      "original_id": "EP-002",
+      "original_title": "EP-002 \u2014 Additive-only accumulator contract contradicts deliberate rounding",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-primitives.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+      "pr_group": "07-primitives-contracts-direct-provenance",
+      "evidence": [
+        "sigma-evidence/group07-ready.json",
+        "sigma-evidence/group07-gate.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Corrected source/documentation contracts with ordinary regressions; direct fixture source recovery and independent pinned recapture complete, with historical attribution uncertainty explicit.",
+      "fix_commits": [
+        "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
+      ],
+      "draft_pr": 524,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+    },
+    {
+      "crate": "ergo-primitives",
+      "original_id": "EP-003",
+      "original_title": "EP-003 \u2014 Direct cost fixture metadata names a revision containing different oracle source",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-primitives.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+      "pr_group": "07-primitives-contracts-direct-provenance",
+      "evidence": [
+        "sigma-evidence/group07-ready.json",
+        "sigma-evidence/group07-gate.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Corrected source/documentation contracts with ordinary regressions; direct fixture source recovery and independent pinned recapture complete, with historical attribution uncertainty explicit.",
+      "fix_commits": [
+        "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
+      ],
+      "limits": [
+        "Original historical checkout clean/dirty and execution revision remain UNKNOWN; recovered matching source revision is explicitly not relabeled as execution provenance.",
+        "Finite standalone probes do not certify live voted caps, individual production charge reachability, or full transaction/chain acceptance."
+      ],
+      "draft_pr": 524,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+    },
+    {
+      "crate": "ergo-primitives",
+      "original_id": "EP-004",
+      "original_title": "EP-004 \u2014 Group sideband docs promise raw wire bytes but the parser records normalized identity",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-primitives.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b",
+      "pr_group": "07-primitives-contracts-direct-provenance",
+      "evidence": [
+        "sigma-evidence/group07-ready.json",
+        "sigma-evidence/group07-gate.json"
+      ],
+      "resolution_stage": "draft_open",
+      "current_assessment": "Corrected source/documentation contracts with ordinary regressions; direct fixture source recovery and independent pinned recapture complete, with historical attribution uncertainty explicit.",
+      "fix_commits": [
+        "6f8de0fdd76a717195b3f5e8b0bad9ca3a69081b"
+      ],
+      "draft_pr": 524,
+      "draft_url": "https://github.com/arkadianet/ergo/pull/524"
+    },
+    {
+      "crate": "ergo-difftest-fuzz",
+      "original_id": "EFF001",
+      "original_title": "EFF001 \u2014 P2: Native crash signaling remains an important validation gap",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json",
+        "sigma-evidence/native-fuzz/build.json",
+        "sigma-evidence/native-fuzz/fixed-seed-manifest.json",
+        "sigma-evidence/native-fuzz/fixed-seed-replay.json",
+        "sigma-evidence/native-fuzz/native-symbols.json"
+      ],
+      "resolution_stage": "validation_obligation",
+      "current_assessment": "All12 native ASan targets built and68 committed seeds replayed once each PASS under exact CI cargo-fuzz0.13.1/nightly2026-09-30; crash/artifact/minimization/upload assurance remains distinct and unexecuted."
+    },
+    {
+      "crate": "ergo-difftest-fuzz",
+      "original_id": "EFF002",
+      "original_title": "EFF002 \u2014 P2: Floating detached resolution and crash uploads lack a self-contained provenance record",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "Upstream f6973a14/3c075c47 pins/tracks detached lock and exact tool setup with locked metadata/drift check. Crash/corpus uploads still lack self-contained source/toolchain/binary/options/lock provenance; remaining repair queued."
+    },
+    {
+      "crate": "ergo-difftest-fuzz",
+      "original_id": "EFF003",
+      "original_title": "EFF003 \u2014 P3: The detached README misstates current replay/oracle CI coverage",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest-fuzz.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "README still mixes floating quickstart with pinned CI, misstates stable/libFuzzer reason and historical replay/oracle claims. Current source/workflow checked; repair queued."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-01",
+      "original_title": "DIFF-01 \u2014 guard loses a detected divergence when minimization errors",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_AND_MECHANICAL_RECORD_RECOVERY_GUARD_REGRESSIONS_PASS",
+      "current_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+      "pr_group": "10-difftest-pending-evidence",
+      "evidence": [
+        "sigma-evidence/group10-ready.json",
+        "sigma-evidence/group10-gate.json",
+        "sigma-evidence/group10-scoped-final.json",
+        "sigma-evidence/group10-guard-selftest.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Every processing failure retains original pending evidence and reports incomplete harness work; generic dummy-context agreement no longer marks unexplained differences benign.",
+      "fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+      "limits": "No new independent Scala verdict or hidden consensus defect proof; DIFF11 artifact identity/publication remains separate queued cause.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/543",
+      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-02",
+      "original_title": "DIFF-02 \u2014 general reinjection calls unrelated process failure detection",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "General reinjection build pipeline masks status; runtime treats any failure as expected detection. No operational reinjection run; typed matching/exit checks repair queued."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-03",
+      "original_title": "DIFF-03 \u2014 generated rediscovery mode skips every eligible check",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "Generated rediscovery still skips every eligible check. Unsupported mode must fail explicitly instead of false success; no campaign run."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-04",
+      "original_title": "DIFF-04 \u2014 canonical gate succeeds without checking a canonical value",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+      "pr_group": "08-difftest-requested-work-contracts",
+      "evidence": [
+        "sigma-evidence/group08-ready.json",
+        "sigma-evidence/group08-gate.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Requested-work and panic-hook contracts repaired with ordinary existing tests plus bounded CLI/corpus regressions; full local gate passed.",
+      "fix_commits": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
+      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-05",
+      "original_title": "DIFF-05 \u2014 coverage option accepts invalid thresholds and unsupported modes",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+      "pr_group": "08-difftest-requested-work-contracts",
+      "evidence": [
+        "sigma-evidence/group08-ready.json",
+        "sigma-evidence/group08-gate.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Requested-work and panic-hook contracts repaired with ordinary existing tests plus bounded CLI/corpus regressions; full local gate passed.",
+      "fix_commits": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
+      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-06",
+      "original_title": "DIFF-06 \u2014 structured oracle mode generates the wrong framing for verify",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+      "pr_group": "08-difftest-requested-work-contracts",
+      "evidence": [
+        "sigma-evidence/group08-ready.json",
+        "sigma-evidence/group08-gate.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Requested-work and panic-hook contracts repaired with ordinary existing tests plus bounded CLI/corpus regressions; full local gate passed.",
+      "fix_commits": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
+      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-07",
+      "original_title": "DIFF-07 \u2014 corpus loading silently loses requested work and seed ordering",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+      "pr_group": "08-difftest-requested-work-contracts",
+      "evidence": [
+        "sigma-evidence/group08-ready.json",
+        "sigma-evidence/group08-gate.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Requested-work and panic-hook contracts repaired with ordinary existing tests plus bounded CLI/corpus regressions; full local gate passed.",
+      "fix_commits": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
+      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-08",
+      "original_title": "DIFF-08 \u2014 promised oracle query timeout is unenforced",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_AND_BOUNDED_LOCAL_TRANSPORT_REGRESSIONS_PLUS_PINNED_SCALA_SMOKE_PASS",
+      "current_commit": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
+      "pr_group": "09-difftest-oracle-transport",
+      "evidence": [
+        "sigma-evidence/group09-ready.json",
+        "sigma-evidence/group09-gate.json",
+        "sigma-evidence/group09-scoped-all-oracle.json",
+        "sigma-evidence/group09-pinned-runtime.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Bounded startup/query transport, terminal failure, diagnostics retention and owned Unix group cleanup; exact executed source/runtime provenance API available.",
+      "fix_commit": "5691e0cb3cfb3468b9b684174c8e24e47ca71183",
+      "limits": "Windows descendants and escaped Unix process groups not certified; no full transaction/runtime fuzz campaign claim.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/540",
+      "pr_head": "codex/reference-audit-20261004-difftest-transport"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-09",
+      "original_title": "DIFF-09 \u2014 generic reduction agreement is insufficient to certify benignity",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_AND_MECHANICAL_RECORD_RECOVERY_GUARD_REGRESSIONS_PASS",
+      "current_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+      "pr_group": "10-difftest-pending-evidence",
+      "evidence": [
+        "sigma-evidence/group10-ready.json",
+        "sigma-evidence/group10-gate.json",
+        "sigma-evidence/group10-scoped-final.json",
+        "sigma-evidence/group10-guard-selftest.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Every processing failure retains original pending evidence and reports incomplete harness work; generic dummy-context agreement no longer marks unexplained differences benign.",
+      "fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82",
+      "limits": "No new independent Scala verdict or hidden consensus defect proof; DIFF11 artifact identity/publication remains separate queued cause.",
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/543",
+      "pr_head": "codex/reference-audit-20261004-difftest-pending-evidence"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-10",
+      "original_title": "DIFF-10 \u2014 filed campaign provenance loses the generating iteration/mode",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+      "pr_group": "group11-difftest-authority",
+      "evidence": [
+        "sigma-evidence/group11-ready.json",
+        "sigma-evidence/group11-gate.json",
+        "sigma-evidence/group11-gate-record-tests.json"
+      ],
+      "resolution_stage": "ready_for_root_review",
+      "current_assessment": "First generating iteration/mode retained in group10; group11 archives build-source/compiler/executable, exact primary/verify sources, actual JVM/JAR and ordered corpus identities, and archived-source repro commands. Unavailable authority remains incomplete.",
+      "partial_fix_commit": "d5b0f3e86f43fd7673f16b06cb8bb4d189ef5d82"
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-11",
+      "original_title": "DIFF-11 \u2014 artifact publication/identity is too weak for concurrent evidence",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+      "pr_group": "group11-difftest-authority",
+      "evidence": [
+        "sigma-evidence/group11-ready.json",
+        "sigma-evidence/group11-gate.json",
+        "sigma-evidence/group11-gate-record-tests.json"
+      ],
+      "resolution_stage": "ready_for_root_review",
+      "current_assessment": "Full canonical-record SHA256, immutable atomic publication, cross-process filing lock and derived queue; guard validates record/journal/source integrity and binds stable semantic baseline key to actual comparison authority. Legacy input-only keys cannot mute records. Ordinary concurrency/corrupt evidence/authority units pass; no power-loss/native upload certification."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-12",
+      "original_title": "DIFF-12 \u2014 genesis root pin is not verified by the replay pin counter",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "Genesis pin counter increments on supplied header ID before computed root/pinned root verification. Offline root/pin contract repair queued; no remote node called."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-13",
+      "original_title": "DIFF-13 \u2014 replay accepts heights outside its faithful context model",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "Replay fixed historical context still accepts unsupported requested height ranges. Faithful supported-era bound/documentation repair queued; no archival replay."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-14",
+      "original_title": "DIFF-14 \u2014 guard clears any caller-selected directory under the repository",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "ba1a66c09354f35ee496fd060658cb84bb69cbe3",
+      "pr_group": "group11-difftest-authority",
+      "evidence": [
+        "sigma-evidence/group11-ready.json",
+        "sigma-evidence/group11-gate.json",
+        "sigma-evidence/group11-gate-record-tests.json"
+      ],
+      "resolution_stage": "ready_for_root_review",
+      "current_assessment": "Guard never clears caller output. Default output is fresh; existing directories require explicit preservation. Per-invocation logs remain separate; arguments/supported nonempty surfaces are validated and Cargo build/metadata locked. Final changes source/unit validated; preserved earlier guard receipt predates finalization."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-15",
+      "original_title": "DIFF-15 \u2014 warning-as-error public Rustdoc fails",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "already_fixed",
+      "revalidation": "CURRENT_STRICT_WORKSPACE_RUSTDOC_PASS",
+      "current_commit": "71bb70165bb0b945b097b170f69fd0cc96b325e4",
+      "pr_group": "preexisting-doc-repairs",
+      "evidence": [
+        "sigma-evidence/group01-gate-doc.json"
+      ],
+      "limits": "Same strict public documentation gate passed on current source; no documentation source changed in this group.",
+      "prior_fix_commits": [
+        "8fb3b0a1facb65c1abbb0ae6ece76bc2d208f297",
+        "bc3befeae957481456ffff06534be2d823f7c3d6"
+      ]
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-16",
+      "original_title": "DIFF-16 \u2014 present-tense spec/map and regeneration instructions are stale",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "remaining_evidence",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "e465d934db39ee999c4d7f3a141c64f331e1733a",
+      "pr_group": null,
+      "evidence": [
+        "sigma-evidence/current-revalidation.json"
+      ],
+      "resolution_stage": "confirmed_repair_queued",
+      "current_assessment": "Several module/registry/CI/regeneration claims still stale; upstream strict docs and trusted-reader repairs credited separately. Documentation repair queued."
+    },
+    {
+      "crate": "ergo-difftest",
+      "original_id": "DIFF-17",
+      "original_title": "DIFF-17 \u2014 panic hook suppression is process-global and unsynchronized",
+      "original_report": "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-difftest.md",
+      "status": "fixed",
+      "revalidation": "CURRENT_SOURCE_REVALIDATED",
+      "current_commit": "025a9cbfcb68891f702d35eadec6801a268890b5",
+      "pr_group": "08-difftest-requested-work-contracts",
+      "evidence": [
+        "sigma-evidence/group08-ready.json",
+        "sigma-evidence/group08-gate.json"
+      ],
+      "resolution_stage": "draft_opened",
+      "current_assessment": "Requested-work and panic-hook contracts repaired with ordinary existing tests plus bounded CLI/corpus regressions; full local gate passed.",
+      "fix_commits": [
+        "025a9cbfcb68891f702d35eadec6801a268890b5"
+      ],
+      "draft_pr": "https://github.com/arkadianet/ergo/pull/531",
+      "pr_head": "codex/reference-audit-20261004-difftest-checks"
+    }
+  ]
+}

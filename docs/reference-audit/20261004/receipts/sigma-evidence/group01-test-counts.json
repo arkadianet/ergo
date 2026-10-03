@@ -1,0 +1,7 @@
+{
+  "binaries": 65,
+  "passed": 7890,
+  "failed": 0,
+  "ignored": 98,
+  "limits": "Ordinary workspace test gate includes committed capture consumers; no whole-chain or exhaustive reference comparison claim."
+}
