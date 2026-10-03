@@ -22,6 +22,7 @@ mod full_block_with_state;
 mod genesis_digest;
 mod header_chain_index;
 mod headers_by_height;
+mod historical_activation_costs;
 mod last_applied_chain_window;
 mod miner_reward_oracle;
 mod minimal_full_block_height_lifecycle;
