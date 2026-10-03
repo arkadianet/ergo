@@ -2,9 +2,10 @@
 //! building blocks the send/sweep/generate paths all route through.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
-use super::generate_sign::{transaction_sign_impl, transaction_sign_impl_with_snapshot};
-use super::tx_build::build_transaction_impl;
+use super::generate_sign::transaction_sign_impl_with_snapshot;
+use super::tx_build::build_transaction_impl_with_snapshot;
 use crate::node::wallet_bridge::{
     map_chain_error, ChainSnapshot, ChainStateAccessor, TxSubmitter, WalletAdminError,
 };
@@ -52,22 +53,26 @@ pub(crate) async fn sign_transaction_native_impl(
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
+    mempool: &dyn ergo_api::MempoolView,
 ) -> Result<ergo_api::wallet::native::dto::SignTxResponse, WalletAdminError> {
     let externals: Vec<ergo_api::wallet::sending::ExternalSecretDto> = req
         .external_secrets
         .iter()
         .map(native_external_to_compat)
         .collect();
-    let signed_bytes = transaction_sign_impl(
+    let snapshot = chain
+        .chain_snapshot()
+        .map_err(map_chain_error)?
+        .with_pool_outputs(mempool.box_snapshot(&[]).outputs);
+    let signed_bytes = transaction_sign_impl_with_snapshot(
         req.unsigned_transaction.bytes_hex(),
         Some(&externals),
         None,
         storage,
         state,
         db,
-        chain,
-    )
-    .await?;
+        &snapshot,
+    )?;
     let tx_id = signed_tx_id_hex(&signed_bytes)?;
     Ok(ergo_api::wallet::native::dto::SignTxResponse {
         signed_transaction: ergo_api::wallet::native::dto::TxRepr::from_bytes(&signed_bytes),
@@ -116,14 +121,20 @@ pub(crate) async fn send_transaction_native_impl(
     chain: &dyn ChainStateAccessor,
     submitter: &dyn TxSubmitter,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn ergo_api::MempoolView,
 ) -> Result<ergo_api::wallet::native::dto::SendTxResponse, WalletAdminError> {
     use ergo_api::wallet::native::dto::{SendTxRequest, SendTxResponse};
 
     // 1. Produce signed bytes (build+sign own secrets for `intent`; decode for `signed`).
     let (signed_bytes, snapshot) = match req {
         SendTxRequest::Intent { intent } => {
-            let built = build_transaction_impl(intent, state, db, chain, network).await?;
-            let snapshot = chain.chain_snapshot().map_err(map_chain_error)?;
+            let (built, pool_snapshot) =
+                build_transaction_impl_with_snapshot(intent, state, db, chain, network, mempool)
+                    .await?;
+            let snapshot = chain
+                .chain_snapshot()
+                .map_err(map_chain_error)?
+                .with_pool_outputs(pool_snapshot.outputs);
             let bytes = transaction_sign_impl_with_snapshot(
                 built.unsigned_transaction.bytes_hex(),
                 None,

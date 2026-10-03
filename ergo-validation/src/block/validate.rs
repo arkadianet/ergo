@@ -175,8 +175,7 @@ pub fn validate_full_block_with_costs(
     let tx_id_refs: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
 
     let witness_data: Vec<Vec<u8>>;
-    let witness_refs: Option<Vec<&[u8]>>;
-    if header.version >= 2 {
+    let witness_refs: Option<Vec<&[u8]>> = if header.version >= 2 {
         witness_data = txs
             .iter()
             .map(|tx| {
@@ -189,10 +188,10 @@ pub fn validate_full_block_with_costs(
             })
             .collect();
         let refs: Vec<&[u8]> = witness_data.iter().map(|w| w.as_slice()).collect();
-        witness_refs = Some(refs);
+        Some(refs)
     } else {
-        witness_refs = None;
-    }
+        None
+    };
 
     let computed_tx_root = transactions_root(&tx_id_refs, witness_refs.as_deref());
     if computed_tx_root != *header.transactions_root.as_bytes() {
@@ -475,8 +474,7 @@ fn validate_full_block_parallel_impl(
     let tx_id_refs: Vec<&[u8]> = tx_ids.iter().map(|id| id.as_slice()).collect();
 
     let witness_data: Vec<Vec<u8>>;
-    let witness_refs: Option<Vec<&[u8]>>;
-    if header.version >= 2 {
+    let witness_refs: Option<Vec<&[u8]>> = if header.version >= 2 {
         witness_data = txs
             .iter()
             .map(|tx| {
@@ -489,10 +487,10 @@ fn validate_full_block_parallel_impl(
             })
             .collect();
         let refs: Vec<&[u8]> = witness_data.iter().map(|w| w.as_slice()).collect();
-        witness_refs = Some(refs);
+        Some(refs)
     } else {
-        witness_refs = None;
-    }
+        None
+    };
 
     let computed_tx_root = transactions_root(&tx_id_refs, witness_refs.as_deref());
     if computed_tx_root != *header.transactions_root.as_bytes() {

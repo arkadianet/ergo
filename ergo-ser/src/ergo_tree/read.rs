@@ -16,9 +16,10 @@ use super::{
 
 /// Deserialize an ErgoTree from bytes.
 ///
-/// For size-delimited trees, exactly `size` bytes are consumed after the size
-/// field. For non-size-delimited trees, all remaining bytes in the reader are
-/// consumed (the caller must provide exact bounds).
+/// A successfully parsed tree consumes its constants and one opcode expression,
+/// leaving following fields available. Size-delimited soft-fork trees retain the
+/// declared byte region as an opaque tree; their boundary follows Scala's wrap
+/// semantics. Parsing and box/script acceptance are separate gates.
 pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     let (tree, _was_wrapped) = read_ergo_tree_tracking_wrap(r)?;
     Ok(tree)

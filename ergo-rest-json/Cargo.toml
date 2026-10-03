@@ -3,6 +3,7 @@ name        = "ergo-rest-json"
 description = "Shared JSON ↔ canonical-wire-bytes layer for Scala-compatible Ergo REST. Hosts the JSON DTOs that mirror the Scala node's encoders plus the canonicalizing decoders that turn parsed JSON back into wire bytes the indexer / validator / persistence layer expect. Anchored by the b4_* byte-parity oracle in ergo-node."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -24,3 +25,6 @@ ergo-crypto = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

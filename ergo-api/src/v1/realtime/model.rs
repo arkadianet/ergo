@@ -1,6 +1,6 @@
 //! Realtime channel vocabulary + the canonical event shape.
 //!
-//! A [`ChannelClass`] is one of the six subscription classes. A wire channel
+//! A [`ChannelClass`] is one of the seven subscription classes. A wire channel
 //! string is `"<class>"` (class channels) or `"<class>:<selector>"`
 //! (selector channels). [`parse_channel`] validates the selector at subscribe
 //! time — a malformed one is `invalid_selector` *before* the liveness check —
@@ -26,11 +26,11 @@ pub enum ChannelClass {
     Mempool,
     /// `peers` — `peer_connected`, `peer_disconnected`. Class channel.
     Peers,
-    /// `address:<address>` — `box_created`, `box_spent`.
+    /// `address:<address>` — box creation/spending and their reorg inverses.
     Address,
-    /// `box:<box_id>` — `box_spent`. **Terminal** (fires once).
+    /// `box:<box_id>` — spent/unspent. Only `box_spent` fulfills.
     Box,
-    /// `token:<token_id>` — `token_moved`.
+    /// `token:<token_id>` — `token_moved`, `token_reverted`.
     Token,
     /// `tx:<tx_id>` — `tx_confirmed`, `tx_dropped`. **Terminal**.
     Tx,
@@ -198,6 +198,70 @@ pub struct RealtimeEventBody {
     /// For a retraction event (`box_reverted`, `box_unspent`, `tx_dropped`
     /// on reorg): the `seq` this event invalidates. `None` otherwise.
     pub previous_seq: Option<u64>,
+}
+
+/// Committed indexer changes understood by the API without a writer dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedBoxEventKind {
+    Created,
+    Spent,
+    Reverted,
+    Unspent,
+}
+
+impl RealtimeEventBody {
+    /// Project a committed box change with the same DTO used by v1 REST reads.
+    /// Creation/retraction routes to the owner; spend/restoration also routes
+    /// to the box. A retracted creation has no current on-chain provenance.
+    pub fn indexed_box(
+        unix_ms: u64,
+        network: NetworkPrefix,
+        kind: IndexedBoxEventKind,
+        record: &ergo_indexer_types::IndexedErgoBox,
+        height: u32,
+        header_id: String,
+    ) -> Result<Self, String> {
+        let current_height = if kind == IndexedBoxEventKind::Unspent {
+            height.saturating_sub(1)
+        } else {
+            height
+        };
+        let mut dto =
+            crate::v1::routes::dto::v1box_from_indexed_box(network, record, current_height, false)?;
+        let mut routes = Vec::with_capacity(2);
+        if let Some(address) = &dto.address {
+            routes.push(format!("address:{address}"));
+        }
+        if matches!(
+            kind,
+            IndexedBoxEventKind::Spent | IndexedBoxEventKind::Unspent
+        ) {
+            routes.push(format!("box:{}", dto.box_id));
+        }
+        if kind == IndexedBoxEventKind::Reverted {
+            dto.confirmed = false;
+            dto.inclusion_height = None;
+            dto.confirmations = None;
+            dto.global_index = None;
+            dto.spent_by = None;
+        }
+        let mut data = serde_json::to_value(dto).map_err(|e| e.to_string())?;
+        data["header_id"] = json!(header_id);
+        Ok(Self {
+            emitted_at_unix_ms: unix_ms,
+            routes,
+            event: match kind {
+                IndexedBoxEventKind::Created => "box_created",
+                IndexedBoxEventKind::Spent => "box_spent",
+                IndexedBoxEventKind::Reverted => "box_reverted",
+                IndexedBoxEventKind::Unspent => "box_unspent",
+            },
+            confirmed: kind != IndexedBoxEventKind::Reverted,
+            height: Some(height),
+            data,
+            previous_seq: None,
+        })
+    }
 }
 
 impl RealtimeEventBody {

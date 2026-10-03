@@ -2,23 +2,24 @@
 
 **Purpose:** Operator-facing read-mostly HTTP/JSON server for the node. Hosts the axum router that serves the Scala API (`/info`, `/blocks/*`, `/transactions*`, `/utxo/*`, `/peers/*`, `/utils/*`, `/blockchain/*`, `/mining/*`) and the RUST API under `/api/v1/*`, plus the `/wallet/*` API and the embedded browser UIs. Its contract with the rest of the workspace is a small set of `Arc<dyn …>` traits — the node implements them against a runtime snapshot and hands the trait objects to `serve`; `ergo-api` never reaches into node internals.
 
-**Depends on (workspace):** ergo-indexer-types, ergo-ser, ergo-primitives, ergo-rest-json (plus dev-only: ergo-indexer)
+**Depends on (workspace):** ergo-compiler, ergo-indexer-types, ergo-primitives, ergo-rest-json, ergo-ser, ergo-sigma (plus dev-only: ergo-indexer)
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~12,300
 
 ## Start here
-- `src/lib.rs` — the module tree + re-export list; the crate's public face in 40 lines.
+- `src/lib.rs` — the module tree + re-export list; the crate's public face.
 - `src/traits.rs` — the load-bearing seam: `NodeReadState`, `NodeSubmit`, `NodeAdmin`, `MempoolView`, `ChainParamsView`. Read this to understand the whole boundary.
 - `src/api_family.rs` — the canonical two-family descriptor table and documentation URLs.
-- `src/server/{scala_api,rust_api}.rs` — family-owned router composition; transport, assets, metrics, and shared singleton setup remain in `server/mod.rs`.
+- `src/server/{scala_api,rust_api}.rs` — family-owned router composition; transport, assets, metrics, and shared node-service wiring remain in `server/mod.rs`.
 - `src/compat/traits.rs` — `NodeChainQuery`, the live id-keyed read trait the Scala-compat surface needs (block/utxo/tx/peers/pool by id).
-- `src/types.rs` (module doc) — the wire DTO contract, especially the id-encoding rules (lowercase hex, 64 hex chars for ids, 66 for `state_root_avl`).
+- `src/types/mod.rs` (module doc) — the wire DTO contract, especially the id-encoding rules (lowercase hex, 64 hex chars for ids, 66 for `state_root_avl`).
 
 ## Modules
 - `src/lib.rs` — crate root: module tree + the curated re-export set.
 - `src/traits.rs` — node-implemented reader/submit/admin/mempool/chain-params traits + `Noop*` test impls; `PoolTxDetail` type alias.
 - `src/emission.rs` — Scala-compat `/emission/at/{height}` schedule view + `/emission/scripts` static P2S addresses; `EmissionSchedule` trait + `EmissionScriptsJson` type; public (no auth, mirrors Scala `EmissionApiRoute`).
-- `src/server/mod.rs` — transport entry points, infrastructure routes, shared singleton setup, and final family-router merge.
+- `src/server/mod.rs` — transport entry points, infrastructure routes, shared node-service wiring, and final family-router merge.
+- `src/server/services.rs` — per-node `ApiServices`, listener-owned background workers, retained shutdown joins, and the shared webhook blocking executor.
+- `src/v1/webhooks/{engine,blocking,worker,routes}.rs` — durable webhook state machine and storage trait, bounded off-runtime execution, signed outbound delivery, and operator management routes. The node supplies the private redb store; admitted delivery obligations survive restart, while source fanout remains best effort.
 - `src/server/scala_api.rs` — Scala API facade: compatibility reads/writes, extra index, wallet, mining, emission, script, utility, and Scala-auth routes.
 - `src/server/rust_api.rs` — RUST API facade: legacy operator routes, Rust-only indexer/storage-rent routes, native wallet, and versioned product modules.
 - `src/server/route_registry.rs` — production router composition paired with per-family operation descriptors; capability-gated mounts contribute descriptors only when mounted.
@@ -28,7 +29,7 @@
 - `src/utils.rs` — stateless `/utils/*` helpers (seed, blake2b hash, address ⇄ raw, address validation, ergoTree→address); pure functions of input + `NetworkPrefix`.
 - `src/web.rs` — compile-time-embedded static assets (dashboard HTML/CSS/JS, Swagger pages, openapi.yaml, JetBrains Mono font, wallet UI bundle).
 - `src/types/activity.rs`, `server/handlers.rs::activity_handler` — operator-key-gated, no-store structured log pagination at `/api/v1/diagnostics/activity`; `NodeReadState::activity` reads the bounded node capture ring. `web/js/activity{,-model}.js` render current conditions and grouped/filterable history with evidence export. See [logging](../logging.md#dashboard-activity-and-logs) for retention and cursor semantics.
-- `src/types.rs` — node-native wire DTOs (`Api*`, `SubmitError`/`SubmitMode`, `RawTransactionBytes`, difficulty series) with `utoipa::ToSchema` for the RUST API OpenAPI spec.
+- `src/types/mod.rs` — node-native wire DTOs (`Api*`, `SubmitError`/`SubmitMode`, `RawTransactionBytes`, difficulty series) with `utoipa::ToSchema` for the RUST API OpenAPI spec.
 - `src/compat/` — Scala API surface mounted at bare paths.
   - `compat/traits.rs` — `NodeChainQuery` live-read trait + `UtxoBoxBytes` envelope.
   - `compat/types.rs` — `ScalaInfo` / `Parameters` + re-exports of the shared `ergo-rest-json` Scala DTOs; `ScalaUnconfirmedTransaction` adds a measured `cost` (null when unknown) to the Scala transaction shape for unconfirmed responses only.
@@ -55,7 +56,7 @@
 - `bind` / `serve_on` / `serve` / `serve_on_with_mempool_and_wallet_and_security` / `router_with_wallet` (fns) — listener + axum lifecycle, graceful-shutdown contract — `src/server/mod.rs:138,181,305,246,488`
 - `mining_router` (fn) — builds the `/mining/*` sub-router merged in when mining is enabled — `src/mining.rs:169`
 - `BlockchainState` (struct) + `enforce_status_gate` (fn) — extra-index router state + the `503 indexer-syncing/-halted` gate — `src/blockchain.rs:105`, `src/blockchain.rs:258`
-- `ApiInfo` / `ApiIdentity` / `ApiStatus` / `ApiSubmitError` / `ApiNativeSubmitError` / `SubmitMode` / `ApiNodeEvents` / `ApiMinerStats` / `ApiMinerStat` (types) — native `/api/v1/*` wire DTOs — `src/types.rs`
+- `ApiInfo` / `ApiIdentity` / `ApiStatus` / `ApiSubmitError` / `ApiNativeSubmitError` / `SubmitMode` / `ApiNodeEvents` / `ApiMinerStats` / `ApiMinerStat` (types) — native `/api/v1/*` wire DTOs — `src/types/mod.rs`
 - `ScalaInfo` / `Parameters` (types) — Scala `/info` body — `src/compat/types.rs`
 
 ## Invariants & contracts
@@ -69,4 +70,4 @@
 - **Graceful-shutdown contract.** `serve_on*` pairs axum's graceful drain with the action loop so in-flight submit/check handlers can surface a structured `503 shutting_down` instead of a TCP RST; the request-id `TraceLayer` span logs path only (never the full query string).
 - **Wallet UI security headers.** `/wallet/ui*` carries a scoped CSP + `no-store`/`no-cache` layer (bfcache mitigation for mnemonic-bearing pages); the page is public but the `/wallet/*` JSON API it drives stays `api_key`-gated.
 
-(No consensus, PoW, AVL, persistence, or reorg invariants are owned here — those live in `ergo-validation`/`ergo-state`/`ergo-crypto`. This crate owns only its wire-shape, auth-scope, route-gating, and trait-boundary contracts.)
+(Consensus, PoW, AVL, and chain-persistence invariants live in `ergo-validation`/`ergo-state`/`ergo-crypto`. This crate owns wire-shape, auth-scope, route-gating, trait-boundary, and webhook delivery-state contracts; the node implements webhook persistence.)

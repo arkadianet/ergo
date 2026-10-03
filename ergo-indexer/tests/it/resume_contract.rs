@@ -2,16 +2,13 @@
 //! contract across the full per-type state surface, not just one
 //! table.
 //!
-//! Apply-path commits run under `Durability::Eventual`, so recovery on
-//! restart is by replay from the chain store, not by guaranteed fsync per
-//! block. The resume contract is unchanged in shape — `IndexerHandle::boot`
-//! reads the persisted meta, `IndexerTask` rolls back if `header_id_at`
-//! diverges, then forward-applies — but it is now *load-bearing* in a way
-//! it wasn't when every block fsync'd. This test pins it.
+//! Apply-path commits use `Durability::Immediate` under redb 4. The resume
+//! contract still checks that `IndexerHandle::boot` reads persisted meta,
+//! `IndexerTask` rolls back if `header_id_at` diverges, then forward-applies.
 //!
 //! Existing close/reopen coverage in `tests/storage_rent_apply.rs:565`
 //! asserts the storage-rent table only. This test extends the assertion
-//! to every observable read surface flushed inside the durability-shifted
+//! to every observable read surface flushed inside the durable
 //! apply transaction: `INDEXER_META`, `INDEXER_UNDO` at every applied
 //! height, per-output box rows + `NUMERIC_BOX[global_box_index]`, per-tx
 //! rows + `NUMERIC_TX[global_tx_index]`, `IndexedAddress` parent +
@@ -238,11 +235,8 @@ fn snapshot(
 /// NUMERIC_TX, address parent + balance + segments, template parent +
 /// segments, token parent + segments, storage_rent rows.
 ///
-/// Under `Durability::Eventual` (apply.rs:152-159), the redb file is
-/// closed cleanly on `Drop`, so all committed transactions are visible
-/// on reopen. The contract this pins is unchanged from before the
-/// durability flip; the test is a regression guard for the now
-/// load-bearing recovery path.
+/// Under redb 4, `Durability::Immediate` flushes every apply transaction.
+/// This test verifies that all committed tables resume together after reopen.
 #[test]
 fn close_reopen_continue_matches_uninterrupted_apply() {
     // Two trees so we exercise multiple addresses/templates.
@@ -453,7 +447,7 @@ fn spill_snapshot(
 /// `flush_staged_spills` code path with the box-segment spills above
 /// (segment_buffer.rs), so the close/reopen contract for tx-segment
 /// spills is implied — the apply transaction does not distinguish row
-/// types when committing under `Durability::Eventual`.
+/// types when committing under `Durability::Immediate`.
 #[test]
 fn close_reopen_preserves_spill_segments() {
     use ergo_indexer::segment::SEGMENT_THRESHOLD;

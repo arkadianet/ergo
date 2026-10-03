@@ -760,7 +760,10 @@ pub async fn holders(State(state): State<V1State>, V1Query(q): V1Query<HoldersQu
                 Ok(o) => o,
                 Err(e) => return *e,
             };
-            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let scan = match scan_token_holders(idx.as_ref(), &tid, state.network) {
+                Ok(scan) => scan,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             let total = scan.circulating.max(1);
             let mut items: Vec<HolderRow> = scan
                 .holders

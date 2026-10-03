@@ -139,6 +139,7 @@ pub(crate) const EMPTY_AVL_DIGEST: [u8; 33] = [0u8; 33];
 #[derive(Debug)]
 pub struct DigestStateStore {
     db: Arc<Database>,
+    redb_cache_bytes: usize,
     db_path: PathBuf,
     root_digest: [u8; 33],
     chain_state: ChainStateMeta,
@@ -197,7 +198,7 @@ use voted_params::{
 
 impl DigestStateStore {
     /// A cloned `Arc` handle to the underlying redb `Database`. Mirrors
-    /// [`StateStore::db_arc`] so boot-time subsystems (the wallet writer
+    /// [`crate::store::StateStore::db_arc`] so boot-time subsystems (the wallet writer
     /// task) can open their own read transactions against the same file
     /// without a backend-typed branch. The digest db holds no box arena,
     /// so UTXO-dependent wallet reads see an empty set — wallet routes are
@@ -233,7 +234,7 @@ impl DigestStateStore {
     }
 
     /// Sparse-aware best-chain height lookup, mirroring
-    /// [`StateStore::lookup_header_at_height`]. The digest backend is
+    /// [`crate::store::StateStore::lookup_header_at_height`]. The digest backend is
     /// always `HeaderAvailability::Dense` (Mode 5 does not NiPoPoW-
     /// bootstrap), so a missing row at or below the header tip is store
     /// corruption rather than an expected sparse gap; the both-arms

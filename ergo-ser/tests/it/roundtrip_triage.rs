@@ -1,6 +1,11 @@
 #![cfg(feature = "diagnostics")]
 //! Triage harness for the 17 transaction roundtrip failures.
 //! Identifies first divergence offset and surrounding byte windows.
+//!
+//! This report scans the locally available transaction captures, including
+//! optional extracted ranges. Run with `cargo test --locked -p ergo-ser
+//! --features diagnostics --test it triage_roundtrip_failures
+//! -- --ignored --nocapture`.
 
 use ergo_primitives::reader::VlqReader;
 use ergo_primitives::writer::VlqWriter;
@@ -37,8 +42,13 @@ fn load_all_vectors() -> Vec<TransactionVector> {
 }
 
 #[test]
+#[ignore = "manual report over locally available mainnet transaction captures"]
 fn triage_roundtrip_failures() {
     let vectors = load_all_vectors();
+    assert!(
+        !vectors.is_empty(),
+        "no transaction captures available for triage"
+    );
     let mut failures = Vec::new();
 
     for v in &vectors {

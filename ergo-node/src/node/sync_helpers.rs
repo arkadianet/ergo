@@ -302,7 +302,10 @@ fn pick_hedge_peers(state: &NodeState, exclude: PeerId, n: usize) -> Vec<PeerId>
 pub(super) fn maybe_exit_ibd(store: &mut StateBackendKind, fb_before: u32, fb: u32, bh: u32) {
     if let Some(u) = store.as_utxo_mut() {
         if fb > fb_before && u.ibd_mode() && bh > 0 && bh.saturating_sub(fb) < 10 {
-            u.set_ibd_mode(false, 0);
+            if let Err(error) = u.set_ibd_mode(false, 0) {
+                tracing::error!(%error, "IBD durability boundary failed; retaining IBD mode");
+                return;
+            }
             info!(gap = bh - fb, durability = "Immediate", "IBD complete",);
         }
     }

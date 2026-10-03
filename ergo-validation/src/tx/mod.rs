@@ -39,7 +39,7 @@ pub struct TxValidationRules<'a> {
 
 /// Bundle of per-tx validation borrows threaded through
 /// [`validate_transaction`], [`validate_transaction_parsed`], and the
-/// internal [`script::validate_scripts`]. Replaces the four-positional-
+/// internal `script::validate_scripts`. Replaces the four-positional-
 /// arg pattern (ctx, params, cost, last_headers) that the script and
 /// composable-parsed entry points used to require.
 ///

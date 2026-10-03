@@ -24,7 +24,7 @@
 //!   changed boxes) used by the indexer.
 //! * [`chain`] — chain header index: best-header / best-full-block
 //!   tracking and reorg-aware lookups.
-//! * [`active_params`] — per-epoch voted-protocol-parameter persistence
+//! * `active_params` — per-epoch voted-protocol-parameter persistence
 //!   wired into the store at epoch boundaries.
 //!
 //! What is **not** here:
@@ -62,12 +62,16 @@ pub(crate) mod digest_utxo_view;
 pub(crate) mod header_store;
 pub mod persist;
 pub mod reader;
+pub mod redb_migration;
 pub mod redb_util;
 pub mod storage_observability;
 pub mod store;
 pub mod wallet;
 
-pub use redb_util::{begin_write_qr, open_with_repair_logging};
+pub use redb_util::{
+    begin_write_qr, open_with_repair_logging, open_with_repair_logging_and_cache,
+    DEFAULT_REDB_CACHE_BYTES,
+};
 
 /// The state-backend dispatch surface NodeState binds against: the
 /// `StateBackendKind` enum (UTXO arena or Mode 5 digest verifier) and

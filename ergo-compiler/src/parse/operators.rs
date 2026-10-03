@@ -311,7 +311,7 @@ pub(crate) fn mk_binary_op(
         right: Box::new(r),
         pos,
     };
-    Ok(match op {
+    let result = match op {
         "==" => rel(RelKind::Eq, l, r),       // :76
         "!=" => rel(RelKind::Neq, l, r),      // :77
         ">=" => rel(RelKind::Ge, l, r),       // :78
@@ -366,5 +366,7 @@ pub(crate) fn mk_binary_op(
                 msg: format!("Unknown binary operation {op}"),
             })
         }
-    })
+    };
+    check_expr_depth(&result)?;
+    Ok(result)
 }

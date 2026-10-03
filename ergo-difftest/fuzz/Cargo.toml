@@ -3,7 +3,7 @@
 # IMPORTANT: this crate is intentionally EXCLUDED from the stable workspace.
 # The [workspace] declaration below makes it a detached workspace so that
 # `cargo clippy --workspace` from the repo root does NOT try to build these
-# targets with the pinned stable 1.95.0 toolchain (libfuzzer-sys requires
+# targets with the pinned stable 1.99.0 toolchain (libfuzzer-sys requires
 # nightly). See ergo-difftest/fuzz/README.md for how to run fuzz targets.
 [workspace]
 
@@ -60,3 +60,39 @@ name = "sigma_expr"
 path = "fuzz_targets/sigma_expr.rs"
 test = false
 doc  = false
+
+[[bin]]
+name = "p2p_frame"
+path = "fuzz_targets/p2p_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_handshake"
+path = "fuzz_targets/p2p_handshake.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_message"
+path = "fuzz_targets/p2p_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "p2p_delivery"
+path = "fuzz_targets/p2p_delivery.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "compiler_source"
+path = "fuzz_targets/compiler_source.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bounded_evaluator"
+path = "fuzz_targets/bounded_evaluator.rs"
+test = false
+doc = false

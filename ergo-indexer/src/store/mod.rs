@@ -20,6 +20,7 @@ pub use undo::{UndoEntry, ROLLBACK_WINDOW};
 
 use ergo_indexer_types::{IndexedErgoBox, IndexedErgoTransaction};
 use ergo_primitives::digest::Digest32;
+use redb::ReadableDatabase;
 
 use crate::address::IndexedAddress;
 use crate::segment::Segment;
@@ -58,6 +59,7 @@ pub enum OpenOutcome {
 pub struct IndexerStore {
     db: Arc<Database>,
     path: PathBuf,
+    redb_cache_bytes: usize,
     /// Undo-retention window (max serviceable rollback depth). Defaults to
     /// [`ROLLBACK_WINDOW`] at `open`; node boot overrides it with the SAME
     /// `[node] keep_versions` value wired into the state store, so the
@@ -110,8 +112,16 @@ impl IndexerStore {
     /// | File present, `schema_version` key missing | Halt `SchemaCorruption`. |
     /// | File present, redb open / table / decode failure | Halt `DbCorruption`. |
     pub fn open(path: &Path) -> Result<(Self, OpenOutcome), IndexerError> {
+        Self::open_with_cache(path, ergo_state::DEFAULT_REDB_CACHE_BYTES)
+    }
+
+    /// Open, resume or rebuild using the same explicit redb page-cache budget.
+    pub fn open_with_cache(
+        path: &Path,
+        cache_bytes: usize,
+    ) -> Result<(Self, OpenOutcome), IndexerError> {
         if !path.exists() {
-            return Self::create_fresh(path).map(|s| (s, OpenOutcome::CreatedFresh));
+            return Self::create_fresh(path, cache_bytes).map(|s| (s, OpenOutcome::CreatedFresh));
         }
 
         // Use `open_with_repair_logging` so an unclean shutdown that
@@ -121,7 +131,7 @@ impl IndexerStore {
         // through `Database::builder().create(path)`, which is
         // create-or-open semantically — equivalent to `Database::open`
         // here since `path.exists()` is already checked above.
-        let db = ergo_state::open_with_repair_logging(path, "indexer")?;
+        let db = ergo_state::open_with_repair_logging_and_cache(path, "indexer", cache_bytes)?;
         let read_txn = db.begin_read()?;
 
         // Propagate the original typed error — `read_schema_version`
@@ -149,6 +159,7 @@ impl IndexerStore {
                     Self {
                         db: Arc::new(db),
                         path: path.to_path_buf(),
+                        redb_cache_bytes: cache_bytes,
                         rollback_window: ROLLBACK_WINDOW,
                     },
                     OpenOutcome::Resumed,
@@ -166,13 +177,13 @@ impl IndexerStore {
                     context: "remove_file schema-wipe",
                     source: e,
                 })?;
-                let store = Self::create_fresh(path)?;
+                let store = Self::create_fresh(path, cache_bytes)?;
                 Ok((store, OpenOutcome::WipedAndRecreated { previous_version }))
             }
         }
     }
 
-    fn create_fresh(path: &Path) -> Result<Self, IndexerError> {
+    fn create_fresh(path: &Path, cache_bytes: usize) -> Result<Self, IndexerError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| IndexerError::FsIo {
@@ -181,7 +192,7 @@ impl IndexerStore {
                 })?;
             }
         }
-        let db = ergo_state::open_with_repair_logging(path, "indexer")?;
+        let db = ergo_state::open_with_repair_logging_and_cache(path, "indexer", cache_bytes)?;
         let write_txn = ergo_state::begin_write_qr(&db)?;
         tables::create_all(&write_txn)?;
         meta::write_schema_version(&write_txn, INDEXER_SCHEMA_VERSION)?;
@@ -190,6 +201,7 @@ impl IndexerStore {
         Ok(Self {
             db: Arc::new(db),
             path: path.to_path_buf(),
+            redb_cache_bytes: cache_bytes,
             rollback_window: ROLLBACK_WINDOW,
         })
     }
@@ -231,6 +243,11 @@ impl IndexerStore {
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    /// Configured redb page-cache budget, rather than measured resident bytes.
+    pub fn redb_cache_capacity_bytes(&self) -> usize {
+        self.redb_cache_bytes
     }
 
     /// Cumulative count of redb cache evictions for the indexer DB.
@@ -713,5 +730,32 @@ impl std::fmt::Debug for IndexerStore {
 impl From<IndexerError> for IndexerHaltReason {
     fn from(e: IndexerError) -> Self {
         e.halt_reason()
+    }
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+    #[test]
+    fn cache_budget_preserved_on_create_resume_and_schema_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("indexer.redb");
+        {
+            let (store, outcome) = IndexerStore::open_with_cache(&path, 65536).unwrap();
+            assert!(matches!(outcome, OpenOutcome::CreatedFresh));
+            assert_eq!(store.redb_cache_capacity_bytes(), 65536);
+        }
+        {
+            let (store, outcome) = IndexerStore::open_with_cache(&path, 32768).unwrap();
+            assert!(matches!(outcome, OpenOutcome::Resumed));
+            assert_eq!(store.redb_cache_capacity_bytes(), 32768);
+            let tx = ergo_state::begin_write_qr(&store.db).unwrap();
+            meta::write_schema_version(&tx, INDEXER_SCHEMA_VERSION - 1).unwrap();
+            tx.commit().unwrap();
+        }
+        let (store, outcome) = IndexerStore::open_with_cache(&path, 16384).unwrap();
+        assert!(matches!(outcome, OpenOutcome::WipedAndRecreated { .. }));
+        assert_eq!(store.redb_cache_capacity_bytes(), 16384);
+        assert_eq!(store.read_meta().unwrap().indexed_height, 0);
     }
 }

@@ -35,7 +35,7 @@ const CAUGHT_UP_PEER_FRESHNESS: Duration = Duration::from_secs(30);
 impl SyncCoordinator {
     /// Level-triggered "caught up to peers" fallback for the headers-synced
     /// latch. **Deliberate, consensus-safe divergence from Scala** (whose
-    /// latch — like ours in [`SyncState::check_headers_synced`] — flips ONLY
+    /// latch — like ours in `SyncState::check_headers_synced` — flips ONLY
     /// on the edge of validating a header fresh per `header.isNew`).
     ///
     /// On an idle / stale tip (e.g. a quiet testnet synced from genesis) the
@@ -43,12 +43,12 @@ impl SyncCoordinator {
     /// the freshness edge never fires and block download never starts — the
     /// node sits at header-tip applying zero blocks. This fallback flips the
     /// latch when we have demonstrably caught up to the network instead:
-    ///   * at least [`MIN_CAUGHT_UP_EQUAL_PEERS`] distinct peers report our
+    ///   * at least `MIN_CAUGHT_UP_EQUAL_PEERS` distinct peers report our
     ///     exact CURRENT tip (`Equal` whose `observed_best_header_id` equals
     ///     `current_best_header_id` — a header-id match under V2, not a bare
     ///     height compare, so forks/cumulative-difficulty ambiguity can't fake
     ///     it, and a stale `Equal` from before a tip advance/reorg doesn't
-    ///     count), observed within [`CAUGHT_UP_PEER_FRESHNESS`], AND
+    ///     count), observed within `CAUGHT_UP_PEER_FRESHNESS`, AND
     ///   * those `Equal` peers are a strict MAJORITY of all peers heard from
     ///     within that window.
     ///

@@ -32,8 +32,9 @@ use ergo_ser::transaction::Transaction;
 
 use crate::apply::{apply_block_in_transaction, IndexerBlock};
 use crate::error::{HeightOverflowContext, IndexerError};
+use crate::events::{BlockChanges, IndexerObserver};
 use crate::handle::IndexerHandle;
-use crate::rollback::rollback_one_block;
+use crate::rollback::rollback_one_block_with_changes;
 use crate::scratch::BlockApplyScratch;
 use crate::store::{IndexerMeta, IndexerStore};
 use crate::HeaderId;
@@ -103,6 +104,7 @@ pub enum IndexerPoll {
 /// across every block apply so per-block / per-tx
 /// allocations amortize over the run.
 pub struct IndexerTask<C: IndexerChainSource> {
+    observer: Option<Arc<dyn IndexerObserver>>,
     handle: IndexerHandle,
     chain: Arc<C>,
     scratch: BlockApplyScratch,
@@ -146,12 +148,21 @@ impl Drop for IndexerWorker {
 impl<C: IndexerChainSource> IndexerTask<C> {
     pub fn new(handle: IndexerHandle, chain: Arc<C>) -> Self {
         Self {
+            observer: None,
             handle,
             chain,
             scratch: BlockApplyScratch::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             hold_logged: false,
         }
+    }
+
+    /// Install a post-commit observer. Capturing box data is opt-in and does
+    /// not change indexer writes or chain validation.
+    pub fn with_observer(mut self, observer: Arc<dyn IndexerObserver>) -> Self {
+        self.scratch.capture_changes = true;
+        self.observer = Some(observer);
+        self
     }
 
     /// Start a dedicated worker for the node's lifetime. All step/rebuild work
@@ -338,12 +349,15 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             Ok(write) => write,
             Err(error) => return IndexerPoll::Halted(error),
         };
-        // Same quick-repair transaction and Eventual durability as single-block
+        // Same quick-repair transaction and Immediate durability as single-block
         // apply. A crash exposes the old checkpoint or the whole committed batch.
-        write.set_durability(redb::Durability::Eventual);
+        if let Err(error) = write.set_durability(redb::Durability::Immediate) {
+            return IndexerPoll::Halted(error.into());
+        }
         let start = Instant::now();
         let mut next = meta;
         let mut bytes = 0_u64;
+        let mut observations = Vec::new();
         for applied_count in 1..=max_blocks {
             let indexed = IndexerBlock {
                 height: block.height,
@@ -361,6 +375,13 @@ impl<C: IndexerChainSource> IndexerTask<C> {
                 Err(error) => return IndexerPoll::Halted(error), // abort all uncommitted rows
             };
             next = applied.meta;
+            if self.observer.is_some() {
+                observations.push(BlockChanges {
+                    header_id: block.header_id,
+                    height: block.height as u32,
+                    boxes: applied.changes,
+                });
+            }
             bytes += applied.serialized_bytes;
             if applied.secondary_repair_pending
                 || applied_count == max_blocks
@@ -396,6 +417,11 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             return IndexerPoll::Halted(error.into());
         }
         self.handle.set_indexed_height(next.indexed_height);
+        if let Some(observer) = &self.observer {
+            for changes in observations {
+                observer.on_committed(changes);
+            }
+        }
         IndexerPoll::Applied(next.indexed_height)
     }
 
@@ -423,9 +449,13 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             transactions: &block.transactions,
         };
         let prev_height = meta.indexed_height;
-        match rollback_one_block(store, meta, &indexer_block) {
-            Ok(next_meta) => {
+        match rollback_one_block_with_changes(store, meta, &indexer_block, self.observer.is_some())
+        {
+            Ok((next_meta, changes)) => {
                 self.handle.set_indexed_height(next_meta.indexed_height);
+                if let (Some(observer), Some(changes)) = (&self.observer, changes) {
+                    observer.on_committed(changes);
+                }
                 IndexerPoll::RolledBack(prev_height)
             }
             Err(e) => IndexerPoll::Halted(e),

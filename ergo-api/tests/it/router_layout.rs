@@ -2213,6 +2213,8 @@ fn build_compat_app_digest_backend() -> axum::Router {
             emission_scripts: None,
             utxo_reads_supported: false,
             local_reverse_proxy: false,
+            services: Arc::new(ergo_api::ApiServices::new()),
+            script_config: Default::default(),
         },
         None,
     )

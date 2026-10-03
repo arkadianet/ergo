@@ -146,7 +146,7 @@ fn reduction_channel(surface: &str) -> Option<(&'static str, &'static [u8])> {
 /// Classify a minimized divergence.
 ///
 /// **Key rule**: for a parse-surface divergence with a reduction channel (see
-/// [`reduction_channel`]), re-run the reconciliation on that channel for the
+/// `reduction_channel`), re-run the reconciliation on that channel for the
 /// same bytes via [`crate::oracle::reconcile`]. If the reduction **explicitly
 /// agrees** (`Reconciliation::Agree`), the parse-surface divergence is a
 /// [`Triage::KnownArtifact`] — the node retains original wire bytes / defers

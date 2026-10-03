@@ -26,7 +26,7 @@
 //! path node-wide then answers `403 invalid.api-key` instead of `404`,
 //! masking "route does not exist" as "you need a key". Whole-prefix
 //! gating (Scala's `pathPrefix(...) & withAuth`) is preserved via
-//! explicit catch-all routes ([`unknown_gated_subpath`]) that
+//! explicit catch-all routes (`unknown_gated_subpath`) that
 //! `route_layer` does cover. Regression pinned by
 //! `tests/openapi_native_runtime_mount.rs`.
 

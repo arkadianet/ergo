@@ -46,7 +46,7 @@ pub struct KnownPeer {
     pub consecutive_failures: u32,
 }
 
-/// Outcome of an [`PeerManager::add_known_address`] call.
+/// Outcome of an [`super::PeerManager::add_known_address`] call.
 ///
 /// Lets the caller (gossip ingress, seed bootstrap) distinguish "this
 /// address actually entered the dial pool" from "we already had it" so
@@ -64,7 +64,7 @@ pub enum AddKnownOutcome {
     /// Gossip-ingested address rejected by the routability filter
     /// (loopback / RFC1918 / link-local / multicast / port 0). Seed
     /// entries skip this filter — see `origin` on
-    /// [`PeerManager::add_known_address`].
+    /// [`super::PeerManager::add_known_address`].
     FilteredNonRoutable,
     /// Pool was at [`MAX_KNOWN_ADDRESSES`] and the new entry's
     /// priority did not beat the worst existing entry, so it was
@@ -89,7 +89,7 @@ const DIAL_BACKOFF_SECS: &[u64] = &[30, 120, 600, 1800, 7200];
 /// Periodic peer-gossip interval. Matches Scala's
 /// `scorexSettings.network.getPeersInterval` default of 2 minutes. The
 /// orchestrator (ergo-node `sync_tick`) is expected to call
-/// [`PeerManager::select_peer_for_gossip`] and send `CODE_GET_PEERS` to
+/// [`super::PeerManager::select_peer_for_gossip`] and send `CODE_GET_PEERS` to
 /// the returned peer no more frequently than this interval.
 pub const GOSSIP_INTERVAL: Duration = Duration::from_secs(120);
 

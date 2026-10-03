@@ -8,6 +8,7 @@
 //! function on the same struct from `mod.rs`.
 
 use super::*;
+use redb::ReadableDatabase;
 
 impl StateStore {
     /// Disable commit durability for this database instance in logic tests.
@@ -58,7 +59,7 @@ impl StateStore {
     /// network-aware shape; defaults `voting_settings` to mainnet.
     /// Tests that pass `scala_launch_for_network(Network::Testnet)`
     /// here will silently use mainnet voting cadence — use
-    /// [`open_with_cache_launch_voting`] instead.
+    /// [`Self::open_with_cache_launch_voting`] instead.
     pub fn open_with_cache_and_launch(
         path: &Path,
         cache_bytes: usize,
@@ -82,9 +83,27 @@ impl StateStore {
         launch_params: ergo_validation::ActiveProtocolParameters,
         voting_settings: ergo_chain_spec::VotingParams,
     ) -> Result<Self, StateError> {
+        Self::open_with_cache_budgets_launch_voting(
+            path,
+            cache_bytes,
+            crate::DEFAULT_REDB_CACHE_BYTES,
+            launch_params,
+            voting_settings,
+        )
+    }
+
+    /// Open with independent AVL and redb budgets and network parameters.
+    pub fn open_with_cache_budgets_launch_voting(
+        path: &Path,
+        cache_bytes: usize,
+        redb_cache_bytes: usize,
+        launch_params: ergo_validation::ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+    ) -> Result<Self, StateError> {
         let t0 = std::time::Instant::now();
         let db = Arc::new(
             Database::builder()
+                .set_cache_size(redb_cache_bytes)
                 .set_repair_callback(|session| {
                     info!(
                         progress_pct = session.progress() * 100.0,
@@ -217,7 +236,19 @@ impl StateStore {
                 Err(e) => return Err(e.into()),
             };
             match from_table {
-                Some(cs) => cs,
+                Some(cs) => {
+                    if cs.best_full_block_height != height {
+                        return Err(StateError::DbCorruption {
+                            table: "chain_state_meta",
+                            key: "chain_state".into(),
+                            reason: format!(
+                                "full-block height {} disagrees with AVL height {height}",
+                                cs.best_full_block_height
+                            ),
+                        });
+                    }
+                    cs
+                }
                 None if height > 0 => {
                     // Derive from committed state: best_full_block = current tip.
                     // best_header defaults to same (header-first sync hasn't started).
@@ -291,6 +322,7 @@ impl StateStore {
             headers: crate::header_store::HeaderSectionTables::new(db.clone()),
             db,
             db_path: path.to_path_buf(),
+            redb_cache_bytes,
             tree,
             height,
             genesis_committed,
@@ -457,4 +489,39 @@ pub(super) fn write_mode2_trust_sentinel(
     let mut table = write_txn.open_table(CHAIN_STATE_META)?;
     table.insert(MODE2_TRUST_FIRST_EPOCH_KEY, [0x01u8].as_slice())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+    #[test]
+    fn separate_cache_budgets_survive_reopen_without_changing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let root;
+        {
+            let mut store = StateStore::open_with_cache_budgets_launch_voting(
+                &path,
+                16384,
+                65536,
+                ergo_validation::scala_launch(),
+                ergo_chain_spec::VotingParams::mainnet(),
+            )
+            .unwrap();
+            root = store.root_digest();
+            assert_eq!(store.metrics().arena_cache_capacity_bytes, 16384);
+            assert_eq!(store.metrics().redb_cache_capacity_bytes, 65536);
+        }
+        let mut store = StateStore::open_with_cache_budgets_launch_voting(
+            &path,
+            8192,
+            32768,
+            ergo_validation::scala_launch(),
+            ergo_chain_spec::VotingParams::mainnet(),
+        )
+        .unwrap();
+        assert_eq!(store.root_digest(), root);
+        assert_eq!(store.metrics().arena_cache_capacity_bytes, 8192);
+        assert_eq!(store.metrics().redb_cache_capacity_bytes, 32768);
+    }
 }

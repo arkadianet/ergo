@@ -183,6 +183,10 @@ impl WalletAdmin for StubAdmin {
 }
 
 fn app(addrs: Vec<String>) -> Router {
+    app_with_compute(addrs, Default::default())
+}
+
+fn app_with_compute(addrs: Vec<String>, compute: ergo_api::v1::ComputePool) -> Router {
     let admin: Arc<dyn WalletAdmin> = Arc::new(StubAdmin {
         addrs,
         fail_locked: false,
@@ -196,7 +200,41 @@ fn app(addrs: Vec<String>) -> Router {
             "/script/p2shAddress",
             post(ergo_api::script::p2sh_address_handler),
         )
-        .with_state((NetworkPrefix::Mainnet, admin))
+        .with_state((NetworkPrefix::Mainnet, admin, compute))
+}
+
+#[tokio::test]
+async fn scala_script_admission_failures_match_the_public_contract() {
+    let document: serde_json::Value =
+        serde_norway::from_str(ergo_api::server::scala_openapi_yaml()).unwrap();
+    let compute = ergo_api::v1::ComputePool::default();
+    compute.close();
+    let router = app_with_compute(vec![], compute);
+    let request = serde_json::json!({"source": "sigmaProp(true)", "treeVersion": 0}).to_string();
+
+    for path in ["/script/p2sAddress", "/script/p2shAddress"] {
+        let operation = &document["paths"][path]["post"];
+        assert_eq!(operation["security"], serde_json::json!([]));
+        for status in ["503", "504"] {
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ScriptServiceError",
+                "{path}: {status}"
+            );
+        }
+        assert_eq!(
+            operation["responses"]["500"]["content"]["application/json"]["schema"]["oneOf"],
+            serde_json::json!([
+                {"$ref": "#/components/schemas/ApiError"},
+                {"$ref": "#/components/schemas/ScriptServiceError"}
+            ])
+        );
+        let (status, body) = post_json(router.clone(), path, &request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+        assert_eq!(body["error"]["reason"], "shutting_down");
+        assert!(body["error"]["message"].is_string());
+        assert!(body["error"]["detail"].is_string());
+    }
 }
 
 async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
@@ -351,7 +389,7 @@ async fn p2s_address_route_locked_wallet_maps_to_400_not_500() {
             "/script/p2sAddress",
             post(ergo_api::script::p2s_address_handler),
         )
-        .with_state((NetworkPrefix::Mainnet, admin));
+        .with_state((NetworkPrefix::Mainnet, admin, Default::default()));
     let body = serde_json::json!({ "source": "sigmaProp(true)", "treeVersion": 0 }).to_string();
     let (status, json) = post_json(router, "/script/p2sAddress", &body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

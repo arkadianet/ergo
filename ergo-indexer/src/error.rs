@@ -340,6 +340,12 @@ impl From<redb::CommitError> for IndexerError {
     }
 }
 
+impl From<redb::SetDurabilityError> for IndexerError {
+    fn from(e: redb::SetDurabilityError) -> Self {
+        Self::Db(Box::new(e.into()))
+    }
+}
+
 impl IndexerError {
     /// Map an in-loop fatal error to the halt-reason classification
     /// used by the API gate.
@@ -388,7 +394,7 @@ impl IndexerError {
     /// error) OR a filesystem I/O failure preparing the indexer DB
     /// directory (`FsIo` — `create_dir_all`/`remove_file`/similar) — the
     /// scope `ergo_node_storage_errors_total` covers (issue #281).
-    /// Deliberately narrower than [`halt_reason`]'s `DbCorruption` bucket:
+    /// Deliberately narrower than [`Self::halt_reason`]'s `DbCorruption` bucket:
     /// that bucket also covers logical/consistency faults (row decode
     /// mismatches, missing boxes, segment topology errors) that are not
     /// "a redb/persist error was surfaced" in the operator sense —

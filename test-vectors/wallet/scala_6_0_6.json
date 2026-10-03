@@ -1,0 +1,80 @@
+{
+  "scalaVersion" : "ergo-wallet 6.0.6 / sigma-state 6.0.6",
+  "aes" : [
+    {
+      "password" : "correct horse battery staple",
+      "salt" : "000102030405060708090a0b0c0d0e0f",
+      "iv" : "0a0b0c0d0e0f000102030405",
+      "plaintext" : "68656c6c6f2c207363616c61207061726974792074657374",
+      "cipherText" : "97af81fe24a149280fc3c4c08d9e6842c34ba472c05dba0a",
+      "authTag" : "858ccfcd5442a90e068c41a8a4c5fabc"
+    },
+    {
+      "password" : "another password",
+      "salt" : "ffeeddccbbaa99887766554433221100",
+      "iv" : "aabbccddeeff001122334455",
+      "plaintext" : "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "cipherText" : "bac3c9b83c1be307cd9da38a55f32c7ff144ffd250242d38278bfadae22c54719907a930a53472ba5325f39362ada1d2917cd1fe84284ce1b7c21035469a2598893266f02ed3365944c96b230839605071359e95aee0d44a7fe7b6d3bd5621f4c69363400fd89af2cea1a7f607ebed875409b1c32466f63d61c2418352d4253d374e22ae3485123516b7bb711749402fc8f56896e21cdfe53872ef25144b5fae",
+      "authTag" : "93cd1cba73996a34db70a846c5402bd0"
+    }
+  ],
+  "modern" : {
+    "cipherText" : "e56ac5758917e2aadaf0e3c05c01720a54f42498f957bec43b5be02d22fac7e625c27b556269d11dad2f2f328918529c2b1bb40a07058a139c6ae101f575b295",
+    "salt" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "iv" : "202122232425262728292a2b",
+    "authTag" : "dfd15051bbbe5c190623a5176e4456dd",
+    "cipherParams" : {
+      "prf" : "HmacSHA512",
+      "c" : 128000,
+      "dkLen" : 256
+    },
+    "usePre1627KeyDerivation" : false
+  },
+  "legacy" : {
+    "cipherText" : "e56ac5758917e2aadaf0e3c05c01720a54f42498f957bec43b5be02d22fac7e625c27b556269d11dad2f2f328918529c2b1bb40a07058a139c6ae101f575b295",
+    "salt" : "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "iv" : "202122232425262728292a2b",
+    "authTag" : "dfd15051bbbe5c190623a5176e4456dd",
+    "cipherParams" : {
+      "prf" : "HmacSHA512",
+      "c" : 128000,
+      "dkLen" : 256
+    },
+    "usePre1627KeyDerivation" : null
+  },
+  "legacyDerivation" : [
+    {
+      "depth" : 0,
+      "secret" : "3527de3227326920720f394281ac182689a7d7e29951d837e96612e4d4bbcfde",
+      "chainCode" : "fd11debf4469c0ccef8aceb5467980b41243ee2172f2256f70b1edad590d1f64"
+    },
+    {
+      "depth" : 1,
+      "secret" : "1368432076b443c9ed3110b6ed3f1973072c95a2999c7178014acc67cc60cdc3",
+      "chainCode" : "23c7ea7175611b914f331a545559c7b770f93150249224467855ef140656b1b4"
+    },
+    {
+      "depth" : 2,
+      "secret" : "6795ba06412cb46add55c13b480dbed4a4433ef6c79b2d7002c0462c09372e",
+      "chainCode" : "eeb77cc0472c8420b2ff25df16be02c9fd93e6bc57eae53d1f17364b0d05df37"
+    },
+    {
+      "depth" : 3,
+      "secret" : "2f2baceb97081f3ecdf5c083482bb2561e7cc183e0cbe172ab801a5e3d1a4b58",
+      "chainCode" : "9728b21aeab5feae2f55a204050c25aba5c98ca4b64bf8ae713c342feb4a73b5"
+    },
+    {
+      "depth" : 4,
+      "secret" : "41e56e303534c7c2dd33979e56629355b3d8f0b7ee9d1ac2fb3f72659268d7ab",
+      "chainCode" : "12e636680a5fc2d926b749b6203cf9948e742c2a1d5a3721d03eb8882c3ca098"
+    },
+    {
+      "depth" : 5,
+      "secret" : "c2253076e42620eddaff801723678ae36829627bd6fd25f6aa185a1cc8e75659",
+      "chainCode" : "465ff5ad8c93e7b14284da6ba72a2fc5a879f352425d64cd3bfe9daa9f4bb03d"
+    }
+  ],
+  "modernAddress" : "9fv2n41gttbUx8oqqhexi68qPfoETFPxnLEEbTfaTk4SmY2knYC",
+  "pre1627Address" : "9ewv8sxJ1jfr6j3WUSbGPMTVx3TZgcJKdnjKCbJWhiJp5U62uhP",
+  "post1627Address" : "9eYMpbGgBf42bCcnB2nG3wQdqPzpCCw5eB1YaWUUen9uCaW3wwm"
+}

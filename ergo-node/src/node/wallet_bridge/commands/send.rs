@@ -31,8 +31,14 @@ pub(crate) async fn native_select_boxes(
         let _ = reply.send(Err(WalletAdminError::Locked));
         return;
     }
-    let result =
-        super::select_boxes_impl(&req, ctx.state, ctx.db, ctx.chain.as_ref(), ctx.cfg.network);
+    let result = super::select_boxes_impl(
+        &req,
+        ctx.state,
+        ctx.db,
+        ctx.chain.as_ref(),
+        ctx.cfg.network,
+        ctx.mempool.as_ref(),
+    );
     let _ = reply.send(result);
 }
 
@@ -53,6 +59,7 @@ pub(crate) async fn native_build_transaction(
         ctx.db,
         ctx.chain.as_ref(),
         ctx.cfg.network,
+        ctx.mempool.as_ref(),
     )
     .await;
     let _ = reply.send(result);
@@ -72,6 +79,7 @@ pub(crate) async fn native_sign_transaction(
         ctx.state,
         ctx.db,
         ctx.chain.as_ref(),
+        ctx.mempool.as_ref(),
     )
     .await;
     let _ = reply.send(result);
@@ -100,6 +108,7 @@ pub(crate) async fn native_send_transaction(
         ctx.chain.as_ref(),
         ctx.submit_handle.as_ref(),
         ctx.cfg.network,
+        ctx.mempool.as_ref(),
     )
     .await;
     let _ = reply.send(result);

@@ -11,7 +11,7 @@ use crate::error::WalletError;
 pub const HARDENED_OFFSET: u32 = 0x8000_0000;
 
 /// Ergo's BIP44 coin type, registered at
-/// https://github.com/satoshilabs/slips/blob/master/slip-0044.md.
+/// <https://github.com/satoshilabs/slips/blob/master/slip-0044.md>.
 /// Used as the second component of a BIP44 derivation: `m/44'/429'/...`.
 pub const ERGO_COIN_TYPE: u32 = 429;
 

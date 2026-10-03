@@ -299,7 +299,7 @@ fn digest_chain_1_1000_pipelined_under_cache_pressure_matches_oracle() {
         .with_non_durable_commits_for_test();
     init_genesis(&mut store);
     // Genesis first: the pipeline worker must not race the genesis write.
-    store.enable_persist_pipeline(64);
+    store.enable_persist_pipeline(64).unwrap();
     let fixtures = TestFixtures::load();
 
     for height in 1u32..=1000 {
@@ -331,7 +331,7 @@ fn ctrl_default_cache_with_pipeline() {
         .unwrap()
         .with_non_durable_commits_for_test();
     init_genesis(&mut store);
-    store.enable_persist_pipeline(64);
+    store.enable_persist_pipeline(64).unwrap();
     let fixtures = TestFixtures::load();
     for height in 1u32..=1000 {
         fixtures.apply_block(&mut store, height);
@@ -347,7 +347,7 @@ fn ctrl_tiny_cache_pipeline_depth_1() {
         .unwrap()
         .with_non_durable_commits_for_test();
     init_genesis(&mut store);
-    store.enable_persist_pipeline(1);
+    store.enable_persist_pipeline(1).unwrap();
     let fixtures = TestFixtures::load();
     for height in 1u32..=1000 {
         fixtures.apply_block(&mut store, height);
@@ -364,7 +364,7 @@ fn ctrl_medium_cache_16mib_with_pipeline() {
             .unwrap()
             .with_non_durable_commits_for_test();
     init_genesis(&mut store);
-    store.enable_persist_pipeline(64);
+    store.enable_persist_pipeline(64).unwrap();
     let fixtures = TestFixtures::load();
     for height in 1u32..=1000 {
         fixtures.apply_block(&mut store, height);
@@ -384,7 +384,7 @@ fn rollback_with_in_flight_persist_jobs_under_cache_pressure_matches_oracle() {
         .unwrap()
         .with_non_durable_commits_for_test();
     init_genesis(&mut store);
-    store.enable_persist_pipeline(64);
+    store.enable_persist_pipeline(64).unwrap();
     let fixtures = TestFixtures::load();
 
     for height in 1u32..=1000 {

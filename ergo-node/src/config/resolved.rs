@@ -65,6 +65,26 @@ impl std::str::FromStr for StateType {
     }
 }
 
+/// Independent redb page-cache budgets. These exclude the AVL arena, dirty
+/// nodes, queued jobs and the mining prover; they do not bound process RSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedbCacheBudgets {
+    pub state: usize,
+    pub indexer: usize,
+    pub peers: usize,
+}
+
+impl Default for RedbCacheBudgets {
+    fn default() -> Self {
+        let bytes = ergo_state::DEFAULT_REDB_CACHE_BYTES;
+        Self {
+            state: bytes,
+            indexer: bytes,
+            peers: bytes,
+        }
+    }
+}
+
 // ---- NodeConfig ----
 
 #[derive(Debug)]
@@ -147,6 +167,7 @@ pub struct NodeConfig {
     pub sync_interval_stable: std::time::Duration,
     /// AVL arena clean-node LRU budget (separate from redb caches), in bytes. None → use store default.
     pub cache_bytes: Option<usize>,
+    pub redb_cache_budgets: RedbCacheBudgets,
     /// Script-validation checkpoint: blocks at or below this height skip
     /// per-input ErgoScript evaluation. `None` → fully validate every block.
     /// `Some((h, id))` → skip below `h`, assert observed header_id at `h`
@@ -191,6 +212,8 @@ pub struct NodeConfig {
     /// `[api] local_reverse_proxy` — withdraw loopback trust when a reverse
     /// proxy terminates on loopback. Default `false`.
     pub api_local_reverse_proxy: bool,
+    /// Native script authentication and execution cost policy.
+    pub api_script: ergo_api::v1::ScriptConfig,
     /// Devnet-only POST /blocks opt-in; defaults to false.
     pub allow_direct_block_submit: bool,
     /// Private devnet genesis cost cap; validated at configuration load.

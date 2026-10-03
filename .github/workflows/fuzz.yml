@@ -8,8 +8,9 @@ name: Fuzz (nightly scheduled)
 # The structured and mutation campaigns use stable Rust; cargo-fuzz runs in
 # a separate nightly-toolchain matrix with libFuzzer and ASan instrumentation.
 #
-# The JVM oracle differential requires scala-cli + a published local ergo-core
-# and stays manual/local. The streamed replay driver IS wired below (the `replay`
+# The JVM oracle differential runs on the same nightly schedule, with cached
+# reference jars and an optional warm runner selected by CONSENSUS_GUARD_RUNNER.
+# The streamed replay driver IS wired below (the `replay`
 # job) but is gated on a `REPLAY_NODE_URL` secret pointing at a reachable archival
 # Scala node — it no-ops when unset (GitHub-hosted runners have no node), so it
 # runs on a self-hosted runner or an operator `workflow_dispatch`. This is where
@@ -21,14 +22,12 @@ on:
     # 02:00 UTC every night (off-peak for cache efficiency)
     - cron: '0 2 * * *'
   workflow_dispatch:
-    # Allow manual trigger for an on-demand long campaign, and for the
-    # JVM-oracle `consensus-guard` job (which only runs on this event — see
-    # the job's own comment for why it is not on the nightly schedule).
+    # Manual runs can reproduce a recorded seed on a selected runner.
     inputs:
       runner:
-        description: 'Runner label for consensus-guard (self-hosted recommended)'
+        description: 'Runner label (empty uses CONSENSUS_GUARD_RUNNER or ubuntu-latest)'
         required: false
-        default: 'ubuntu-latest'
+        default: ''
       guard_seed:
         description: 'consensus-guard PRNG seed'
         required: false
@@ -47,28 +46,27 @@ jobs:
     name: structured campaign (2 000 000 iters, min-coverage 0.80)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
+      - uses: ./.github/actions/rust
+        id: rust
 
       # Keep the difftest binary cached across nightly runs so only dependency
       # changes trigger a rebuild (the generator code rarely changes).
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: fuzz-nightly
 
-      - name: cargo build (release)
-        run: cargo build --release -p ergo-difftest
+      - name: cargo build --locked (release)
+        run: cargo build --locked --release -p ergo-difftest
 
       # Long structured campaign (2 M iters ≈ 10–15 min on ubuntu-latest).
       # Fails loudly on any invariant violation OR coverage drop below 80 %.
       - name: structured campaign — 2 000 000 iters
         run: |
-          cargo run --release -p ergo-difftest -- \
+          cargo run --locked --release -p ergo-difftest -- \
             --structured --iters 2000000 --min-coverage 0.80
 
   fuzz-corpus-mutation:
@@ -76,20 +74,19 @@ jobs:
     runs-on: ubuntu-latest
     # Independent of fuzz-structured — a separate signal, runs in parallel.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
+      - uses: ./.github/actions/rust
+        id: rust
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: fuzz-corpus-mutation
 
-      - name: cargo build (release)
-        run: cargo build --release -p ergo-difftest
+      - name: cargo build --locked (release)
+        run: cargo build --locked --release -p ergo-difftest
 
       # Byte-mutation campaign seeded from the committed corpus.
       # Unlike the structured campaign (grammar-aware), this mutates real wire
@@ -97,7 +94,7 @@ jobs:
       - name: corpus mutation — 2 000 000 iters
         run: |
           set -o pipefail
-          cargo run --release -p ergo-difftest -- \
+          cargo run --locked --release -p ergo-difftest -- \
             --iters 2000000 \
             --corpus ergo-difftest/fuzz/corpus/ergo_tree \
             2>&1 | tee "$RUNNER_TEMP/corpus-mutation.log"
@@ -107,14 +104,14 @@ jobs:
       - name: corpus mutation (sigma_expr) — 500 000 iters
         run: |
           set -o pipefail
-          cargo run --release -p ergo-difftest -- \
+          cargo run --locked --release -p ergo-difftest -- \
             --surface sigma_expr --iters 500000 \
             --corpus ergo-difftest/fuzz/corpus/sigma_expr \
             2>&1 | tee "$RUNNER_TEMP/sigma-expr-mutation.log"
 
       - name: upload mutation findings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-transcripts
           path: |
@@ -130,20 +127,19 @@ jobs:
     # no-ops when unset (GitHub-hosted runners have no node — use a self-hosted
     # runner or a workflow_dispatch from an operator with node access).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
+      - uses: ./.github/actions/rust
+        id: rust
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: replay-driver
 
-      - name: cargo build (release)
-        run: cargo build --release -p ergo-difftest --bin replay
+      - name: cargo build --locked (release)
+        run: cargo build --locked --release -p ergo-difftest --bin replay
 
       # Pass the node URL via env (a secret) — never interpolated into the shell.
       # Skip cleanly when unset so the job is green on hosted runners without a node.
@@ -157,7 +153,7 @@ jobs:
             echo 'REPLAY_NODE_URL is unset. Fuzzing results do not include state-root replay coverage.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          cargo run --release -p ergo-difftest --bin replay -- \
+          cargo run --locked --release -p ergo-difftest --bin replay -- \
             --from 1 --to 10000 --node "$REPLAY_NODE_URL"
 
   cargo-fuzz-nightly:
@@ -172,18 +168,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr]
+        target: [ergo_tree, constant, ergo_box_candidate, transaction, header, sigma_expr, p2p_frame, p2p_handshake, p2p_message, p2p_delivery, compiler_source, bounded_evaluator]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/rust
+        id: rust
         with:
-          toolchain: nightly
+          nightly: 'true'
           components: rust-src
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: cargo-fuzz-${{ matrix.target }}
           workspaces: ergo-difftest/fuzz
@@ -192,14 +189,21 @@ jobs:
       # across nightly runs — it changes rarely.
       - name: cache cargo-fuzz binary
         id: cargo-fuzz-bin-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-bin-${{ runner.os }}-v0.13
+          key: cargo-fuzz-bin-${{ runner.os }}-${{ steps.rust.outputs.fuzz }}
 
       - name: install cargo-fuzz
         if: steps.cargo-fuzz-bin-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version ${{ steps.rust.outputs.fuzz }} --locked
+
+      # cargo-fuzz has no --locked option. Resolve its separate workspace
+      # against the committed lock before building, then detect any drift even
+      # when libFuzzer reports a crash.
+      - name: check locked fuzz dependencies
+        working-directory: ergo-difftest
+        run: cargo +${{ steps.rust.outputs.nightly }} metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
 
       # Bounded run: build (ASan) + a coverage-guided run seeded from the
       # committed corpus/<surface>, capped at 10 minutes wall-clock per target
@@ -219,12 +223,18 @@ jobs:
         env:
           ASAN_OPTIONS: malloc_context_size=0
         run: |
-          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+          cargo +${{ steps.rust.outputs.nightly }} fuzz run "${{ matrix.target }}" -- \
             -max_total_time=600 -error_exitcode=1 -rss_limit_mb=2048 -print_final_stats=1
+
+      - name: verify fuzz lockfile unchanged
+        if: always()
+        run: |
+          git ls-files --error-unmatch ergo-difftest/fuzz/Cargo.lock
+          git diff --exit-code -- ergo-difftest/fuzz/Cargo.lock
 
       - name: upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: ergo-difftest/fuzz/artifacts/
@@ -235,7 +245,7 @@ jobs:
       # the committed corpus/<surface>/ by hand.
       - name: upload grown corpus
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-corpus-${{ matrix.target }}
           path: ergo-difftest/fuzz/corpus/${{ matrix.target }}/
@@ -243,47 +253,43 @@ jobs:
 
   consensus-guard:
     name: consensus guard (JVM oracle differential — reduce / reduce_ctx / tx / box / validate)
-    # `workflow_dispatch` ONLY, deliberately — not on the nightly schedule.
-    #
-    # Why: the oracle runs the REAL reference jars, and `ergo-core 6.0.6` is not
+    # The oracle runs the REAL reference jars, and `ergo-core 6.0.6` is not
     # published to Maven Central. Standing it up on a cold GitHub-hosted runner
     # means cloning the Scala node and running
     # `sbt avldb/publishLocal ergoWallet/publishLocal ergoCore/publishLocal`,
-    # which alone exceeds the ~20 min this job is budgeted for (an sbt cold start
-    # plus three subproject publishes; the coursier + sigma-state fetch is on top).
-    # The `~/.ivy2/local` cache below removes that cost on a WARM runner, so the
-    # honest wiring is: green-path = a self-hosted runner (or a hosted runner
-    # whose ivy cache is already populated), triggered on demand or by an
-    # operator cron; the bootstrap step is here so a cold run still works, just
-    # slowly. Point `runner` at a self-hosted label to take the fast path.
+    # (three subproject publishes, plus coursier and sigma-state dependency fetches).
+    # The 120-minute timeout allows a cold run; the immutable-version dependency
+    # cache removes this cost on subsequent hosted runs. Set the repository
+    # variable CONSENSUS_GUARD_RUNNER to a warm runner label to reuse local jars.
     #
     # The hermetic PR-time `difftest` job in ci.yml is unchanged and needs none
     # of this.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || vars.CONSENSUS_GUARD_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: consensus-guard-${{ github.ref }}
+      cancel-in-progress: false
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
+      - uses: ./.github/actions/rust
+        id: rust
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: consensus-guard
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: '11'
 
-      - uses: VirtusLab/scala-cli-setup@v1
+      - uses: VirtusLab/scala-cli-setup@c33dfbf1a5f16ee60efff453b7f9a987d2b6955b # v1
 
       # scala-cli does not install sbt, which the cold publishLocal path needs.
-      - uses: sbt/setup-sbt@v1
+      - uses: sbt/setup-sbt@5ffaf2b6f207c2df06fee08e16bd6110e300b04d # v1
         with:
           sbt-runner-version: 1.12.11
 
@@ -293,7 +299,7 @@ jobs:
       # version bump invalidates the cache instead of silently reusing stale jars.
       - name: cache JVM oracle dependencies
         id: oracle-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.ivy2/local
@@ -319,11 +325,11 @@ jobs:
           set -euo pipefail
           echo "ergo_tree 0008d3" \
             | scala-cli run scripts/jvm_serde_oracle/ErgoSerdeOracle.scala \
-            | tee /tmp/oracle-warm.txt
-          grep -q '^ACCEPT 0008d3$' /tmp/oracle-warm.txt
+            | tee "$RUNNER_TEMP/oracle-warm.txt"
+          grep -q '^ACCEPT 0008d3$' "$RUNNER_TEMP/oracle-warm.txt"
 
-      - name: cargo build (release)
-        run: cargo build --release -p ergo-difftest
+      - name: cargo build --locked (release)
+        run: cargo build --locked --release -p ergo-difftest
 
       # The guard itself. Exit 1 = an UNBASELINED pending divergence (a new
       # candidate); exit 3 = the run did not check what it planned to (dead
@@ -337,20 +343,46 @@ jobs:
       - name: consensus guard
         env:
           DIFFTEST_ORACLE_LOG: ${{ runner.temp }}/oracle-transcript.log
-          GUARD_SEED: ${{ inputs.guard_seed || '991' }}
+          # A scheduled run gets a recorded, rotating seed; manual runs retain
+          # the explicit input so a failing campaign can be reproduced exactly.
+          GUARD_SEED: ${{ inputs.guard_seed || github.run_id }}
           GUARD_ITERS: ${{ inputs.guard_iters || '2000' }}
         run: |
-          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS"
+          set -euo pipefail
+          printf 'seed=%s\niters=%s\nsource=%s\nreference=ergo-core-6.0.6\n' \
+            "$GUARD_SEED" "$GUARD_ITERS" "$GITHUB_SHA" > "$RUNNER_TEMP/consensus-guard-run.txt"
+          scripts/difftest-guard.sh --seed "$GUARD_SEED" --iters "$GUARD_ITERS" \
+            2>&1 | tee "$RUNNER_TEMP/consensus-guard.log"
+
+      - name: summarize consensus guard
+        if: always()
+        run: |
+          {
+            echo '### Scala consensus differential campaign'
+            echo
+            echo '```text'
+            if [ -f "$RUNNER_TEMP/consensus-guard-run.txt" ]; then
+              cat "$RUNNER_TEMP/consensus-guard-run.txt"
+            else
+              echo 'Campaign did not start; check dependency bootstrap and oracle warm-up.'
+            fi
+            echo '```'
+            echo
+            echo 'The artifact preserves the campaign log, seed, reference version, minimized regressions and per-surface oracle transcripts.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Always upload: on a pass this is the empty-queue evidence, on a failure
       # it is the minimized, classified record set plus the oracle transcript
       # that proves the harness and the oracle stayed in step.
       - name: upload regressions + oracle transcript
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: consensus-guard-regressions
           path: |
             ergo-difftest/regressions/
+            ${{ runner.temp }}/consensus-guard-run.txt
+            ${{ runner.temp }}/consensus-guard.log
+            ${{ runner.temp }}/oracle-warm.txt
             ${{ runner.temp }}/oracle-transcript.log.*
           if-no-files-found: ignore

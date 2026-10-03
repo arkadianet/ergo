@@ -6,11 +6,31 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
+/// Offline operator commands. These never start the node or load its config.
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Copy and upgrade a stopped legacy redb database; never replace either path.
+    MigrateRedb {
+        /// Existing database belonging to a stopped node.
+        source: PathBuf,
+        /// New database path in an existing directory; must not exist.
+        destination: PathBuf,
+    },
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "ergo-node", about = "Ergo Rust full node")]
+#[command(
+    name = "ergo-node",
+    version,
+    about = "Ergo Rust full node",
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
+    /// Offline operator command instead of starting a node.
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// Path to config file (default: ergo-node.toml in data dir)
     #[arg(long, short = 'c')]
     pub config: Option<PathBuf>,
@@ -29,8 +49,7 @@ pub struct Cli {
 
     /// IBD durability flush interval (blocks). During initial sync,
     /// block commits use `Durability::None` except every N blocks which
-    /// use `Durability::Eventual` (still a synchronous flush on Linux
-    /// with the pinned redb 2.6.3 backend).
+    /// use `Durability::Immediate` (a synchronous flush on every supported OS).
     /// Default 500 — empirically reduces durable-flush spikes >500ms by
     /// ~75% vs the old 100, with no measurable loss in apply throughput.
     /// On hard crash, up to N blocks of work replays from peers.

@@ -3,6 +3,7 @@ name        = "ergo-crypto"
 description = "Cryptographic primitives for the Ergo Rust node: Blake2b-based Merkle trees, Autolykos v1/v2 proof-of-work verification, secp256k1 EC arithmetic helpers, and difficulty-adjustment math (pre-EIP-37, EIP-37, and v2-activation special cases)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -25,3 +26,6 @@ serde_json = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

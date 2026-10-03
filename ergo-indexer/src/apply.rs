@@ -119,7 +119,7 @@ pub fn apply_block_with_scratch(
     scratch: &mut BlockApplyScratch,
 ) -> Result<IndexerMeta, IndexerError> {
     let mut write_txn = store.begin_write()?;
-    write_txn.set_durability(redb::Durability::Eventual);
+    write_txn.set_durability(redb::Durability::Immediate)?;
     let applied =
         apply_block_in_transaction(&write_txn, store.rollback_window(), meta, block, scratch)?;
     write_txn.commit()?;
@@ -127,6 +127,7 @@ pub fn apply_block_with_scratch(
 }
 
 pub(crate) struct AppliedBlock {
+    pub changes: Vec<crate::events::BoxChange>,
     pub meta: IndexerMeta,
     pub secondary_repair_pending: bool,
     pub serialized_bytes: u64,
@@ -251,6 +252,14 @@ pub(crate) fn apply_block_in_transaction(
                     existing.spending_tx_id = Some(tx_id);
                     existing.spending_height = Some(block_height);
                     existing.spending_proof = Some(input.spending_proof.clone());
+                    if scratch.capture_changes {
+                        scratch.box_changes.push(crate::events::BoxChange {
+                            kind: crate::events::BoxChangeKind::Spent,
+                            box_id: input.box_id,
+                            tx_id,
+                            record: existing.clone(),
+                        });
+                    }
                     write_then_insert(
                         &mut box_table,
                         &mut scratch.writer,
@@ -394,6 +403,14 @@ pub(crate) fn apply_block_in_transaction(
                     box_data: sealed,
                     global_index: global,
                 };
+                if scratch.capture_changes {
+                    scratch.box_changes.push(crate::events::BoxChange {
+                        kind: crate::events::BoxChangeKind::Created,
+                        box_id,
+                        tx_id,
+                        record: indexed.clone(),
+                    });
+                }
                 write_then_insert(
                     &mut box_table,
                     &mut scratch.writer,
@@ -480,7 +497,7 @@ pub(crate) fn apply_block_in_transaction(
                                 let fresh = IndexedToken::from_box(
                                     &box_id,
                                     token,
-                                    &candidate.additional_registers,
+                                    candidate.additional_registers(),
                                 );
                                 record.creating_box_id = fresh.creating_box_id;
                                 record.emission_amount = fresh.emission_amount;
@@ -620,6 +637,7 @@ pub(crate) fn apply_block_in_transaction(
     undo_io::prune_below_window(write_txn, block_height_u64, rollback_window)?;
 
     Ok(AppliedBlock {
+        changes: std::mem::take(&mut scratch.box_changes),
         meta: next,
         secondary_repair_pending: secondary_skipped,
         serialized_bytes,

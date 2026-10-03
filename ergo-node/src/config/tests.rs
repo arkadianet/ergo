@@ -49,6 +49,7 @@ fn default_toml() -> tempfile::NamedTempFile {
 
 fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     Cli {
+        command: None,
         config: tmp_toml.map(|p| p.as_ref().to_path_buf()),
         network: Some("mainnet".into()),
         peers: vec!["127.0.0.1:9030".parse().unwrap()],
@@ -2367,5 +2368,67 @@ fn storage_rent_relay_policy_network_defaults_and_overrides() {
                 "network={network}, override={override_value:?}",
             );
         }
+    }
+}
+
+#[test]
+fn redb_cache_budgets_default_independently_of_avl_and_cli() {
+    let cfg = NodeConfig::load(minimal_cli::<&std::path::Path>(None)).unwrap();
+    assert_eq!(cfg.redb_cache_budgets, RedbCacheBudgets::default());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\ncache_bytes = 2097152\nstate_redb_cache_bytes = 16777216\nindexer_redb_cache_bytes = 33554432\npeers_redb_cache_bytes = 1048576\n").unwrap();
+    let mut cli = minimal_cli(Some(&path));
+    cli.cache_bytes = Some(4194304);
+    let cfg = NodeConfig::load(cli).unwrap();
+    assert_eq!(cfg.cache_bytes, Some(4194304));
+    assert_eq!(
+        cfg.redb_cache_budgets,
+        RedbCacheBudgets {
+            state: 16777216,
+            indexer: 33554432,
+            peers: 1048576
+        }
+    );
+}
+
+#[test]
+fn redb_cache_budgets_allow_disabled_cache_and_reject_negative_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.toml");
+    std::fs::write(&path, "[store]\nstate_redb_cache_bytes = 0\n").unwrap();
+    let cfg = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(cfg.redb_cache_budgets.state, 0);
+    assert_eq!(
+        cfg.redb_cache_budgets.peers,
+        ergo_state::DEFAULT_REDB_CACHE_BYTES
+    );
+    for field in [
+        "state_redb_cache_bytes",
+        "indexer_redb_cache_bytes",
+        "peers_redb_cache_bytes",
+    ] {
+        std::fs::write(&path, format!("[store]\n{field} = -1\n")).unwrap();
+        assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err());
+    }
+}
+
+#[test]
+fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
+    let path = write_toml("[api.script]\nrequire_api_key = true\nmax_cost = 12345\n");
+    let config = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert!(config.api_script.require_api_key);
+    assert_eq!(config.api_script.max_cost, 12345);
+    for source in [
+        "[api.script]\nrequire_api_keys = true\n",
+        "[api]\nscript_require_api_key = true\n",
+        "[api.script]\nmax_cost = 0\n",
+        "[api.script]\nmax_cost = 8001092\n",
+    ] {
+        let path = write_toml(source);
+        assert!(
+            NodeConfig::load(minimal_cli(Some(&path))).is_err(),
+            "{source}"
+        );
     }
 }

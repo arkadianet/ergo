@@ -71,6 +71,8 @@ pub enum StateError {
     TableError(#[source] Box<redb::TableError>),
     #[error("redb commit error: {0}")]
     CommitError(#[source] Box<redb::CommitError>),
+    #[error("redb durability error: {0}")]
+    DurabilityError(#[source] redb::SetDurabilityError),
     #[error("state digest mismatch: computed {computed}, expected {expected}")]
     DigestMismatch { computed: String, expected: String },
     /// Shipped-ADProofs transition replay failed during UTXO-mode block
@@ -336,7 +338,7 @@ pub enum StateError {
         at: PopowMissingAt,
     },
     /// Internal invariant violation at a specific block height —
-    /// typed-detail companion to [`InternalInvariant`] for sites
+    /// typed-detail companion to [`Self::InternalInvariant`] for sites
     /// where the failure context is a height (e.g. expected
     /// HEADER_CHAIN_INDEX row missing for a height the prover just
     /// validated, voted_params cache reload missing a row the
@@ -629,6 +631,12 @@ impl From<redb::TableError> for StateError {
 impl From<redb::CommitError> for StateError {
     fn from(e: redb::CommitError) -> Self {
         StateError::CommitError(Box::new(e))
+    }
+}
+
+impl From<redb::SetDurabilityError> for StateError {
+    fn from(e: redb::SetDurabilityError) -> Self {
+        Self::DurabilityError(e)
     }
 }
 

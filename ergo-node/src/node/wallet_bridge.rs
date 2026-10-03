@@ -4,6 +4,7 @@
 //! them serially and sends the responses back via the per-command
 //! oneshot channel.
 
+use redb::ReadableDatabase;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -323,24 +324,46 @@ pub enum WalletCommand {
 /// `Node::run` and handed to `ergo-api`'s router builder.
 pub struct NodeWalletAdmin {
     tx: mpsc::Sender<WalletCommand>,
+    rescan: Arc<crate::wallet_boot::RescanControl>,
 }
 
 impl NodeWalletAdmin {
     pub fn new(tx: mpsc::Sender<WalletCommand>) -> Self {
-        Self { tx }
+        Self::with_rescan(tx, Arc::new(crate::wallet_boot::RescanControl::default()))
+    }
+
+    pub fn with_rescan(
+        tx: mpsc::Sender<WalletCommand>,
+        rescan: Arc<crate::wallet_boot::RescanControl>,
+    ) -> Self {
+        Self { tx, rescan }
+    }
+
+    pub fn rescan_control(&self) -> &Arc<crate::wallet_boot::RescanControl> {
+        &self.rescan
     }
 
     async fn send_cmd<R, F>(&self, build: F) -> Result<R, WalletAdminError>
     where
         F: FnOnce(oneshot::Sender<Result<R, WalletAdminError>>) -> WalletCommand,
     {
+        if self.rescan.stopping() {
+            return Err(WalletAdminError::ShuttingDown);
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(build(reply_tx))
-            .await
-            .map_err(|_| WalletAdminError::Internal("wallet writer task is gone".to_string()))?;
+        self.tx.send(build(reply_tx)).await.map_err(|_| {
+            if self.rescan.stopping() {
+                WalletAdminError::ShuttingDown
+            } else {
+                WalletAdminError::Internal("wallet writer task is gone".to_string())
+            }
+        })?;
         reply_rx.await.map_err(|_| {
-            WalletAdminError::Internal("wallet writer task dropped reply".to_string())
+            if self.rescan.stopping() {
+                WalletAdminError::ShuttingDown
+            } else {
+                WalletAdminError::Internal("wallet writer task dropped reply".to_string())
+            }
         })?
     }
 }
@@ -1008,6 +1031,7 @@ impl ChainStateAccessor for ChainStateAccessorImpl {
 /// single delayed apply per admin operation.
 pub struct WalletStateHook {
     pub wallet: Arc<RwLock<ergo_wallet::state::WalletState>>,
+    pub rescan: Arc<crate::wallet_boot::RescanControl>,
     /// Shared redb handle — used to read the registered scans for block-apply
     /// matching (the scans live in redb, not `WalletState`).
     pub db: Arc<redb::Database>,
@@ -1018,7 +1042,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     fn tracked_p2pk_trees(&self) -> std::collections::BTreeSet<Vec<u8>> {
         // Skip during rescan: the live apply hook returns empty so chain-apply
         // doesn't interfere with the background rescan writing the same tables.
-        if crate::wallet_boot::rescan_in_progress() {
+        if self.rescan.in_progress() {
             return std::collections::BTreeSet::new();
         }
         let state = self.wallet.read();
@@ -1026,7 +1050,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
     }
 
     fn cached_pubkeys(&self) -> std::collections::BTreeMap<u64, [u8; 33]> {
-        if crate::wallet_boot::rescan_in_progress() {
+        if self.rescan.in_progress() {
             return std::collections::BTreeMap::new();
         }
         let state = self.wallet.read();
@@ -1041,7 +1065,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // how the pubkey path skips during a rescan. A PARTIAL
         // rescan does not set this flag, so live scan tracking continues
         // across it (scans have no range-rewind rebuild).
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan.rebuilding.load(Ordering::SeqCst) {
             return 0;
         }
         // Cheap per-block gate: count rows in WALLET_SCANS. Scan tracking is
@@ -1066,7 +1090,7 @@ impl ergo_state::wallet::WalletApplyHook for WalletStateHook {
         // Quiesced during a scan rebuild (see `registered_scan_count`). The
         // count gate already returns 0 then, so this is defense in depth —
         // mirrors the pubkey path gating both of its hook methods.
-        if crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst) {
+        if self.rescan.rebuilding.load(Ordering::SeqCst) {
             return vec![Vec::new(); boxes.len()];
         }
         // Load the registry once for the whole block, then match each box.
@@ -1142,13 +1166,12 @@ pub struct WriterConfig {
     pub max_tx_size_bytes: usize,
 }
 
-/// Writer-task loop. Runs in a dedicated tokio task; receives commands and
-/// dispatches against owned `storage` + `state` + `db` + `chain` accessor.
-/// Each command's reply is sent back via its oneshot.
-#[allow(clippy::result_large_err)] // redb::Error is large; closures in rescan dispatch can't avoid it
-#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
+/// Compatibility entry point for embedders that own the task themselves.
+/// Closing every command sender drains the writer and its rescans. Production
+/// uses the supervised entry point so shutdown does not depend on sender Drop.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_wallet_writer(
-    mut rx: mpsc::Receiver<WalletCommand>,
+    rx: mpsc::Receiver<WalletCommand>,
     storage: Arc<RwLock<SecretStorage>>,
     state: Arc<RwLock<WalletState>>,
     db: Arc<redb::Database>,
@@ -1157,9 +1180,73 @@ pub async fn run_wallet_writer(
     submit_handle: Arc<dyn TxSubmitter>,
     mempool: Arc<dyn ergo_api::MempoolView>,
 ) {
+    run_wallet_writer_with_rescan(
+        rx,
+        storage,
+        state,
+        db,
+        chain,
+        cfg,
+        submit_handle,
+        mempool,
+        Arc::new(crate::wallet_boot::RescanControl::default()),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_wallet_writer_with_rescan(
+    rx: mpsc::Receiver<WalletCommand>,
+    storage: Arc<RwLock<SecretStorage>>,
+    state: Arc<RwLock<WalletState>>,
+    db: Arc<redb::Database>,
+    chain: Arc<dyn ChainStateAccessor>,
+    cfg: WriterConfig,
+    submit_handle: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<crate::wallet_boot::RescanControl>,
+) {
+    let (_keep_alive, shutdown) = tokio::sync::watch::channel(false);
+    if let Err(error) = run_wallet_writer_supervised(
+        rx,
+        storage,
+        state,
+        db,
+        chain,
+        cfg,
+        submit_handle,
+        mempool,
+        rescan,
+        shutdown,
+    )
+    .await
+    {
+        tracing::error!(%error, "wallet writer failed");
+    }
+}
+
+/// Writer-task loop. Runs in a dedicated tokio task; receives commands and
+/// dispatches against owned `storage` + `state` + `db` + `chain` accessor.
+/// Each command's reply is sent back via its oneshot.
+#[allow(clippy::result_large_err)] // redb::Error is large; closures in rescan dispatch can't avoid it
+#[allow(clippy::too_many_arguments)] // task spawn-point: owned deps unpacked straight into WriterContext
+pub async fn run_wallet_writer_supervised(
+    mut rx: mpsc::Receiver<WalletCommand>,
+    storage: Arc<RwLock<SecretStorage>>,
+    state: Arc<RwLock<WalletState>>,
+    db: Arc<redb::Database>,
+    chain: Arc<dyn ChainStateAccessor>,
+    cfg: WriterConfig,
+    submit_handle: Arc<dyn TxSubmitter>,
+    mempool: Arc<dyn ergo_api::MempoolView>,
+    rescan: Arc<crate::wallet_boot::RescanControl>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), WalletAdminError> {
     let store: Arc<dyn ergo_state::wallet::WalletStore> =
         Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
     let ctx = commands::WriterContext {
+        rescan: &rescan,
+        rescan_workers: &rescan.workers,
         storage: &storage,
         state: &state,
         db: &db,
@@ -1174,7 +1261,33 @@ pub async fn run_wallet_writer(
     // `commands::admin::AttemptLimiter`.
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
-    while let Some(cmd) = rx.recv().await {
+    let mut failure = None;
+    loop {
+        if rescan.stopping() || *shutdown.borrow() {
+            break;
+        }
+        // Release completed task handles during normal operation, retaining
+        // panic evidence for explicit shutdown rather than silently detaching.
+        let completed = {
+            let mut workers = rescan.workers.lock();
+            let (completed, running): (Vec<_>, Vec<_>) = std::mem::take(&mut *workers)
+                .into_iter()
+                .partition(|worker| worker.is_finished());
+            *workers = running;
+            completed
+        };
+        for worker in completed {
+            if let Err(error) = worker.await {
+                failure.get_or_insert_with(|| {
+                    WalletAdminError::Internal(format!("wallet rescan worker failed: {error}"))
+                });
+            }
+        }
+        let cmd = tokio::select! {
+            biased;
+            _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
+            command = rx.recv() => match command { Some(command) => command, None => break },
+        };
         let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
             continue;
         };
@@ -1339,6 +1452,15 @@ pub async fn run_wallet_writer(
             }
         }
     }
+    rescan.stop();
+    rx.close();
+    drop(rx);
+    if let Err(error) = rescan.join_workers().await {
+        failure.get_or_insert_with(|| {
+            WalletAdminError::Internal(format!("wallet rescan worker failed: {error}"))
+        });
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 // `run_wallet_writer` per-command handlers split into per-group
@@ -1390,6 +1512,7 @@ mod scan_invalidation_tests {
             w.commit().unwrap();
         }
         let hook = WalletStateHook {
+            rescan: Arc::new(crate::wallet_boot::RescanControl::default()),
             wallet: Arc::new(RwLock::new(ergo_wallet::state::WalletState::empty(false))),
             db: db.clone(),
             store: Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone())),

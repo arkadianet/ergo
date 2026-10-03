@@ -145,6 +145,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -163,6 +166,9 @@ pub async fn run(config: NodeConfig) -> Result<(), NodeError> {
                     Ok(Err(e)) => e,
                     Err(join_err) => Box::new(join_err) as NodeError,
                 };
+                if let Err(error) = handle.drain_wallet().await {
+                    tracing::error!(%error, "wallet cleanup failed after action-loop exit");
+                }
                 handle.drain_api_and_inbound().await;
                 return Err(cause);
             }
@@ -324,6 +330,17 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         }
         launch_parameters.max_block_cost = cap as i32;
     }
+    info!(
+        state_redb_cache_bytes = config.redb_cache_budgets.state,
+        indexer_redb_cache_bytes = if config.indexer_config.enabled {
+            config.redb_cache_budgets.indexer
+        } else {
+            0
+        },
+        peers_redb_cache_bytes = config.redb_cache_budgets.peers,
+        "redb page-cache budgets; cache eviction metrics enabled",
+    );
+
     let is_mode_5 = crate::config::is_canonical_mode_5_combo(
         config.state_type,
         config.verify_transactions,
@@ -331,11 +348,12 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         config.utxo_bootstrap,
     );
     if is_mode_5 {
-        let mut store = ergo_state::DigestStateStore::open(
+        let mut store = ergo_state::DigestStateStore::open_with_redb_cache(
             &db_path,
             launch_parameters,
             config.chain_spec.voting,
             ergo_chain_spec::GenesisParams::for_network(config.chain_spec.network).state_digest,
+            config.redb_cache_budgets.state,
         )
         .map_err(|e| {
             report_boot_storage_failure(&db_path, "open_digest_state", &e);
@@ -370,9 +388,10 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         .await;
     }
 
-    let mut store = StateStore::open_with_cache_launch_voting(
+    let mut store = StateStore::open_with_cache_budgets_launch_voting(
         &db_path,
         cache_bytes,
+        config.redb_cache_budgets.state,
         launch_parameters,
         config.chain_spec.voting,
     )
@@ -420,15 +439,6 @@ pub async fn run_inner(config: NodeConfig) -> Result<RunHandle, NodeError> {
         state_type = config.state_type.as_str(),
         avl_arena_cache_mb = cache_bytes / (1024 * 1024),
         "opened store",
-    );
-    // Observability note: redb cache config is implicit in 2.6.3 — the
-    // `Database::builder()` call in `ergo-state::store` does not invoke
-    // `set_cache_size`, so each redb DB falls back to the library default
-    // (1 GiB per redb 2.6.3 `Builder::new`, ~90% read / ~10% write split).
-    // Log this honestly so operators don't read the AVL arena MB above as
-    // the total state-subsystem cache budget.
-    info!(
-        "redb cache: default/unset (1 GiB per DB, redb 2.6.3); cache_metrics feature disabled (evictions counter inactive)",
     );
     info!(
         height = store.height(),
@@ -689,7 +699,7 @@ async fn run_inner_with_backend(
     boot_sentinel: u32,
 ) -> Result<RunHandle, NodeError> {
     // Phase 1: peer manager + address book + known-peer seeding.
-    let (session_id, peer_manager) = peers::setup(&config);
+    let (session_id, peer_manager) = peers::setup(&config)?;
 
     // Phase 2: sync coordinator/executor, IBD/persist pipeline, indexer,
     // shadow validation, hydrate/recover, NiPoPoW resume classification.
@@ -866,6 +876,7 @@ async fn run_inner_with_backend(
         scaffold.read_state.clone(),
         scaffold.submit_bridge.clone(),
         sync.indexer_handle.clone(),
+        sync.indexer_event_observer.clone(),
         &mut mempool,
         mining_subsystem.bridge.clone(),
         scaffold.voting_targets_slot.clone(),
@@ -877,7 +888,11 @@ async fn run_inner_with_backend(
     let api_addr = api_bind.api_addr;
     let api_handle = api_bind.api_handle;
     let api_shutdown_tx = api_bind.api_shutdown_tx;
+    let api_services = api_bind.api_services;
     let live_wallet_hook = api_bind.live_wallet_hook;
+    let wallet_rescan = api_bind.wallet_rescan;
+    let wallet_cancel = api_bind.wallet_cancel;
+    let wallet_handle = api_bind.wallet_handle;
 
     // Inbound P2P listener (opt-in via `[peers] bind_addr`). Without it
     // the node runs outbound-only: peers we dialed feed us blocks/txs
@@ -995,6 +1010,7 @@ async fn run_inner_with_backend(
         // wallet routes process without erroring (UTXO-dependent reads
         // see an empty set; secret-only ops like init/unlock work).
         // Mode-aware route gating is tracked separately as feature work.
+        wallet_rescan: wallet_rescan.clone(),
         wallet_hook: if sync.backend_is_utxo {
             live_wallet_hook
         } else {
@@ -1105,8 +1121,12 @@ async fn run_inner_with_backend(
         read: scaffold.read_state,
         shutdown_tx: Some(shutdown_tx),
         api_shutdown_tx,
+        api_services,
         loop_handle,
         api_handle,
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle: Some(wallet_handle),
         inbound_handle,
         shadow_task_handle: sync.shadow_task_handle,
         indexer_cancel: sync.indexer_cancel,

@@ -16,17 +16,17 @@
 //!
 //! The dispatch arms live here (`assign_type`/`dispatch`); the grammar is split
 //! across submodules:
-//! - [`simple_arms`] — §1.1-1.6/1.13/1.14/1.19/1.20: block, concrete-collection,
+//! - `simple_arms` — §1.1-1.6/1.13/1.14/1.19/1.20: block, concrete-collection,
 //!   ident, select, lambda, if, and/or, exponentiate, byindex.
-//! - [`apply`] — §1.7-1.10/1.12: the `assign_apply*`/`assign_apply_types` routing
+//! - `apply` — §1.7-1.10/1.12: the `assign_apply*`/`assign_apply_types` routing
 //!   family and its arg-adaptation/numeric-const helpers.
-//! - [`method_call_like`] — §1.11: the `mcl_*` receiver-family functions and the
+//! - `method_call_like` — §1.11: the `mcl_*` receiver-family functions and the
 //!   `assign_method_call_like` dispatcher.
-//! - [`lower_method`] — the shared method/property irBuilder lowering catalog,
+//! - `lower_method` — the shared method/property irBuilder lowering catalog,
 //!   a single receiver/name-keyed dispatch table kept as one function.
-//! - [`arith_bitop`] — §1.16/1.17: `ArithOp`/`BitOp` arms plus the relation/
+//! - `arith_bitop` — §1.16/1.17: `ArithOp`/`BitOp` arms plus the relation/
 //!   equality node builders.
-//! - [`harness`] — §6: the `bimap`/`bimap2`/`unmap` shared numeric-op harness.
+//! - `harness` — §6: the `bimap`/`bimap2`/`unmap` shared numeric-op harness.
 //!
 //! `expr_contains_untyped_node` (a generic `TypedExpr` tree-walk, not
 //! typer-specific logic) lives in `typed.rs` alongside the type it walks. The
@@ -51,7 +51,7 @@
 //! graded fact and reject `line:col` stays advisory (E5). Positions ride on
 //! [`TypedExpr`] (typed.rs); rebuilt nodes inherit the position of the node
 //! being rewritten (Scala's `currentSrcCtx` pinning), so typed children carry
-//! their bound-tree offsets. Ledger: `lib.rs` § "Known M2 deviations" D-T7.
+//! their bound-tree offsets. Ledger: `compiler-design-ledger.md` § "Known M2 deviations" D-T7.
 
 use crate::span::Pos;
 use crate::stype::SType;
@@ -1266,7 +1266,7 @@ mod tests {
     /// Scala `SByte.downcast` / `SShort.downcast` = `toByteExact` / `toShortExact`:
     /// throw `ArithmeticException` on overflow.  We reject with `TyperError`.
     /// Verdict parity is exact; class-tag differs (ArithmeticException vs TyperError
-    /// — see lib.rs Known M2 deviations).
+    /// — see compiler-design-ledger.md Known M2 deviations).
     #[test]
     fn id_narrowing_overflow_rejects() {
         // getVar[Int](200): 200 > i8::MAX (127) → ArithmeticException (oracle §13).
@@ -1653,7 +1653,7 @@ mod tests {
 
     /// D-T12 residual: an opaque env-lifted `ConstPayload::SigmaProp(String)` (no
     /// real curve bytes in our representation — only a label) stays a NAMED
-    /// reject (documented in the lib.rs deviation ledger) — the still-open half
+    /// reject (documented in the compiler design ledger) — the still-open half
     /// of D-T12, distinct from the now-closed GroupElement/ProveDlog arms above.
     #[test]
     fn mcl_string_const_plus_opaque_sigmaprop_const_rejects_residual() {

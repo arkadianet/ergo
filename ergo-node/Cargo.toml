@@ -3,6 +3,7 @@ name        = "ergo-node"
 description = "Operator binary and runtime crate for the Ergo Rust full node. Wires the workspace's component crates (state, p2p, sync, mempool, indexer, API) into a single async runtime, owns process-level lifecycle (config, data-dir layout, graceful shutdown, peer loop, submission action loop), and exposes the API trait surface to ergo-api over an Arc<NodeSnapshot>."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -63,6 +64,7 @@ rand               = { workspace = true }
 ergo-sigma         = { workspace = true }
 
 [dev-dependencies]
+redb_legacy = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ergo-api           = { workspace = true }
@@ -78,3 +80,11 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "mempool_publication"
+path = "benches/mempool_publication.rs"
+harness = false

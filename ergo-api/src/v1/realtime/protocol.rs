@@ -448,7 +448,12 @@ impl Session {
                 data: event.data.clone(),
                 previous_seq: event.previous_seq,
             });
-            if class.map(ChannelClass::is_terminal).unwrap_or(false) {
+            let terminal = matches!(
+                (class, event.event),
+                (Some(ChannelClass::Box), "box_spent")
+                    | (Some(ChannelClass::Tx), "tx_confirmed" | "tx_dropped")
+            );
+            if terminal {
                 self.channels.remove(&channel);
                 fulfilled.push(channel);
             }
@@ -647,6 +652,57 @@ mod tests {
         assert_eq!(s.channel_count(), 0, "terminal channel freed");
         // A second event no longer matches.
         assert!(s.on_event(&ev).is_empty());
+    }
+
+    #[test]
+    fn box_unspent_after_resubscribe_does_not_fulfill_until_next_spend() {
+        let mut s = session();
+        let channel = format!("box:{HEX64}");
+        s.handle_subscribe(None, vec![channel.clone()], all_live);
+        let mut event = RealtimeEvent {
+            seq: 1,
+            emitted_at_unix_ms: 0,
+            routes: vec![channel.clone()],
+            event: "box_spent",
+            confirmed: true,
+            height: Some(10),
+            data: serde_json::json!({"box_id":HEX64}),
+            previous_seq: None,
+        };
+        assert_eq!(s.on_event(&event).len(), 2);
+        assert_eq!(s.channel_count(), 0);
+        s.handle_subscribe(None, vec![channel], all_live);
+        event.seq = 2;
+        event.event = "box_unspent";
+        event.previous_seq = Some(1);
+        assert_eq!(s.on_event(&event).len(), 1);
+        assert_eq!(s.channel_count(), 1);
+        event.seq = 3;
+        event.event = "box_spent";
+        assert_eq!(s.on_event(&event).len(), 2);
+        assert_eq!(s.channel_count(), 0);
+    }
+
+    #[test]
+    fn terminal_tx_only_fulfills_confirmed_or_dropped_events() {
+        let mut s = session();
+        s.handle_subscribe(None, vec![format!("tx:{HEX64}")], all_live);
+        let mut event = RealtimeEvent {
+            seq: 1,
+            emitted_at_unix_ms: 0,
+            routes: vec![format!("tx:{HEX64}")],
+            event: "tx_accepted",
+            confirmed: false,
+            height: None,
+            data: serde_json::json!({"tx_id":HEX64}),
+            previous_seq: None,
+        };
+        assert_eq!(s.on_event(&event).len(), 1);
+        assert_eq!(s.channel_count(), 1);
+        event.seq = 2;
+        event.event = "tx_dropped";
+        assert_eq!(s.on_event(&event).len(), 2);
+        assert_eq!(s.channel_count(), 0);
     }
 
     #[test]

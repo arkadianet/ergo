@@ -78,6 +78,15 @@ pub fn rollback_one_block(
     meta: &IndexerMeta,
     block: &IndexerBlock<'_>,
 ) -> Result<IndexerMeta, IndexerError> {
+    rollback_one_block_with_changes(store, meta, block, false).map(|(meta, _)| meta)
+}
+
+pub(crate) fn rollback_one_block_with_changes(
+    store: &IndexerStore,
+    meta: &IndexerMeta,
+    block: &IndexerBlock<'_>,
+    capture_changes: bool,
+) -> Result<(IndexerMeta, Option<crate::events::BlockChanges>), IndexerError> {
     if meta.indexed_height == 0 {
         return Err(IndexerError::NothingToRollback { height: 0 });
     }
@@ -113,8 +122,9 @@ pub fn rollback_one_block(
     );
 
     let block_height = block.height;
+    let mut changes = capture_changes.then(Vec::new);
     let result: Result<IndexerMeta, IndexerError> =
-        rollback_one_block_inner(store, block, height_u64, block_height);
+        rollback_one_block_inner(store, block, height_u64, block_height, &mut changes);
 
     match &result {
         Ok(new_meta) => {
@@ -140,7 +150,14 @@ pub fn rollback_one_block(
         }
     }
 
-    result
+    result.map(|meta| {
+        let changes = changes.map(|boxes| crate::events::BlockChanges {
+            header_id: block.header_id,
+            height: block.height as u32,
+            boxes,
+        });
+        (meta, changes)
+    })
 }
 
 /// Body of [`rollback_one_block`], factored out so the caller can wrap
@@ -152,6 +169,7 @@ fn rollback_one_block_inner(
     block: &IndexerBlock<'_>,
     height_u64: u64,
     block_height: i32,
+    changes: &mut Option<Vec<crate::events::BoxChange>>,
 ) -> Result<IndexerMeta, IndexerError> {
     let write_txn = store.begin_write()?;
     // Mirror apply: set if any secondary unflip is skipped on a drift, flushed
@@ -281,6 +299,14 @@ fn rollback_one_block_inner(
                         source: e,
                     })?;
                 drop(raw);
+                if let Some(changes) = changes {
+                    changes.push(crate::events::BoxChange {
+                        kind: crate::events::BoxChangeKind::Reverted,
+                        box_id,
+                        tx_id,
+                        record: existing.clone(),
+                    });
+                }
                 let owner_tree_hash =
                     tree_hash_from_bytes(existing.box_data.candidate.ergo_tree_bytes());
                 let value_delta = existing.box_data.candidate.value as i64;
@@ -445,6 +471,14 @@ fn rollback_one_block_inner(
                     existing.spending_tx_id = None;
                     existing.spending_height = None;
                     existing.spending_proof = None;
+                    if let Some(changes) = changes {
+                        changes.push(crate::events::BoxChange {
+                            kind: crate::events::BoxChangeKind::Unspent,
+                            box_id: input.box_id,
+                            tx_id,
+                            record: existing.clone(),
+                        });
+                    }
                     let bytes =
                         serialize_indexed_box(&existing).map_err(|e| IndexerError::DbDecode {
                             context: "indexed_box encode",

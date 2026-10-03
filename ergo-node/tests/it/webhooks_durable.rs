@@ -19,7 +19,7 @@ async fn detail(
         .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn independent_api_engines_and_restart_preserve_private_registrations() {
     let first_dir = tempfile::tempdir().unwrap();
     let second_dir = tempfile::tempdir().unwrap();
@@ -46,6 +46,12 @@ async fn independent_api_engines_and_restart_preserve_private_registrations() {
         assert!(value.get("secret").is_none());
     }
     first.shutdown().await.unwrap();
+    // Awaited shutdown must release the durable engine immediately, before a
+    // queued Drop supervisor gets another poll on this current-thread runtime.
+    drop(
+        redb::Database::open(first_dir.path().join("webhooks.redb"))
+            .expect("shutdown must release webhook database without yielding"),
+    );
     second.shutdown().await.unwrap();
     let restarted = spawn_node(make_test_config(first_dir.path().to_path_buf())).await;
     let value = detail(&client, restarted.api_addr.unwrap(), &ids[0]).await;

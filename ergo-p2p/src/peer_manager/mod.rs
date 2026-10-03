@@ -5,7 +5,7 @@
 //! - Target 96 outbound, up to 256 inbound (decoupled — a full outbound
 //!   set never reduces inbound capacity)
 //! - 1 connection per IP
-//! - Max 3 from same /16 subnet [inherited, relaxed]
+//! - Max 3 from one IPv4 /16 or native IPv6 /48 connection group
 //!
 //! Peer selection currently sorts by most-recently-seen. Full bucketed
 //! ranking with throughput metrics and randomization is queued for a
@@ -166,6 +166,14 @@ impl PeerManager {
     /// Attach a persistent address book. Subsequent lifecycle hooks
     /// (handshake, dial outcome, gossip ingest, ban) will write through.
     /// Idempotent: replaces any existing handle.
+    /// Peer database budget and cumulative page-cache evictions, or zeros when unavailable.
+    pub fn address_book_cache_metrics(&self) -> (usize, u64) {
+        self.book
+            .as_ref()
+            .map(|b| b.cache_metrics())
+            .unwrap_or_default()
+    }
+
     pub fn set_address_book(&mut self, book: Arc<AddressBook>) {
         self.book = Some(book);
     }
@@ -458,7 +466,7 @@ impl PeerManager {
 
     /// Check if an IP is currently banned (ban list, not peer table).
     pub fn is_banned(&self, addr: &SocketAddr, now: Instant) -> bool {
-        if let Some(entry) = self.bans.get(&addr.ip()) {
+        if let Some(entry) = self.bans.get(&crate::peer::canonical_ip(addr.ip())) {
             return now < entry.until;
         }
         false
@@ -781,10 +789,17 @@ impl PeerManager {
         }
     }
 
-    /// Restore a ban from disk. Idempotent — replaces any existing entry
-    /// for the same IP. Does not write back through to the book.
+    /// Restore a ban from disk without writing back. Mapped and native IPv4
+    /// records share one identity; preserve the strongest expiry and count if
+    /// both representations were persisted by an older node.
     pub fn restore_ban(&mut self, ip: IpAddr, until: Instant, count: u32) {
-        self.bans.insert(ip, BanEntry { until, count });
+        self.bans
+            .entry(crate::peer::canonical_ip(ip))
+            .and_modify(|entry| {
+                entry.until = entry.until.max(until);
+                entry.count = entry.count.max(count);
+            })
+            .or_insert(BanEntry { until, count });
     }
 
     /// Record a dial failure against a known address. Increments the
@@ -1080,30 +1095,33 @@ impl PeerManager {
         let ip_count = self
             .peers
             .values()
-            .filter(|p| p.addr.ip() == addr.ip())
+            .filter(|p| {
+                crate::peer::canonical_ip(p.addr.ip()) == crate::peer::canonical_ip(addr.ip())
+            })
             .count();
         if ip_count >= self.limits.per_ip_limit {
             return Err(ConnectError::PerIpLimitReached);
         }
-        // Per-subnet limit (IPv4 /16)
-        if let IpAddr::V4(ip) = addr.ip() {
-            let subnet = [ip.octets()[0], ip.octets()[1]];
-            let subnet_count = self
-                .peers
-                .values()
-                .filter(|p| p.subnet() == Some(subnet))
-                .count();
-            if subnet_count >= self.limits.per_subnet_limit {
-                return Err(ConnectError::PerSubnetLimitReached);
-            }
+        // Pending handshakes and both connection directions count against the
+        // same IPv4 /16 or IPv6 /48 group budget.
+        let group = limits::network_group(addr.ip());
+        let group_count = self
+            .peers
+            .values()
+            .filter(|p| limits::network_group(p.addr.ip()) == group)
+            .count();
+        if group_count >= self.limits.per_subnet_limit {
+            return Err(ConnectError::PerSubnetLimitReached);
         }
         Ok(())
     }
 
     /// Record a ban in the ban list (separate from peer table).
     fn record_ban(&mut self, ip: IpAddr, now: Instant, permanent: bool) {
+        let ip = crate::peer::canonical_ip(ip);
         // Bans are IP-wide, including other ports and pending handshakes.
-        self.peers.retain(|addr, _| addr.ip() != ip);
+        self.peers
+            .retain(|addr, _| crate::peer::canonical_ip(addr.ip()) != ip);
         let existing_count = self.bans.get(&ip).map(|e| e.count).unwrap_or(0);
         let duration = if permanent {
             Duration::from_secs(365 * 24 * 60 * 60)
@@ -1154,7 +1172,7 @@ impl PeerManager {
     /// Expired bans are already unenforced (`is_banned` / `currently_banned_ips`
     /// compare against `until`), so this is pure hygiene: without it, entries
     /// linger in memory until restart and their redb rows forever. Cadence is
-    /// gated internally to [`BAN_SWEEP_INTERVAL`] — the first call runs
+    /// gated internally to `BAN_SWEEP_INTERVAL` — the first call runs
     /// immediately, later calls between sweeps are cheap no-ops. Returns the
     /// number of entries removed.
     pub fn sweep_expired_bans(&mut self, now: Instant) -> usize {

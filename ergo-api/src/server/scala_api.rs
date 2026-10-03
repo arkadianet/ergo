@@ -79,6 +79,7 @@ pub(super) fn auxiliary_router(
     emission: Option<Arc<dyn crate::emission::EmissionSchedule>>,
     emission_scripts: Option<Arc<crate::emission::EmissionScriptsJson>>,
     security: Option<Arc<crate::auth::ApiSecurity>>,
+    compute: crate::v1::ComputePool,
 ) -> FamilyRouter {
     let documented = super::scala_openapi_operations();
     let mut operations = std::collections::BTreeSet::new();
@@ -164,7 +165,11 @@ pub(super) fn auxiliary_router(
             "/script/addressToBytes/:address",
             get(crate::utils::script_address_to_bytes_handler),
         );
-    let scripts: Router<(NetworkPrefix, Arc<dyn crate::wallet::WalletAdmin>)> = Router::new()
+    let scripts: Router<(
+        NetworkPrefix,
+        Arc<dyn crate::wallet::WalletAdmin>,
+        crate::v1::ComputePool,
+    )> = Router::new()
         .route(
             "/script/p2sAddress",
             post(crate::script::p2s_address_handler),
@@ -184,7 +189,7 @@ pub(super) fn auxiliary_router(
     FamilyRouter::new(ApiFamily::Scala).merge_documented(
         router
             .merge(utilities.with_state(network))
-            .merge(scripts.with_state((network, wallet_admin))),
+            .merge(scripts.with_state((network, wallet_admin, compute))),
         operations,
     )
 }

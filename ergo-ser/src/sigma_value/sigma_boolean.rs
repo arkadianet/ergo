@@ -34,48 +34,45 @@ pub fn write_sigma_boolean(w: &mut VlqWriter, sb: &SigmaBoolean) -> Result<(), W
         }
         Ok(())
     }
-    match sb {
-        SigmaBoolean::TrivialProp(false) => w.put_u8(TRIVIAL_PROP_FALSE),
-        SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
-        SigmaBoolean::ProveDlog(ge) => {
-            w.put_u8(PROVE_DLOG);
-            w.put_bytes(&canonical_encoding(*ge.as_bytes()));
-        }
-        SigmaBoolean::ProveDHTuple { g, h, u, v } => {
-            w.put_u8(PROVE_DHTUPLE);
-            w.put_bytes(&canonical_encoding(*g.as_bytes()));
-            w.put_bytes(&canonical_encoding(*h.as_bytes()));
-            w.put_bytes(&canonical_encoding(*u.as_bytes()));
-            w.put_bytes(&canonical_encoding(*v.as_bytes()));
-        }
-        SigmaBoolean::Cand(children) => {
-            check_children_len(children.len(), "Cand")?;
-            w.put_u8(SIGMA_AND);
-            w.put_u16(children.len() as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+    let mut pending = vec![sb];
+    while let Some(sb) = pending.pop() {
+        match sb {
+            SigmaBoolean::TrivialProp(false) => w.put_u8(TRIVIAL_PROP_FALSE),
+            SigmaBoolean::TrivialProp(true) => w.put_u8(TRIVIAL_PROP_TRUE),
+            SigmaBoolean::ProveDlog(ge) => {
+                w.put_u8(PROVE_DLOG);
+                w.put_bytes(&canonical_encoding(*ge.as_bytes()));
             }
-        }
-        SigmaBoolean::Cor(children) => {
-            check_children_len(children.len(), "Cor")?;
-            w.put_u8(SIGMA_OR);
-            w.put_u16(children.len() as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+            SigmaBoolean::ProveDHTuple { g, h, u, v } => {
+                w.put_u8(PROVE_DHTUPLE);
+                w.put_bytes(&canonical_encoding(*g.as_bytes()));
+                w.put_bytes(&canonical_encoding(*h.as_bytes()));
+                w.put_bytes(&canonical_encoding(*u.as_bytes()));
+                w.put_bytes(&canonical_encoding(*v.as_bytes()));
             }
-        }
-        SigmaBoolean::Cthreshold { k, children } => {
-            let n = children.len();
-            if !is_valid_cthreshold_shape(*k, n) {
-                return Err(WriteError::InvalidData(format!(
-                    "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={n}"
-                )));
+            SigmaBoolean::Cand(children) => {
+                check_children_len(children.len(), "Cand")?;
+                w.put_u8(SIGMA_AND);
+                w.put_u16(children.len() as u16);
+                pending.extend(children.iter().rev());
             }
-            w.put_u8(SIGMA_THRESHOLD);
-            w.put_u16(*k);
-            w.put_u16(n as u16);
-            for child in children {
-                write_sigma_boolean(w, child)?;
+            SigmaBoolean::Cor(children) => {
+                check_children_len(children.len(), "Cor")?;
+                w.put_u8(SIGMA_OR);
+                w.put_u16(children.len() as u16);
+                pending.extend(children.iter().rev());
+            }
+            SigmaBoolean::Cthreshold { k, children } => {
+                let n = children.len();
+                if !is_valid_cthreshold_shape(*k, n) {
+                    return Err(WriteError::InvalidData(format!(
+                        "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={n}"
+                    )));
+                }
+                w.put_u8(SIGMA_THRESHOLD);
+                w.put_u16(*k);
+                w.put_u16(n as u16);
+                pending.extend(children.iter().rev());
             }
         }
     }
@@ -142,7 +139,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
-            Ok(SigmaBoolean::Cand(children))
+            Ok(SigmaBoolean::Cand(children.into()))
         }
         SIGMA_OR => {
             let count = r.get_u16()? as usize;
@@ -150,7 +147,7 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
             for _ in 0..count {
                 children.push(read_sigma_boolean_at_depth(r, next)?);
             }
-            Ok(SigmaBoolean::Cor(children))
+            Ok(SigmaBoolean::Cor(children.into()))
         }
         SIGMA_THRESHOLD => {
             // Scala: k = r.getUShort(), n = r.getUShort(), then the n children,
@@ -169,7 +166,10 @@ fn read_sigma_boolean_node(r: &mut VlqReader, depth: usize) -> Result<SigmaBoole
                     "Cthreshold invariant requires 0 <= k <= n <= 255: k={k}, n={count}"
                 )));
             }
-            Ok(SigmaBoolean::Cthreshold { k, children })
+            Ok(SigmaBoolean::Cthreshold {
+                k,
+                children: children.into(),
+            })
         }
         // Scala's `SigmaBoolean.serializer.parse` matches the tag with no
         // default case: a `MatchError`, a hard reject.
@@ -238,24 +238,30 @@ mod tests {
 
     #[test]
     fn roundtrip_sigma_prop_cand() {
-        let sb = SigmaBoolean::Cand(vec![
-            SigmaBoolean::ProveDlog(fake_ge(0xAA)),
-            SigmaBoolean::ProveDlog(fake_ge(0xBB)),
-        ]);
+        let sb = SigmaBoolean::Cand(
+            vec![
+                SigmaBoolean::ProveDlog(fake_ge(0xAA)),
+                SigmaBoolean::ProveDlog(fake_ge(0xBB)),
+            ]
+            .into(),
+        );
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
 
     #[test]
     fn roundtrip_sigma_prop_cor() {
-        let sb = SigmaBoolean::Cor(vec![
-            SigmaBoolean::ProveDlog(fake_ge(0xCC)),
-            SigmaBoolean::ProveDHTuple {
-                g: fake_ge(0x11),
-                h: fake_ge(0x22),
-                u: fake_ge(0x33),
-                v: fake_ge(0x44),
-            },
-        ]);
+        let sb = SigmaBoolean::Cor(
+            vec![
+                SigmaBoolean::ProveDlog(fake_ge(0xCC)),
+                SigmaBoolean::ProveDHTuple {
+                    g: fake_ge(0x11),
+                    h: fake_ge(0x22),
+                    u: fake_ge(0x33),
+                    v: fake_ge(0x44),
+                },
+            ]
+            .into(),
+        );
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
 
@@ -267,7 +273,8 @@ mod tests {
                 SigmaBoolean::ProveDlog(fake_ge(0xAA)),
                 SigmaBoolean::ProveDlog(fake_ge(0xBB)),
                 SigmaBoolean::ProveDlog(fake_ge(0xCC)),
-            ],
+            ]
+            .into(),
         };
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
@@ -277,7 +284,7 @@ mod tests {
         // A single-child Cand chain within MaxTreeDepth (110) must still parse.
         let mut sb = SigmaBoolean::TrivialProp(true);
         for _ in 0..100 {
-            sb = SigmaBoolean::Cand(vec![sb]);
+            sb = SigmaBoolean::Cand(vec![sb].into());
         }
         roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
     }
@@ -291,7 +298,7 @@ mod tests {
         // throws DeserializeCallDepthExceeded past depth 110.
         let mut sb = SigmaBoolean::TrivialProp(true);
         for _ in 0..200 {
-            sb = SigmaBoolean::Cand(vec![sb]);
+            sb = SigmaBoolean::Cand(vec![sb].into());
         }
         let mut w = VlqWriter::new();
         write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
@@ -311,7 +318,7 @@ mod tests {
         let chain = |n: usize| {
             let mut sb = SigmaBoolean::TrivialProp(true);
             for _ in 0..n {
-                sb = SigmaBoolean::Cand(vec![sb]);
+                sb = SigmaBoolean::Cand(vec![sb].into());
             }
             let mut w = VlqWriter::new();
             write_value(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
@@ -337,7 +344,7 @@ mod tests {
         let sigma_const = |m: usize| {
             let mut sb = SigmaBoolean::TrivialProp(true);
             for _ in 0..m {
-                sb = SigmaBoolean::Cand(vec![sb]);
+                sb = SigmaBoolean::Cand(vec![sb].into());
             }
             let mut w = VlqWriter::new();
             write_constant(&mut w, &SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb)).unwrap();
@@ -379,7 +386,7 @@ mod tests {
                 &mut w,
                 &SigmaBoolean::Cthreshold {
                     k,
-                    children: vec![SigmaBoolean::TrivialProp(true); n],
+                    children: vec![SigmaBoolean::TrivialProp(true); n].into(),
                 },
             );
             assert!(result.is_err(), "k={k}, n={n} must be rejected");
@@ -394,7 +401,7 @@ mod tests {
                 &mut w,
                 &SigmaBoolean::Cthreshold {
                     k,
-                    children: vec![SigmaBoolean::TrivialProp(true); n],
+                    children: vec![SigmaBoolean::TrivialProp(true); n].into(),
                 },
             );
             assert!(result.is_ok(), "k={k}, n={n} must be accepted");
@@ -442,7 +449,7 @@ mod tests {
         for (k, n) in [(0u16, 0usize), (1, 1), (255, 255)] {
             let sb = SigmaBoolean::Cthreshold {
                 k,
-                children: vec![SigmaBoolean::TrivialProp(true); n],
+                children: vec![SigmaBoolean::TrivialProp(true); n].into(),
             };
             roundtrip_value(&SigmaType::SSigmaProp, &SigmaValue::SigmaProp(sb));
         }

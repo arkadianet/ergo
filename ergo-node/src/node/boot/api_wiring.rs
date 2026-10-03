@@ -8,6 +8,7 @@
 //! it produces — so the natural boot order is `build_scaffold` →
 //! (mining subsystem) → `bind`.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_state::HeaderSectionStore;
@@ -135,6 +136,10 @@ pub(super) struct ApiBind {
     pub api_addr: Option<std::net::SocketAddr>,
     pub api_handle: Option<JoinHandle<()>>,
     pub api_shutdown_tx: Option<oneshot::Sender<()>>,
+    pub wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
+    pub wallet_cancel: tokio::sync::watch::Sender<bool>,
+    pub wallet_handle: JoinHandle<Result<(), ergo_api::wallet::WalletAdminError>>,
+    pub api_services: Option<Arc<ergo_api::ApiServices>>,
     pub live_wallet_hook: Option<Arc<super::super::wallet_bridge::WalletStateHook>>,
 }
 
@@ -185,6 +190,7 @@ pub(super) async fn bind(
     read_state: Arc<dyn ergo_api::NodeReadState>,
     submit_bridge: Arc<dyn ergo_api::NodeSubmit>,
     indexer_handle: Option<ergo_indexer::IndexerHandle>,
+    indexer_event_observer: Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     mempool: &mut ergo_mempool::Mempool,
     mining_bridge: Option<Arc<dyn ergo_api::NodeMining>>,
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
@@ -276,7 +282,9 @@ pub(super) async fn bind(
     let submit_handle: Arc<dyn super::super::wallet_bridge::TxSubmitter> = Arc::new(
         super::super::wallet_bridge::NodeSubmitAdapter::new(submit_bridge.clone()),
     );
-    tokio::spawn(super::super::wallet_bridge::run_wallet_writer(
+    let wallet_rescan = Arc::new(crate::wallet_boot::RescanControl::default());
+    let (wallet_cancel, wallet_shutdown) = tokio::sync::watch::channel(false);
+    let wallet_handle = tokio::spawn(super::super::wallet_bridge::run_wallet_writer_supervised(
         wallet_rx,
         wallet_storage,
         wallet_state,
@@ -287,11 +295,15 @@ pub(super) async fn bind(
         // Clone the mempool view for the wallet's unconfirmed-balance
         // overlay; the original moves into ServerCtx below.
         mempool_view.clone(),
+        wallet_rescan.clone(),
+        wallet_shutdown,
     ));
-    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> =
-        Arc::new(super::super::wallet_bridge::NodeWalletAdmin::new(wallet_tx));
+    let wallet_admin: Arc<dyn ergo_api::wallet::WalletAdmin> = Arc::new(
+        super::super::wallet_bridge::NodeWalletAdmin::with_rescan(wallet_tx, wallet_rescan.clone()),
+    );
     let hook = Arc::new(super::super::wallet_bridge::WalletStateHook {
         wallet: wallet_state_for_hook,
+        rescan: wallet_rescan.clone(),
         db: db_arc.clone(),
         store: wallet_store,
     });
@@ -302,6 +314,10 @@ pub(super) async fn bind(
             api_addr: None,
             api_handle: None,
             api_shutdown_tx: None,
+            wallet_rescan,
+            wallet_cancel,
+            wallet_handle,
+            api_services: None,
             live_wallet_hook: Some(hook),
         });
     };
@@ -327,6 +343,10 @@ pub(super) async fn bind(
                 api_addr: None,
                 api_handle: None,
                 api_shutdown_tx: None,
+                wallet_rescan,
+                wallet_cancel,
+                wallet_handle,
+                api_services: None,
                 live_wallet_hook: Some(hook),
             });
         }
@@ -366,29 +386,31 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    // Open durable obligations before the server starts the delivery worker.
-    // A corrupt/unwritable store disables webhooks instead of acknowledging
-    // registrations that would disappear at restart.
-    let webhook_engine =
-        crate::webhook_store::RedbWebhookStore::open(&config.data_dir.join("webhooks.redb"))
+    // Restore admitted delivery obligations before node-owned realtime observers
+    // and the API listener start. An unavailable store disables webhooks rather
+    // than acknowledging registrations that would disappear at restart.
+    let webhook_path = config.data_dir.join("webhooks.redb");
+    let api_services = tokio::task::spawn_blocking(move || {
+        let webhook_engine = crate::webhook_store::RedbWebhookStore::open(&webhook_path)
             .and_then(|store| {
                 ergo_api::v1::WebhookEngine::durable(Default::default(), Arc::new(store))
             })
             .map(Arc::new);
-    let webhook_engine = match webhook_engine {
-        Ok(engine) => Some(engine),
-        Err(error) => {
-            tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
-            None
-        }
-    };
-    if let Some(engine) = &webhook_engine {
-        ergo_api::realtime_handle()
-            .bus
-            .advance_cursor_to(engine.highest_event_seq().saturating_add(1));
-    }
-
-    // Realtime WS bridge (A2): the same process-wide bus the
+        let webhook_engine = match webhook_engine {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                tracing::error!(%error, "durable webhook store unavailable; webhooks disabled");
+                None
+            }
+        };
+        Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
+        Arc::new(ergo_api::ApiServices::with_webhooks(None))
+    });
+    // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
     // `tx_accepted`/`tx_dropped` on the `mempool` channel
@@ -396,9 +418,14 @@ pub(super) async fn bind(
     // coarse ring (which only carries block/reorg/peer events).
     mempool.set_observer(Some(Arc::new(
         crate::realtime_mempool_bridge::RealtimeMempoolObserver::new(
-            ergo_api::realtime_handle().bus,
+            api_services.realtime.bus.clone(),
         ),
     )));
+    // Restore any durable webhook cursor before activating this observer.
+    // Disabled indexers and boot failures without a store have no observer.
+    if let Some(observer) = indexer_event_observer {
+        observer.activate(api_services.realtime.bus.clone());
+    }
     let mut admin = crate::api_bridge::ShutdownAdmin::new(
         shutdown_notify.clone(),
         Some(peer_connect_tx.clone()),
@@ -440,9 +467,11 @@ pub(super) async fn bind(
         // here yet, but the gate is the right shape now.
         utxo_reads_supported: config.state_type == crate::config::StateType::Utxo,
         local_reverse_proxy: config.api_local_reverse_proxy,
+        services: api_services.clone(),
+        script_config: config.api_script.clone(),
     };
     let security = api_security(config)?;
-    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts_and_webhooks(
+    let handle = ergo_api::serve_on_with_mempool_and_wallet_and_security_and_hosts(
         api_ctx,
         listener,
         api_shutdown_rx,
@@ -450,13 +479,16 @@ pub(super) async fn bind(
         wallet_admin,
         security,
         &config.api_allowed_hosts,
-        webhook_engine,
     );
 
     Ok(ApiBind {
         api_addr: Some(actual),
         api_handle: Some(handle),
         api_shutdown_tx: Some(api_shutdown_tx),
+        wallet_rescan,
+        wallet_cancel,
+        wallet_handle,
+        api_services: Some(api_services),
         live_wallet_hook: Some(hook),
     })
 }

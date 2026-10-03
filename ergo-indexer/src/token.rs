@@ -22,7 +22,7 @@
 //! ≥ 64 (where unsigned VLQ and zigzag-encoded positives differ in the
 //! leading bytes).
 //!
-//! Mint detection: see [`is_mint`]. The IndexedToken record is
+//! Mint detection: see `is_mint`. The IndexedToken record is
 //! constructed via [`IndexedToken::from_box`] on first detection and
 //! mutated via [`IndexedToken::add_emission_amount`] on each subsequent
 //! same-tx detection (multi-output mint).

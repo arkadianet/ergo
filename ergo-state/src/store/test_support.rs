@@ -8,12 +8,35 @@
 
 #![cfg(any(test, feature = "test-helpers"))]
 
+use redb::ReadableDatabase;
+use redb::ReadableTable;
+
 use super::{
     StateError, StateStore, CHAIN_INDEX, CHAIN_STATE_META, HEADERS, HEADERS_BY_HEIGHT,
     HEADER_CHAIN_INDEX, HEADER_META, MINIMAL_FULL_BLOCK_HEIGHT_KEY, STATE_META,
 };
 
 impl StateStore {
+    /// Test-only: preserve the tree bytes while setting the persisted AVL
+    /// height. Synthetic startup fixtures must keep this height consistent
+    /// with their separately seeded full-block metadata.
+    pub fn test_force_set_committed_height(&mut self, height: u32) -> Result<(), StateError> {
+        if !self.genesis_committed {
+            self.initialize_genesis(&[])?;
+        }
+        let write = crate::begin_write_qr(&self.db)?;
+        {
+            let mut table = write.open_table(STATE_META)?;
+            let row = table.get("root")?.ok_or(StateError::NoCommittedState)?;
+            let mut metadata = super::meta::StateMeta::deserialize(row.value())?;
+            drop(row);
+            metadata.height = height;
+            table.insert("root", metadata.serialize().as_slice())?;
+        }
+        write.commit()?;
+        self.height = height;
+        Ok(())
+    }
     /// Test-only, unsafe: forcibly overwrite the best-header pointer without
     /// validating that the header exists in HEADERS/HEADER_META or that the
     /// chain below it is persisted.

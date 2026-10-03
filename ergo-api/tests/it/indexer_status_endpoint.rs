@@ -1,11 +1,12 @@
 //! `GET /api/v1/indexer/status` — the operator health surface (superset of
 //! `/blockchain/indexedHeight`, which stays pinned to its Scala-parity
-//! shape). Like indexedHeight it is always-200 and never status-gated: it
+//! shape). Like indexedHeight it is never status-gated: it
 //! must answer while the index is syncing, repairing, or halted — that is
 //! exactly when the operator needs it. These tests pin the wire shape across
 //! the status variants, the repair/totals sub-objects, and the 404 on
 //! indexer-less wiring.
 
+use ergo_indexer_types::IndexerReadError;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -38,67 +39,104 @@ impl IndexerQuery for HealthStub {
     fn status(&self) -> IndexerStatus {
         IndexerStatus::CaughtUp
     }
-    fn health(&self) -> IndexerHealthDto {
-        self.0.clone()
+    fn health(&self) -> Result<IndexerHealthDto, IndexerReadError> {
+        Ok(self.0.clone())
     }
-    fn box_by_id(&self, _: &BoxId) -> Option<IndexedBoxDto> {
+    fn box_by_id(&self, _: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
         unreachable!("indexer/status never reads boxes")
     }
-    fn box_by_global_index(&self, _: u64) -> Option<IndexedBoxDto> {
+    fn box_by_global_index(&self, _: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn boxes_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedBoxDto> {
+    fn boxes_by_global_range(
+        &self,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn tx_by_id(&self, _: &TxId) -> Option<IndexedTxDto> {
+    fn tx_by_id(&self, _: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn tx_by_global_index(&self, _: u64) -> Option<IndexedTxDto> {
+    fn tx_by_global_index(&self, _: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn txs_by_global_range(&self, _: u64, _: u64) -> Vec<IndexedTxDto> {
+    fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn address_balance(&self, _: &TreeHash) -> Option<BalanceDto> {
+    fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
         unreachable!()
     }
-    fn address_txs_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedTxDto> {
+    fn address_txs_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn address_boxes_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
+    fn address_boxes_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn address_unspent_paged(&self, _: &TreeHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
+    fn address_unspent_paged(
+        &self,
+        _: &TreeHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn address_total_txs(&self, _: &TreeHash) -> u64 {
+    fn address_total_txs(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
         unreachable!()
     }
-    fn address_total_boxes(&self, _: &TreeHash) -> u64 {
+    fn address_total_boxes(&self, _: &TreeHash) -> Result<u64, IndexerReadError> {
         unreachable!()
     }
-    fn template_boxes_paged(&self, _: &TemplateHash, _: Page) -> Vec<IndexedBoxDto> {
+    fn template_boxes_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn template_unspent_paged(&self, _: &TemplateHash, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
+    fn template_unspent_paged(
+        &self,
+        _: &TemplateHash,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn template_total_boxes(&self, _: &TemplateHash) -> u64 {
+    fn template_total_boxes(&self, _: &TemplateHash) -> Result<u64, IndexerReadError> {
         unreachable!()
     }
-    fn token_by_id(&self, _: &TokenId) -> Option<IndexedTokenDto> {
+    fn token_by_id(&self, _: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
         unreachable!()
     }
-    fn tokens_by_ids(&self, _: &[TokenId]) -> Vec<IndexedTokenDto> {
+    fn tokens_by_ids(&self, _: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
         unreachable!()
     }
-    fn token_boxes_paged(&self, _: &TokenId, _: Page) -> Vec<IndexedBoxDto> {
+    fn token_boxes_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn token_unspent_paged(&self, _: &TokenId, _: Page, _: SortDir) -> Vec<IndexedBoxDto> {
+    fn token_unspent_paged(
+        &self,
+        _: &TokenId,
+        _: Page,
+        _: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!()
     }
-    fn token_total_boxes(&self, _: &TokenId) -> u64 {
+    fn token_total_boxes(&self, _: &TokenId) -> Result<u64, IndexerReadError> {
         unreachable!()
     }
 }
@@ -163,7 +201,10 @@ async fn indexer_status_reports_caught_up() {
     let read: Arc<dyn NodeReadState> = Arc::new(StubReadState {
         full_height: 700_000,
     });
-    let indexer = IndexerHandle::syncing(700_000);
+    let temporary = tempfile::TempDir::new().unwrap();
+    let (store, _) =
+        ergo_indexer::IndexerStore::open(&temporary.path().join("indexer.redb")).unwrap();
+    let indexer = IndexerHandle::with_store(store, 700_000);
     indexer.set_status(IndexerStatus::CaughtUp);
     let app = router(
         read,

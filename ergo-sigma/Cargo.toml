@@ -3,6 +3,7 @@ name        = "ergo-sigma"
 description = "Sigma-protocol verifier and ErgoTree evaluator for the Ergo Rust node: AST-walking interpreter, JIT cost accounting, AVL+ proof verification (via ergo_avltree_rust), Schnorr/DHTuple/CAND/COR/Cthreshold verification, and the spending-proof entry points used by mempool admission and block validation."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -45,3 +46,6 @@ toml       = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

@@ -2,6 +2,7 @@
 //! and the shared burn-aware unsigned-tx builder both the compat and native
 //! send paths route through.
 
+use redb::ReadableDatabase;
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
@@ -62,6 +63,43 @@ pub(crate) async fn build_unsigned_tx(
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
+) -> Result<BuiltTx, WalletAdminError> {
+    build_unsigned_tx_with_options(
+        requests,
+        override_inputs,
+        override_data_inputs,
+        fee_override,
+        change_address_override,
+        state,
+        db,
+        chain,
+        network,
+        &NativeBuildOptions::default(),
+    )
+    .await
+}
+
+#[derive(Default)]
+struct NativeBuildOptions {
+    registers: Vec<ergo_ser::register::AdditionalRegisters>,
+    burn_tokens: BTreeMap<[u8; 32], u64>,
+    available: Option<Vec<ergo_wallet::box_selector::BoxSummary>>,
+}
+
+/// Native payment registers are applied before serialization; compat callers
+/// use the wrapper above and retain empty registers on payment outputs.
+#[allow(clippy::too_many_arguments)]
+async fn build_unsigned_tx_with_options(
+    requests: &[PaymentRequestDto],
+    override_inputs: Option<&[String]>,
+    override_data_inputs: Option<&[String]>,
+    fee_override: Option<u64>,
+    change_address_override: Option<&str>,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+    options: &NativeBuildOptions,
 ) -> Result<BuiltTx, WalletAdminError> {
     let state = state.read();
     let as_of = chain
@@ -219,7 +257,7 @@ pub(crate) async fn build_unsigned_tx(
 
         // Sum required outputs (payments + fee).
         let mut required_erg: u64 = fee;
-        let mut required_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        let mut required_tokens = options.burn_tokens.clone();
         for req in &payment_reqs {
             required_erg = required_erg
                 .checked_add(req.value)
@@ -304,7 +342,7 @@ pub(crate) async fn build_unsigned_tx(
 
         // Build output candidates.
         let mut output_candidates: Vec<ergo_ser::ergo_box::ErgoBoxCandidate> = Vec::new();
-        for req in &payment_reqs {
+        for (index, req) in payment_reqs.iter().enumerate() {
             let ergo_tree = {
                 let mut r = ergo_primitives::reader::VlqReader::new(&req.to_ergo_tree);
                 ergo_ser::ergo_tree::read_ergo_tree(&mut r)
@@ -324,7 +362,7 @@ pub(crate) async fn build_unsigned_tx(
                     ergo_tree,
                     current_height,
                     tokens,
-                    ergo_ser::register::AdditionalRegisters::empty(),
+                    options.registers.get(index).cloned().unwrap_or_default(),
                 )
                 .map_err(|e| {
                     WalletAdminError::Internal(format!("ErgoBoxCandidate (payment): {e:?}"))
@@ -448,23 +486,23 @@ pub(crate) async fn build_unsigned_tx(
             as_of,
         })
     } else {
-        // Automatic box selection from wallet unspent boxes.
-        let read_txn = db
-            .begin_read()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-        let unspent = wallet_reader
-            .unspent_boxes()
-            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-
-        let summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
-            .iter()
-            .map(|wb| ergo_wallet::box_selector::BoxSummary {
-                box_id: wb.box_id,
-                value: wb.value,
-                tokens: wb.assets.iter().copied().collect(),
-            })
-            .collect();
+        let summaries = if let Some(available) = &options.available {
+            available.clone()
+        } else {
+            let read = db
+                .begin_read()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            ergo_state::wallet::reader::WalletReader::new(&read)
+                .unspent_boxes()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|box_record| ergo_wallet::box_selector::BoxSummary {
+                    box_id: box_record.box_id,
+                    value: box_record.value,
+                    tokens: box_record.assets.into_iter().collect(),
+                })
+                .collect()
+        };
 
         let data_inputs: Vec<ergo_ser::input::DataInput> = override_data_inputs
             .unwrap_or(&[])
@@ -504,9 +542,23 @@ pub(crate) async fn build_unsigned_tx(
         // re-emission token on a payment output (→ `ReemissionTokenOnOutput`,
         // mapped to `reemission_spend_not_allowed` by `map_build_error`), so the
         // invariant holds even on a direct builder call — no extra guard here.
-        let (unsigned_tx, plan) = builder
-            .build_with_plan(&payment_reqs)
+        let (mut unsigned_tx, plan) = builder
+            .build_with_token_burns(&payment_reqs, &options.burn_tokens)
             .map_err(map_build_error)?;
+        for (candidate, regs) in unsigned_tx
+            .output_candidates
+            .iter_mut()
+            .zip(&options.registers)
+        {
+            *candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                candidate.value,
+                candidate.ergo_tree().clone(),
+                candidate.creation_height,
+                candidate.tokens.clone(),
+                regs.clone(),
+            )
+            .map_err(|e| WalletAdminError::BadRequest(format!("payment registers: {e}")))?;
+        }
         let bytes = super::sign_submit::serialize_unsigned_tx(&unsigned_tx)?;
 
         // Reconstruct the response plan from the builder's `SelectionPlan` + the
@@ -596,9 +648,15 @@ pub(crate) fn parse_native_assets(
     for a in assets {
         let id = parse_box_id_hex(&a.token_id)?;
         let amt = parse_u64_dec(&a.amount, "asset.amount")?;
+        if amt == 0 || amt > i64::MAX as u64 {
+            return Err(WalletAdminError::BadRequest(
+                "asset amounts must be between 1 and i64::MAX".into(),
+            ));
+        }
         let entry = out.entry(id).or_insert(0);
         *entry = entry
             .checked_add(amt)
+            .filter(|amount| *amount <= i64::MAX as u64)
             .ok_or_else(|| WalletAdminError::BadRequest("asset amount overflow".into()))?;
     }
     Ok(out)
@@ -733,6 +791,130 @@ pub(crate) fn exact_set_plan(
     })
 }
 
+/// Shared candidate policy for native selection/build. Confirmations follow
+/// Scala wallet depth (`tip - inclusionHeight`); -1 additionally includes
+/// unspent pool outputs paying a tracked wallet tree.
+fn selection_candidates(
+    source: &ergo_api::wallet::native::dto::InputSource,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    mempool: &dyn ergo_api::MempoolView,
+) -> Result<
+    (
+        Vec<ergo_wallet::box_selector::BoxSummary>,
+        ergo_api::MempoolBoxSnapshot,
+    ),
+    WalletAdminError,
+> {
+    use ergo_api::wallet::native::dto::InputSource;
+    use ergo_primitives::digest::Digest32;
+    use ergo_wallet::box_selector::BoxSummary;
+    let (minimum, excluded) = match source {
+        InputSource::Auto {
+            min_confirmations,
+            exclude_box_ids,
+        } => {
+            if *min_confirmations < -1 {
+                return Err(WalletAdminError::BadRequest(
+                    "minConfirmations must be -1 or nonnegative".into(),
+                ));
+            }
+            (
+                *min_confirmations,
+                exclude_box_ids
+                    .iter()
+                    .map(|id| parse_box_id_hex(id))
+                    .collect::<Result<std::collections::HashSet<_>, _>>()?,
+            )
+        }
+        InputSource::BoxIds { .. } => (0, std::collections::HashSet::new()),
+        InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
+    };
+    let read = db
+        .begin_read()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let boxes = ergo_state::wallet::reader::WalletReader::new(&read)
+        .unspent_boxes()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let ids: Vec<_> = boxes
+        .iter()
+        .map(|record| Digest32::from_bytes(record.box_id))
+        .collect();
+    let overlay = mempool.box_snapshot(&ids);
+    let tip = chain
+        .tip_height()
+        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let mut summaries: BTreeMap<[u8; 32], BoxSummary> = boxes
+        .into_iter()
+        .filter(|record| {
+            // WalletBox records the inclusion block height, not the candidate's
+            // caller-declared creationHeight field.
+            record.creation_height <= tip
+                && (minimum < 0 || i64::from(tip - record.creation_height) >= minimum)
+                && !excluded.contains(&record.box_id)
+                && !overlay
+                    .spent_box_ids
+                    .contains(&Digest32::from_bytes(record.box_id))
+        })
+        .map(|record| {
+            (
+                record.box_id,
+                BoxSummary {
+                    box_id: record.box_id,
+                    value: record.value,
+                    tokens: record.assets.into_iter().collect(),
+                },
+            )
+        })
+        .collect();
+    if minimum == -1 {
+        let wallet = state.read();
+        for (id, output) in overlay.outputs.iter() {
+            if !excluded.contains(id.as_bytes())
+                && !overlay.spent_box_ids.contains(id)
+                && wallet.is_tracked_tree(output.candidate.ergo_tree_bytes())
+            {
+                summaries
+                    .entry(*id.as_bytes())
+                    .or_insert_with(|| BoxSummary {
+                        box_id: *id.as_bytes(),
+                        value: output.candidate.value,
+                        tokens: output
+                            .candidate
+                            .tokens
+                            .iter()
+                            .map(|token| (*token.token_id.as_bytes(), token.amount))
+                            .collect(),
+                    });
+            }
+        }
+    }
+    if let InputSource::BoxIds { box_ids } = source {
+        let requested: Vec<_> = box_ids
+            .iter()
+            .map(|id| parse_box_id_hex(id))
+            .collect::<Result<_, _>>()?;
+        let wanted: std::collections::HashSet<_> = requested.iter().copied().collect();
+        if wanted.len() != box_ids.len() {
+            return Err(WalletAdminError::BadRequest(
+                "duplicate box id in boxIds input source".into(),
+            ));
+        }
+        if wanted.iter().any(|id| !summaries.contains_key(id)) {
+            return Err(WalletAdminError::BoxNotFound);
+        }
+        // Preserve explicit order: construction uses this same order, and an
+        // issuance token ID is bound to the first input.
+        let selected = requested
+            .into_iter()
+            .map(|id| summaries.remove(&id).ok_or(WalletAdminError::BoxNotFound))
+            .collect::<Result<_, _>>()?;
+        return Ok((selected, overlay));
+    }
+    Ok((summaries.into_values().collect(), overlay))
+}
+
 /// Native `boxes/select`: a read-only, burn-aware selection dry-run over the
 /// wallet's confirmed unspent boxes — real selected inputs, the real change plan,
 /// and the exact EIP-27 burn. `auto` uses the SHARED `select_with_reemission`;
@@ -743,28 +925,14 @@ pub(crate) fn select_boxes_impl(
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn ergo_api::MempoolView,
 ) -> Result<ergo_api::wallet::native::dto::BoxSelectResponse, WalletAdminError> {
     use ergo_api::wallet::native::dto as ndto;
 
     let target_erg = parse_u64_dec(&req.target.nano_erg, "target.nanoErg")?;
     let target_tokens = parse_native_assets(&req.target.assets)?;
 
-    // Confirmed unspent set → summaries, narrowed by the input source.
-    let read_txn = db
-        .begin_read()
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let wallet_reader = ergo_state::wallet::reader::WalletReader::new(&read_txn);
-    let unspent = wallet_reader
-        .unspent_boxes()
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-    let mut summaries: Vec<ergo_wallet::box_selector::BoxSummary> = unspent
-        .iter()
-        .map(|wb| ergo_wallet::box_selector::BoxSummary {
-            box_id: wb.box_id,
-            value: wb.value,
-            tokens: wb.assets.iter().copied().collect(),
-        })
-        .collect();
+    let (summaries, _) = selection_candidates(&req.inputs, state, db, chain, mempool)?;
 
     let reemission = chain.reemission_rules();
     let reemission_height = chain
@@ -775,60 +943,23 @@ pub(crate) fn select_boxes_impl(
     // Narrow to the requested input set, then plan: `auto` sub-selects greedily;
     // `boxIds` uses the EXACT set (same as `transactions/build`).
     let plan = match &req.inputs {
-        ndto::InputSource::Auto {
-            min_confirmations,
-            exclude_box_ids,
-        } => {
-            // The dry-run reads confirmed boxes (minConfirmations 0); a pool-inclusive
-            // or N-deep request is a valid shape not yet wired here.
-            if *min_confirmations != 0 {
-                return Err(WalletAdminError::UnsupportedIntent);
-            }
-            let mut excluded: std::collections::HashSet<[u8; 32]> =
-                std::collections::HashSet::new();
-            for id in exclude_box_ids {
-                excluded.insert(parse_box_id_hex(id)?);
-            }
-            summaries.retain(|s| !excluded.contains(&s.box_id));
-            ergo_wallet::tx_builder::select_with_reemission(
-                &ergo_wallet::box_selector::default::DefaultBoxSelector,
-                &summaries,
-                target_erg,
-                &target_tokens,
-                MIN_BOX_VALUE,
-                reemission,
-                reemission_height,
-            )
-            .map_err(map_build_error)?
-        }
-        ndto::InputSource::BoxIds { box_ids } => {
-            let mut wanted: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-            for id in box_ids {
-                wanted.insert(parse_box_id_hex(id)?);
-            }
-            // A duplicate id in the request silently collapses into the
-            // HashSet above; catch it here as a client error rather than
-            // treating "spend box X twice" as "spend box X once" — matches
-            // `build_unsigned_tx`'s explicit-input path, which processes
-            // each listed id as its own occurrence rather than deduping.
-            if box_ids.len() != wanted.len() {
-                return Err(WalletAdminError::BadRequest(
-                    "duplicate box id in boxIds input source".to_string(),
-                ));
-            }
-            summaries.retain(|s| wanted.contains(&s.box_id));
-            // Every requested id must be a wallet unspent box.
-            if summaries.len() != wanted.len() {
-                return Err(WalletAdminError::BoxNotFound);
-            }
-            exact_set_plan(
-                &summaries,
-                target_erg,
-                &target_tokens,
-                reemission,
-                reemission_height,
-            )?
-        }
+        ndto::InputSource::Auto { .. } => ergo_wallet::tx_builder::select_with_reemission(
+            &ergo_wallet::box_selector::default::DefaultBoxSelector,
+            &summaries,
+            target_erg,
+            &target_tokens,
+            MIN_BOX_VALUE,
+            reemission,
+            reemission_height,
+        )
+        .map_err(map_build_error)?,
+        ndto::InputSource::BoxIds { .. } => exact_set_plan(
+            &summaries,
+            target_erg,
+            &target_tokens,
+            reemission,
+            reemission_height,
+        )?,
         ndto::InputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
     };
 
@@ -890,18 +1021,110 @@ pub(crate) fn select_boxes_impl(
     })
 }
 
+/// Decode each register independently so trailing bytes cannot turn into a
+/// different register. The consensus register reader enforces evaluated values
+/// and type restrictions. Dense R4..R9 packing is enforced at the API boundary.
+fn parse_native_registers(
+    registers: Option<&BTreeMap<String, String>>,
+) -> Result<ergo_ser::register::AdditionalRegisters, WalletAdminError> {
+    let mut result = ergo_ser::register::AdditionalRegisters::empty();
+    let Some(registers) = registers else {
+        return Ok(result);
+    };
+    if registers.len() > 6 {
+        return Err(WalletAdminError::BadRequest(
+            "at most six registers (R4..R9) are allowed".into(),
+        ));
+    }
+    for (index, (key, value)) in registers.iter().enumerate() {
+        if key != &format!("R{}", index + 4) {
+            return Err(WalletAdminError::BadRequest(
+                "registers must be densely packed from R4 through R9".into(),
+            ));
+        }
+        let bytes = hex::decode(value).map_err(|_| {
+            WalletAdminError::BadRequest(format!("{key}: invalid hexadecimal constant"))
+        })?;
+        let mut bytes_with_count = vec![1];
+        bytes_with_count.extend(bytes);
+        let mut reader = ergo_primitives::reader::VlqReader::new(&bytes_with_count);
+        let decoded = ergo_ser::register::read_registers(&mut reader)
+            .map_err(|e| WalletAdminError::BadRequest(format!("{key}: {e}")))?;
+        if !reader.is_empty() {
+            return Err(WalletAdminError::BadRequest(format!(
+                "{key}: trailing bytes after constant"
+            )));
+        }
+        for point in reader.group_elements() {
+            ergo_sigma::evaluator::validate_group_element(*point).map_err(|e| {
+                WalletAdminError::BadRequest(format!("{key}: invalid group element: {e:?}"))
+            })?;
+        }
+        result.registers.extend(decoded.registers);
+    }
+    Ok(result)
+}
+
+/// EIP-4 metadata is UTF-8 Coll[Byte] in dense R4(name), R5(description),
+/// R6(decimal digits). Missing metadata uses the EIP-4 empty/zero defaults.
+fn eip4_registers(
+    name: Option<&str>,
+    description: Option<&str>,
+    decimals: Option<u8>,
+) -> ergo_ser::register::AdditionalRegisters {
+    use ergo_ser::{
+        register::{AdditionalRegisters, RegisterValue},
+        sigma_type::SigmaType,
+        sigma_value::{CollValue, SigmaValue},
+    };
+    AdditionalRegisters {
+        registers: [
+            name.unwrap_or_default().to_owned(),
+            description.unwrap_or_default().to_owned(),
+            decimals.unwrap_or(0).to_string(),
+        ]
+        .into_iter()
+        .map(|value| RegisterValue {
+            tpe: SigmaType::SColl(Box::new(SigmaType::SByte)),
+            value: SigmaValue::Coll(CollValue::Bytes(value.into_bytes())),
+        })
+        .collect(),
+    }
+}
+
 /// Native `transactions/build`: map a [`TxIntent`] to the burn-aware
 /// [`build_unsigned_tx`] and report exactly what was built. `payment` outputs are
-/// load-bearing; `mint`/`burn`/`payment.registers` and inline-serialized box
-/// sources ship `unsupported_intent(422)` until wired (a later 422→200 for the
-/// same well-formed request).
+/// payment and mint outputs, custom R4..R9 registers, and authorized token
+/// burns are supported. Inline-serialized box sources remain unsupported.
 pub(crate) async fn build_transaction_impl(
     intent: &ergo_api::wallet::native::dto::TxIntent,
     state: &RwLock<ergo_wallet::state::WalletState>,
     db: &redb::Database,
     chain: &dyn ChainStateAccessor,
     network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn ergo_api::MempoolView,
 ) -> Result<ergo_api::wallet::native::dto::BuildTxResponse, WalletAdminError> {
+    build_transaction_impl_with_snapshot(intent, state, db, chain, network, mempool)
+        .await
+        .map(|(response, _)| response)
+}
+
+/// Retain the same pool outputs and spend marks used for candidate selection
+/// so an intent send can sign against that view after the live pool changes.
+pub(crate) async fn build_transaction_impl_with_snapshot(
+    intent: &ergo_api::wallet::native::dto::TxIntent,
+    state: &RwLock<ergo_wallet::state::WalletState>,
+    db: &redb::Database,
+    chain: &dyn ChainStateAccessor,
+    network: ergo_ser::address::NetworkPrefix,
+    mempool: &dyn ergo_api::MempoolView,
+) -> Result<
+    (
+        ergo_api::wallet::native::dto::BuildTxResponse,
+        ergo_api::MempoolBoxSnapshot,
+    ),
+    WalletAdminError,
+> {
     use ergo_api::wallet::native::dto as ndto;
 
     if intent.outputs.is_empty() {
@@ -910,6 +1133,8 @@ pub(crate) async fn build_transaction_impl(
         ));
     }
     let mut payment_reqs: Vec<PaymentRequestDto> = Vec::with_capacity(intent.outputs.len());
+    let mut options = NativeBuildOptions::default();
+    let mut mint_output: Option<(usize, u64)> = None;
     for o in &intent.outputs {
         match o {
             ndto::OutputIntent::Payment {
@@ -918,26 +1143,81 @@ pub(crate) async fn build_transaction_impl(
                 assets,
                 registers,
             } => {
-                if registers.is_some() {
-                    return Err(WalletAdminError::UnsupportedIntent);
-                }
-                let assets = assets
-                    .iter()
-                    .map(|a| {
-                        Ok(ergo_api::wallet::sending::AssetDto {
-                            token_id: a.token_id.clone(),
-                            amount: parse_u64_dec(&a.amount, "output asset amount")?,
-                        })
+                options
+                    .registers
+                    .push(parse_native_registers(registers.as_ref())?);
+                let assets = parse_native_assets(assets)?
+                    .into_iter()
+                    .map(|(id, amount)| ergo_api::wallet::sending::AssetDto {
+                        token_id: hex::encode(id),
+                        amount,
                     })
-                    .collect::<Result<_, WalletAdminError>>()?;
+                    .collect();
                 payment_reqs.push(PaymentRequestDto {
                     address: address.clone(),
                     value: parse_u64_dec(value, "output value")?,
                     assets,
                 });
             }
-            ndto::OutputIntent::Mint { .. } | ndto::OutputIntent::Burn { .. } => {
-                return Err(WalletAdminError::UnsupportedIntent);
+            ndto::OutputIntent::Mint {
+                address,
+                amount,
+                name,
+                decimals,
+                description,
+            } => {
+                if mint_output.is_some() {
+                    return Err(WalletAdminError::BadRequest(
+                        "only one mint intent is allowed per transaction".into(),
+                    ));
+                }
+                let amount = parse_u64_dec(amount, "mint amount")?;
+                if amount == 0 || amount > i64::MAX as u64 {
+                    return Err(WalletAdminError::BadRequest(
+                        "mint amount must be between 1 and i64::MAX".into(),
+                    ));
+                }
+                mint_output = Some((payment_reqs.len(), amount));
+                payment_reqs.push(PaymentRequestDto {
+                    address: address.clone(),
+                    value: MIN_BOX_VALUE,
+                    assets: vec![],
+                });
+                options.registers.push(eip4_registers(
+                    name.as_deref(),
+                    description.as_deref(),
+                    *decimals,
+                ));
+            }
+            ndto::OutputIntent::Burn { assets } => {
+                if !intent.allow_token_burn {
+                    return Err(WalletAdminError::TokenBurnNotAllowed(
+                        "set allowTokenBurn to permit explicit token destruction".into(),
+                    ));
+                }
+                for (id, amount) in parse_native_assets(assets)? {
+                    if amount == 0 || amount > i64::MAX as u64 {
+                        return Err(WalletAdminError::BadRequest(
+                            "burn amounts must be between 1 and i64::MAX".into(),
+                        ));
+                    }
+                    if chain
+                        .reemission_rules()
+                        .is_some_and(|rules| rules.reemission_token_id == id)
+                    {
+                        return Err(WalletAdminError::ReemissionSpendNotAllowed(
+                            "re-emission tokens use the automatic EIP-27 spending obligation"
+                                .into(),
+                        ));
+                    }
+                    let total = options.burn_tokens.entry(id).or_default();
+                    *total = total
+                        .checked_add(amount)
+                        .filter(|n| *n <= i64::MAX as u64)
+                        .ok_or_else(|| {
+                            WalletAdminError::BadRequest("burn amount overflow".into())
+                        })?;
+                }
             }
         }
     }
@@ -947,16 +1227,11 @@ pub(crate) async fn build_transaction_impl(
         None => None,
     };
 
+    let (available, pool_snapshot) =
+        selection_candidates(&intent.inputs, state, db, chain, mempool)?;
     let override_inputs: Option<Vec<String>> = match &intent.inputs {
-        ndto::InputSource::Auto {
-            min_confirmations,
-            exclude_box_ids,
-        } => {
-            // The build path selects over confirmed boxes; pool-inclusive selection
-            // and explicit excludes are valid shapes not yet wired here.
-            if *min_confirmations != 0 || !exclude_box_ids.is_empty() {
-                return Err(WalletAdminError::UnsupportedIntent);
-            }
+        ndto::InputSource::Auto { .. } => {
+            options.available = Some(available);
             None
         }
         ndto::InputSource::BoxIds { box_ids } => Some(box_ids.clone()),
@@ -967,7 +1242,7 @@ pub(crate) async fn build_transaction_impl(
         ndto::DataInputSource::Boxes { .. } => return Err(WalletAdminError::UnsupportedIntent),
     };
 
-    let built = build_unsigned_tx(
+    let mut built = build_unsigned_tx_with_options(
         &payment_reqs,
         override_inputs.as_deref(),
         override_data_inputs.as_deref(),
@@ -977,8 +1252,56 @@ pub(crate) async fn build_transaction_impl(
         db,
         chain,
         network,
+        &options,
     )
     .await?;
+
+    if mint_output.is_some()
+        || !options.burn_tokens.is_empty()
+        || options.registers.iter().any(|r| r.count() != 0)
+    {
+        // Registers change box size and therefore its required minimum value.
+        // Validate the complete candidate against the current voted parameters.
+        let bytes = &built.bytes;
+        let mut reader = ergo_primitives::reader::VlqReader::new(bytes);
+        let mut unsigned = ergo_ser::transaction::read_unsigned_transaction(&mut reader)
+            .map_err(|e| WalletAdminError::Internal(format!("built transaction decode: {e}")))?;
+        if let Some((index, amount)) = mint_output {
+            let first = unsigned.inputs.first().ok_or_else(|| {
+                WalletAdminError::InsufficientFunds("mint requires an input box".into())
+            })?;
+            unsigned.output_candidates[index]
+                .tokens
+                .push(ergo_ser::token::Token {
+                    token_id: first.box_id,
+                    amount,
+                });
+        }
+        built.bytes = super::sign_submit::serialize_unsigned_tx(&unsigned)?;
+        let tx = ergo_ser::transaction::Transaction {
+            inputs: unsigned
+                .inputs
+                .into_iter()
+                .map(|input| {
+                    Ok(ergo_ser::input::Input {
+                        box_id: input.box_id,
+                        spending_proof: ergo_ser::input::SpendingProof::new(
+                            vec![],
+                            input.extension,
+                        )
+                        .map_err(|e| WalletAdminError::Internal(format!("built input: {e}")))?,
+                    })
+                })
+                .collect::<Result<Vec<_>, WalletAdminError>>()?,
+            data_inputs: unsigned.data_inputs,
+            output_candidates: unsigned.output_candidates,
+        };
+        let params = chain
+            .build_protocol_params()
+            .map_err(crate::node::wallet_bridge::map_chain_error)?;
+        ergo_validation::tx::structural::validate_structural(&tx, &params)
+            .map_err(|e| WalletAdminError::BadRequest(format!("built transaction: {e}")))?;
+    }
 
     // Fail-closed: a reward-box spend (EIP-27 burn) needs explicit opt-in.
     if built.reemission_burn.is_some() && !intent.allow_reemission_spend {
@@ -1012,20 +1335,600 @@ pub(crate) async fn build_transaction_impl(
         })
         .collect();
 
-    Ok(ndto::BuildTxResponse {
-        unsigned_transaction: ndto::TxRepr::from_bytes(&built.bytes),
-        inputs_selected,
-        change_outputs,
-        fee: built.fee.to_string(),
-        reemission_burn,
-        as_of: built.as_of,
-    })
+    Ok((
+        ndto::BuildTxResponse {
+            unsigned_transaction: ndto::TxRepr::from_bytes(&built.bytes),
+            inputs_selected,
+            change_outputs,
+            fee: built.fee.to_string(),
+            reemission_burn,
+            as_of: built.as_of,
+        },
+        pool_snapshot,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ergo_ser::address::NetworkPrefix;
+
+    // ----- helpers -----
+
+    fn register_map(value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([("R4".into(), value.into())])
+    }
+
+    // ----- error paths -----
+
+    #[test]
+    fn native_registers_malformed_sparse_or_trailing_rejected() {
+        for registers in [
+            BTreeMap::from([("R5".into(), "0402".into())]),
+            BTreeMap::from([("R3".into(), "0402".into())]),
+            register_map("zz"),
+            register_map(""),
+            register_map("040200"),
+            register_map("280102"),
+            register_map(&format!("0702{}", "00".repeat(32))),
+            (4..=10).map(|n| (format!("R{n}"), "0402".into())).collect(),
+        ] {
+            assert!(matches!(
+                parse_native_registers(Some(&registers)),
+                Err(WalletAdminError::BadRequest(_))
+            ));
+        }
+        assert_eq!(
+            parse_native_registers(Some(&BTreeMap::new()))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    // ----- oracle parity -----
+
+    #[test]
+    fn native_registers_group_normalization_matches_scala_candidate() {
+        // Scala-generated candidate fixtures, with provenance and extraction
+        // script recorded in their _comment. All cases carry only R4.
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/scala/canonical_extension_and_group_element.json"
+        ))
+        .unwrap();
+        for case in oracle["boxes"].as_array().unwrap() {
+            let input = case["candidate_wire_hex"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("c0843d10010101d17300000001")
+                .unwrap();
+            let regs = parse_native_registers(Some(&register_map(input))).unwrap();
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::register::write_registers(&mut writer, &regs).unwrap();
+            let expected = case["canonical_candidate_hex"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("c0843d10010101d173000000")
+                .unwrap();
+            assert_eq!(hex::encode(writer.result()), expected, "{}", case["label"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_build_registers_auto_and_explicit_preserve_payment_only() {
+        use ergo_api::wallet::native::dto::{InputSource, TxIntent};
+        use ergo_state::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        let address = test_addr();
+        let input_id = [0xAB; 32];
+        let chain = BurnTestChain {
+            reward_id: input_id,
+            reward_box: ergo_ser::ergo_box::ErgoBox {
+                candidate: ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    5_000_000,
+                    p2pk_tree(&address),
+                    100,
+                    vec![],
+                    Default::default(),
+                )
+                .unwrap(),
+                transaction_id: ergo_primitives::digest::ModifierId::from(
+                    ergo_primitives::digest::Digest32::from_bytes([0xCD; 32]),
+                ),
+                index: 0,
+            },
+            rules: ergo_validation::ReemissionRuleInputs {
+                activation_height: 1000,
+                reemission_token_id: REEMISSION_TOKEN,
+                pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+            },
+            tip: 200,
+        };
+        let mut wallet = ergo_wallet::state::WalletState::empty(false);
+        wallet.set_change_address(address.clone());
+        let state = RwLock::new(wallet);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            let wb = WalletBox {
+                box_id: input_id,
+                creation_tx_id: [0xCD; 32],
+                creation_output_index: 0,
+                creation_height: 100,
+                value: 5_000_000,
+                assets: vec![],
+                status: BoxStatus::Confirmed,
+                provenance: BoxProvenance::Owned,
+            };
+            table
+                .insert(input_id, bincode::serialize(&wb).unwrap())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let mut intent: TxIntent = serde_json::from_value(serde_json::json!({
+            "outputs": [{"type":"payment", "address":address, "value":"2000000",
+                "registers":{"R4":"070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}}]
+        })).unwrap();
+        for inputs in [
+            InputSource::default(),
+            InputSource::BoxIds {
+                box_ids: vec![hex::encode(input_id)],
+            },
+        ] {
+            intent.inputs = inputs;
+            let built = build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new(),
+            )
+            .await
+            .unwrap();
+            let bytes = hex::decode(built.unsigned_transaction.bytes_hex()).unwrap();
+            let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
+            let tx = ergo_ser::transaction::read_unsigned_transaction(&mut reader).unwrap();
+            // Scala fixture's R4 generator constant, retained byte-for-byte.
+            assert_eq!(
+                hex::encode(tx.output_candidates[0].register_bytes()),
+                "01070279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            );
+            assert!(tx.output_candidates[1..]
+                .iter()
+                .all(|b| b.additional_registers().count() == 0));
+            assert_eq!(built.change_outputs[0].nano_erg, "2000000");
+        }
+        for length in [3900, 5000] {
+            let mut writer = ergo_primitives::writer::VlqWriter::new();
+            ergo_ser::sigma_value::write_constant(
+                &mut writer,
+                &ergo_ser::sigma_type::SigmaType::SColl(Box::new(
+                    ergo_ser::sigma_type::SigmaType::SByte,
+                )),
+                &ergo_ser::sigma_value::SigmaValue::Coll(ergo_ser::sigma_value::CollValue::Bytes(
+                    vec![0; length],
+                )),
+            )
+            .unwrap();
+            intent.outputs = vec![ergo_api::wallet::native::dto::OutputIntent::Payment {
+                address: address.clone(),
+                value: "1000000".into(),
+                assets: vec![],
+                registers: Some(register_map(&hex::encode(writer.result()))),
+            }];
+            assert!(matches!(
+                build_transaction_impl(
+                    &intent,
+                    &state,
+                    &db,
+                    &chain,
+                    NetworkPrefix::Mainnet,
+                    &ergo_api::NoopMempoolView::new()
+                )
+                .await,
+                Err(WalletAdminError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_build_mint_burn_matches_scala_transaction_builder() {
+        use ergo_api::wallet::native::dto::{InputSource, OutputIntent, TxIntent};
+        use ergo_state::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/wallet/native_mint_burn_scala.json"
+        ))
+        .unwrap();
+        let input_bytes = hex::decode(oracle["input_hex"].as_str().unwrap()).unwrap();
+        let mut reader = ergo_primitives::reader::VlqReader::new(&input_bytes);
+        let input = ergo_ser::ergo_box::read_ergo_box(&mut reader).unwrap();
+        let input_id = parse_box_id_hex(oracle["input_id"].as_str().unwrap()).unwrap();
+        let chain = BurnTestChain {
+            reward_id: input_id,
+            reward_box: input,
+            rules: ergo_validation::ReemissionRuleInputs {
+                activation_height: 1000,
+                reemission_token_id: [0x22; 32],
+                pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+            },
+            tip: 200,
+        };
+        let address = test_addr();
+        let mut wallet = ergo_wallet::state::WalletState::empty(false);
+        wallet.set_change_address(address.clone());
+        let state = RwLock::new(wallet);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            let wb = WalletBox {
+                box_id: input_id,
+                creation_tx_id: [0xCD; 32],
+                creation_output_index: 0,
+                creation_height: 100,
+                value: 10_000_000,
+                assets: vec![([0x11; 32], 10)],
+                status: BoxStatus::Confirmed,
+                provenance: BoxProvenance::Owned,
+            };
+            table
+                .insert(input_id, bincode::serialize(&wb).unwrap())
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let token = hex::encode([0x11; 32]);
+        let mut intent: TxIntent = serde_json::from_value(serde_json::json!({
+            "outputs": [
+                {"type":"payment", "address":address, "value":"2000000", "assets":[{"tokenId":token,"amount":"2"}]},
+                {"type":"mint", "address":address, "amount":"1000", "name":"Native Token", "description":"Scala oracle", "decimals":2},
+                {"type":"burn", "assets":[{"tokenId":token,"amount":"5"}]}
+            ], "allowTokenBurn":true
+        })).unwrap();
+        for inputs in [
+            InputSource::default(),
+            InputSource::BoxIds {
+                box_ids: vec![hex::encode(input_id)],
+            },
+        ] {
+            intent.inputs = inputs;
+            let built = build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new(),
+            )
+            .await
+            .unwrap();
+            let bytes = hex::decode(built.unsigned_transaction.bytes_hex()).unwrap();
+            let mut reader = ergo_primitives::reader::VlqReader::new(&bytes);
+            let tx = ergo_ser::transaction::read_unsigned_transaction(&mut reader).unwrap();
+            assert_eq!(
+                hex::encode(tx.inputs[0].box_id.as_bytes()),
+                oracle["input_id"].as_str().unwrap()
+            );
+            assert_eq!(tx.output_candidates.len(), 4);
+            for (output, expected) in tx
+                .output_candidates
+                .iter()
+                .zip(oracle["output_candidates_hex"].as_array().unwrap())
+            {
+                let mut writer = ergo_primitives::writer::VlqWriter::new();
+                ergo_ser::ergo_box::write_ergo_box_candidate(&mut writer, output).unwrap();
+                assert_eq!(hex::encode(writer.result()), expected.as_str().unwrap());
+            }
+            assert_eq!(built.change_outputs[0].nano_erg, "6000000");
+            assert_eq!(built.change_outputs[0].assets[0].amount, "3");
+            assert_eq!(built.fee, "1000000");
+        }
+        intent.allow_token_burn = false;
+        assert!(matches!(
+            build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new()
+            )
+            .await,
+            Err(WalletAdminError::TokenBurnNotAllowed(_))
+        ));
+        intent.allow_token_burn = true;
+        intent.outputs = vec![OutputIntent::Burn {
+            assets: vec![ergo_api::wallet::native::dto::WalletAssetDto {
+                token_id: token.clone(),
+                amount: "11".into(),
+            }],
+        }];
+        assert!(matches!(
+            build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new()
+            )
+            .await,
+            Err(WalletAdminError::InsufficientFunds(_))
+        ));
+        intent.outputs = vec![OutputIntent::Mint {
+            address,
+            amount: "0".into(),
+            name: None,
+            description: None,
+            decimals: None,
+        }];
+        assert!(matches!(
+            build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new()
+            )
+            .await,
+            Err(WalletAdminError::BadRequest(_))
+        ));
+        if let OutputIntent::Mint { amount, .. } = &mut intent.outputs[0] {
+            *amount = "1".into();
+        }
+        intent.outputs.push(intent.outputs[0].clone());
+        assert!(matches!(
+            build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &ergo_api::NoopMempoolView::new()
+            )
+            .await,
+            Err(WalletAdminError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_selection_constraints_match_build_and_pool_policy() {
+        use ergo_api::wallet::native::dto::{
+            BoxSelectRequest, InputSource, SelectTarget, TxIntent,
+        };
+        use ergo_primitives::digest::Digest32;
+        use ergo_state::wallet::{
+            tables::WALLET_BOXES,
+            types::{BoxProvenance, BoxStatus, WalletBox},
+        };
+        use std::collections::{HashMap, HashSet};
+        struct Pool {
+            outputs: std::sync::Arc<HashMap<Digest32, ergo_ser::ergo_box::ErgoBox>>,
+            spent: HashSet<Digest32>,
+        }
+        impl ergo_api::MempoolView for Pool {
+            fn is_spent_by_pool(&self, id: &Digest32) -> bool {
+                self.spent.contains(id)
+            }
+            fn pool_spending_tx(&self, _: &Digest32) -> Option<Digest32> {
+                None
+            }
+            fn pool_outputs(
+                &self,
+            ) -> std::sync::Arc<HashMap<Digest32, ergo_ser::ergo_box::ErgoBox>> {
+                self.outputs.clone()
+            }
+        }
+        let address = test_addr();
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../test-vectors/wallet/native_mint_burn_scala.json"
+        ))
+        .unwrap();
+        let input_bytes = hex::decode(oracle["input_hex"].as_str().unwrap()).unwrap();
+        let mut reader = ergo_primitives::reader::VlqReader::new(&input_bytes);
+        let input = ergo_ser::ergo_box::read_ergo_box(&mut reader).unwrap();
+        let input_id = parse_box_id_hex(oracle["input_id"].as_str().unwrap()).unwrap();
+        let chain = BurnTestChain {
+            reward_id: input_id,
+            reward_box: input.clone(),
+            rules: ergo_validation::ReemissionRuleInputs {
+                activation_height: 1000,
+                reemission_token_id: [0x22; 32],
+                pay_to_reemission_tree: hex::decode(PAY2R_HEX).unwrap(),
+            },
+            tip: 200,
+        };
+        let mut wallet = ergo_wallet::state::WalletState::empty(false);
+        let public_key =
+            ergo_ser::address::decode_p2pk_address(&address, NetworkPrefix::Mainnet).unwrap();
+        wallet
+            .insert_tracked_pubkey(0, public_key, NetworkPrefix::Mainnet)
+            .unwrap();
+        wallet.set_change_address(address.clone());
+        let state = RwLock::new(wallet);
+        let dir = tempfile::tempdir().unwrap();
+        let db = redb::Database::create(dir.path().join("wallet.redb")).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(WALLET_BOXES).unwrap();
+            for (id, value, height, status) in [
+                (input_id, 10_000_000, 100, BoxStatus::Confirmed),
+                ([2; 32], 20_000_000, 200, BoxStatus::Confirmed),
+                ([3; 32], 40_000_000, 100, BoxStatus::Confirmed),
+                (
+                    [4; 32],
+                    60_000_000,
+                    100,
+                    BoxStatus::Immature { matures_at: 1000 },
+                ),
+                ([5; 32], 80_000_000, 100, BoxStatus::Confirmed),
+            ] {
+                let record = WalletBox {
+                    box_id: id,
+                    creation_tx_id: [0xCD; 32],
+                    creation_output_index: 0,
+                    creation_height: height,
+                    value,
+                    assets: vec![],
+                    status,
+                    provenance: BoxProvenance::Owned,
+                };
+                table
+                    .insert(id, bincode::serialize(&record).unwrap())
+                    .unwrap();
+            }
+        }
+        write.commit().unwrap();
+        let mut pool_output = input.clone();
+        pool_output.candidate.value = 100_000_000;
+        let pool_id = Digest32::from_bytes([6; 32]);
+        let pool_spent_id = Digest32::from_bytes([7; 32]);
+        let mut pool_spent = input.clone();
+        pool_spent.candidate.value = 200_000_000;
+        let mut external = input;
+        external.candidate.value = 300_000_000;
+        external.candidate = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+            300_000_000,
+            ergo_ser::ergo_tree::read_ergo_tree(&mut ergo_primitives::reader::VlqReader::new(&[
+                0, 8, 0xd3, 1,
+            ]))
+            .unwrap(),
+            200,
+            vec![],
+            Default::default(),
+        )
+        .unwrap();
+        let pool = Pool {
+            outputs: std::sync::Arc::new(HashMap::from([
+                (pool_id, pool_output),
+                (pool_spent_id, pool_spent),
+                (Digest32::from_bytes([8; 32]), external),
+            ])),
+            spent: HashSet::from([Digest32::from_bytes([5; 32]), pool_spent_id]),
+        };
+        let mut intent: TxIntent = serde_json::from_value(serde_json::json!({"outputs":[{
+            "type":"payment", "address":address, "value":"2000000"}]}))
+        .unwrap();
+        // Scala WalletBox.apply(currentHeight) computes currentHeight minus
+        // trackedBox.inclusionHeightOpt, including zero at the tip. Source:
+        // ergoplatform/ergo v6.0.3, nodeView/wallet/WalletBox.scala.
+        for (depth, expected) in [(0, [2; 32]), (1, input_id), (100, input_id), (-1, [6; 32])] {
+            let source = InputSource::Auto {
+                min_confirmations: depth,
+                exclude_box_ids: vec![hex::encode([3; 32])],
+            };
+            intent.inputs = source.clone();
+            let request = BoxSelectRequest {
+                target: SelectTarget {
+                    nano_erg: "3000000".into(),
+                    assets: vec![],
+                },
+                inputs: source,
+                change_address: None,
+                allow_reemission_spend: false,
+            };
+            let selected =
+                select_boxes_impl(&request, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                    .unwrap();
+            let built =
+                build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                    .await
+                    .unwrap();
+            assert_eq!(selected.inputs_selected, built.inputs_selected);
+            assert_eq!(built.inputs_selected[0].box_id, hex::encode(expected));
+            assert_eq!(selected.change, built.change_outputs[0]);
+        }
+        intent.inputs = InputSource::Auto {
+            min_confirmations: -1,
+            exclude_box_ids: vec![hex::encode([3; 32]), hex::encode([6; 32])],
+        };
+        assert_eq!(
+            build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                .await
+                .unwrap()
+                .inputs_selected[0]
+                .box_id,
+            hex::encode([2; 32])
+        );
+        for depth in [-2, i64::MAX] {
+            intent.inputs = InputSource::Auto {
+                min_confirmations: depth,
+                exclude_box_ids: vec![],
+            };
+            assert!(build_transaction_impl(
+                &intent,
+                &state,
+                &db,
+                &chain,
+                NetworkPrefix::Mainnet,
+                &pool
+            )
+            .await
+            .is_err());
+        }
+        intent.inputs = InputSource::Auto {
+            min_confirmations: 0,
+            exclude_box_ids: vec!["invalid".into()],
+        };
+        assert!(matches!(
+            build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                .await,
+            Err(WalletAdminError::BadRequest(_))
+        ));
+        let explicit_order = vec![hex::encode(input_id), hex::encode([2; 32])];
+        let selected = select_boxes_impl(
+            &BoxSelectRequest {
+                target: SelectTarget {
+                    nano_erg: "3000000".into(),
+                    assets: vec![],
+                },
+                inputs: InputSource::BoxIds {
+                    box_ids: explicit_order.clone(),
+                },
+                change_address: None,
+                allow_reemission_spend: false,
+            },
+            &state,
+            &db,
+            &chain,
+            NetworkPrefix::Mainnet,
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .inputs_selected
+                .iter()
+                .map(|input| input.box_id.clone())
+                .collect::<Vec<_>>(),
+            explicit_order
+        );
+        intent.inputs = InputSource::BoxIds {
+            box_ids: vec![hex::encode(input_id), hex::encode(input_id)],
+        };
+        assert!(matches!(
+            build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                .await,
+            Err(WalletAdminError::BadRequest(_))
+        ));
+        intent.inputs = InputSource::BoxIds {
+            box_ids: vec![hex::encode([5; 32])],
+        };
+        assert!(matches!(
+            build_transaction_impl(&intent, &state, &db, &chain, NetworkPrefix::Mainnet, &pool)
+                .await,
+            Err(WalletAdminError::BoxNotFound)
+        ));
+    }
 
     /// Real mainnet pay-to-reemission contract tree (valid; header byte 0x19).
     const PAY2R_HEX: &str = "193c03040004000e20d3feeffa87f2df63a7a15b4905e618ae3ce4c69a7975f171bd314d0b877927b8d1938cb2e4c6b2a5730000020c4d0e730100017302";
@@ -1070,6 +1973,12 @@ mod tests {
         }
         fn reemission_rules(&self) -> Option<&ergo_validation::ReemissionRuleInputs> {
             Some(&self.rules)
+        }
+        fn build_protocol_params(
+            &self,
+        ) -> Result<ergo_validation::ProtocolParams, crate::node::wallet_bridge::ChainStateError>
+        {
+            Ok(ergo_validation::ProtocolParams::mainnet_default())
         }
         fn lookup_utxo(&self, box_id: &[u8; 32]) -> Option<ergo_ser::ergo_box::ErgoBox> {
             (box_id == &self.reward_id).then(|| self.reward_box.clone())
@@ -1246,8 +2155,15 @@ mod tests {
             allow_reemission_spend: false,
         };
 
-        let err = select_boxes_impl(&req, &state, &db, &chain, NetworkPrefix::Mainnet)
-            .expect_err("duplicate box id must be rejected");
+        let err = select_boxes_impl(
+            &req,
+            &state,
+            &db,
+            &chain,
+            NetworkPrefix::Mainnet,
+            &ergo_api::NoopMempoolView::new(),
+        )
+        .expect_err("duplicate box id must be rejected");
         assert!(
             matches!(err, WalletAdminError::BadRequest(_)),
             "expected BadRequest, got {err:?}",

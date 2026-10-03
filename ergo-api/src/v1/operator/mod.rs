@@ -9,17 +9,17 @@
 //! * **T1 controls** — `network/connect`, `network/blacklist`,
 //!   `mining/{candidate,solution,reward-address,reward-pubkey,candidate-with-txs}`,
 //!   `voting/operator-votes` (GET+POST), `node/config` GET. Gated by
-//!   [`require_tier`](crate::v1::auth::require_tier) at `Tier::Operator`.
+//!   [`require_tier`] at `Tier::Operator`.
 //! * **T2 admin** — `node/config` PATCH (mutation). Gated at `Tier::Admin`
 //!   (`api_key` + loopback-preferred). `node/shutdown` is the canonical T2
 //!   endpoint but stays on the frozen compat mount (see the T2 note in
 //!   [`operator_router`]); this group does not re-mount it.
 //!
 //! Every endpoint **reuses an existing node capability** — the same
-//! [`NodeReadState`](crate::traits::NodeReadState) /
-//! [`NodeChainQuery`](crate::compat::NodeChainQuery) /
-//! [`NodeAdmin`](crate::traits::NodeAdmin) /
-//! [`NodeMining`](crate::mining::NodeMining) traits the compat surface reads —
+//! [`NodeReadState`] /
+//! [`NodeChainQuery`] /
+//! [`NodeAdmin`] /
+//! [`NodeMining`] traits the compat surface reads —
 //! reshaped into the standard envelope + snake_case glossary. Where a
 //! capability has no trait seam yet (manual peer-ban, config read/patch,
 //! forced-tx candidate, next-block vote preview), the endpoint mounts and

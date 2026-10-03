@@ -9,6 +9,7 @@ use ergo_state::wallet::tables::*;
 use ergo_state::wallet::types::{BoxStatus, WalletBox};
 use ergo_wallet::state::WalletState;
 use redb::Database;
+use redb::ReadableDatabase;
 
 struct NoopRescanGuard;
 impl RescanGuard for NoopRescanGuard {

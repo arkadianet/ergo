@@ -139,7 +139,7 @@ pub(super) fn scan_token_holders(
     idx: &dyn IndexerQuery,
     token_id: &TokenId,
     network: NetworkPrefix,
-) -> HolderScan {
+) -> Result<HolderScan, ergo_indexer_types::IndexerReadError> {
     let mut capped = false;
     let mut acc: HashMap<String, u128> = HashMap::new();
     let mut circulating: u128 = 0;
@@ -152,7 +152,7 @@ pub(super) fn scan_token_holders(
             // approximate — an unspent set of exactly HOLDER_SCAN_CAP rows is
             // a complete scan, not a truncated one.
             let probe =
-                idx.token_unspent_paged(token_id, IdxPage { offset, limit: 1 }, SortDir::Asc);
+                idx.token_unspent_paged(token_id, IdxPage { offset, limit: 1 }, SortDir::Asc)?;
             capped = !probe.is_empty();
             break;
         }
@@ -164,7 +164,7 @@ pub(super) fn scan_token_holders(
                 limit: want,
             },
             SortDir::Asc,
-        );
+        )?;
         if rows.is_empty() {
             break;
         }
@@ -193,12 +193,12 @@ pub(super) fn scan_token_holders(
     }
     let mut holders: Vec<(String, u128)> = acc.into_iter().collect();
     holders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    HolderScan {
+    Ok(HolderScan {
         holders,
         scanned,
         capped,
         circulating,
-    }
+    })
 }
 
 /// `GET /api/v1/tokens/{token_id}/holders` — `{items, page, meta}` (Part D).
@@ -241,7 +241,10 @@ pub async fn token_holders(
         .blocking
         .clone()
         .run(ReadLane::Scan, move || {
-            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let scan = match scan_token_holders(idx.as_ref(), &tid, state.network) {
+                Ok(scan) => scan,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             let mut items: Vec<V1TokenHolder> = scan
                 .holders
                 .iter()
@@ -309,13 +312,19 @@ pub async fn token_stats(State(state): State<V1State>, Path(token_hex): Path<Str
                 Ok(None) => return token_not_found(),
                 Err(error) => return super::indexer_read_failed(error),
             };
-            let scan = scan_token_holders(idx.as_ref(), &tid, state.network);
+            let scan = match scan_token_holders(idx.as_ref(), &tid, state.network) {
+                Ok(scan) => scan,
+                Err(error) => return super::indexer_read_failed(error),
+            };
             let stats = V1TokenStats {
                 token_id: hex::encode(tid.as_bytes()),
                 emission_amount: token.emission_amount.to_string(),
                 circulating_supply: scan.circulating.to_string(),
                 holder_count: scan.holders.len() as u64,
-                box_count: idx.token_total_boxes(&tid),
+                box_count: match idx.token_total_boxes(&tid) {
+                    Ok(count) => count,
+                    Err(error) => return super::indexer_read_failed(error),
+                },
                 scan_capped: scan.capped,
             };
             Json(stats).into_response()

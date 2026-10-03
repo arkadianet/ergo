@@ -8,6 +8,7 @@
 
 use super::{ScanMatchRecord, StateError, BLOCK_SECTIONS, CHAIN_INDEX, HEADERS};
 use crate::wallet::scan::RescanReadError;
+use redb::ReadableDatabase;
 
 pub(crate) enum WalletBlockSections {
     MissingHeader,
@@ -27,10 +28,10 @@ pub struct OwnedBlockOutput {
     pub assets: Vec<([u8; 32], u64)>,
     pub miner_reward_pubkey: Option<[u8; 33]>,
     /// Full serialized `ErgoBox` bytes. Populated by BOTH builders:
-    /// - the section/replay builder ([`build_wallet_block_txs_from_sections`])
+    /// - the section/replay builder (`build_wallet_block_txs_from_sections`)
     ///   feeds the rescan read path's registered-scan matching +
     ///   `ScanTrackedBox.box_bytes`;
-    /// - the live-apply builder ([`build_owned_tx_data_checked`]) captures it
+    /// - the live-apply builder (`build_owned_tx_data_checked`) captures it
     ///   for free by reusing the box-id serialization (the id IS
     ///   `blake2b256` of these bytes), so the apply hook can store it in
     ///   `WALLET_BOX_BYTES` for the reserved-scan reads

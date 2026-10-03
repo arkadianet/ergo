@@ -282,7 +282,6 @@ pub(crate) struct NodeState {
     /// request fan-out, proof apply, and the bounded forward catchup
     /// kickoff. Read by `drive_popow_bootstrap` (sync_tick.rs) and
     /// `handle_inbound_popow_proof` (messaging.rs).
-    #[allow(dead_code)]
     pub(super) popow_bootstrap: Option<ergo_sync::popow_bootstrap::PopowBootstrap>,
     /// Mirror of `config.utxo_bootstrap`. The outbound discovery
     /// fan-out checks this flag at each sync_tick to decide whether
@@ -350,6 +349,7 @@ pub(crate) struct NodeState {
     /// from `sync_tick` after each block apply to keep wallet tables
     /// up-to-date without coupling the sync layer to the wallet.
     /// `None` in no-API / headers-only mode.
+    pub(super) wallet_rescan: Arc<crate::wallet_boot::RescanControl>,
     pub(super) wallet_hook: Option<Arc<wallet_bridge::WalletStateHook>>,
     /// Mirrors "mining wiring exists" for the snapshot emitter (the wiring
     /// itself lives on the action loop, out of the emitter's reach).

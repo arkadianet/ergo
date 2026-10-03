@@ -22,7 +22,7 @@ fn history_with(
     let db = redb::Database::create(dir.path().join("segments.redb")).unwrap();
     let parent = Digest32::from_bytes([0x42; 32]);
     let mut txn = ergo_state::begin_write_qr(&db).unwrap();
-    txn.set_durability(redb::Durability::Eventual);
+    txn.set_durability(redb::Durability::Immediate).unwrap();
     {
         let mut table = txn.open_table(crate::store::tables::SEGMENTS).unwrap();
         let mut writer = VlqWriter::new();
@@ -79,7 +79,7 @@ fn ordered_lookup_matches_linear_reference_across_duplicates_gaps_and_rollback()
         })
         .collect();
     let mut txn = ergo_state::begin_write_qr(&db).unwrap();
-    txn.set_durability(redb::Durability::Eventual);
+    txn.set_durability(redb::Durability::Immediate).unwrap();
     let mut table = txn.open_table(crate::store::tables::SEGMENTS).unwrap();
     let mut staged = StagedSpills::new();
     let mut seed = 7u64;
@@ -262,7 +262,7 @@ fn historical_spend_benchmark() {
                 let mut head = original.clone();
                 let mut staged = StagedSpills::new();
                 let mut txn = ergo_state::begin_write_qr(&db).unwrap();
-                txn.set_durability(redb::Durability::Eventual);
+                txn.set_durability(redb::Durability::Immediate).unwrap();
                 let lookup_ms;
                 let flush_start;
                 {

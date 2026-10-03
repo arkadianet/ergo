@@ -62,18 +62,51 @@ struct HandleInner {
     /// `None` for boot-time-halted handles; `Some` once a successful
     /// `IndexerStore::open` has produced the backing store.
     store: Option<Arc<IndexerStore>>,
+    /// Retain observed read corruption until the handle is reopened. An
+    /// unrelated successful query cannot establish that the index is healthy.
+    read_error: RwLock<Option<IndexerReadError>>,
 }
 
 impl IndexerHandle {
-    fn page_reader(&self, handler: &'static str) -> Option<PageReader> {
+    fn query_store(&self) -> Result<&IndexerStore, IndexerReadError> {
         self.inner
             .store
-            .as_ref()?
-            .page_reader()
-            .inspect_err(|error| {
-                tracing::warn!(handler, %error, "indexer read failed");
-            })
-            .ok()
+            .as_deref()
+            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))
+    }
+
+    fn read<T>(
+        &self,
+        query: impl FnOnce() -> Result<T, IndexerReadError>,
+    ) -> Result<T, IndexerReadError> {
+        query().inspect_err(|error| {
+            tracing::warn!(%error, "indexer read failed");
+            *self
+                .inner
+                .read_error
+                .write()
+                .unwrap_or_else(|p| p.into_inner()) = Some(error.clone());
+        })
+    }
+
+    fn box_page(
+        &self,
+        owner: PageOwner,
+        page: Page,
+        dir: SortDir,
+        unspent: bool,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let entries = reader
+                .entries(owner, page, dir, unspent)
+                .map_err(read_error)?
+                .unwrap_or_default();
+            entries
+                .into_iter()
+                .map(|entry| try_dereference_box(&reader, entry))
+                .collect()
+        })
     }
 
     /// Apply the boot contract:
@@ -91,12 +124,21 @@ impl IndexerHandle {
     /// to the caller (the node-startup wiring) which then spawns the
     /// task against the same store.
     pub fn boot(config: &IndexerConfig, datadir: &Path) -> Option<Self> {
+        Self::boot_with_cache(config, datadir, ergo_state::DEFAULT_REDB_CACHE_BYTES)
+    }
+
+    /// Boot the optional indexer with a separate redb page-cache budget.
+    pub fn boot_with_cache(
+        config: &IndexerConfig,
+        datadir: &Path,
+        cache_bytes: usize,
+    ) -> Option<Self> {
         if !config.enabled {
             return None;
         }
 
         let path = datadir.join(&config.db_filename);
-        match IndexerStore::open(&path) {
+        match IndexerStore::open_with_cache(&path, cache_bytes) {
             Ok((mut store, _outcome)) => {
                 store.set_rollback_window(config.rollback_window);
                 let meta = match store.read_meta() {
@@ -150,6 +192,7 @@ impl IndexerHandle {
                 status: RwLock::new(IndexerStatus::Halted(reason)),
                 indexed_height: RwLock::new(0),
                 store: None,
+                read_error: RwLock::new(None),
             }),
         }
     }
@@ -163,6 +206,7 @@ impl IndexerHandle {
                 status: RwLock::new(IndexerStatus::Syncing),
                 indexed_height: RwLock::new(indexed_height),
                 store: None,
+                read_error: RwLock::new(None),
             }),
         }
     }
@@ -175,6 +219,7 @@ impl IndexerHandle {
                 status: RwLock::new(IndexerStatus::Syncing),
                 indexed_height: RwLock::new(indexed_height),
                 store: Some(Arc::new(store)),
+                read_error: RwLock::new(None),
             }),
         }
     }
@@ -232,505 +277,292 @@ impl IndexerQuery for IndexerHandle {
             .clone()
     }
 
-    fn health(&self) -> IndexerHealthDto {
-        // One redb read txn per call (see `IndexerStore::health_snapshot`) —
-        // acceptable at dashboard-poll cadence, unlike `indexed_height`,
-        // whose cached mirror exists because the status-gate middleware
-        // reads it on EVERY gated request. Best-effort: a failed snapshot
-        // degrades to the healthy default rather than erroring the surface
-        // — which must keep answering exactly when the store is unwell.
-        let drift_skips = crate::segment_buffer::secondary_index_drift_skips();
-        let Some(store) = self.inner.store.as_ref() else {
-            // Boot-halted handle: no store, only the process counter.
-            return IndexerHealthDto {
-                drift_skips,
-                ..IndexerHealthDto::default()
-            };
-        };
-        match store.health_snapshot() {
-            Ok(s) => IndexerHealthDto {
-                repair_pending: s.repair_pending,
-                repair_next_gi: s.repair_next_gi,
-                repair_skipped: s.repair_skipped,
-                drift_skips,
-                global_boxes: s.meta.global_box_index,
-                global_txs: s.meta.global_tx_index,
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "indexer health snapshot failed");
-                IndexerHealthDto {
-                    drift_skips,
-                    ..IndexerHealthDto::default()
-                }
-            }
-        }
-    }
-
-    fn box_by_id(&self, box_id: &BoxId) -> Option<IndexedBoxDto> {
-        let store = self.inner.store.as_ref()?;
-        store
-            .read_box(box_id)
-            .inspect_err(
-                |e| tracing::warn!(handler = "box_by_id", error = %e, "indexer read failed"),
-            )
-            .ok()
-            .flatten()
-    }
-
-    fn try_box_by_id(&self, box_id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
-        let store = self
+    fn health(&self) -> Result<IndexerHealthDto, IndexerReadError> {
+        if let Some(error) = self
             .inner
-            .store
-            .as_ref()
-            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
-        store
-            .read_box(box_id)
-            .map_err(|error| IndexerReadError::new(error.to_string()))
-    }
-    fn box_by_global_index(&self, n: u64) -> Option<IndexedBoxDto> {
-        let store = self.inner.store.as_ref()?;
-        let id = store
-            .read_numeric_box(n)
-            .inspect_err(|e| {
-                tracing::warn!(
-                    handler = "box_by_global_index",
-                    op = "numeric_box",
-                    n,
-                    error = %e,
-                    "indexer read failed",
-                )
+            .read_error
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            return Err(error);
+        }
+        // Offline handles explicitly report Syncing/Halted through status;
+        // their absent counters are not a successful database read.
+        if self.inner.store.is_none() && !self.is_caught_up() {
+            return Ok(IndexerHealthDto {
+                drift_skips: crate::segment_buffer::secondary_index_drift_skips(),
+                ..IndexerHealthDto::default()
+            });
+        }
+        self.read(|| {
+            let snapshot = self.query_store()?.health_snapshot().map_err(read_error)?;
+            Ok(IndexerHealthDto {
+                repair_pending: snapshot.repair_pending,
+                repair_next_gi: snapshot.repair_next_gi,
+                repair_skipped: snapshot.repair_skipped,
+                drift_skips: crate::segment_buffer::secondary_index_drift_skips(),
+                global_boxes: snapshot.meta.global_box_index,
+                global_txs: snapshot.meta.global_tx_index,
             })
-            .ok()
-            .flatten()?;
-        store
-            .read_box(&id)
-            .inspect_err(|e| {
-                tracing::warn!(
-                    handler = "box_by_global_index",
-                    op = "box",
-                    error = %e,
-                    "indexer read failed",
-                )
-            })
-            .ok()
-            .flatten()
-    }
-    fn boxes_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedBoxDto> {
-        Vec::new()
-    }
-
-    fn tx_by_id(&self, tx_id: &TxId) -> Option<IndexedTxDto> {
-        let store = self.inner.store.as_ref()?;
-        store
-            .read_tx(tx_id)
-            .inspect_err(
-                |e| tracing::warn!(handler = "tx_by_id", error = %e, "indexer read failed"),
-            )
-            .ok()
-            .flatten()
-    }
-    fn tx_by_global_index(&self, n: u64) -> Option<IndexedTxDto> {
-        let store = self.inner.store.as_ref()?;
-        let id = store
-            .read_numeric_tx(n)
-            .inspect_err(|e| {
-                tracing::warn!(
-                    handler = "tx_by_global_index",
-                    op = "numeric_tx",
-                    n,
-                    error = %e,
-                    "indexer read failed",
-                )
-            })
-            .ok()
-            .flatten()?;
-        store
-            .read_tx(&id)
-            .inspect_err(|e| {
-                tracing::warn!(
-                    handler = "tx_by_global_index",
-                    op = "tx",
-                    error = %e,
-                    "indexer read failed",
-                )
-            })
-            .ok()
-            .flatten()
-    }
-    fn txs_by_global_range(&self, _lo: u64, _hi: u64) -> Vec<IndexedTxDto> {
-        Vec::new()
-    }
-
-    fn address_balance(&self, tree_hash: &TreeHash) -> Option<BalanceDto> {
-        let store = self.inner.store.as_ref()?;
-        let addr = store
-            .read_address(tree_hash)
-            .inspect_err(
-                |e| tracing::warn!(handler = "address_balance", error = %e, "indexer read failed"),
-            )
-            .ok()
-            .flatten()?;
-        let balance = addr.balance?;
-        Some(BalanceDto {
-            nano_ergs: balance.nano_ergs,
-            tokens: balance.tokens,
         })
     }
-    fn address_txs_paged(&self, tree_hash: &TreeHash, p: Page, dir: SortDir) -> Vec<IndexedTxDto> {
-        let Some(store) = self.page_reader("address_txs_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::AddressTxs(*tree_hash), p, dir, false) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "address_txs_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_tx(&store, entry))
-            .collect()
+
+    fn box_by_id(&self, id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        self.read(|| self.query_store()?.read_box(id).map_err(read_error))
     }
+
+    fn box_by_global_index(&self, n: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        self.read(|| {
+            let store = self.query_store()?.page_reader().map_err(read_error)?;
+            let Some(id) = store.read_numeric_box(n).map_err(read_error)? else {
+                return Ok(None);
+            };
+            store
+                .read_box(&id)
+                .map_err(read_error)?
+                .map(Some)
+                .ok_or_else(|| {
+                    IndexerReadError::new(format!(
+                        "indexed box row {} is missing",
+                        hex::encode(id.as_bytes())
+                    ))
+                })
+        })
+    }
+
+    fn boxes_by_global_range(
+        &self,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let end = hi.min(reader.read_meta().map_err(read_error)?.global_box_index);
+            (lo..end).map(|n| try_global_box(&reader, n)).collect()
+        })
+    }
+
+    fn tx_by_id(&self, id: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        self.read(|| self.query_store()?.read_tx(id).map_err(read_error))
+    }
+
+    fn tx_by_global_index(&self, n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        self.read(|| {
+            let store = self.query_store()?.page_reader().map_err(read_error)?;
+            let Some(id) = store.read_numeric_tx(n).map_err(read_error)? else {
+                return Ok(None);
+            };
+            store
+                .read_tx(&id)
+                .map_err(read_error)?
+                .map(Some)
+                .ok_or_else(|| {
+                    IndexerReadError::new(format!(
+                        "indexed transaction row {} is missing",
+                        hex::encode(id.as_bytes())
+                    ))
+                })
+        })
+    }
+
+    fn txs_by_global_range(&self, lo: u64, hi: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let end = hi.min(reader.read_meta().map_err(read_error)?.global_tx_index);
+            (lo..end).map(|n| try_global_tx(&reader, n)).collect()
+        })
+    }
+
+    fn address_balance(&self, hash: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
+        self.read(|| {
+            let address = self.query_store()?.read_address(hash).map_err(read_error)?;
+            Ok(address.and_then(|a| a.balance).map(|balance| BalanceDto {
+                nano_ergs: balance.nano_ergs,
+                tokens: balance.tokens,
+            }))
+        })
+    }
+
+    fn address_txs_paged(
+        &self,
+        hash: &TreeHash,
+        page: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
+        self.read(|| {
+            let reader = self.query_store()?.page_reader().map_err(read_error)?;
+            let entries = reader
+                .entries(PageOwner::AddressTxs(*hash), page, dir, false)
+                .map_err(read_error)?
+                .unwrap_or_default();
+            entries
+                .into_iter()
+                .map(|entry| try_dereference_tx(&reader, entry))
+                .collect()
+        })
+    }
+
     fn address_boxes_paged(
         &self,
-        tree_hash: &TreeHash,
-        p: Page,
-        dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("address_boxes_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::AddressBoxes(*tree_hash), p, dir, false) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "address_boxes_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
-    }
-    fn address_unspent_paged(
-        &self,
-        tree_hash: &TreeHash,
-        p: Page,
-        dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("address_unspent_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::AddressBoxes(*tree_hash), p, dir, true) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "address_unspent_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
-    }
-    fn address_total_txs(&self, tree_hash: &TreeHash) -> u64 {
-        let Some(store) = self.inner.store.as_ref() else {
-            return 0;
-        };
-        match store.read_address(tree_hash) {
-            Ok(Some(addr)) => total_count(addr.segment.tx_segment_count, addr.segment.txs.len()),
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(
-                    handler = "address_total_txs",
-                    error = %e,
-                    "indexer read failed",
-                );
-                0
-            }
-        }
-    }
-    fn address_total_boxes(&self, tree_hash: &TreeHash) -> u64 {
-        let Some(store) = self.inner.store.as_ref() else {
-            return 0;
-        };
-        match store.read_address(tree_hash) {
-            Ok(Some(addr)) => total_count(addr.segment.box_segment_count, addr.segment.boxes.len()),
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(
-                    handler = "address_total_boxes",
-                    error = %e,
-                    "indexer read failed",
-                );
-                0
-            }
-        }
-    }
-
-    fn template_boxes_paged(&self, h: &TemplateHash, p: Page) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("template_boxes_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::Template(*h), p, SortDir::Desc, false) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "template_boxes_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
-    }
-    fn template_unspent_paged(
-        &self,
-        h: &TemplateHash,
-        p: Page,
-        dir: SortDir,
-    ) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("template_unspent_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::Template(*h), p, dir, true) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "template_unspent_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
-    }
-
-    fn try_template_unspent_paged(
-        &self,
-        h: &TemplateHash,
-        p: Page,
+        hash: &TreeHash,
+        page: Page,
         dir: SortDir,
     ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
-        let store = self
-            .inner
-            .store
-            .as_ref()
-            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?
-            .page_reader()
-            .map_err(|error| IndexerReadError::new(error.to_string()))?;
-        let Some(entries) = store
-            .entries(PageOwner::Template(*h), p, dir, true)
-            .map_err(|error| IndexerReadError::new(error.to_string()))?
-        else {
-            return Ok(Vec::new());
-        };
-        entries
-            .into_iter()
-            .map(|entry| try_dereference_box(&store, entry))
-            .collect()
-    }
-    fn template_total_boxes(&self, h: &TemplateHash) -> u64 {
-        let Some(store) = self.inner.store.as_ref() else {
-            return 0;
-        };
-        match store.read_template(h) {
-            Ok(Some(t)) => total_count(t.segment.box_segment_count, t.segment.boxes.len()),
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(
-                    handler = "template_total_boxes",
-                    error = %e,
-                    "indexer read failed",
-                );
-                0
-            }
-        }
+        self.box_page(PageOwner::AddressBoxes(*hash), page, dir, false)
     }
 
-    fn token_by_id(&self, token_id: &TokenId) -> Option<IndexedTokenDto> {
-        let store = self.inner.store.as_ref()?;
-        match store.read_token(token_id) {
-            Ok(Some(t)) => Some(token_to_dto(&t)),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    handler = "token_by_id",
-                    error = %e,
-                    "indexer read failed",
-                );
-                None
-            }
-        }
-    }
-
-    fn try_token_by_id(
+    fn address_unspent_paged(
         &self,
-        token_id: &TokenId,
-    ) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
-        let store = self
-            .inner
-            .store
-            .as_ref()
-            .ok_or_else(|| IndexerReadError::new("indexer store is unavailable"))?;
-        store
-            .read_token(token_id)
-            .map(|token| token.as_ref().map(token_to_dto))
-            .map_err(|error| IndexerReadError::new(error.to_string()))
+        hash: &TreeHash,
+        page: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.box_page(PageOwner::AddressBoxes(*hash), page, dir, true)
     }
-    fn tokens_by_ids(&self, ids: &[TokenId]) -> Vec<IndexedTokenDto> {
-        let Some(store) = self.inner.store.as_ref() else {
-            return Vec::new();
-        };
-        // Scala flatMap semantics: misses are dropped from the result
-        // array. DB-error misses are also dropped — logged for
-        // diagnostics — to match the same flatMap shape.
+
+    fn address_total_txs(&self, hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            Ok(self
+                .query_store()?
+                .read_address(hash)
+                .map_err(read_error)?
+                .map(|a| total_count(a.segment.tx_segment_count, a.segment.txs.len()))
+                .unwrap_or(0))
+        })
+    }
+
+    fn address_total_boxes(&self, hash: &TreeHash) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            Ok(self
+                .query_store()?
+                .read_address(hash)
+                .map_err(read_error)?
+                .map(|a| total_count(a.segment.box_segment_count, a.segment.boxes.len()))
+                .unwrap_or(0))
+        })
+    }
+
+    fn template_boxes_paged(
+        &self,
+        hash: &TemplateHash,
+        page: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.box_page(PageOwner::Template(*hash), page, SortDir::Desc, false)
+    }
+
+    fn template_unspent_paged(
+        &self,
+        hash: &TemplateHash,
+        page: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.box_page(PageOwner::Template(*hash), page, dir, true)
+    }
+
+    fn template_total_boxes(&self, hash: &TemplateHash) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            Ok(self
+                .query_store()?
+                .read_template(hash)
+                .map_err(read_error)?
+                .map(|t| total_count(t.segment.box_segment_count, t.segment.boxes.len()))
+                .unwrap_or(0))
+        })
+    }
+
+    fn token_by_id(&self, id: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
+        self.read(|| {
+            Ok(self
+                .query_store()?
+                .read_token(id)
+                .map_err(read_error)?
+                .as_ref()
+                .map(token_to_dto))
+        })
+    }
+
+    fn tokens_by_ids(&self, ids: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
+        self.query_store()?;
+        // Scala flatMap semantics drop absent IDs, while failures abort the query.
         ids.iter()
-            .filter_map(|id| match store.read_token(id) {
-                Ok(Some(t)) => Some(token_to_dto(&t)),
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::warn!(
-                        handler = "tokens_by_ids",
-                        error = %e,
-                        "indexer read failed",
-                    );
-                    None
-                }
-            })
+            .filter_map(|id| self.token_by_id(id).transpose())
             .collect()
     }
-    fn token_boxes_paged(&self, token_id: &TokenId, p: Page) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("token_boxes_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::Token(*token_id), p, SortDir::Desc, false) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "token_boxes_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
+
+    fn token_boxes_paged(
+        &self,
+        id: &TokenId,
+        page: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.box_page(PageOwner::Token(*id), page, SortDir::Desc, false)
     }
-    fn token_unspent_paged(&self, token_id: &TokenId, p: Page, dir: SortDir) -> Vec<IndexedBoxDto> {
-        let Some(store) = self.page_reader("token_unspent_paged") else {
-            return Vec::new();
-        };
-        let entries = match store.entries(PageOwner::Token(*token_id), p, dir, true) {
-            Ok(Some(e)) => e,
-            Ok(None) => return Vec::new(),
-            Err(e) => {
-                tracing::warn!(
-                    handler = "token_unspent_paged",
-                    error = %e,
-                    "indexer read failed",
-                );
-                return Vec::new();
-            }
-        };
-        entries
-            .iter()
-            .filter_map(|&entry| dereference_box(&store, entry))
-            .collect()
+
+    fn token_unspent_paged(
+        &self,
+        id: &TokenId,
+        page: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        self.box_page(PageOwner::Token(*id), page, dir, true)
     }
-    fn token_total_boxes(&self, token_id: &TokenId) -> u64 {
-        let Some(store) = self.inner.store.as_ref() else {
-            return 0;
-        };
-        match store.read_token(token_id) {
-            Ok(Some(t)) => total_count(t.segment.box_segment_count, t.segment.boxes.len()),
-            Ok(None) => 0,
-            Err(e) => {
-                tracing::warn!(
-                    handler = "token_total_boxes",
-                    error = %e,
-                    "indexer read failed",
-                );
-                0
-            }
-        }
+
+    fn token_total_boxes(&self, id: &TokenId) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            Ok(self
+                .query_store()?
+                .read_token(id)
+                .map_err(read_error)?
+                .map(|t| total_count(t.segment.box_segment_count, t.segment.boxes.len()))
+                .unwrap_or(0))
+        })
     }
 
     fn storage_rent_eligible_paged(
         &self,
-        height_cutoff: u32,
-        p: Page,
+        cutoff: u32,
+        page: Page,
         dir: SortDir,
-    ) -> Vec<StorageRentEligibleDto> {
-        let Some(store) = self.store() else {
-            return Vec::new();
-        };
-        store
-            .read_storage_rent_eligible_paged(height_cutoff, p.offset, p.limit, dir)
-            .unwrap_or_default()
+    ) -> Result<Vec<StorageRentEligibleDto>, IndexerReadError> {
+        self.read(|| {
+            self.query_store()?
+                .read_storage_rent_eligible_paged(cutoff, page.offset, page.limit, dir)
+                .map_err(read_error)
+        })
     }
 
-    fn storage_rent_eligible_total(&self, height_cutoff: u32) -> u64 {
-        let Some(store) = self.store() else {
-            return 0;
-        };
-        store
-            .read_storage_rent_eligible_total(height_cutoff)
-            .unwrap_or(0)
+    fn storage_rent_eligible_total(&self, cutoff: u32) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            self.query_store()?
+                .read_storage_rent_eligible_total(cutoff)
+                .map_err(read_error)
+        })
     }
 
     fn storage_rent_in_creation_range(
         &self,
-        height_lo: u32,
-        height_hi: u32,
-        p: Page,
+        lo: u32,
+        hi: u32,
+        page: Page,
         dir: SortDir,
-    ) -> Vec<StorageRentEligibleDto> {
-        let Some(store) = self.store() else {
-            return Vec::new();
-        };
-        store
-            .read_storage_rent_in_creation_range_paged(height_lo, height_hi, p.offset, p.limit, dir)
-            .unwrap_or_default()
+    ) -> Result<Vec<StorageRentEligibleDto>, IndexerReadError> {
+        self.read(|| {
+            self.query_store()?
+                .read_storage_rent_in_creation_range_paged(lo, hi, page.offset, page.limit, dir)
+                .map_err(read_error)
+        })
     }
 
-    fn storage_rent_total_in_creation_range(&self, height_lo: u32, height_hi: u32) -> u64 {
-        let Some(store) = self.store() else {
-            return 0;
-        };
-        store
-            .read_storage_rent_total_in_creation_range(height_lo, height_hi)
-            .unwrap_or(0)
+    fn storage_rent_total_in_creation_range(
+        &self,
+        lo: u32,
+        hi: u32,
+    ) -> Result<u64, IndexerReadError> {
+        self.read(|| {
+            self.query_store()?
+                .read_storage_rent_total_in_creation_range(lo, hi)
+                .map_err(read_error)
+        })
     }
 }
 
@@ -762,103 +594,36 @@ fn slice_paged(entries: &[i64], page: Page, dir: SortDir) -> Vec<i64> {
     }
 }
 
-/// Resolve a tx-segment entry (always positive) to its full
-/// `IndexedTxDto`. Two redb reads per result: numeric_tx → tx_id,
-/// then tx → record. Missing rows surface as `None` with a warning —
-/// they would indicate apply/rollback skew, not a normal "not indexed"
-/// case (segment entries always reference a row written in the same
-/// block).
-fn dereference_tx(store: &PageReader, entry: i64) -> Option<IndexedTxDto> {
-    if entry < 0 {
-        tracing::warn!(
-            handler = "address_txs_paged",
-            entry,
-            "negative tx-segment entry",
-        );
-        return None;
-    }
-    let n = entry as u64;
-    let id = match store.read_numeric_tx(n) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            tracing::warn!(
-                handler = "address_txs_paged",
-                op = "numeric_tx",
-                n,
-                "entry missing",
-            );
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(
-                handler = "address_txs_paged",
-                op = "numeric_tx",
-                n,
-                error = %e,
-                "indexer read failed",
-            );
-            return None;
-        }
-    };
-    match store.read_tx(&id) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(
-                handler = "address_txs_paged",
-                op = "tx",
-                tx_id = %hex::encode(id.as_bytes()),
-                error = %e,
-                "indexer read failed",
-            );
-            None
-        }
-    }
+fn read_error(error: IndexerError) -> IndexerReadError {
+    IndexerReadError::new(error.to_string())
 }
 
-/// Resolve a box-segment entry to its full `IndexedBoxDto`.
-/// Sign-flipped entries dereference via `abs(entry)` — the box record
-/// stays under its positive global index.
-fn dereference_box(store: &PageReader, entry: i64) -> Option<IndexedBoxDto> {
-    let n = entry.unsigned_abs();
-    let id = match store.read_numeric_box(n) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            tracing::warn!(
-                handler = "dereference_box",
-                op = "numeric_box",
-                n,
-                "entry missing",
-            );
-            return None;
-        }
-        Err(e) => {
-            tracing::warn!(
-                handler = "dereference_box",
-                op = "numeric_box",
-                n,
-                error = %e,
-                "indexer read failed",
-            );
-            return None;
-        }
-    };
-    match store.read_box(&id) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                handler = "dereference_box",
-                op = "box",
-                box_id = %hex::encode(id.as_bytes()),
-                error = %e,
-                "indexer read failed",
-            );
-            None
-        }
-    }
+/// Resolve every referenced row. Missing rows inside a page are inconsistent
+/// storage, unlike an absent page owner; return an error rather than a partial page.
+fn try_dereference_tx(store: &PageReader, entry: i64) -> Result<IndexedTxDto, IndexerReadError> {
+    let n = u64::try_from(entry)
+        .map_err(|_| IndexerReadError::new(format!("negative tx-segment entry {entry}")))?;
+    try_global_tx(store, n)
+}
+
+fn try_global_tx(store: &PageReader, n: u64) -> Result<IndexedTxDto, IndexerReadError> {
+    let id = store
+        .read_numeric_tx(n)
+        .map_err(read_error)?
+        .ok_or_else(|| IndexerReadError::new(format!("numeric transaction row {n} is missing")))?;
+    store.read_tx(&id).map_err(read_error)?.ok_or_else(|| {
+        IndexerReadError::new(format!(
+            "indexed transaction row {} is missing",
+            hex::encode(id.as_bytes())
+        ))
+    })
 }
 
 fn try_dereference_box(store: &PageReader, entry: i64) -> Result<IndexedBoxDto, IndexerReadError> {
-    let n = entry.unsigned_abs();
+    try_global_box(store, entry.unsigned_abs())
+}
+
+fn try_global_box(store: &PageReader, n: u64) -> Result<IndexedBoxDto, IndexerReadError> {
     let id = store
         .read_numeric_box(n)
         .map_err(|error| IndexerReadError::new(error.to_string()))?
@@ -1041,7 +806,7 @@ mod tests {
             );
             assert!(handle
                 .template_unspent_paged(&template_hash, page(), SortDir::Asc)
-                .is_empty());
+                .is_err());
         }
 
         #[test]
@@ -1079,7 +844,7 @@ mod tests {
             );
             assert!(handle
                 .template_unspent_paged(&template_hash, page(), SortDir::Asc)
-                .is_empty());
+                .is_err());
         }
 
         #[test]
@@ -1099,7 +864,7 @@ mod tests {
                 .unwrap();
 
             assert!(handle.try_box_by_id(&box_id).is_err());
-            assert!(handle.box_by_id(&box_id).is_none());
+            assert!(handle.box_by_id(&box_id).is_err());
         }
 
         #[test]
@@ -1120,7 +885,7 @@ mod tests {
                 .unwrap();
 
             assert!(handle.try_token_by_id(&token_id).is_err());
-            assert!(handle.token_by_id(&token_id).is_none());
+            assert!(handle.token_by_id(&token_id).is_err());
         }
     }
 
@@ -1144,15 +909,15 @@ mod tests {
         }
 
         #[test]
-        fn returns_none_for_halted_handle_without_store() {
+        fn halted_handle_without_store_reports_unavailable() {
             let h = IndexerHandle::halted(IndexerHaltReason::DbCorruption);
-            assert!(h.address_balance(&d(0xAA)).is_none());
+            assert!(h.address_balance(&d(0xAA)).is_err());
         }
 
         #[test]
         fn returns_none_when_address_not_indexed() {
             let (h, _tmp) = handle_with_store();
-            assert!(h.address_balance(&d(0xAA)).is_none());
+            assert!(h.address_balance(&d(0xAA)).unwrap().is_none());
         }
 
         #[test]
@@ -1176,7 +941,10 @@ mod tests {
             write_address(&write_txn, &tree_hash, &rec).unwrap();
             write_txn.commit().unwrap();
 
-            let dto = h.address_balance(&tree_hash).expect("address present");
+            let dto = h
+                .address_balance(&tree_hash)
+                .unwrap()
+                .expect("address present");
             assert_eq!(dto.nano_ergs, 1_000_000_000);
             assert_eq!(dto.tokens, vec![(token_a, 5), (token_b, 7)]);
         }
@@ -1205,7 +973,10 @@ mod tests {
             write_address(&write_txn, &tree_hash, &rec).unwrap();
             write_txn.commit().unwrap();
 
-            let dto = h.address_balance(&tree_hash).expect("address present");
+            let dto = h
+                .address_balance(&tree_hash)
+                .unwrap()
+                .expect("address present");
             assert_eq!(
                 dto.tokens,
                 vec![(id_first, 1), (id_second, 2), (id_third, 3)]
@@ -1230,7 +1001,7 @@ mod tests {
             write_address(&write_txn, &tree_hash, &rec).unwrap();
             write_txn.commit().unwrap();
 
-            assert!(h.address_balance(&tree_hash).is_none());
+            assert!(h.address_balance(&tree_hash).unwrap().is_none());
         }
     }
 
@@ -1431,8 +1202,8 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             );
-            assert_eq!(h.address_total_boxes(&tree_hash), 5);
-            assert_eq!(h.address_total_txs(&tree_hash), 2);
+            assert_eq!(h.address_total_boxes(&tree_hash).unwrap(), 5);
+            assert_eq!(h.address_total_txs(&tree_hash).unwrap(), 2);
         }
 
         #[test]
@@ -1450,14 +1221,14 @@ mod tests {
                 vec![spill_0, spill_1],
                 Vec::new(),
             );
-            assert_eq!(h.address_total_boxes(&tree_hash), 1027);
+            assert_eq!(h.address_total_boxes(&tree_hash).unwrap(), 1027);
         }
 
         #[test]
         fn total_returns_zero_for_unindexed_address() {
             let (h, _tmp) = handle_with_store();
-            assert_eq!(h.address_total_boxes(&d(0xFF)), 0);
-            assert_eq!(h.address_total_txs(&d(0xFF)), 0);
+            assert_eq!(h.address_total_boxes(&d(0xFF)).unwrap(), 0);
+            assert_eq!(h.address_total_txs(&d(0xFF)).unwrap(), 0);
         }
 
         #[test]

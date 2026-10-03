@@ -145,10 +145,8 @@ pub(super) fn complete_tree(
             // poly.to_bytes() returns the (n-k) non-zero-degree coefficients, each 24 bytes.
             let poly_bytes = poly.to_bytes();
             // Split into per-coefficient arrays.
-            let poly_more_coeffs: Vec<[u8; SOUNDNESS_BYTES]> = poly_bytes
-                .chunks_exact(SOUNDNESS_BYTES)
-                .map(|c| c.try_into().expect("chunk is exactly SOUNDNESS_BYTES"))
-                .collect();
+            let poly_more_coeffs: Vec<[u8; SOUNDNESS_BYTES]> =
+                poly_bytes.as_chunks::<SOUNDNESS_BYTES>().0.to_vec();
 
             // Build child challenge lookup: simulated → their pre-assigned challenge.
             let sim_map: std::collections::HashMap<usize, [u8; SOUNDNESS_BYTES]> =
@@ -221,7 +219,7 @@ fn finalize_leaf(
             secret, r_scalar, ..
         } => {
             let e = challenge_to_scalar(challenge);
-            let z = r_scalar + e * secret;
+            let z = *r_scalar + e * *secret;
             Ok((z.to_bytes().into(), 0))
         }
         LeafState::Simulated { z_bytes, .. } => Ok((z_bytes, 0)),

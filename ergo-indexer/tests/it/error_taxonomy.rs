@@ -31,6 +31,7 @@ use ergo_indexer::error::{
 use ergo_indexer::IndexerError;
 use ergo_indexer_types::IndexerHaltReason;
 use ergo_primitives::reader::ReadError;
+use redb::ReadableDatabase;
 use redb::{Database, TableDefinition};
 use tempfile::TempDir;
 

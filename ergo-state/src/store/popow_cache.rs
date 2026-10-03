@@ -15,6 +15,7 @@
 #![allow(clippy::too_many_lines)]
 
 use super::*;
+use redb::ReadableDatabase;
 
 impl StateStore {
     /// Read the cached serve-side NiPoPoW proof bytes, if any. Set

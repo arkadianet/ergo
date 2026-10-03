@@ -211,9 +211,28 @@ impl<'a> UnsignedTxBuilder<'a> {
         &self,
         requests: &[PaymentRequest],
     ) -> Result<(UnsignedTransaction, SelectionPlan), WalletError> {
+        self.build_with_token_burns(requests, &BTreeMap::new())
+    }
+
+    /// Build with an explicit token destruction budget. The burned quantities
+    /// participate in input selection and are debited from change, without
+    /// becoming payment outputs. Authorization belongs to the caller.
+    pub fn build_with_token_burns(
+        &self,
+        requests: &[PaymentRequest],
+        burn_tokens: &BTreeMap<[u8; 32], u64>,
+    ) -> Result<(UnsignedTransaction, SelectionPlan), WalletError> {
+        if self
+            .reemission
+            .is_some_and(|rules| burn_tokens.contains_key(&rules.reemission_token_id))
+        {
+            return Err(WalletError::TxBuild(
+                "use the EIP-27 spending obligation for re-emission tokens".into(),
+            ));
+        }
         // 1. Sum totals required across all payment outputs + fee.
         let mut total_erg: u64 = self.fee;
-        let mut total_tokens: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        let mut total_tokens = burn_tokens.clone();
         for r in requests {
             total_erg = total_erg
                 .checked_add(r.value)

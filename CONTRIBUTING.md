@@ -22,23 +22,27 @@ data flow, and [`docs/compatibility.md`](./docs/compatibility.md) for what
 
 ## Prerequisites
 
-The toolchain is pinned to **Rust 1.95.0** via
+The toolchain is pinned to **Rust 1.99.0** via
 [`rust-toolchain.toml`](./rust-toolchain.toml) at the repo root. `rustup`
 installs it (with `rustfmt` and `clippy`) automatically on first build, so you
 do not need to select a toolchain by hand. The workspace is edition 2021.
 
-CI pins the same `1.95.0`. Bumping `channel` in `rust-toolchain.toml` is the one
-edit that rolls the whole repo and CI together.
+CI reads the stable compiler directly from `rust-toolchain.toml`. Every member
+inherits the workspace's `rust-version` requirement (currently 1.99.0) and lint
+policy. When raising the compiler requirement, update the toolchain channel and
+workspace `rust-version` together; `scripts/ci-policy.py` rejects drift. The
+compiler pin selects the development toolchain; `rust-version` tells downstream
+users the minimum supported compiler.
 
 ## Build
 
 ```bash
 # Compile-check the whole workspace, tests included.
-cargo check --workspace --tests
+cargo check --locked --workspace --tests
 
 # Release builds of the two shipped binaries.
-cargo build --release -p ergo-node
-cargo build --release -p ergo-wallet
+cargo build --locked --release -p ergo-node
+cargo build --locked --release -p ergo-wallet
 ```
 
 ## Test workflow
@@ -47,47 +51,95 @@ Run the full local gate before submitting — it mirrors CI:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+python3 scripts/check-rust-fragments.py
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+python3 scripts/ci-policy.py
+python3 -m unittest discover -s scripts -p 'test_release*.py'
 ```
 
 `clippy` runs with `-D warnings`: a warning is a failure. If a lint trips after
-your change, fix the root cause — do not `#[allow(...)]` it away.
+your change, fix the root cause — do not `#[allow(...)]` it away. The workspace
+forbids unsafe code and warns on
+`dbg!`. It intentionally permits test unwraps and avoids blanket pedantic lint
+sets. Public Rustdoc links and HTML must resolve, and strict docs build with all
+features. Private helper references in public docs should be code text, not links
+to pages downstream users cannot open.
 
 ### Per-crate inner loop
 
 Scoped tests are the fastest iteration loop while you work on one crate:
 
 ```bash
-cargo test -p ergo-ser
-cargo test -p ergo-validation
-cargo test -p ergo-state
+cargo test --locked -p ergo-ser
+cargo test --locked -p ergo-validation
+cargo test --locked -p ergo-state
 ```
 
 ### Feature-gated tests
 
 Two surfaces need explicit feature flags to compile and run; the default
-`cargo test --workspace` does not build them:
+`cargo test --locked --workspace` does not build them:
 
 ```bash
 # Cost-trace recording in ergo-sigma (CI runs exactly these two tests).
-cargo test -p ergo-sigma --features cost-trace --test it cost_trace_smoke
-cargo test -p ergo-sigma --features cost-trace --test it traced_untraced_parity
+cargo test --locked -p ergo-sigma --features cost-trace --test it cost_trace_smoke
+cargo test --locked -p ergo-sigma --features cost-trace --test it traced_untraced_parity
 
-# Diagnostics-feature triage tests. CI compiles these only (--no-run) because
-# they need external state (mainnet captures, captured block JSON, a running
-# Scala node). Run them locally only if you have that state.
-cargo test --no-run -p ergo-validation --features diagnostics
-cargo test --no-run -p ergo-mempool    --features diagnostics
-cargo test --no-run -p ergo-ser        --features diagnostics
+# Diagnostics compile-check. External reports and live oracles also have
+# explicit #[ignore] markers, so enabling their features never silently
+# probes operator state or converts missing captures into passing evidence.
+cargo test --locked --no-run -p ergo-validation --features diagnostics
+cargo test --locked --no-run -p ergo-mempool    --features diagnostics
+cargo test --locked --no-run -p ergo-ser        --features diagnostics
 ```
+
+`cargo test --locked --workspace --all-features` runs the hermetic feature
+coverage too. It leaves external/manual tests ignored. Run an individual manual
+test with `--ignored --nocapture` only after supplying its documented inputs;
+missing or unsuitable required inputs fail that invocation. Ignore markers are
+per test: the committed block-836113, both Scala NiPoPoW captures and cost fixtures continue
+to run normally.
+
+The cost-ledger workflow fetches the hash-pinned L4 input release and explicitly
+runs its two replay tests and input-hash test. Reproduce that external obligation
+from the repository root:
+
+```bash
+scripts/fetch-l4-inputs.sh
+cargo nextest run --locked -p ergo-validation --features diagnostics \
+  --run-ignored only \
+  -E 'test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)'
+```
+
+Other manual obligations are separate from that pinned replay:
+
+| Harness | Required inputs and invocation |
+|---|---|
+| `ergo-validation/tests/diagnose_block_{303967,555672,836113}.rs` | Scala `/blocks/{blockId}/transactions` captures at `/tmp/block_<height>_txs.json`. Run `cargo test --locked -p ergo-validation --features diagnostics --test diagnose_block_<height> -- --ignored --nocapture`. |
+| `eval_error_triage` | At least one of the listed extracted transaction ranges and covering header JSON files. Run `cargo test --locked -p ergo-validation --features diagnostics --test eval_error_triage -- --ignored --nocapture`. It reports available ranges; it does not certify missing ranges. |
+| `parity_triage` | Extracted 889000–890000 or 1500000–1501000 transactions, covering headers and JVM costs. Run `cargo test --locked -p ergo-validation --features diagnostics --test parity_triage -- --ignored --nocapture`. |
+| `trace_emission_700000`, `trace_mismatch_889k` | Exact transaction/header/cost filenames and commands appear in each test module. Run the named `--test` with its feature and `--ignored --nocapture`. |
+| `ergo-ser::triage_roundtrip_failures` | Locally available transaction captures. Run `cargo test --locked -p ergo-ser --features diagnostics --test it triage_roundtrip_failures -- --ignored --nocapture`; this is a diagnostic report of divergences. |
+| `ergo-mempool::mempool_admits_mainnet_corpus_1761k` | Re-extracted `transactions`, `headers` and `input_boxes` JSON for 1761000–1762000. Run `cargo test --locked -p ergo-mempool --test it mempool_admits_mainnet_corpus_1761k -- --ignored --nocapture`. |
+| `ergo-mempool::scala_pending_tx_oracle` | Live Scala node configured by `NODE_URL`, with nonempty pending transactions; see the module for capture requirements. Run `cargo test --locked -p ergo-mempool --features diagnostics --test it scala_pending_tx_oracle -- --ignored --nocapture`. |
+| `ergo-state::popow_prove_mainnet` | Stopped Mode 1 mainnet archive (or offline copy), Dense headers, height ≥100 and historical extensions. Run `ERGO_MAINNET_DATA_DIR=/path/to/archive cargo test --locked -p ergo-state --test it popow_prove_mainnet -- --ignored --nocapture --test-threads=1`. |
+
+Use the extraction scripts in `test-vectors/scripts/` with a Scala node,
+`curl`, `jq` and the script's JVM tooling. For example,
+`extract_transactions.sh <start> <end> <output_file>` and
+`extract_headers.sh <start> <end> <output_file>` produce the archival range
+inputs. Manual benchmark, broad-corpus and live-JVM tests carry their own
+prerequisites; the default/all-features gates do not claim those obligations
+were executed.
 
 ### Differential testing
 
 CI runs the `ergo-difftest` structured campaign on every push and pull request:
 
 ```bash
-cargo run --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
+cargo run --locked --release -p ergo-difftest -- --structured --iters 50000 --min-coverage 0.80
 ```
 
 This checks wire-decoder invariants across all `ergo-ser` surfaces (no panics,
@@ -95,7 +147,14 @@ encode–decode fixed point) and enforces that every generator produces adversar
 inputs at the expected rate (≥ 80 % of the declared vocabulary). An invariant
 violation or a generator falling below the coverage threshold fails CI. The
 harness unit tests (`tests/it/smoke.rs`, `tests/it/selftest.rs`) are exercised by
-the standard `cargo test --workspace` run above and do not need a Scala oracle.
+the standard `cargo test --locked --workspace` run above and do not need a
+Scala oracle.
+
+Dependency changes must also keep `ergo-difftest/fuzz/Cargo.lock`, the detached
+fuzz workspace's lockfile, current. CI resolves it with the pinned nightly
+and `cargo metadata --locked` on every PR; the longer libFuzzer campaigns remain
+scheduled. See [the fuzz workflow](ergo-difftest/fuzz/README.md) for the update
+and validation commands.
 
 ### Test profiles
 
@@ -103,15 +162,15 @@ Defined in the workspace [`Cargo.toml`](./Cargo.toml):
 
 | Profile | Inherits | `opt-level` | Use |
 |---|---|---|---|
-| `test` | — | `1` | Default for `cargo test`. Keeps crypto-heavy oracle tests near ~30 s instead of ~4 min at `opt-level = 0`, while preserving backtraces. |
-| `oracle` | `test` | `2` | Long-running oracle / CI runs: `cargo test --profile oracle --workspace`. |
+| `test` | — | `1` | Default for `cargo test --locked`. Keeps crypto-heavy oracle tests near ~30 s instead of ~4 min at `opt-level = 0`, while preserving backtraces. |
+| `oracle` | `test` | `2` | Long-running oracle / CI runs: `cargo test --locked --profile oracle --workspace`. |
 | `release-prof` | `release` | — | Release-equivalent plus frame pointers and line-table debuginfo so `perf`/flamegraph can attribute samples. |
 
 The profiling build:
 
 ```bash
 RUSTFLAGS="-C target-cpu=native -C force-frame-pointers=yes" \
-  cargo build --profile release-prof -p ergo-node
+  cargo build --locked --profile release-prof -p ergo-node
 ```
 
 ## Audit tooling
@@ -120,20 +179,25 @@ Three auditors run in CI on every push and pull request. Treat a local failure
 the same as a `clippy -D warnings` failure: stop, diagnose, fix the dependency
 tree — do not silence the tool.
 
-One-time install (`--locked` pins the auditor binary against drift):
+Install the exact auditor releases from [`.github/ci-tools.toml`](.github/ci-tools.toml).
+`--version` pins the tool release; `--locked` uses that release's dependency
+lockfile. CI uses both, and the shared action exposes these same versions:
 
 ```bash
-cargo install cargo-deny    --locked
-cargo install cargo-audit   --locked
-cargo install cargo-machete --locked
-cargo install cargo-udeps   --locked
-cargo install cargo-geiger  --locked
+python3 - <<'PYTOOLS'
+import subprocess, tomllib
+with open(".github/ci-tools.toml", "rb") as source:
+    versions = tomllib.load(source)["tools"]
+for name in ("deny", "audit", "machete"):
+    subprocess.run(["cargo", "install", f"cargo-{name}", "--version",
+                    versions[name], "--locked"], check=True)
+PYTOOLS
 ```
 
 | Tool | Command | Checks | When |
 |---|---|---|---|
 | `cargo-deny` | `cargo deny check` | Licenses, duplicate deps, RustSec advisories, source gating. Config in [`deny.toml`](./deny.toml). | CI (every push/PR); locally before submitting dependency changes. |
-| `cargo-audit` | `cargo audit --deny warnings` | RustSec advisory database against `Cargo.lock`. | CI (every push/PR). |
+| `cargo-audit` | `cargo audit --deny warnings --ignore RUSTSEC-2025-0141` | RustSec advisory database against `Cargo.lock`. | CI (every push/PR). |
 | `cargo-machete` | `cargo machete` | Unused dependencies (stable Rust). | CI (every push/PR). |
 | `cargo-udeps` | `cargo +nightly udeps --workspace` | Unused dependencies (nightly; stricter — catches feature-gated deps machete misses). | Not in CI. Run before a release-train cut. |
 | `cargo-geiger` | `cargo geiger` | `unsafe`-code surface report. Informational, no pass/fail. | Not in CI. Diff against the previous run before merging any PR that adds `unsafe`. |
@@ -210,6 +274,15 @@ read [`docs/compatibility.md`](./docs/compatibility.md) first. It documents the
 verified surfaces, how parity is checked against the Scala reference node and
 mainnet, and the areas where parity is still incomplete.
 
+Release packaging and exact-tag validation are documented in
+[`docs/releasing.md`](docs/releasing.md). Python tooling requires Python 3.11+. CI also runs the browser model and voting
+regressions with the Node.js release pinned in `.github/ci-tools.toml`:
+
+```sh
+node --experimental-default-type=module --test ergo-api/web/tests/*.test.mjs
+node scripts/test-voting-ui.cjs
+```
+
 ## Pull requests
 
 - Keep PRs focused. If a change touches multiple subsystems, split it. A single
@@ -217,7 +290,8 @@ mainnet, and the areas where parity is still incomplete.
 - Include a short test plan in the description: which commands you ran and what
   passed.
 - Before submitting, run the full local gate (`fmt --check`,
-  `clippy -D warnings`, `cargo test --workspace`) and confirm it is green.
+  `clippy -D warnings`, `cargo test --locked --workspace`, strict Rustdoc) and
+  confirm it is green.
 - If you change any consensus-critical encoding, hashing, or validation logic,
   add or update an oracle-backed test vector — see the oracle-parity rule above.
 - Commit messages should explain the *why*, not restate the diff. Code comments

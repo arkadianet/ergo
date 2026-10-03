@@ -13,6 +13,7 @@ use ergo_ser::block_transactions::read_block_transactions;
 use ergo_ser::ergo_box::ErgoBox;
 use ergo_ser::header::read_header;
 use ergo_ser::modifier_id::{compute_section_id, TYPE_BLOCK_TRANSACTIONS};
+use redb::ReadableDatabase;
 use redb::{ReadableTable, TableDefinition, WriteTransaction};
 
 pub(crate) const EMISSION_IDENTITIES: TableDefinition<&[u8], &[u8]> =
@@ -628,7 +629,7 @@ mod tests {
             let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
             let (mut store, seed) = seeded_store(&dir.path().join("state.redb"));
             if pipeline {
-                store.enable_persist_pipeline(8);
+                store.enable_persist_pipeline(8).unwrap();
             }
             let tx = transaction(seed, 1);
             let expected = box_id(&output_box(&tx).unwrap()).unwrap();
@@ -780,7 +781,7 @@ mod tests {
             );
             assert_eq!(store.emission_identity(&target).unwrap(), None);
             if pipeline {
-                store.enable_persist_pipeline(8);
+                store.enable_persist_pipeline(8).unwrap();
             }
             // Leave a persistence job in flight for rollback to flush.
             apply(&mut store, height + 2, vec![], 3);

@@ -535,6 +535,14 @@ impl MempoolView for SnapshotMempoolView {
         self.handle.load().pool_outputs.clone()
     }
 
+    fn box_snapshot(&self, _committed_ids: &[Digest32]) -> ergo_api::MempoolBoxSnapshot {
+        let snapshot = self.handle.load();
+        ergo_api::MempoolBoxSnapshot {
+            outputs: snapshot.pool_outputs.clone(),
+            spent_box_ids: snapshot.pool_inputs.keys().copied().collect(),
+        }
+    }
+
     fn pool_tx_detail(&self, tx_id: &Digest32) -> Option<PoolTxDetail> {
         // Single coherent load: the tx bytes and the pool-output overlay
         // must come from the same snapshot version so pool-parent input

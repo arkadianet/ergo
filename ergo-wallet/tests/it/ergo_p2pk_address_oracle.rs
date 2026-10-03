@@ -24,7 +24,7 @@ const CROSS_VERIFIED_MNEMONIC: &str =
 fn address_for(path: DerivationPath) -> String {
     let m = Mnemonic::import(CROSS_VERIFIED_MNEMONIC).expect("vector mnemonic must import");
     let seed = m.to_seed("");
-    let master = ExtendedSecretKey::derive_master_key(&seed, false)
+    let master = ExtendedSecretKey::derive_master_key(&seed[..], false)
         .expect("master key derivation must succeed");
     let leaf = master
         .derive_at_path(&path)

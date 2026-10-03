@@ -1,7 +1,7 @@
 # ergo-compiler
 
 **Purpose:** ErgoScript source → ErgoTree compiler, production-faithful to
-Scala's `sigmastate.lang.SigmaCompiler` (sigma-state 6.0.2). Full pipeline:
+Scala's `sigmastate.lang.SigmaCompiler` against version-pinned fixtures. Full pipeline:
 parse → bind → typecheck → root-coerce (`BoolToSigmaProp`) → emit to
 `ergo_ser` opcode IR → nine-pass graph build → constant segregation → wire
 write → P2S/P2SH addresses, plus `@contract` template compilation
@@ -14,14 +14,11 @@ oracle-parity bar anyway.
 (dev-only: ergo-sigma as a semantic-smoke oracle)
 **Depended on by:** `ergo-api` (the only workspace dependent — `/script/*` and
 the native `/api/v1/script/*` surface)
-**Approx LOC:** ~24,700 production (~40,400 src incl. in-file tests;
-+7,400 integration tests)
 
 ## Start here
-- `src/lib.rs:1` — the crate charter + module map (`:1259`) + public
-  re-exports (`:1300`); the deviation ledger (`D-T*` typer, `D-E*` emit,
-  `D-C*` tree/compile) inside the doc comment is the single source of truth for
-  every known parity gap and its Scala citation.
+- `src/lib.rs` — current public pipeline, module map, re-exports and examples.
+- [`compiler-design-ledger.md`](../compiler-design-ledger.md) — oracle versions,
+  known residuals and closure evidence (`D-T*` typer, `D-E*` emit, `D-C*` tree).
 - `src/tree/mod.rs:60` — `graph_build`, the oracle-pinned nine-pass ordering
   (cast fold → isProven fusion → fold → dead-val prune → v0 gate → lower →
   re-fold → isProven strip → tuple → CSE → re-fold); `compile` at `:318`.

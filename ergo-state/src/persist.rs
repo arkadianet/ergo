@@ -55,7 +55,7 @@ use crate::store::{
 ///
 /// Scope: this barrier proves *redb-committed N jobs*. It does NOT prove
 /// *OS-fsync* — durability beyond redb's commit is governed by the
-/// `Durability::Eventual` setting and the separate `force_durable_flush`
+/// per-job `Durability::Immediate`/`None` setting and the separate `force_durable_flush`
 /// path in `StateStore`.
 struct CommitWatch {
     state: Mutex<CommitState>,
@@ -75,6 +75,7 @@ struct CommitState {
     /// far. Strictly monotonic on success — independent of block height,
     /// so it remains correct across rollback / reorg branch swaps.
     committed_count: u64,
+    synchronously_durable_count: u64,
     /// First persist error since pipeline start, if any. Sticky:
     /// subsequent `wait_for` calls keep returning it until the pipeline
     /// is reconstructed. The carried `height` is informational.
@@ -104,9 +105,12 @@ impl CommitWatch {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn record_committed_jobs(&self, n: u64) {
+    fn record_committed_jobs(&self, n: u64, synchronously_durable: bool) {
         let mut s = self.take_lock();
         s.committed_count = s.committed_count.saturating_add(n);
+        if synchronously_durable {
+            s.synchronously_durable_count = s.committed_count;
+        }
         // Publish under the same lock that advances the count, so the
         // watermark can never run ahead of a commit that has been
         // recorded. Release ordering pairs with the arena's acquire load:
@@ -130,6 +134,10 @@ impl CommitWatch {
         let mut s = self.take_lock();
         s.closed = true;
         self.cond.notify_all();
+    }
+
+    fn error(&self) -> Option<(u32, String)> {
+        self.take_lock().error.clone()
     }
 
     /// Block until `committed_count >= target_count` or an error is
@@ -175,6 +183,16 @@ impl CommitWatch {
     }
 }
 
+/// Pipeline sequence progress. Counts distinguish admission, transaction
+/// commit and synchronous durability; they are not chain heights and remain
+/// monotonic across reorgs. A flush barrier proves `committed_jobs` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistProgress {
+    pub enqueued_jobs: u64,
+    pub committed_jobs: u64,
+    pub synchronously_durable_jobs: u64,
+}
+
 /// RAII guard the worker holds so the watch is marked closed even on
 /// panic. Clones the underlying `Arc<CommitWatch>` for the worker thread
 /// and signals close on drop.
@@ -189,8 +207,8 @@ impl Drop for WorkerWatchGuard {
 /// A single block's worth of pre-serialized persist data.
 ///
 /// Built on the main thread, consumed by the persist thread.
-/// All serialization happens before send — the persist thread
-/// only does redb writes.
+/// AVL payloads are serialized before send. The worker merges chain metadata
+/// with the latest transaction-visible header selection before writing it.
 pub(crate) struct PersistJob {
     pub emission: crate::store::emission::EmissionTransition,
     /// Height of the block being persisted.
@@ -227,9 +245,8 @@ pub(crate) struct PersistJob {
     /// stay intact when pruning starts; only the heights between
     /// `new_min - diff` and `new_min` are evicted.
     pub old_best_full_block_height: u32,
-    /// Whether this batch requires `Durability::Eventual` rather than
-    /// `Durability::None`. In redb 2.6.3, Eventual still calls synchronous
-    /// `File::sync_data` on Linux; it is not an OS-writeback-only mode.
+    /// Whether this batch requires `Durability::Immediate` rather than
+    /// `Durability::None`.
     /// Set per `ibd_blocks_since_flush >= ibd_flush_interval` so durable
     /// commits happen periodically during IBD.
     pub durable: bool,
@@ -482,6 +499,25 @@ where
 }
 
 impl PersistPipeline {
+    pub fn progress(&self) -> PersistProgress {
+        let state = self.commit_watch.take_lock();
+        PersistProgress {
+            enqueued_jobs: self.sent_count.load(Ordering::Acquire),
+            committed_jobs: state.committed_count,
+            synchronously_durable_jobs: state.synchronously_durable_count,
+        }
+    }
+
+    pub(crate) fn record_durable_barrier(&self) {
+        let mut state = self.commit_watch.take_lock();
+        state.synchronously_durable_count = state.committed_count;
+    }
+    /// Jobs waiting in the input channel. Excludes the worker's current
+    /// batch and result channel; this is not total queued payload memory.
+    pub fn queued_jobs(&self) -> usize {
+        self.tx.as_ref().map_or(0, crossbeam_channel::Sender::len)
+    }
+
     /// Deterministic pending-result fixture, without a background worker.
     #[cfg(feature = "test-utils")]
     pub(crate) fn with_pending_failure_for_test(height: u32) -> Self {
@@ -494,6 +530,7 @@ impl PersistPipeline {
             })
             .unwrap();
         let commit_watch = CommitWatch::new(None);
+        commit_watch.record_error(height, "injected pending persistence failure".into());
         commit_watch.record_closed();
         Self {
             tx: Some(tx),
@@ -562,6 +599,7 @@ impl PersistPipeline {
     /// commit_watch's terminal-error path rather than waiting
     /// forever on an unreachable target.
     pub(crate) fn send(&self, job: PersistJob) -> Result<u64, StateError> {
+        self.check_health()?;
         // The sequence this job is assigned: jobs commit in FIFO order and
         // `committed_count` counts them, so "job `seq` is durable" is
         // exactly `committed_count >= seq`. The caller hands it to
@@ -572,14 +610,26 @@ impl PersistPipeline {
         })?;
         let height = job.height;
         let send_start = std::time::Instant::now();
-        tx.send(job).map_err(|_| StateError::InternalInvariant {
-            what: "persist worker thread died (channel closed)",
-        })?;
+        if tx.send(job).is_err() {
+            self.check_health()?;
+            return Err(StateError::InternalInvariant {
+                what: "persist worker thread died (channel closed)",
+            });
+        }
+        self.check_health()?;
         let send_ms = send_start.elapsed().as_secs_f64() * 1000.0;
         if send_ms >= 1.0 {
             debug!(height, send_ms, "persist queue wait");
         }
         Ok(seq)
+    }
+
+    /// The watch is authoritative even when the notification channel is full.
+    pub(crate) fn check_health(&self) -> Result<(), StateError> {
+        match self.commit_watch.error() {
+            Some((height, error)) => Err(StateError::PersistFailed { height, error }),
+            None => Ok(()),
+        }
     }
 
     /// Drain any completed results without blocking.
@@ -623,13 +673,28 @@ impl PersistPipeline {
     /// until the pipeline is reconstructed).
     pub fn flush(&self) -> Option<PersistResult> {
         let target = self.sent_count.load(Ordering::Acquire);
-        if target == 0 {
-            // Nothing was ever queued; barrier is vacuously satisfied.
-            return None;
-        }
         match self.commit_watch.wait_for(target) {
             Ok(()) => None,
             Err((height, error)) => Some(PersistResult::Err { height, error }),
+        }
+    }
+
+    /// Close admission, join the worker and preserve its first failure.
+    /// `Drop` is only a best-effort fallback; explicit callers must inspect
+    /// this result before reporting a successful shutdown.
+    pub(crate) fn shutdown(&mut self) -> Result<(), StateError> {
+        drop(self.tx.take());
+        if let Some(handle) = self.thread.take() {
+            if handle.join().is_err() {
+                self.commit_watch
+                    .record_error(0, "persist worker panicked".into());
+            }
+        }
+        match self.flush() {
+            Some(PersistResult::Err { height, error }) => {
+                Err(StateError::PersistFailed { height, error })
+            }
+            _ => Ok(()),
         }
     }
 
@@ -671,6 +736,7 @@ impl PersistPipeline {
                 .map(|j| (j.avl_writes.len() + j.avl_deletes.len()) as u32)
                 .sum();
             let batch_size = batch.len();
+            let synchronously_durable = batch.iter().any(|job| job.durable);
             let committed_before =
                 *committed_heights.get_or_insert_with(|| CommittedHeights::before(&batch[0]));
             let committed_after = CommittedHeights::after(
@@ -708,7 +774,7 @@ impl PersistPipeline {
                     // committed" so heights re-decreasing across
                     // rollback / reorg cannot false-pass an old
                     // watermark.
-                    watch.record_committed_jobs(batch_size as u64);
+                    watch.record_committed_jobs(batch_size as u64, synchronously_durable);
 
                     // Send one Ok per job — preserves the result API
                     // for any other consumers. `try_send` may drop
@@ -739,6 +805,11 @@ impl PersistPipeline {
                             error: e.clone(),
                         });
                     }
+                    // Every later delta depends on this batch. Continuing would
+                    // commit a tip whose AVL/undo changes are missing. Dropping
+                    // the receiver also wakes blocked producers with the sticky
+                    // original failure rather than admitting more work.
+                    return;
                 }
             }
         }
@@ -755,7 +826,7 @@ impl PersistPipeline {
     /// is rewritten ONCE if any job bumped best_header, walking back from
     /// the LAST bumping job's tip to the FIRST bumping job's old base.
     /// Pruning uses the LAST job's `prune_below` (pruning is monotonic).
-    /// Durability: Eventual iff ANY job in the batch is durable.
+    /// Durability: Immediate iff ANY job in the batch is durable.
     #[cfg(test)]
     fn execute_batch(
         db: &Database,
@@ -815,20 +886,20 @@ impl PersistPipeline {
 
         // Durability mode per batch:
         //   - `None`: makes writes visible without a durability guarantee.
-        //   - `Eventual`: periodic IBD commit points and every tip-sync batch.
-        // In redb 2.6.3's Linux backend Eventual uses File::sync_data, just
-        // like Immediate. Quick-repair also enables two-phase commits. These
-        // commits can therefore stall on disk flushes; do not describe them
-        // as background OS writeback or weaken durability to hide the stall.
+        //   - `Immediate`: periodic IBD commit points and every tip-sync batch.
+        // The explicit mode guarantees a synchronous durability boundary on
+        // every supported backend.
         let any_durable = jobs.iter().any(|j| j.durable);
         let durability = if any_durable {
-            redb::Durability::Eventual
+            redb::Durability::Immediate
         } else {
             redb::Durability::None
         };
         #[cfg(any(test, feature = "test-utils"))]
         let durability = crate::redb_util::test_durability(db, durability);
-        write_txn.set_durability(durability);
+        write_txn
+            .set_durability(durability)
+            .observe_persist_error(failure_context, "background_persist_set_durability")?;
         let mut wallet_store = crate::wallet::RedbWalletStore::attach_write_transaction(&write_txn);
 
         // 1. AVL_NODES — apply in job order so later blocks overwrite
@@ -916,16 +987,38 @@ impl PersistPipeline {
             }
         }
 
-        // 5. CHAIN_STATE_META — only the LAST job's snapshot. Mid-batch
-        //    chain states would be observable to readers but are not
-        //    consistent with the in-memory state until the batch lands;
-        //    storing only the final state matches the atomicity contract.
+        // Full-block writers own the applied pointer. A header transaction
+        // may have selected another tip since this job was queued, including
+        // a fork at the same height; retain that committed header selection.
+        let mut merged_chain =
+            crate::chain::ChainStateMeta::deserialize(&last.chain_state_bytes)
+                .observe_persist_error(failure_context, "background_persist_chain_state_decode")?;
+        let mut rewrite_header = jobs.iter().any(|j| j.best_header_bumped);
         {
             let mut cs_table = write_txn
                 .open_table(CHAIN_STATE_META)
                 .observe_persist_error(failure_context, "background_persist_batch")?;
+            let committed = cs_table
+                .get("chain_state")
+                .observe_persist_error(failure_context, "background_persist_batch")?
+                .map(|row| crate::chain::ChainStateMeta::deserialize(row.value()))
+                .transpose()
+                .observe_persist_error(failure_context, "background_persist_chain_state_decode")?;
+            if let Some(committed) = committed {
+                // A full-block apply can advance the header pointer only if
+                // header-first sync has not already selected this height.
+                if !rewrite_header
+                    || committed.best_header_height >= merged_chain.best_header_height
+                {
+                    merged_chain.best_header_id = committed.best_header_id;
+                    merged_chain.best_header_height = committed.best_header_height;
+                    merged_chain.best_header_score = committed.best_header_score;
+                    merged_chain.header_availability = committed.header_availability;
+                    rewrite_header = false;
+                }
+            }
             cs_table
-                .insert("chain_state", last.chain_state_bytes.as_slice())
+                .insert("chain_state", merged_chain.serialize().as_slice())
                 .observe_persist_error(failure_context, "background_persist_batch")?;
         }
 
@@ -933,7 +1026,11 @@ impl PersistPipeline {
         //    bumped best_header. Use the FIRST bumping job's old base
         //    (walk-back lower bound) and the LAST bumping job's tip
         //    (walk-back start). Intermediate bumps are subsumed.
-        if let Some(first_bump) = jobs.iter().find(|j| j.best_header_bumped) {
+        if let Some(first_bump) = jobs
+            .iter()
+            .find(|j| j.best_header_bumped)
+            .filter(|_| rewrite_header)
+        {
             let last_bump = jobs
                 .iter()
                 .rev()
@@ -1216,41 +1313,8 @@ macro_rules! shutdown_log {
 
 impl Drop for PersistPipeline {
     fn drop(&mut self) {
-        // Closing the sender causes `for job in rx` in persist_loop to
-        // exit once the queue drains, releasing the Arc<Database> so redb
-        // can write its clean-shutdown marker.
-        let pending = self.tx.as_ref().map(|tx| tx.len()).unwrap_or(0);
-        shutdown_log!(
-            "[persist] shutdown: closing channel, {pending} job(s) queued + any in flight"
-        );
-        drop(self.tx.take());
-        if let Some(handle) = self.thread.take() {
-            let t0 = std::time::Instant::now();
-            // Drain result events while waiting so we can surface per-job
-            // commit times during the shutdown path.
-            while !handle.is_finished() {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                while let Ok(r) = self.result_rx.try_recv() {
-                    match r {
-                        PersistResult::Ok { height, avl_writes, commit_ms } => shutdown_log!(
-                            "[persist] drained h={height} writes={avl_writes} commit={commit_ms:.1}ms"
-                        ),
-                        PersistResult::Err { height, error } => shutdown_log!(
-                            "[persist] drain ERROR at h={height}: {error}"
-                        ),
-                    }
-                }
-                let elapsed = t0.elapsed().as_secs_f64();
-                shutdown_log!("[persist] still draining… {elapsed:.1}s elapsed");
-            }
-            if let Err(e) = handle.join() {
-                shutdown_log!("[persist] thread join failed: {e:?}");
-            } else {
-                shutdown_log!(
-                    "[persist] thread joined cleanly after {:.1}s",
-                    t0.elapsed().as_secs_f64(),
-                );
-            }
+        if let Err(error) = self.shutdown() {
+            shutdown_log!("[persist] shutdown failed: {error}");
         }
     }
 }
@@ -1258,6 +1322,7 @@ impl Drop for PersistPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::ReadableDatabase;
     use std::time::Duration;
 
     use crate::test_helpers::SharedBuf;
@@ -1280,7 +1345,15 @@ mod tests {
             undo_bytes: vec![0u8; 1],
             state_meta_bytes: vec![0u8; 1],
             alloc_meta_bytes: vec![0u8; 1],
-            chain_state_bytes: vec![0u8; 1],
+            chain_state_bytes: crate::chain::ChainStateMeta {
+                best_header_id: [0; 32],
+                best_header_height: 0,
+                best_header_score: vec![0],
+                best_full_block_id: [height as u8; 32],
+                best_full_block_height: height,
+                header_availability: crate::chain::HeaderAvailability::Dense,
+            }
+            .serialize(),
             best_header_bumped: false,
             old_best_header_height: 0,
             old_best_full_block_height: 0,
@@ -1290,6 +1363,94 @@ mod tests {
             voted_params_row: None,
             wallet_payload: None,
         }
+    }
+
+    #[test]
+    fn stale_block_snapshot_preserves_newer_header_and_same_height_fork() {
+        for current_height in [10, 11] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("persist.redb");
+            let db = Database::create(&path).unwrap();
+            let mut current = crate::chain::ChainState::empty().to_persisted();
+            current.best_header_height = current_height;
+            current.best_header_id = [0xbb; 32];
+            current.best_header_score = vec![42];
+            current.header_availability = crate::chain::HeaderAvailability::PoPowSparse {
+                dense_from_height: 10,
+                proof_suffix_height: 10,
+            };
+            let write = db.begin_write().unwrap();
+            write
+                .open_table(CHAIN_STATE_META)
+                .unwrap()
+                .insert("chain_state", current.serialize().as_slice())
+                .unwrap();
+            write.commit().unwrap();
+            let mut job = minimal_job(8);
+            let mut old =
+                crate::chain::ChainStateMeta::deserialize(&job.chain_state_bytes).unwrap();
+            old.best_header_id = [0xaa; 32];
+            old.best_header_height = 10;
+            old.best_header_score = vec![20];
+            job.chain_state_bytes = old.serialize();
+            PersistPipeline::execute_batch(&db, &path, vec![job], 1024, -1).unwrap();
+            let read = db.begin_read().unwrap();
+            let row = read.open_table(CHAIN_STATE_META).unwrap();
+            let result = crate::chain::ChainStateMeta::deserialize(
+                row.get("chain_state").unwrap().unwrap().value(),
+            )
+            .unwrap();
+            assert_eq!(result.best_header_id, current.best_header_id);
+            assert_eq!(result.best_header_height, current_height);
+            assert_eq!(result.header_availability, current.header_availability);
+            assert_eq!(result.best_full_block_height, 8);
+        }
+    }
+
+    #[test]
+    fn worker_failure_is_terminal_with_full_notifications_and_shutdown_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persist.redb");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let mut pipeline = PersistPipeline::new(db.clone(), path, 1, 1024, -1, None);
+        for height in 1..=2 {
+            pipeline.send(minimal_job(height)).unwrap();
+            assert!(pipeline.flush().is_none());
+        }
+        let mut bad = minimal_job(3);
+        let mut params = ergo_validation::active_params::scala_launch_mainnet();
+        params.epoch_start_height = 3;
+        bad.voted_params_row = Some(params);
+        let _ = pipeline.send(bad);
+        assert!(matches!(
+            pipeline.flush(),
+            Some(PersistResult::Err { height: 3, .. })
+        ));
+        assert!(matches!(
+            pipeline.send(minimal_job(4)),
+            Err(StateError::PersistFailed { height: 3, .. })
+        ));
+        assert!(matches!(
+            pipeline.shutdown(),
+            Err(StateError::PersistFailed { height: 3, .. })
+        ));
+        // The commit watch advances before notifications, so flush alone
+        // cannot prove their delivery. The joined worker must have sent both
+        // successes before receiving the failing job, filling the channel
+        // and preventing its error notification from fitting.
+        assert_eq!(pipeline.result_rx.len(), 2);
+        for height in 1..=2 {
+            assert!(matches!(
+                pipeline.result_rx.try_recv(),
+                Ok(PersistResult::Ok { height: got, .. }) if got == height
+            ));
+        }
+        assert!(pipeline.result_rx.is_empty());
+        let read = db.begin_read().unwrap();
+        let chain = read.open_table(CHAIN_INDEX).unwrap();
+        assert!(chain.get(3).unwrap().is_none());
+        assert!(chain.get(4).unwrap().is_none());
+        assert!(chain.get(2).unwrap().is_some());
     }
 
     /// Build a `PersistJob` carrying a wallet payload with one
@@ -1548,41 +1709,23 @@ mod tests {
             PersistResult::Err { height: 701, .. }
         ));
 
-        let mut second = minimal_job(1024);
-        second.old_best_full_block_height = 1023;
-        second.old_best_header_height = 1100;
-        let mut invalid_codec = ergo_validation::active_params::scala_launch_mainnet();
-        invalid_codec.epoch_start_height = 1024;
-        invalid_codec.extra.push((1, 7));
-        second.voted_params_row = Some(invalid_codec);
-        job_tx.send(second).unwrap();
-        assert!(matches!(
-            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            PersistResult::Err { height: 1024, .. }
-        ));
-
-        drop(job_tx);
+        // Once one delta fails, no later delta may commit, even if valid.
         worker.join().unwrap();
+        assert!(job_tx.send(minimal_job(702)).is_err());
+        drop(job_tx);
+        let read = db.begin_read().unwrap();
+        let chain = read.open_table(CHAIN_INDEX).unwrap();
+        assert!(chain.get(701).unwrap().is_none());
+        assert!(chain.get(702).unwrap().is_none());
 
         let output = String::from_utf8(writer.bytes()).unwrap();
         let events: Vec<serde_json::Value> = output
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(events.len(), 2);
-        assert_eq!(
-            events[0]["fields"]["operation"],
-            "background_persist_voted_params_epoch_gate"
-        );
-        assert_eq!(
-            events[1]["fields"]["operation"],
-            "background_persist_voted_params_serialize"
-        );
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0]["fields"]["best_full_block_height"], 700);
         assert_eq!(events[0]["fields"]["best_header_height"], 650);
-        assert_eq!(events[1]["fields"]["best_full_block_height"], 700);
-        assert_eq!(events[1]["fields"]["best_header_height"], 650);
-        assert_eq!(events[1]["fields"]["attempted_height"], 1024);
     }
 
     #[test]
@@ -1590,6 +1733,33 @@ mod tests {
         let (_d, p) = fresh_pipeline(1);
         // Vacuous barrier: nothing was ever queued.
         assert!(p.flush().is_none(), "flush of empty pipeline should be Ok");
+    }
+
+    #[test]
+    fn progress_distinguishes_committed_jobs_from_synchronous_durability() {
+        let (_directory, pipeline) = fresh_pipeline(4);
+        pipeline.send(minimal_job(1)).unwrap();
+        assert!(pipeline.flush().is_none());
+        assert_eq!(
+            pipeline.progress(),
+            PersistProgress {
+                enqueued_jobs: 1,
+                committed_jobs: 1,
+                synchronously_durable_jobs: 0
+            }
+        );
+        let mut durable = minimal_job(2);
+        durable.durable = true;
+        pipeline.send(durable).unwrap();
+        assert!(pipeline.flush().is_none());
+        assert_eq!(
+            pipeline.progress(),
+            PersistProgress {
+                enqueued_jobs: 2,
+                committed_jobs: 2,
+                synchronously_durable_jobs: 2
+            }
+        );
     }
 
     #[test]
@@ -1717,7 +1887,7 @@ mod tests {
         // after a rollback). The watch tracks counts, so the new target
         // is 8 — branch A's 5 do NOT satisfy a target of 8.
         let watch = CommitWatch::new(None);
-        watch.record_committed_jobs(5); // branch A
+        watch.record_committed_jobs(5, false); // branch A
         let watch_clone = Arc::clone(&watch);
         let waiter = thread::spawn(move || watch_clone.wait_for(8));
         // Branch B is still in flight; waiter should be blocked.
@@ -1728,7 +1898,7 @@ mod tests {
              a height-based barrier would have false-passed here"
         );
         // Worker commits branch B.
-        watch.record_committed_jobs(3);
+        watch.record_committed_jobs(3, false);
         // Now waiter must complete promptly.
         let result = waiter.join().expect("waiter thread panicked");
         assert!(

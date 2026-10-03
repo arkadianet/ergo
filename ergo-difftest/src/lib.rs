@@ -18,11 +18,14 @@
 use std::panic::{self, AssertUnwindSafe};
 
 pub mod avl_frame;
+pub mod delivery_fuzz;
+pub mod execution_fuzz;
 pub mod fuzz;
 pub mod gen;
 pub mod generate;
 pub mod methodcall;
 pub mod minimize;
+pub mod network_fuzz;
 pub mod oracle;
 pub mod regressions;
 pub mod rng;
@@ -275,7 +278,9 @@ pub fn from_hex(s: &str) -> Option<Vec<u8>> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     };
-    s.chunks_exact(2)
+    s.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }

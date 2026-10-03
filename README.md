@@ -21,6 +21,7 @@ Repository: <https://github.com/arkadianet/ergo>
   the full build / test / run / configure surface.
 - [`docs/configuration.md`](./docs/configuration.md) — every config field, by type.
 - [`docs/operating.md`](./docs/operating.md) — running, modes, observability.
+- [`docs/releasing.md`](./docs/releasing.md) — exact-tag validation and tested binary archives.
 - [`docs/compatibility.md`](./docs/compatibility.md) — consensus-compatibility and versioning policy.
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) · [`SECURITY.md`](./SECURITY.md) · [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 
@@ -88,7 +89,7 @@ time (R1, R2, R3, R5); R4 has no analogue because the node exposes no
 
 ## Quickstart
 
-The workspace pins Rust 1.95.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
+The workspace pins Rust 1.99.0 via [`rust-toolchain.toml`](./rust-toolchain.toml)
 (`rustup` installs it on first build).
 
 ```bash

@@ -15,7 +15,7 @@
 //!   Its read splits into a header phase and a body phase so a caller
 //!   can budget a frame's declared size before the body is read.
 //! * [`handshake`] — version exchange + features negotiation; the
-//!   gate before a peer is promoted to [`peer::Peer`].
+//!   gate before a peer is promoted to [`peer::PeerInfo`].
 //! * [`message`] — typed P2P message enum and parser/serializer
 //!   matching Scala's `MessageSpec` registrations.
 //! * [`peer`] — per-peer state machine (handshaking → handshaked →

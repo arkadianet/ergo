@@ -118,6 +118,8 @@ pub(super) struct SyncSetup {
     pub executor: SyncExecutor,
     pub indexer_handle: Option<IndexerHandle>,
     pub indexer_task_handle: Option<IndexerWorker>,
+    pub indexer_event_observer:
+        Option<Arc<crate::realtime_indexer_bridge::RealtimeIndexerObserver>>,
     pub indexer_cancel: Arc<AtomicBool>,
     pub shadow_state: Option<Arc<super::super::shadow_watch::ShadowState>>,
     pub shadow_task_handle: Option<JoinHandle<()>>,
@@ -324,10 +326,9 @@ pub(super) fn setup(
     // `apply_block_digest` (no batched AVL replay), so neither applies.
     if let Some(s) = store.as_utxo_mut() {
         if config.ibd_flush_interval > 0 {
-            s.set_ibd_mode(true, config.ibd_flush_interval);
+            s.set_ibd_mode(true, config.ibd_flush_interval)?;
             info!(
                 flush_interval = config.ibd_flush_interval,
-                max_replay_blocks = config.ibd_flush_interval,
                 "IBD durability enabled",
             );
         }
@@ -339,7 +340,7 @@ pub(super) fn setup(
         // degrades to 1 job per batch when the queue stays empty between
         // blocks. In-flight memory is bounded by queue_depth × per-job
         // serialized AVL/undo size (~100-500KB), so 64 ≈ 32MB upper bound.
-        s.enable_persist_pipeline(64);
+        s.enable_persist_pipeline(64)?;
         info!(
             queue_depth = 64,
             "persist pipeline started in background thread"
@@ -357,8 +358,13 @@ pub(super) fn setup(
     // signal it on shutdown regardless of whether a task was actually
     // spawned. `indexer_task_handle` is `Some` only when a task is live.
     let indexer_cancel = Arc::new(AtomicBool::new(false));
+    let mut indexer_event_observer = None;
     let (indexer_handle, indexer_task_handle): (Option<IndexerHandle>, Option<IndexerWorker>) =
-        match IndexerHandle::boot(&config.indexer_config, &config.data_dir) {
+        match IndexerHandle::boot_with_cache(
+            &config.indexer_config,
+            &config.data_dir,
+            config.redb_cache_budgets.indexer,
+        ) {
             Some(handle) if handle.store().is_some() => {
                 info!(
                     poll_idle_ms = config.indexer_config.poll_idle_ms,
@@ -366,7 +372,16 @@ pub(super) fn setup(
                     "indexer enabled",
                 );
                 let chain = ChainReaderAdapter::new(store.reader_handle());
-                let task = IndexerTask::new(handle.clone(), chain);
+                let mut task = IndexerTask::new(handle.clone(), chain);
+                if config.api_bind.is_some() {
+                    let observer = Arc::new(
+                        crate::realtime_indexer_bridge::RealtimeIndexerObserver::new(
+                            config.chain_spec.network_params.address_prefix,
+                        ),
+                    );
+                    task = task.with_observer(observer.clone());
+                    indexer_event_observer = Some(observer);
+                }
                 let cancel_for_task = indexer_cancel.clone();
                 let poll_idle = Duration::from_millis(config.indexer_config.poll_idle_ms);
                 let task_handle = task.spawn(cancel_for_task, poll_idle)?;
@@ -606,6 +621,7 @@ pub(super) fn setup(
         executor,
         indexer_handle,
         indexer_task_handle,
+        indexer_event_observer,
         indexer_cancel,
         shadow_state,
         shadow_task_handle,

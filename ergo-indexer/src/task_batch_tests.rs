@@ -107,6 +107,165 @@ fn unlimited_time(task: &mut IndexerTask<Chain>, count: usize) -> IndexerPoll {
     task.step_with_budget(count, Duration::from_secs(60), u64::MAX)
 }
 
+struct CommitObserver {
+    handle: IndexerHandle,
+    seen: Mutex<Vec<crate::events::BlockChanges>>,
+}
+
+impl crate::events::IndexerObserver for CommitObserver {
+    fn on_committed(&self, changes: crate::events::BlockChanges) {
+        let durable = self.handle.store().unwrap().read_meta().unwrap();
+        assert_eq!(self.handle.indexed_height(), durable.indexed_height);
+        if changes.boxes.iter().any(|change| {
+            matches!(
+                change.kind,
+                crate::events::BoxChangeKind::Unspent | crate::events::BoxChangeKind::Reverted
+            )
+        }) {
+            assert_eq!(durable.indexed_height, u64::from(changes.height - 1));
+        } else {
+            assert!(durable.indexed_height >= u64::from(changes.height));
+            assert!(self
+                .handle
+                .store()
+                .unwrap()
+                .read_undo(u64::from(changes.height))
+                .unwrap()
+                .is_some());
+        }
+        self.seen.lock().unwrap().push(changes);
+    }
+}
+
+fn commit_observer(handle: &IndexerHandle) -> Arc<CommitObserver> {
+    Arc::new(CommitObserver {
+        handle: handle.clone(),
+        seen: Mutex::new(Vec::new()),
+    })
+}
+
+#[test]
+fn observed_mainnet_batch_and_rollback_publish_only_committed_row_changes() {
+    use crate::events::BoxChangeKind;
+    let blocks = corpus();
+    let (_tmp, handle, chain, task) = setup(&blocks[..3]);
+    let observer = commit_observer(&handle);
+    let mut task = task.with_observer(observer.clone());
+    let pending = observer.clone();
+    *chain.hook.lock().unwrap() = Some(Box::new(move |_| {
+        assert!(
+            pending.seen.lock().unwrap().is_empty(),
+            "no event before batch commit"
+        );
+    }));
+    assert!(matches!(
+        unlimited_time(&mut task, 16),
+        IndexerPoll::Applied(3)
+    ));
+    *chain.hook.lock().unwrap() = None;
+    let reference: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../test-vectors/mainnet/transactions_1_200.json"
+    ))
+    .unwrap();
+    {
+        let observed = observer.seen.lock().unwrap();
+        assert_eq!(
+            observed.iter().map(|b| b.height).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        for (i, block) in observed.iter().enumerate() {
+            assert_eq!(block.header_id, blocks[i].header_id);
+            let reference_tx = &reference[i]["id"];
+            for change in &block.boxes {
+                assert_eq!(
+                    hex::encode(change.tx_id.as_bytes()),
+                    reference_tx.as_str().unwrap()
+                );
+                assert_eq!(change.record.box_data.box_id().unwrap(), change.box_id);
+                match change.kind {
+                    BoxChangeKind::Created => assert!(change.record.spending_tx_id.is_none()),
+                    BoxChangeKind::Spent => {
+                        assert_eq!(change.record.spending_tx_id, Some(change.tx_id))
+                    }
+                    _ => panic!("inverse event on forward apply"),
+                }
+            }
+        }
+    }
+    chain.tip.store(2, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(2);
+    assert!(matches!(task.step(), IndexerPoll::RolledBack(3)));
+    let observed = observer.seen.lock().unwrap();
+    let inverse = &observed[3];
+    assert_eq!(inverse.header_id, observed[2].header_id);
+    assert_eq!(inverse.boxes.len(), observed[2].boxes.len());
+    for (backward, forward) in inverse.boxes.iter().zip(observed[2].boxes.iter().rev()) {
+        assert_eq!(backward.box_id, forward.box_id);
+        assert_eq!(backward.tx_id, forward.tx_id);
+        assert_eq!(backward.record.box_data, forward.record.box_data);
+        match (backward.kind, forward.kind) {
+            (BoxChangeKind::Reverted, BoxChangeKind::Created) => {}
+            (BoxChangeKind::Unspent, BoxChangeKind::Spent) => {
+                assert!(backward.record.spending_tx_id.is_none())
+            }
+            kinds => panic!("wrong rollback order/kinds: {kinds:?}"),
+        }
+    }
+}
+
+#[test]
+fn observed_failed_batch_and_failed_rollback_emit_nothing() {
+    let blocks = corpus();
+    let (_tmp, handle, chain, task) = setup(&blocks[..3]);
+    let observer = commit_observer(&handle);
+    let mut task = task.with_observer(observer.clone());
+    chain
+        .blocks
+        .lock()
+        .unwrap()
+        .get_mut(&blocks[1].header_id)
+        .unwrap()
+        .transactions[0]
+        .inputs[0]
+        .box_id = Digest32::from_bytes([0xab; 32]);
+    assert!(matches!(
+        unlimited_time(&mut task, 16),
+        IndexerPoll::Halted(_)
+    ));
+    assert!(observer.seen.lock().unwrap().is_empty());
+    chain
+        .blocks
+        .lock()
+        .unwrap()
+        .insert(blocks[1].header_id, blocks[1].clone());
+    assert!(matches!(
+        unlimited_time(&mut task, 16),
+        IndexerPoll::Applied(3)
+    ));
+    assert_eq!(
+        observer.seen.lock().unwrap().len(),
+        3,
+        "retry emits each committed block once"
+    );
+    let before = handle.store().unwrap().read_meta().unwrap();
+    let mut broken = blocks[2].clone();
+    broken.transactions[0].output_candidates[0].value += 1;
+    chain
+        .blocks
+        .lock()
+        .unwrap()
+        .insert(broken.header_id, broken);
+    chain.tip.store(2, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(2);
+    assert!(matches!(task.step(), IndexerPoll::Halted(_)));
+    assert_eq!(handle.store().unwrap().read_meta().unwrap(), before);
+    assert_eq!(
+        observer.seen.lock().unwrap().len(),
+        3,
+        "rollback abort emits no partial inverses"
+    );
+}
+
 #[test]
 fn batched_mainnet_interval_matches_single_commits_and_rolls_back_per_height() {
     let blocks = corpus();

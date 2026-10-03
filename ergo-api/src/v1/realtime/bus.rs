@@ -34,7 +34,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 
@@ -109,7 +109,7 @@ struct Inner {
 /// The fan-out hub. `Arc`-shared between the feed task(s) and every socket.
 pub struct RealtimeBus {
     inner: Mutex<Inner>,
-    live_classes: HashSet<ChannelClass>,
+    live_classes: RwLock<HashSet<ChannelClass>>,
 }
 
 /// A live subscription handle held by one socket task. Dropping it deregisters
@@ -147,7 +147,7 @@ impl RealtimeBus {
                 subs: HashMap::new(),
                 backfill: VecDeque::with_capacity(RESUME_WINDOW.min(1024)),
             }),
-            live_classes,
+            live_classes: RwLock::new(live_classes),
         }
     }
 
@@ -181,7 +181,19 @@ impl RealtimeBus {
 
     /// Whether `class` has a live upstream feed on this bus.
     pub fn is_live(&self, class: ChannelClass) -> bool {
-        self.live_classes.contains(&class)
+        self.live_classes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&class)
+    }
+
+    /// Enable classes only after their real upstream observer is installed.
+    /// Merely mounting an indexer query API does not provide an event source.
+    pub fn enable_classes(&self, classes: impl IntoIterator<Item = ChannelClass>) {
+        self.live_classes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(classes);
     }
 
     /// The current global cursor (`0` = nothing published yet).
@@ -193,8 +205,15 @@ impl RealtimeBus {
     /// Register a new subscriber (initially subscribed to nothing). The socket
     /// task fills the filter as the client subscribes.
     pub fn subscribe(self: &Arc<Self>) -> BusSubscription {
+        self.subscribe_with_filter(Arc::new(std::sync::RwLock::new(HashSet::new())))
+    }
+
+    /// Install an initialized filter before exposing the subscriber to publishers.
+    pub(crate) fn subscribe_with_filter(
+        self: &Arc<Self>,
+        filter: Arc<std::sync::RwLock<HashSet<String>>>,
+    ) -> BusSubscription {
         let (tx, rx) = mpsc::channel(SUB_QUEUE_CAP);
-        let filter = Arc::new(std::sync::RwLock::new(HashSet::new()));
         let lagged = Arc::new(AtomicBool::new(false));
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let id = g.next_sub_id;
@@ -462,6 +481,23 @@ mod tests {
         assert!(bus.is_live(ChannelClass::Mempool));
         assert!(bus.is_live(ChannelClass::Peers));
         assert!(bus.is_live(ChannelClass::Tx));
+    }
+
+    #[test]
+    fn enabling_indexed_classes_updates_existing_bus_without_changing_cursor() {
+        let bus = RealtimeBus::blocks_and_mempool();
+        assert!(!bus.is_live(ChannelClass::Address));
+        assert!(!bus.is_live(ChannelClass::Box));
+        assert!(!bus.is_live(ChannelClass::Token));
+        bus.enable_classes([
+            ChannelClass::Address,
+            ChannelClass::Box,
+            ChannelClass::Token,
+        ]);
+        assert!(bus.is_live(ChannelClass::Address));
+        assert!(bus.is_live(ChannelClass::Box));
+        assert!(bus.is_live(ChannelClass::Token));
+        assert_eq!(bus.latest_seq(), 0);
     }
 
     #[tokio::test]

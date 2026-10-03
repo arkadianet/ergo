@@ -92,7 +92,7 @@ impl NipopowVerifier {
     /// Borrow the current best NiPoPoW proof, if any. Needed by the
     /// sync-layer orchestration (`drive_popow_bootstrap`) so it can
     /// hand the proof directly to
-    /// [`ergo_state::store::StateStore::apply_popow_proof`] without
+    /// `ergo_state::store::StateStore::apply_popow_proof` without
     /// going through the consumed-headers projection.
     pub fn best_proof(&self) -> Option<&NipopowProof> {
         self.best_proof.as_ref()

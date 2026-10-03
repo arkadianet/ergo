@@ -2,8 +2,8 @@
 //!
 //! Wire format [protocol, verified: MessageSerializer.scala]:
 //!
-//! Empty payload:  magic[4] || code[1] || length[4 BE i32 = 0]  (9 bytes)
-//! With payload:   magic[4] || code[1] || length[4 BE i32] || checksum[4] || payload[length]
+//! Empty payload:  `magic[4]` || `code[1]` || `length[4 BE i32 = 0]`  (9 bytes)
+//! With payload:   `magic[4]` || `code[1]` || `length[4 BE i32]` || `checksum[4]` || `payload[length]`
 //!                 (13 + length bytes)
 //!
 //! Checksum = first 4 bytes of blake2b256(payload).

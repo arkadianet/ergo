@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index) — ergo-api, ergo-node, ergo-difftest, ergo-validation (tests only)
-**Approx LOC:** ~1441 (src, incl. tests)
 
 ## Start here
 - `src/lib.rs` — module tree + the flat re-export surface. Note the re-exports cover `decode::*` and `types::*` only; the `mining` DTOs are reached via the `mining` module path (`ergo_rest_json::mining::WorkMessageJson`).

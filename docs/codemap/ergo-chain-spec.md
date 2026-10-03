@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser
 **Depended on by:** (see codemap index)
-**Approx LOC:** 1 093 (single file, `src/lib.rs`; ~362 of which is the `#[cfg(test)]` oracle-parity block)
 
 ## Start here
 - `ChainSpec` (`src/lib.rs:526`) — the aggregate that bundles every per-network parameter group; read its fields to see the whole surface.

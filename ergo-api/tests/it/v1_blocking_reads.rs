@@ -12,6 +12,7 @@ use ergo_api::{
     types::*,
     v1::{v1_router, BlockingReads, BlockingReadsConfig, V1State},
 };
+use ergo_indexer_types::IndexerReadError;
 use ergo_indexer_types::{
     query::{BalanceDto, IndexedBoxDto, IndexedTokenDto, IndexedTxDto},
     BoxId, IndexerQuery, IndexerStatus, Page, SortDir, TemplateHash, TokenId, TreeHash, TxId,
@@ -164,49 +165,76 @@ impl IndexerQuery for StubIndexer {
     fn status(&self) -> IndexerStatus {
         IndexerStatus::CaughtUp
     }
-    fn box_by_id(&self, id: &BoxId) -> Option<IndexedBoxDto> {
-        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
-        None
+    fn box_by_id(&self, id: &BoxId) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            None
+        })
     }
-    fn box_by_global_index(&self, _n: u64) -> Option<IndexedBoxDto> {
+    fn box_by_global_index(&self, _n: u64) -> Result<Option<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn boxes_by_global_range(&self, _l: u64, _h: u64) -> Vec<IndexedBoxDto> {
+    fn boxes_by_global_range(
+        &self,
+        _l: u64,
+        _h: u64,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn tx_by_id(&self, tx_id: &TxId) -> Option<IndexedTxDto> {
-        assert_eq!(hex::encode(tx_id.as_bytes()), format!("{HEIGHT:064x}"));
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
-        None
+    fn tx_by_id(&self, tx_id: &TxId) -> Result<Option<IndexedTxDto>, IndexerReadError> {
+        Ok({
+            assert_eq!(hex::encode(tx_id.as_bytes()), format!("{HEIGHT:064x}"));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            None
+        })
     }
-    fn tx_by_global_index(&self, _n: u64) -> Option<IndexedTxDto> {
+    fn tx_by_global_index(&self, _n: u64) -> Result<Option<IndexedTxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn txs_by_global_range(&self, _l: u64, _h: u64) -> Vec<IndexedTxDto> {
+    fn txs_by_global_range(&self, _l: u64, _h: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_balance(&self, _t: &TreeHash) -> Option<BalanceDto> {
+    fn address_balance(&self, _t: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_txs_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedTxDto> {
+    fn address_txs_paged(
+        &self,
+        _t: &TreeHash,
+        _p: Page,
+        _d: SortDir,
+    ) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_boxes_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedBoxDto> {
+    fn address_boxes_paged(
+        &self,
+        _t: &TreeHash,
+        _p: Page,
+        _d: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_unspent_paged(&self, _t: &TreeHash, _p: Page, _d: SortDir) -> Vec<IndexedBoxDto> {
+    fn address_unspent_paged(
+        &self,
+        _t: &TreeHash,
+        _p: Page,
+        _d: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_total_txs(&self, _t: &TreeHash) -> u64 {
+    fn address_total_txs(&self, _t: &TreeHash) -> Result<u64, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn address_total_boxes(&self, _t: &TreeHash) -> u64 {
+    fn address_total_boxes(&self, _t: &TreeHash) -> Result<u64, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn template_boxes_paged(&self, _t: &TemplateHash, _p: Page) -> Vec<IndexedBoxDto> {
+    fn template_boxes_paged(
+        &self,
+        _t: &TemplateHash,
+        _p: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
     fn template_unspent_paged(
@@ -214,30 +242,43 @@ impl IndexerQuery for StubIndexer {
         _t: &TemplateHash,
         _p: Page,
         _d: SortDir,
-    ) -> Vec<IndexedBoxDto> {
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn template_total_boxes(&self, _t: &TemplateHash) -> u64 {
+    fn template_total_boxes(&self, _t: &TemplateHash) -> Result<u64, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn token_by_id(&self, _t: &TokenId) -> Option<IndexedTokenDto> {
+    fn token_by_id(&self, _t: &TokenId) -> Result<Option<IndexedTokenDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Vec<IndexedTokenDto> {
+    fn tokens_by_ids(&self, _ids: &[TokenId]) -> Result<Vec<IndexedTokenDto>, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
-    fn token_boxes_paged(&self, id: &TokenId, page: Page) -> Vec<IndexedBoxDto> {
-        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
-        assert_eq!((page.offset, page.limit), (0, 2));
-        Vec::new()
+    fn token_boxes_paged(
+        &self,
+        id: &TokenId,
+        page: Page,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+            assert_eq!((page.offset, page.limit), (0, 2));
+            Vec::new()
+        })
     }
-    fn token_unspent_paged(&self, id: &TokenId, page: Page, dir: SortDir) -> Vec<IndexedBoxDto> {
-        assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
-        assert_eq!((page.offset, page.limit), (0, 1000));
-        assert_eq!(dir, SortDir::Asc);
-        Vec::new()
+    fn token_unspent_paged(
+        &self,
+        id: &TokenId,
+        page: Page,
+        dir: SortDir,
+    ) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok({
+            assert_eq!(hex::encode(id.as_bytes()), format!("{HEIGHT:064x}"));
+            assert_eq!((page.offset, page.limit), (0, 1000));
+            assert_eq!(dir, SortDir::Asc);
+            Vec::new()
+        })
     }
-    fn token_total_boxes(&self, _t: &TokenId) -> u64 {
+    fn token_total_boxes(&self, _t: &TokenId) -> Result<u64, IndexerReadError> {
         unreachable!("unexpected indexer query")
     }
 }

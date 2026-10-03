@@ -1,6 +1,6 @@
 //! `webhooks/*` — the T1 (operator) management surface. Registration is an
 //! outbound-request lever, so every endpoint is gated by
-//! [`require_tier`](crate::v1::auth::require_tier) at `Tier::Operator` — the
+//! [`require_tier`] at `Tier::Operator` — the
 //! same api-key gate as `/wallet/*` and `POST /votes`.
 //!
 //! Handlers consume the shared G2 primitives (error envelope + [`Reason`],
@@ -21,6 +21,7 @@ use ergo_ser::address::NetworkPrefix;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::blocking::WebhookExecutor;
 use super::engine::{generate_secret, RegisterError, WebhookEngine};
 use super::model::{validate_url, UrlPolicy, UrlReject};
 use crate::v1::auth::{require_tier, Tier, V1AuthConfig};
@@ -36,8 +37,8 @@ use crate::v1::routes::extract::{V1Json, V1Query};
 /// the SSRF URL policy.
 #[derive(Clone)]
 pub struct WebhooksHandle {
-    /// The registry + delivery-log + retry state machine.
-    pub engine: Arc<WebhookEngine>,
+    /// Owned blocking execution, shared with the delivery worker.
+    pub executor: Arc<WebhookExecutor>,
     /// The realtime event source — used only to reject registrations for
     /// channel classes without a live upstream feed (`channel_unavailable`).
     pub bus: Arc<RealtimeBus>,
@@ -60,16 +61,37 @@ impl WebhooksState {
     /// response. Boxed to keep the `Ok` path small — the repo convention
     /// for handler early-returns (a rendered [`Response`] is large).
     fn handle(&self) -> Result<&WebhooksHandle, Box<Response>> {
-        self.handle
-            .as_ref()
-            .filter(|handle| handle.engine.is_available())
-            .ok_or_else(|| {
-                Box::new(v1_error(
+        self.handle.as_ref().ok_or_else(|| {
+            Box::new(v1_error(
+                Reason::WebhooksDisabled,
+                "the webhook store is not wired on this node",
+                "webhooks require the durable delivery subsystem to be enabled",
+            ))
+        })
+    }
+}
+
+async fn run_operation<F>(handle: &WebhooksHandle, work: F) -> Response
+where
+    F: FnOnce(&WebhookEngine) -> Response + Send + 'static,
+{
+    match handle
+        .executor
+        .run(move |engine| {
+            if !engine.is_available() {
+                v1_error(
                     Reason::WebhooksDisabled,
-                    "the webhook store is not wired on this node",
-                    "webhooks require the durable delivery subsystem to be enabled",
-                ))
-            })
+                    "the webhook store is unavailable",
+                    "restore writable webhook storage and restart the node",
+                )
+            } else {
+                work(engine)
+            }
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
     }
 }
 
@@ -224,34 +246,37 @@ pub(crate) async fn register(
     };
     let min_conf = req.confirmations.unwrap_or(1);
 
-    match handle.engine.register(
-        req.url,
-        keys,
-        secret,
-        min_conf,
-        crate::v1::webhooks::worker::now_unix_ms(),
-    ) {
-        Ok(sub) => (
-            axum::http::StatusCode::CREATED,
-            Json(sub.to_dto_with_secret()),
-        )
-            .into_response(),
-        Err(RegisterError::LimitReached) => v1_error(
-            Reason::WebhookLimit,
-            "the maximum number of webhooks is registered",
-            "delete an existing webhook before registering another",
-        ),
-        Err(RegisterError::StorageUnavailable) => v1_error(
-            Reason::WebhooksDisabled,
-            "the webhook store could not commit this registration",
-            "restore writable webhook storage and restart the node",
-        ),
-        Err(RegisterError::TooManyChannels) => v1_error(
-            Reason::LimitExceeded,
-            "too many channels for one webhook",
-            "reduce the channel list",
-        ),
-    }
+    run_operation(handle, move |engine| {
+        match engine.register(
+            req.url,
+            keys,
+            secret,
+            min_conf,
+            crate::v1::webhooks::worker::now_unix_ms(),
+        ) {
+            Ok(sub) => (
+                axum::http::StatusCode::CREATED,
+                Json(sub.to_dto_with_secret()),
+            )
+                .into_response(),
+            Err(RegisterError::LimitReached) => v1_error(
+                Reason::WebhookLimit,
+                "the maximum number of webhooks is registered",
+                "delete an existing webhook before registering another",
+            ),
+            Err(RegisterError::StorageUnavailable) => v1_error(
+                Reason::WebhooksDisabled,
+                "the webhook store could not commit this registration",
+                "restore writable webhook storage and restart the node",
+            ),
+            Err(RegisterError::TooManyChannels) => v1_error(
+                Reason::LimitExceeded,
+                "too many channels for one webhook",
+                "reduce the channel list",
+            ),
+        }
+    })
+    .await
 }
 
 /// `GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.
@@ -281,22 +306,25 @@ pub(crate) async fn list(
         Ok(o) => o,
         Err(e) => return *e,
     };
-    let mut rows = handle.engine.list(off, limit as usize + 1);
-    let has_more = rows.len() > limit as usize;
-    if has_more {
-        rows.truncate(limit as usize);
-    }
-    let items: Vec<serde_json::Value> = rows.iter().map(|s| s.to_dto()).collect();
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&OffsetCursor {
-            off: off + limit as usize,
-        })
-    });
-    Json(json!({
-        "items": items,
-        "page": Page { limit, next_cursor, has_more },
-    }))
-    .into_response()
+    run_operation(handle, move |engine| {
+        let mut rows = engine.list(off, limit as usize + 1);
+        let has_more = rows.len() > limit as usize;
+        if has_more {
+            rows.truncate(limit as usize);
+        }
+        let items: Vec<serde_json::Value> = rows.iter().map(|s| s.to_dto()).collect();
+        let next_cursor = has_more.then(|| {
+            encode_cursor(&OffsetCursor {
+                off: off + limit as usize,
+            })
+        });
+        Json(json!({
+            "items": items,
+            "page": Page { limit, next_cursor, has_more },
+        }))
+        .into_response()
+    })
+    .await
 }
 
 /// `GET /api/v1/webhooks/{webhook_id}` — one subscription (T1). Never the secret.
@@ -315,10 +343,11 @@ pub(crate) async fn detail(State(state): State<WebhooksState>, Path(id): Path<St
         Ok(h) => h,
         Err(e) => return *e,
     };
-    match handle.engine.get(&id) {
+    run_operation(handle, move |engine| match engine.get(&id) {
         Some(sub) => Json(sub.to_dto()).into_response(),
         None => webhook_not_found(),
-    }
+    })
+    .await
 }
 
 /// `DELETE /api/v1/webhooks/{webhook_id}` — deregister (T1).
@@ -337,17 +366,20 @@ pub(crate) async fn delete(State(state): State<WebhooksState>, Path(id): Path<St
         Ok(h) => h,
         Err(e) => return *e,
     };
-    if handle.engine.delete(&id) {
-        Json(json!({ "webhook_id": id, "deleted": true })).into_response()
-    } else if !handle.engine.is_available() {
-        v1_error(
-            Reason::WebhooksDisabled,
-            "webhook deletion could not be committed",
-            "restore writable storage and restart",
-        )
-    } else {
-        webhook_not_found()
-    }
+    run_operation(handle, move |engine| {
+        if engine.delete(&id) {
+            Json(json!({ "webhook_id": id, "deleted": true })).into_response()
+        } else if !engine.is_available() {
+            v1_error(
+                Reason::WebhooksDisabled,
+                "webhook deletion could not be committed",
+                "restore writable storage and restart",
+            )
+        } else {
+            webhook_not_found()
+        }
+    })
+    .await
 }
 
 /// `PATCH /api/v1/webhooks/{webhook_id}` — pause / resume (T1).
@@ -372,14 +404,18 @@ pub(crate) async fn patch_active(
         Ok(h) => h,
         Err(e) => return *e,
     };
-    match handle.engine.set_active(&id, body.active) {
-        Some(sub) => Json(sub.to_dto()).into_response(),
-        None if !handle.engine.is_available() => match state.handle() {
-            Err(response) => *response,
-            Ok(_) => webhook_not_found(),
-        },
-        None => webhook_not_found(),
-    }
+    run_operation(handle, move |engine| {
+        match engine.set_active(&id, body.active) {
+            Some(sub) => Json(sub.to_dto()).into_response(),
+            None if !engine.is_available() => v1_error(
+                Reason::WebhooksDisabled,
+                "webhook update could not be committed",
+                "restore writable storage and restart",
+            ),
+            None => webhook_not_found(),
+        }
+    })
+    .await
 }
 
 /// `GET /api/v1/webhooks/{webhook_id}/deliveries` — delivery-status log (T1),
@@ -408,30 +444,33 @@ pub(crate) async fn deliveries(
         Ok(h) => h,
         Err(e) => return *e,
     };
-    if handle.engine.get(&id).is_none() {
-        return webhook_not_found();
-    }
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);
     let off = match offset_from(q.cursor.as_deref()) {
         Ok(o) => o,
         Err(e) => return *e,
     };
-    let mut rows = handle.engine.deliveries_for(&id, off, limit as usize + 1);
-    let has_more = rows.len() > limit as usize;
-    if has_more {
-        rows.truncate(limit as usize);
-    }
-    let items: Vec<serde_json::Value> = rows.iter().map(|d| d.to_dto()).collect();
-    let next_cursor = has_more.then(|| {
-        encode_cursor(&OffsetCursor {
-            off: off + limit as usize,
-        })
-    });
-    Json(json!({
-        "items": items,
-        "page": Page { limit, next_cursor, has_more },
-    }))
-    .into_response()
+    run_operation(handle, move |engine| {
+        if engine.get(&id).is_none() {
+            return webhook_not_found();
+        }
+        let mut rows = engine.deliveries_for(&id, off, limit as usize + 1);
+        let has_more = rows.len() > limit as usize;
+        if has_more {
+            rows.truncate(limit as usize);
+        }
+        let items: Vec<serde_json::Value> = rows.iter().map(|d| d.to_dto()).collect();
+        let next_cursor = has_more.then(|| {
+            encode_cursor(&OffsetCursor {
+                off: off + limit as usize,
+            })
+        });
+        Json(json!({
+            "items": items,
+            "page": Page { limit, next_cursor, has_more },
+        }))
+        .into_response()
+    })
+    .await
 }
 
 fn webhook_not_found() -> Response {
@@ -476,9 +515,10 @@ mod tests {
     }
 
     fn state_enabled() -> WebhooksState {
+        let engine = Arc::new(WebhookEngine::new(WebhookEngineConfig::default()));
         WebhooksState {
             handle: Some(WebhooksHandle {
-                engine: Arc::new(WebhookEngine::new(WebhookEngineConfig::default())),
+                executor: Arc::new(WebhookExecutor::new(engine)),
                 bus: Arc::new(RealtimeBus::blocks_only()),
                 url_policy: UrlPolicy::default(),
             }),

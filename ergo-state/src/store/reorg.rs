@@ -10,6 +10,7 @@
 //! `self.rebuild_from_committed()` to restore in-memory state
 //! from disk.
 
+use redb::ReadableDatabase;
 use redb::ReadableTable;
 use tracing::{info, warn};
 
@@ -27,8 +28,8 @@ impl StateStore {
     /// Three-phase: (1) pre-read all undo entries from `UNDO_LOG`
     /// before mutating the AVL tree so a DB read failure leaves
     /// the tree untouched; (2) replay each entry's change-log in
-    /// reverse via [`apply_rollback_mutations`]; (3) persist the
-    /// truncation atomically via [`persist_rollback`]. Any failure
+    /// reverse via `apply_rollback_mutations`; (3) persist the
+    /// truncation atomically via `persist_rollback`. Any failure
     /// after step 2 routes through `rebuild_from_committed` so the
     /// in-memory state is restored from committed disk state.
     ///

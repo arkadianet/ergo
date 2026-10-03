@@ -41,7 +41,12 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]`, `[api]`, `[api.security]`, `[api.script]`, `[api.peer_details]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[mining]` |
+
+**Upgrade:** Formerly ignored unknown keys in `[api]`, `[api.security]` and
+`[api.script]` now fail configuration loading and prevent startup. Remove
+unsupported keys or rename misspelled keys to their documented names in
+existing configs before upgrading.
 
 ## Top-level keys
 
@@ -58,14 +63,17 @@ section rejects typos:
 | `node_name` | string | `"ergo-rust-node"` | Node name advertised in the handshake. |
 | `blocks_to_keep` | i32 | `-1` | Pruning suffix length. `-1` = full archive (keep every block). `N > 0` = retain a pruned suffix of `N` blocks. `0` is reserved for the headers-only combo (see below). Values below `-1` are rejected. A positive `N` must be at least the rollback-window floor (`keep_versions + SAFETY_MARGIN`); a smaller value is rejected because a reorg could otherwise need evicted block sections. |
 | `keep_versions` | u32 | `200` | Undo-retention window = the deepest chain reorg the node can serve (Scala `keepVersions` parity — same default). Raising it lets the node follow deeper best-chain reorgs at a linear undo-log disk cost; the same value is wired into the extra-index store so the indexer can follow any reorg the state performs. `0` is rejected (a store that can never roll back would wedge on any reorg). Prospective only: undo entries already pruned under a smaller window stay gone, so a raise takes full effect `keep_versions` blocks later. If the best-header chain ever forks deeper than this window, the node cannot reorg onto it and reports a terminal `sync_wedged` state (`/health` = `wedged`, HTTP 503) — the only recovery is a resync. |
-| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` is accepted only in the headers-only combo below; any other digest configuration is rejected at load. |
+| `state_type` | string | `"utxo"` | State backend. `"utxo"` keeps the full UTXO set on disk (wire byte 0); `"digest"` keeps only the authenticated root digest and a header window (wire byte 1). Case-insensitive. `"digest"` supports the digest-verifier and headers-only combinations below. |
 | `verify_transactions` | bool | `true` | When `false`, the node syncs headers only and downloads no block sections. Requires `state_type = "digest"` (Scala rule R1) and is accepted only in the headers-only combo below. |
 
-**Headers-only combo.** The only currently-bootable non-UTXO
-configuration is `state_type = "digest"` + `verify_transactions = false`
-+ `blocks_to_keep = 0` + `utxo_bootstrap = false` (this mirrors Scala
-`application.conf`). Other digest or `blocks_to_keep = 0` combinations
-are rejected with an explicit error so the conflicting key is obvious.
+**Digest combinations.** Mode 5 verifies full blocks with AD proofs:
+`state_type = "digest"`, `verify_transactions = true`, `blocks_to_keep = -1`,
+`utxo_bootstrap = false`, `nipopow_bootstrap = false`. Mode 6 verifies headers
+only: `state_type = "digest"`, `verify_transactions = false`,
+`blocks_to_keep = 0`, `utxo_bootstrap = false`. Other digest combinations are
+rejected. Both modes reject mining and the extra-index because they keep no
+UTXO box store. Mode-specific compatibility limits remain in
+[`compatibility.md`](compatibility.md).
 
 ### `[node.utxo]`
 
@@ -92,7 +100,7 @@ the fast clean-database boot path.
 | `target_outbound` | usize | `96` | Outbound-connection target. Must be at least 1 and no greater than `max_connections`. When omitted, the default is clamped down to `max_connections` if that value is smaller, so a config that pins a low `max_connections` is not broken by a binary upgrade that raises the default. An explicit value above `max_connections` is a hard error. |
 | `max_inbound` | usize | `256` | Maximum inbound connections accepted. Decoupled from `target_outbound`: a full outbound set never reduces inbound capacity. `0` = outbound-only. The hard ceiling `max_connections` still applies on top of this budget. |
 | `per_ip_limit` | usize | `1` | Maximum connections per peer IP. Must be at least 1. |
-| `per_subnet_limit` | usize | `3` | Maximum connections per /16 subnet. Must be at least 1. |
+| `per_subnet_limit` | usize | `3` | Maximum connections per IPv4 /16 or IPv6 /48 group, across inbound/outbound and pending handshakes. IPv4-mapped IPv6 shares IPv4 limits. Must be at least 1. |
 | `bind_addr` | string | none | Inbound TCP listen address. Absent or empty string = outbound-only (no inbound listener). Parsed as a socket address at load; a malformed value is rejected. |
 | `declared_addr` | string | none | Address advertised in the handshake and peer gossip so others can dial this node. Independent of `bind_addr` (a NAT'd host binds privately and declares its public address). Absent or empty = the handshake omits it. |
 | `allow_local` | bool | `false` | Allow local-network addresses — loopback, RFC1918 / site-local, link-local, IPv6 unique-local, and carrier-grade NAT — to be learned from gossip, dialed, shared with peers, and kept in `peers.redb`. Off by default so a NAT'd peer advertising e.g. `10.0.0.8:9030` does not enter every other node's dial pool. Turn it on for a LAN devnet, where peers must find each other by gossip over private addresses. Mirrors Scala `scorex.network.allowLocal`. Entries in `known` are unaffected: an operator-configured address is always dialable, including `127.0.0.1:9020`. |
@@ -111,6 +119,22 @@ the fast clean-database boot path.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `cache_bytes` | usize | 1 GiB (`1073741824`) | AVL arena clean-node LRU budget, in bytes. CLI flag `--cache-bytes` overrides this. Dirty/pinned nodes and redb's per-database caches are separate; this is not a process RSS limit. |
+| `state_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `state.redb`, including digest mode. Independent of `cache_bytes`; zero disables this cache. |
+| `indexer_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for the optional indexer database. Used on creation, resume and schema rebuild. |
+| `peers_redb_cache_bytes` | usize | 1 GiB | redb page-cache budget for `peers.redb`, including replacement after corruption. |
+
+Defaults preserve the previous per-database budgets. Each redb budget covers
+its read/write page caches (approximately 90%/10%); it is neither a resident
+memory measurement nor a process-wide hard limit. Startup logs report the
+requested budgets. `ERGO_MEM_CSV` samples append the effective per-database
+budgets, cumulative active eviction counters, and unpersisted pinned AVL bytes.
+An unavailable peer/indexer database reports zero budget; zero evictions can
+mean no pressure. Choose a new CSV path when upgrading its column schema.
+
+For a constrained comparison, an AVL/state/indexer/peer cache allocation of
+16/16/16/1 MiB is a starting experiment, not an optimal mainnet profile. Replay
+the same owned snapshot and interval with identical validation and persistence
+settings, verifying final roots and reopen before comparing throughput and RSS.
 
 Start with the 1 GiB default for full-mainnet replay, then compare the same
 height interval and validation settings before changing it. The
@@ -157,6 +181,17 @@ retry state are stored in `<data_dir>/webhooks.redb`. The file uses owner-only
 permissions on Unix. Back up this private database with the node data directory.
 A failed open, corrupt snapshot or failed commit disables webhook management and
 outbound deliveries until restart; other API routes remain available.
+On a commit error, RAM changes are rolled back, but a failed disk flush may leave
+either atomic snapshot visible after restart. A failed API request can therefore
+have persisted; reconcile registrations and delivery history after reopening.
+
+Webhook storage and response serialization run on one owned blocking thread,
+started on first use. Up to eight management operations are admitted, including
+the running operation; additional requests receive `503 overloaded` with
+`Retry-After: 1`. Accepted work finishes even if its HTTP caller disconnects.
+Scheduling has separate admission, and each of the 64 possible in-flight sends
+reserves capacity for its outcome. Graceful node shutdown joins these writes
+and releases the database before returning.
 
 Delivery attempt reservations and acknowledgements commit before they are
 reported. After a crash, an attempt whose outcome is unknown may be retried with
@@ -231,11 +266,39 @@ describe an approximate network endpoint, not a verified operator location. An
 ASN organization is the network operator and need not be the node operator or
 retail ISP. These display-only details never affect peer selection or scoring.
 
+Realtime subscriptions, mempool-depth sampling, and the webhook registry belong
+to one node, including when several nodes run in one process. Router construction
+starts no background workers; the API listener owns them and stops them at
+shutdown. Webhook registrations remain in memory. Delivery permits only public
+DNS destinations by default, checks every resolved address before connecting,
+and disables redirects and environment HTTP proxies so those checks also apply
+to retries and cannot be bypassed by alternate routing.
+
 ### `[api.security]`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `api_key_hash` | string (hex) | none | Lowercase Base16 of `Blake2b256(<secret>)`. Optional; privileged routes fail closed when absent. Must be exactly 64 lowercase hex characters (`0-9`, `a-f`); uppercase or mixed case is rejected for canonical-form parity. Supplied hashes are validated even when the API is disabled. |
+
+### `[api.script]`
+
+Native script endpoints under `/api/v1/script/*` use this policy. It does not
+change authentication on the Scala-compatible `/script/p2sAddress` and
+`/script/p2shAddress` routes.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `require_api_key` | bool | `false` | Require a configured API credential for all seven native script endpoints. When enabled without a configured hash, those endpoints fail closed. |
+| `max_cost` | u64 | `8001091` | Maximum native reduction cost; accepts `1..=8001091`. A request can lower the limit, and cannot raise it above this policy. Invalid values reject configuration even when the API is disabled. |
+
+Compilation and reduction use a per-node compute pool with two running jobs,
+eight waiting jobs, a two-second queue wait and a thirty-second response
+deadline. Scala-compatible P2S/P2SH compilation shares that pool. Queue pressure
+returns HTTP 503 with `Retry-After: 1`. A response timeout or disconnected client
+does not stop an accepted blocking job: it retains its slot until execution
+finishes, and shutdown drains accepted jobs. Point and scan read lanes use
+sixteen/four running jobs and sixty-four/sixteen waiting jobs respectively.
+These resource limits are code defaults rather than TOML keys.
 
 ### Security notes for the API
 
@@ -527,8 +590,7 @@ checks and are enforced at load:
 - **R5** — `nipopow_bootstrap = true` requires a configured genesis id
   (cannot use `genesis_id = ""`).
 - The digest backend additionally rejects `[mining] enabled = true` and
-  `[indexer] enabled = true`, and `state_type = "digest"` boots only in
-  the headers-only combo.
+  `[indexer] enabled = true`, and requires one of the Mode 5 or Mode 6 combinations above.
 - `[mining] claim_storage_rent = true` requires `[indexer] enabled = true`
   (the eligible-box scan reads the extra-index).
 - `[voting.targets]` set with `[mining] enabled = false` is rejected — the

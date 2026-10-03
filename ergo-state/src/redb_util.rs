@@ -23,18 +23,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use redb::{Database, DatabaseError, TransactionError, WriteTransaction};
+use redb::{Database, DatabaseError, WriteTransaction};
 use tracing::info;
 
 /// Open a redb write transaction with quick-repair enabled.
 ///
 /// See module docs for the non-monotonicity contract.
-#[allow(clippy::result_large_err)] // redb's TransactionError shape is fixed upstream
-pub fn begin_write_qr(db: &Database) -> Result<WriteTransaction, TransactionError> {
+#[allow(clippy::result_large_err)] // redb's error shape is fixed upstream
+pub fn begin_write_qr(db: &Database) -> Result<WriteTransaction, redb::Error> {
     let mut txn = db.begin_write()?;
     txn.set_quick_repair(true);
     #[cfg(any(test, feature = "test-utils"))]
-    txn.set_durability(test_durability(db, redb::Durability::Immediate));
+    txn.set_durability(test_durability(db, redb::Durability::Immediate))?;
     Ok(txn)
 }
 
@@ -70,6 +70,9 @@ pub(crate) fn test_durability(db: &Database, requested: redb::Durability) -> red
     }
 }
 
+/// Preserve redb 2.6.3's default per-database page-cache budget.
+pub const DEFAULT_REDB_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Open (or create) a redb database at `path`, emitting structured
 /// `redb_repair_*` events whenever the post-unclean-shutdown repair
 /// walk runs.
@@ -97,12 +100,23 @@ pub fn open_with_repair_logging(
     path: &Path,
     db_name: &'static str,
 ) -> Result<Database, DatabaseError> {
+    open_with_repair_logging_and_cache(path, db_name, DEFAULT_REDB_CACHE_BYTES)
+}
+
+/// Open with an explicit redb page-cache budget, independently of AVL caching.
+#[allow(clippy::result_large_err)] // redb's DatabaseError shape is fixed upstream
+pub fn open_with_repair_logging_and_cache(
+    path: &Path,
+    db_name: &'static str,
+    cache_bytes: usize,
+) -> Result<Database, DatabaseError> {
     let repair_started = Arc::new(AtomicBool::new(false));
     let cb_started = repair_started.clone();
     let cb_path = path.display().to_string();
 
     let t0 = Instant::now();
     let db = Database::builder()
+        .set_cache_size(cache_bytes)
         .set_repair_callback(move |session| {
             let was_started = cb_started.swap(true, Ordering::SeqCst);
             let pct = session.progress() * 100.0;
@@ -142,10 +156,11 @@ pub fn open_with_repair_logging(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::ReadableDatabase;
     use redb::TableDefinition;
     use tempfile::tempdir;
 
-    // Observability note: redb 2.6.3 does not expose a getter for the
+    // Observability note: redb 4.3 does not expose a getter for the
     // quick-repair flag on `WriteTransaction`, and `Database::drop`
     // itself ensures allocator state on graceful close — so this test
     // can only verify that the helper returns a usable txn that
@@ -154,6 +169,41 @@ mod tests {
     // (not built here). This test is a regression catcher for "did
     // someone break the helper signature or wiring", which is what
     // 80+ call sites depend on.
+
+    #[test]
+    fn explicit_zero_cache_evicts_pages_and_preserves_reopened_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache.redb");
+        let table: TableDefinition<u64, &[u8]> = TableDefinition::new("cache_test");
+        {
+            let db = open_with_repair_logging_and_cache(&path, "test", 0).unwrap();
+            let tx = begin_write_qr(&db).unwrap();
+            {
+                let mut rows = tx.open_table(table).unwrap();
+                for key in 0..64u64 {
+                    rows.insert(key, vec![key as u8; 8192].as_slice()).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            for _ in 0..2 {
+                let read = db.begin_read().unwrap();
+                let rows = read.open_table(table).unwrap();
+                for key in 0..64u64 {
+                    assert_eq!(rows.get(key).unwrap().unwrap().value()[0], key as u8);
+                }
+            }
+            assert!(
+                db.cache_stats().evictions() > 0,
+                "cache_metrics must be active for standalone state builds"
+            );
+        }
+        let db = open_with_repair_logging_and_cache(&path, "test", 1024 * 1024).unwrap();
+        let read = db.begin_read().unwrap();
+        let rows = read.open_table(table).unwrap();
+        for key in 0..64u64 {
+            assert_eq!(rows.get(key).unwrap().unwrap().value().len(), 8192);
+        }
+    }
 
     // ----- happy path -----
 
@@ -168,15 +218,15 @@ mod tests {
             redb::Durability::Immediate
         ));
         disable_test_durability(&db);
-        for requested in [redb::Durability::Immediate, redb::Durability::Eventual] {
+        for requested in [redb::Durability::Immediate, redb::Durability::None] {
             assert!(matches!(
                 test_durability(&db, requested),
                 redb::Durability::None
             ));
         }
         assert!(matches!(
-            test_durability(&control, redb::Durability::Eventual),
-            redb::Durability::Eventual
+            test_durability(&control, redb::Durability::Immediate),
+            redb::Durability::Immediate
         ));
 
         let table: TableDefinition<&str, &[u8]> = TableDefinition::new("t");
@@ -213,7 +263,7 @@ mod tests {
 
         // Graceful close above; reopen and verify. Repair callback
         // must not fire — graceful close always leaves a valid
-        // allocator state table in redb 2.6.3, helper or not.
+        // allocator state table in redb 4.3, helper or not.
         let callback_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cb = callback_fired.clone();
         let db = redb::Builder::new()

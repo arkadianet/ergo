@@ -198,7 +198,7 @@ fn eval_box_preserves_fields_from_ergo_box() {
         }
 
         // Register count (R4-R9)
-        let src_reg_count = ergo_box.candidate.additional_registers.registers.len();
+        let src_reg_count = ergo_box.candidate.additional_registers().registers.len();
         let eval_reg_count = eval_box.registers.iter().filter(|r| r.is_some()).count();
         assert_eq!(
             eval_reg_count,

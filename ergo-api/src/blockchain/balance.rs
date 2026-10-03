@@ -87,11 +87,14 @@ fn render_balance(state: &BlockchainState, address: &str) -> Response {
         Ok(h) => h,
         Err(e) => return invalid_address(&e),
     };
-    let confirmed = state
-        .indexer
-        .address_balance(&tree_hash)
-        .map(balance_dto_to_entry)
-        .unwrap_or_default();
+    let confirmed = match state.indexer.address_balance(&tree_hash) {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::blockchain::internal_error(&format!("indexer read failed: {error}"))
+        }
+    }
+    .map(balance_dto_to_entry)
+    .unwrap_or_default();
     let unconfirmed = unconfirmed_balance_for_tree(state.mempool.as_ref(), &tree_hash);
     let body = BalanceResponse {
         confirmed,

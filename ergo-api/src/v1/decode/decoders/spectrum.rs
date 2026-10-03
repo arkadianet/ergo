@@ -110,7 +110,7 @@ pub fn decode_n2t_pool(
         .map(|token| token.amount)
         .collect::<Vec<_>>();
     let r4 = candidate
-        .additional_registers
+        .additional_registers()
         .get(RegisterId::R4)
         .map(|register| (&register.tpe, &register.value));
     let fields = validate_pool_fields(&token_ids, &token_amounts, candidate.value, r4)?;

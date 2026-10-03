@@ -385,7 +385,7 @@ impl SyncCoordinator {
     /// call: `(header_id, delivering peer)` for each header accepted by
     /// `on_header_validated`. The action loop folds these into its bounded
     /// first-deliverer ring after each `execute_all`. Same drain pattern
-    /// as [`take_net_stats`] — pure observability, never read by sync.
+    /// as [`Self::take_net_stats`] — pure observability, never read by sync.
     pub fn take_first_deliverers(&mut self) -> Vec<([u8; 32], PeerId)> {
         std::mem::take(&mut self.first_deliverers)
     }

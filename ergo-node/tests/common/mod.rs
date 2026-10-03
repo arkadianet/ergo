@@ -54,6 +54,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         sync_interval: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL,
         sync_interval_stable: ergo_p2p::sync::DEFAULT_SYNC_INTERVAL_STABLE,
         cache_bytes: None,
+        redb_cache_budgets: Default::default(),
         script_validation_checkpoint: chain_spec.bootstrap.checkpoint,
         // No header-level anchor in tests: Scala's default is
         // `checkpoint = null` and there is no network default.
@@ -75,6 +76,7 @@ pub fn make_test_config(data_dir: PathBuf) -> NodeConfig {
         ),
         api_allowed_hosts: Vec::new(),
         api_local_reverse_proxy: false,
+        api_script: Default::default(),
         allow_direct_block_submit: false,
         devnet_max_block_cost: None,
         mempool_config: MempoolConfig::default(),

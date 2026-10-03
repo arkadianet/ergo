@@ -1,6 +1,7 @@
 //! Integration test: NodeWalletAdmin init→status round-trip via the
 //! channel-backed writer task.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -285,20 +286,27 @@ fn spawn_writer_with_chain(
     };
     let mempool: std::sync::Arc<dyn ergo_api::MempoolView> =
         std::sync::Arc::new(ergo_api::NoopMempoolView::new());
-    tokio::spawn(run_wallet_writer(
-        rx, storage, state, db, chain, cfg, submitter, mempool,
-    ));
-    (NodeWalletAdmin::new(tx), db_seed, dir)
+    let control = Arc::new(ergo_node::wallet_boot::RescanControl::default());
+    tokio::spawn(
+        ergo_node::node::wallet_bridge::run_wallet_writer_with_rescan(
+            rx,
+            storage,
+            state,
+            db,
+            chain,
+            cfg,
+            submitter,
+            mempool,
+            control.clone(),
+        ),
+    );
+    (NodeWalletAdmin::with_rescan(tx, control), db_seed, dir)
 }
-
-static RESCAN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn rescan_runs_in_background_and_reports_durable_failure() {
     use ergo_api::wallet::native::dto::RescanStateDto;
     use std::time::{Duration, Instant};
-
-    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -353,7 +361,7 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
         .map(|row| row.value())
         .unwrap_or(false);
     assert!(invalidated);
-    while ergo_node::wallet_boot::rescan_in_progress() {
+    while admin.rescan_control().in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -362,7 +370,6 @@ async fn rescan_runs_in_background_and_reports_durable_failure() {
 async fn rescan_on_genesis_tip_is_accepted() {
     use std::time::Duration;
 
-    let _rescan_guard = RESCAN_TEST_LOCK.lock().await;
     let (admin, _db, _dir) =
         spawn_writer_with_chain(Arc::new(StubChainAccessor), Arc::new(StubTxSubmitter));
     tokio::time::timeout(Duration::from_secs(1), admin.rescan(0))
@@ -382,7 +389,7 @@ async fn rescan_on_genesis_tip_is_accepted() {
     })
     .await
     .expect("tip-zero rescan must finish");
-    while ergo_node::wallet_boot::rescan_in_progress() {
+    while admin.rescan_control().in_progress() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -390,12 +397,11 @@ async fn rescan_on_genesis_tip_is_accepted() {
 #[tokio::test]
 async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
     use ergo_api::wallet::native::dto::RescanStateDto;
-    use ergo_node::wallet_boot::{rescan_in_progress, ProdRescanGuard, SCAN_REBUILD_IN_PROGRESS};
+
     use ergo_state::wallet::apply::RescanGuard;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    let _lock = RESCAN_TEST_LOCK.lock().await;
     let (entered, entered_rx) = std::sync::mpsc::channel();
     let (release_a, wait_a) = std::sync::mpsc::channel();
     let (release_b, wait_b) = std::sync::mpsc::channel();
@@ -411,7 +417,7 @@ async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
         Err(WalletAdminError::RescanUnavailable(reason)) if reason == "rescan already in progress"));
 
     let txn = db.begin_write().unwrap();
-    ProdRescanGuard.abort_in_progress(&txn).unwrap();
+    admin.rescan_control().abort_in_progress(&txn).unwrap();
     txn.commit().unwrap();
     admin.rescan(0).await.unwrap();
     entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -431,8 +437,8 @@ async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
     })
     .await
     .expect("cancelled rescan must exit");
-    assert!(rescan_in_progress());
-    assert!(SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    assert!(admin.rescan_control().in_progress());
+    assert!(admin.rescan_control().rebuilding.load(Ordering::SeqCst));
     let status = admin.native_status().await.unwrap();
     assert!(matches!(
         status.rescan,
@@ -451,8 +457,8 @@ async fn rescan_rollback_then_replacement_preserves_running_and_invalidation() {
     })
     .await
     .expect("replacement rescan must finish");
-    assert!(!rescan_in_progress());
-    assert!(!SCAN_REBUILD_IN_PROGRESS.load(Ordering::SeqCst));
+    assert!(!admin.rescan_control().in_progress());
+    assert!(!admin.rescan_control().rebuilding.load(Ordering::SeqCst));
     let status = admin.native_status().await.unwrap();
     assert!(matches!(status.rescan, RescanStateDto::Idle));
     assert!(!status.scan_invalidated);
@@ -1583,4 +1589,71 @@ mod scan_invalidation {
             .unwrap()
             .value());
     }
+}
+
+#[tokio::test]
+async fn supervised_wallet_shutdown_joins_blocked_rescan_before_database_reopen() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.redb");
+    let db = Arc::new(redb::Database::create(&path).unwrap());
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let chain = Arc::new(BlockingRescanChain {
+        entered,
+        release: Arc::new(std::sync::Mutex::new(wait_release)),
+    });
+    let control = Arc::new(ergo_node::wallet_boot::RescanControl::default());
+    let (commands, receiver) = tokio::sync::mpsc::channel(4);
+    let (cancel, cancellation) = tokio::sync::watch::channel(false);
+    let admin = NodeWalletAdmin::with_rescan(commands, control.clone());
+    let worker = tokio::spawn(
+        ergo_node::node::wallet_bridge::run_wallet_writer_supervised(
+            receiver,
+            Arc::new(parking_lot::RwLock::new(
+                ergo_wallet::storage::SecretStorage::open(directory.path().join("wallet")),
+            )),
+            Arc::new(parking_lot::RwLock::new(
+                ergo_wallet::state::WalletState::empty(false),
+            )),
+            db.clone(),
+            chain,
+            WriterConfig {
+                network: ergo_ser::address::NetworkPrefix::Mainnet,
+                expose_private_keys: false,
+                reemission: None,
+                min_relay_fee_nano_erg: 1_000_000,
+                max_tx_size_bytes: 98_304,
+            },
+            Arc::new(StubTxSubmitter),
+            Arc::new(ergo_api::NoopMempoolView::new()),
+            control,
+            cancellation,
+        ),
+    );
+    admin.rescan(0).await.unwrap();
+    // Deterministic barrier: the worker owns the database while blocked in
+    // a block read. Shutdown cannot finish before this operation is released.
+    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    cancel.send(true).unwrap();
+    let mut shutdown = tokio::spawn(async move {
+        worker.await.unwrap().unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), &mut shutdown)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        admin.native_status().await,
+        Err(WalletAdminError::ShuttingDown)
+    ));
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(admin);
+    drop(db);
+    redb::Database::open(path).expect("all wallet database owners must have been joined");
 }

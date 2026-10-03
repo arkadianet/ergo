@@ -278,9 +278,14 @@ impl WebhookEngine {
     }
 
     /// False after a durable write failure. Management routes and the scheduler
-    /// fail closed until restart, preserving the last acknowledged snapshot.
+    /// fail closed until restart. RAM rolls back; a failed durable commit may
+    /// leave either atomic snapshot on disk, so reconcile after reopening.
     pub fn is_available(&self) -> bool {
         !self.lock().storage_failed
+    }
+
+    pub(crate) fn fail_closed_after_panic(&self) {
+        self.lock().storage_failed = true;
     }
 
     /// Highest cursor included in durable delivery state. Seed the realtime bus
@@ -514,9 +519,18 @@ impl WebhookEngine {
     /// The scheduler: collect deliveries that are due now (`next_retry_at <=
     /// now`, still open, owning sub active), respecting the per-webhook and
     /// global in-flight caps, mark them in-flight, count the attempt, and
-    /// return the signed requests to POST. Never blocks; a saturated cap simply
-    /// leaves work for the next tick.
+    /// return the signed requests to POST. A saturated cap leaves work for the
+    /// next tick. Durable engines synchronously commit their reservation;
+    /// production calls this through the blocking executor.
     pub fn take_due(&self, now_unix_ms: u64) -> Vec<PreparedRequest> {
+        self.take_due_bounded(now_unix_ms, MAX_INFLIGHT_GLOBAL)
+    }
+
+    pub(crate) fn take_due_bounded(
+        &self,
+        now_unix_ms: u64,
+        max_requests: usize,
+    ) -> Vec<PreparedRequest> {
         self.mutate(|g| {
             // A crash after the final committed reservation still consumes
             // that attempt. Park the unknown outcome instead of exceeding
@@ -543,7 +557,7 @@ impl WebhookEngine {
 
             // Pick due delivery ids in FIFO (fair) order without holding a borrow.
             let mut picks: Vec<String> = Vec::new();
-            let mut global_room = MAX_INFLIGHT_GLOBAL - g.inflight.len();
+            let mut global_room = (MAX_INFLIGHT_GLOBAL - g.inflight.len()).min(max_requests);
             for d in g.deliveries.iter() {
                 if global_room == 0 {
                     break;

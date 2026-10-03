@@ -4,7 +4,7 @@ name: Release binaries
 # workflow_dispatch with a `tag` input. Builds ergo-node + ergo-wallet for
 # Linux (glibc + static musl), macOS, and Windows on x86_64. For each platform
 # it publishes the bare binary, a `.tar.gz` / `.zip` archive (binary + README +
-# licenses + CHANGELOG + SECURITY), and a `.sha256` for each, all uploaded to
+# config + operating docs + licenses), and a `.sha256` for each, all uploaded to
 # the GitHub Release (created if it does not already exist).
 on:
   push:
@@ -17,9 +17,51 @@ on:
         required: true
         type: string
 
+# Publication is conditional on validation and smoke checks of one resolved
+# commit. All jobs read it by SHA; tags are checked again before publication.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  resolve:
+    name: Resolve release tag to exact commit
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require tag and workspace version to agree
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python scripts/release.py resolve --github-output
+
+  validate:
+    name: Validate exact release commit
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  validate-cost-ledger:
+    name: Validate exact release cost ledger
+    needs: resolve
+    uses: ./.github/workflows/cost-ledger.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
   build:
-    name: Build ${{ matrix.target }}
+    name: Build and smoke-test ${{ matrix.target }}
+    needs: [resolve, validate, validate-cost-ledger]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -35,103 +77,60 @@ jobs:
             target: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/rust
+        id: rust
         with:
-          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --bin ergo-node --bin ergo-wallet --target ${{ matrix.target }}
+        run: cargo build --locked --release --bin ergo-node --bin ergo-wallet --target ${{ matrix.target }}
 
-      - name: Stage artifacts (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bin="target/${{ matrix.target }}/release"
-          for b in ergo-node ergo-wallet; do
-            # Bare binary, renamed with the target suffix.
-            cp "$bin/$b" "$b-${{ matrix.target }}"
-            # Archive: binary + docs + licenses.
-            rm -rf "stage/$b" && mkdir -p "stage/$b"
-            cp "$bin/$b" README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md SECURITY.md "stage/$b/"
-            tar -czf "$b-${{ matrix.target }}.tar.gz" -C "stage/$b" .
-            # Checksums for both the bare binary and the archive.
-            shasum -a 256 "$b-${{ matrix.target }}"        > "$b-${{ matrix.target }}.sha256"
-            shasum -a 256 "$b-${{ matrix.target }}.tar.gz" > "$b-${{ matrix.target }}.tar.gz.sha256"
-          done
+      - name: Package archives and test extracted binaries
+        run: python scripts/release.py package --target ${{ matrix.target }} --binaries target/${{ matrix.target }}/release --output release-artifacts
 
-      - name: Stage artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bin = "target/${{ matrix.target }}/release"
-          foreach ($b in "ergo-node", "ergo-wallet") {
-            Copy-Item "$bin/$b.exe" "$b-${{ matrix.target }}.exe"
-            Remove-Item -Recurse -Force "stage/$b" -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force "stage/$b" | Out-Null
-            Copy-Item "$bin/$b.exe" "stage/$b/"
-            Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, CHANGELOG.md, SECURITY.md "stage/$b/"
-            Compress-Archive -Path "stage/$b/*" -DestinationPath "$b-${{ matrix.target }}.zip" -Force
-            foreach ($f in "$b-${{ matrix.target }}.exe", "$b-${{ matrix.target }}.zip") {
-              $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
-              "$h  $f" | Out-File -Encoding ascii "$f.sha256"
-            }
-          }
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
-          path: |
-            ergo-node-${{ matrix.target }}*
-            ergo-wallet-${{ matrix.target }}*
+          path: release-artifacts/*
+          if-no-files-found: error
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [resolve, validate, validate-cost-ledger, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
-      - name: Resolve tag
-        id: tag
-        shell: bash
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          if [ -n "$INPUT_TAG" ]; then
-            if ! [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-              echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"
-              exit 1
-            fi
-            echo "name=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ steps.tag.outputs.name }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
-          sparse-checkout: CHANGELOG.md
-          sparse-checkout-cone-mode: false
           path: src
+
+      - name: Reject moved release tags
+        working-directory: src
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: python scripts/release.py verify
 
       # The release body is the tag's CHANGELOG section. An existing non-empty body is
       # never replaced, so notes edited by hand survive a re-run; a missing section only
@@ -141,7 +140,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.name }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null || true)
           if [ -n "$existing" ]; then
@@ -159,12 +158,12 @@ jobs:
           fi
 
       - name: Create / update release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: ${{ steps.tag.outputs.name }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: ${{ needs.resolve.outputs.tag }}
           # Pre-1.0 releases are pre-release only when the tag carries an
           # -alpha / -beta / -rc suffix.
-          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
+          prerelease: ${{ contains(needs.resolve.outputs.tag, '-') }}
           body_path: ${{ steps.notes.outputs.path }}
           files: artifacts/**/*

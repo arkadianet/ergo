@@ -31,7 +31,7 @@ use ergo_ser::modifier_id::{
 ///
 /// Caller is `ergo-node/src/node/messaging.rs`'s `CODE_MODIFIER` arm,
 /// which invokes this before passing bytes to
-/// [`SyncCoordinator::on_modifier_received`]. Kept out of the
+/// [`crate::coordinator::SyncCoordinator::on_modifier_received`]. Kept out of the
 /// coordinator path so coordinator tests can drive assembly flow with
 /// synthetic fixtures without canonical wire bytes.
 pub fn verify_section_modifier_id(

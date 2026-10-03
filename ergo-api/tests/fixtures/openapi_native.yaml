@@ -164,11 +164,13 @@ paths:
       tags:
       - node
       summary: |-
-        `GET /api/v1/indexer/status`. Always 200; never gated (like
+        `GET /api/v1/indexer/status`. Never gated (like
         `indexedHeight`, this must keep answering while the index is syncing,
         repairing, or halted — that is exactly when the operator needs it).
         `/blockchain/indexedHeight` stays pinned to its Scala-parity shape;
-        the self-repair markers and totals live here instead.
+        the self-repair markers and totals live here instead. Failed database
+        snapshots or previously observed read corruption return 500. Offline
+        syncing/halted handles still report their explicit status.
       description: |-
         Mounted only when an indexer handle is plumbed — on indexer-less wiring
         the route 404s, which the UI reads as "extra-index disabled".
@@ -180,6 +182,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiIndexerStatus'
+        '500':
+          description: Indexer health snapshot failed or read corruption was observed
   /api/v1/info:
     get:
       tags:
@@ -1294,7 +1298,7 @@ components:
               bootstrapped history. Absent when the store reports the
               default (Dense) and no NiPoPoW bootstrap is in progress.
 
-              Distinct from [`ApiIdentity::history_mode`] — that field is the
+              Distinct from [`crate::ApiIdentity::history_mode`] — that field is the
               operator-configured chain-retention policy (archive / pruned /
               utxo-bootstrapped / headers-only), this field is the on-disk
               header-section shape (dense from genesis vs sparse with a
@@ -2690,7 +2694,7 @@ components:
         Single-call dashboard view: collapses sync + tip + peer count.
         Polled at 1 Hz by the UI header strip.
 
-        Derives `Default` (like [`ApiIdentity`]) so test stubs can write
+        Derives `Default` (like [`crate::ApiIdentity`]) so test stubs can write
         `ApiStatus { <overrides>, ..Default::default() }` and stop breaking
         on every added field.
       required:
@@ -3748,7 +3752,7 @@ components:
           minConfirmations:
             type: integer
             format: int64
-            description: Minimum confirmations a candidate box must have (`-1` = include pool).
+            description: Minimum block depth (`tip - inclusionHeight`; `-1` also includes unspent wallet pool outputs).
           type:
             type: string
             enum:
@@ -3895,7 +3899,7 @@ components:
             type:
             - object
             - 'null'
-            description: Non-default registers (R4..R9), hex-encoded constants. `unsupported_intent` until wired.
+            description: Non-default registers (R4..R9), densely packed hex-encoded evaluated constants.
             additionalProperties:
               type: string
             propertyNames:
@@ -3908,7 +3912,9 @@ components:
             type: string
             description: nanoErg to send (decimal string).
       - type: object
-        description: Mint a new token to `address`. `unsupported_intent` until wired.
+        description: |-
+          Mint a new token to `address` in a box carrying 1,000,000 nanoErg.
+          Its token ID is the selected first input box ID; at most one mint intent is allowed.
         required:
         - address
         - amount
@@ -3957,12 +3963,10 @@ components:
             enum:
             - burn
       description: |-
-        One requested output of a [`TxIntent`], tagged. `payment` (+ optional
-        assets/registers) and `burn` are load-bearing; `mint` and `payment.registers`
-        are valid shapes that ship `unsupported_intent(422)` until builder support
-        lands (P2-5 — a later 422→200 for the same well-formed request, not a behavior
-        change). Manual `Deserialize` so unknown sibling fields and cross-variant field
-        leakage are rejected.
+        One requested output of a [`TxIntent`], tagged. Payments support assets and
+        dense R4..R9 registers; mint emits one token with EIP-4 metadata, and burn
+        destroys an explicit quantity with `allowTokenBurn`. Manual Deserialize
+        rejects unknown sibling fields and cross-variant field leakage.
     RawTransactionBytes:
       type: string
       format: binary
@@ -4397,10 +4401,8 @@ components:
         allowTokenBurn:
           type: boolean
           description: |-
-            Permit dropping (burning) a non-re-emission token surplus. RESERVED: the
-            current builder never drops a non-re-emission token (any surplus always
-            becomes change), so this flag has no effect yet; it gates the deferred
-            `burn` output intent (which ships `unsupported_intent` until wired).
+            Permit the explicit destruction quantities requested by `burn` intents.
+            Unrequested token surplus remains in change.
         changeAddress:
           type:
           - string

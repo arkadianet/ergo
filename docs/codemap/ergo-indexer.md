@@ -4,7 +4,6 @@
 
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-state, ergo-indexer-types
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~7,250 non-test (~11,500 with tests)
 
 ## Start here
 - `apply::apply_block_with_scratch` (`src/apply.rs:117`) — the heart: how one block becomes box/tx/address/template/token rows in a single atomic redb txn. Read its module doc (`src/apply.rs:1-22`) first.
@@ -19,7 +18,7 @@
 - `src/rollback.rs` — exact inverse of apply, walking the block's txs in reverse. Restores meta from the `UndoEntry` snapshot; pops/unflips segment entries; deletes token records whose creating mint was in the rolled-back block.
 - `src/rebuild.rs` — chain-free rebuild of the derived secondary (template/token) box-segment indexes from the intact primary tables (`NUMERIC_BOX` + `INDEXED_BOX`). Triggered when a tolerated `SegmentEntryMissing` drift stamps a sticky repair marker in `INDEXER_META`. Phase 0 wipes template/token box-segment heads and their spill rows; Phase 1 replays box history in `gi` order via `append_box_entry`/`flip_box_segment_entry`, reusing the exact apply machinery so rebuilt segments are byte-identical to a fresh linear index. Both phases commit per-chunk and checkpoint in `INDEXER_META` for crash-safety and resumability. Consensus is untouched. Exports `rebuild_secondary_indexes`.
 - `src/task.rs` — `IndexerTask` polling loop + the `IndexerChainSource` read trait + `IndexerPoll` step outcomes; self-repair gate (checks the sticky marker and drives `rebuild_secondary_indexes` before any forward-apply or rollback); bounded section-missing retry; reorg detection via header-id re-read.
-- `src/handle.rs` — `IndexerHandle`: the read-side `IndexerQuery` impl wired into `ergo-api`. Holds in-memory status + cached indexed-height mirror; paging/dereference helpers (`slice_paged`, `dereference_box`, `dereference_tx`).
+- `src/handle.rs` — `IndexerHandle`: the read-side `IndexerQuery` impl wired into `ergo-api`. Holds in-memory status + cached indexed-height mirror; paging/dereference helpers (`slice_paged`, `try_dereference_box`, `try_dereference_tx`).
 - `src/segment.rs` — `Segment` body type + wire codec (Scala `Segment.scala` parity); `SEGMENT_THRESHOLD = 512`.
 - `src/segment_buffer.rs` — head-buffer + spill mechanics: `append_box_entry`/`append_tx_entry`, `flip`/`unflip_box_segment_entry`, `pop_box_entry`/`pop_tx_entry`, `flush_staged_spills`. Drives both address and template/token segments.
 - `src/segment_id.rs` — pure derivations: `box_segment_id`/`tx_segment_id`, `tree_hash`/`tree_hash_from_bytes`, `token_unique_id`. All `[inherited]` byte-exact formulas — part of the public API surface.
@@ -67,8 +66,21 @@
 - **Protocol-genesis box absorption.** The 3 protocol-seeded box IDs (foundation / no-premine / emission) are never in `INDEXED_BOX`; their first spend pushes `0` to `input_nums` and continues instead of `InputMissing`, mirroring Scala `ExtraIndexer.scala:331`. Genesis (height 1) skips the input-spend pass entirely (`src/apply.rs:191-222,318`, `src/rollback.rs:241-243,414`).
 - **Storage-rent index coherence.** `unspent_by_creation_height` is keyed by the box's own `creationHeight` (R3 metadata, *not* inclusion height) + immutable `global_box_index`; symmetric insert-on-output / remove-on-input with apply, fully re-derived from unchanged `IndexedErgoBox` rows on rollback (no undo-payload extension) (`src/store/storage_rent.rs:1-24`, `src/apply.rs:251,381`, `src/rollback.rs:295,472`).
 - **Secondary-index degrade-not-halt.** A `SegmentEntryMissing` on a DERIVED secondary index (template/token box-segment) is tolerated — the indexer marks a sticky `repair_pending` marker in `INDEXER_META` and continues applying blocks rather than halting. The PRIMARY address segments still halt on any topology error. On the next poll, `IndexerTask::step` detects the marker and runs `rebuild_secondary_indexes` (chain-free, from the intact primary box table) before resuming normal forward-apply. A process-lifetime counter `secondary_index_drift_skips()` and the durable repair markers drive the health surface (`src/segment_buffer.rs:76,101`, `src/task.rs:139-170`, `src/rebuild.rs`).
-- **Halted-handle read isolation.** A boot-time-halted handle has no store; reads return `None`/empty/0 and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault (`src/handle.rs:32-39,158-184`).
+- **Halted-handle read isolation.** A boot-time-halted handle has no store; database reads return `Err(IndexerReadError)` for the unavailable store and the polling task is not spawned. The cached `indexed_height`/`status` reads recover from a poisoned lock rather than propagating panic, keeping the API surface up after an indexer fault (`src/handle.rs:45-52,71-75,251-277`).
 - **Indexer DB isolation.** The redb file is separate from the chain store, so an indexer wipe never touches consensus data (`src/store/mod.rs:1-3`).
 
 ## Notes for the architecture doc
 Two stale *source comments* in `src/store/mod.rs` (not README/docs claims): the `IndexerStore` doc at `:53-55` says apply/rollback are "layered on top via the `commit_apply_meta_only` / `commit_rollback_meta_only` helpers" — but `apply.rs`/`rollback.rs` inline their meta+undo+prune writes in their own write txn; those helpers are only used by integration tests. `begin_write`'s doc at `:591` references a `commit_block_txn` method that does not exist. Worth a cleanup pass, but outside the README/docs accuracy scope.
+
+Read errors propagate to API consumers. Page and global-range references are
+resolved in one redb snapshot; a missing referenced row fails the entire
+response. Global ranges are clipped to the snapshot's indexed counters.
+`IndexerHandle` retains the last observed read failure until reopened, and
+`health()` returns it rather than reporting healthy zero counters after an
+unrelated successful query. `/api/v1/indexer/status` returns HTTP 500 for
+failed snapshots or observed read corruption; cached indexed-height/status
+remain queryable. Storeless syncing/halted handles still reject database
+queries with an unavailable-store error. Only `health()` may return `Ok` with
+zero store-backed counters for their explicit offline status, provided no
+read error is latched; `drift_skips` remains the live process counter
+(`src/handle.rs:280-308`).

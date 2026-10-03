@@ -4,6 +4,7 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
+use redb::ReadableDatabase;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,6 +24,15 @@ use super::{
 };
 
 impl DigestStateStore {
+    /// Page-cache gauges for the digest database; all AVL fields are zero.
+    pub fn metrics(&self) -> crate::store::StateMetrics {
+        crate::store::StateMetrics {
+            redb_cache_capacity_bytes: self.redb_cache_bytes,
+            redb_cache_evictions: self.db.cache_stats().evictions(),
+            ..Default::default()
+        }
+    }
+
     /// Disable commit durability for this database instance in logic tests.
     ///
     /// Call before initializing fixtures or starting a persist worker. Every
@@ -67,9 +77,27 @@ impl DigestStateStore {
         voting_settings: ergo_chain_spec::VotingParams,
         genesis_state_digest: [u8; 33],
     ) -> Result<Self, StateError> {
-        let db = Arc::new(crate::redb_util::open_with_repair_logging(
+        Self::open_with_redb_cache(
+            path,
+            launch_params,
+            voting_settings,
+            genesis_state_digest,
+            crate::DEFAULT_REDB_CACHE_BYTES,
+        )
+    }
+
+    /// Open a digest backend with an independent redb page-cache budget.
+    pub fn open_with_redb_cache(
+        path: &Path,
+        launch_params: ActiveProtocolParameters,
+        voting_settings: ergo_chain_spec::VotingParams,
+        genesis_state_digest: [u8; 33],
+        redb_cache_bytes: usize,
+    ) -> Result<Self, StateError> {
+        let db = Arc::new(crate::redb_util::open_with_repair_logging_and_cache(
             path,
             "digest_state_store",
+            redb_cache_bytes,
         )?);
 
         // Resolve the state-type sentinel READ-ONLY first: this
@@ -158,6 +186,7 @@ impl DigestStateStore {
 
         Ok(Self {
             db,
+            redb_cache_bytes,
             db_path: path.to_path_buf(),
             root_digest: loaded.root_digest,
             chain_state: loaded.chain_state,

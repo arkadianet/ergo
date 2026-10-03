@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_master_key_post_1627() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let xsk = ExtendedSecretKey::derive_master_key(&seed, false)
+        let xsk = ExtendedSecretKey::derive_master_key(&seed[..], false)
             .expect("standard BIP32 master key must derive");
         assert_eq!(
             hex::encode(xsk.secret_bytes()),
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_first_hardened_child() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         // m/0' = hardened index 0 = HARDENED_OFFSET | 0
         let child = master
             .derive_child(HARDENED_OFFSET)
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn bip32_vector_1_two_step_derive_at_path() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         // m/0'/1
         let path: DerivationPath = "m/0'/1".parse().unwrap();
         let leaf = master
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn extended_pubkey_from_xsk_returns_compressed_secp256k1_pubkey() {
         let seed = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         let xpub = master.public_key();
         // BIP32 Vector 1, master pubkey (compressed sec1):
         // 0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2
@@ -503,7 +503,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
+        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().unwrap().compressed_bytes();
@@ -527,7 +527,7 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKey::derive_master_key(&seed, false).unwrap();
+        let master = ExtendedSecretKey::derive_master_key(&seed[..], false).unwrap();
         let path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
         let leaf = master.derive_at_path(&path).unwrap();
         let pk = leaf.public_key().compressed_bytes();
@@ -536,12 +536,10 @@ mod tests {
         assert_eq!(hex::encode(pk), expected_pubkey_hex);
     }
 
-    /// Pre-1627 intermediate values — must come from Scala oracle.
-    /// Currently #[ignore]'d pending engineer extraction.
+    /// Pre-1627 intermediate values from Scala 6.0.6, including the child
+    /// whose leading zero is stripped before the next hardened HMAC input.
     #[test]
-    #[ignore = "intermediate vectors must be Scala-extracted before un-ignoring"]
     fn pre_1627_intermediate_vectors_match_scala() {
-        use crate::derivation::DerivationPath;
         use crate::mnemonic::Mnemonic;
         let mnemonic = Mnemonic::import(
             "race relax argue hair sorry riot there spirit ready \
@@ -549,12 +547,27 @@ mod tests {
         )
         .unwrap();
         let seed = mnemonic.to_seed("");
-        let master = ExtendedSecretKeyLegacy::derive_master_key(&seed).unwrap();
-        let expected_master_hex: &str = "<EXTRACT_FROM_SCALA>";
-        let expected_master_chain_hex: &str = "<EXTRACT_FROM_SCALA>";
-        assert_eq!(hex::encode(master.secret_bytes()), expected_master_hex);
-        assert_eq!(hex::encode(master.chain_code()), expected_master_chain_hex);
-        // Suppress unused variable warning — path would be used after Scala extraction.
-        let _path: DerivationPath = "m/44'/429'/0'/0/0".parse().unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../test-vectors/wallet/scala_6_0_6.json"))
+                .unwrap();
+        let steps = fixture["legacyDerivation"].as_array().unwrap();
+        let indices = [44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0];
+        assert_eq!(steps.len(), indices.len() + 1);
+        let mut key = ExtendedSecretKeyLegacy::derive_master_key(&seed[..]).unwrap();
+        for (depth, expected) in steps.iter().enumerate() {
+            assert_eq!(
+                hex::encode(key.secret_bytes()),
+                expected["secret"],
+                "depth {depth}"
+            );
+            assert_eq!(
+                hex::encode(key.chain_code()),
+                expected["chainCode"],
+                "depth {depth}"
+            );
+            if let Some(index) = indices.get(depth) {
+                key = key.derive_child(*index).unwrap();
+            }
+        }
     }
 }

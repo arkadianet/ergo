@@ -32,7 +32,9 @@ redb_state_evictions,redb_indexer_evictions,redb_addrbook_evictions,\
 indexer_indexed_height,indexer_lag,indexer_status,\
 smaps_rss_kb,smaps_pss_kb,smaps_shared_clean_kb,smaps_shared_dirty_kb,\
 smaps_private_clean_kb,smaps_private_dirty_kb,smaps_anonymous_kb,\
-smaps_anon_huge_pages_kb,smaps_file_pmd_mapped_kb";
+smaps_anon_huge_pages_kb,smaps_file_pmd_mapped_kb,\
+redb_state_capacity_bytes,redb_indexer_capacity_bytes,redb_addrbook_capacity_bytes,\
+avl_unpersisted_pinned_bytes";
 
 /// One sample of memory + chain state. All counters are point-in-time reads.
 #[derive(Debug, Default, Clone)]
@@ -70,6 +72,10 @@ pub struct MemSample {
     pub indexer_lag: u64,
     pub indexer_status: &'static str,
     pub smaps: SmapsRollup,
+    pub redb_state_capacity_bytes: u64,
+    pub redb_indexer_capacity_bytes: u64,
+    pub redb_addrbook_capacity_bytes: u64,
+    pub avl_unpersisted_pinned_bytes: u64,
 }
 
 /// Format a single CSV row. No trailing newline.
@@ -88,7 +94,8 @@ pub fn format_row(s: &MemSample) -> String {
          {},{},{},\
          {},{},{},{},\
          {},{},{},\
-         {},{}",
+         {},{},\
+         {},{},{},{}",
         s.ts_ms,
         s.best_header,
         s.best_full_block,
@@ -133,6 +140,10 @@ pub fn format_row(s: &MemSample) -> String {
         s.smaps.anonymous_kb,
         s.smaps.anon_huge_pages_kb,
         s.smaps.file_pmd_mapped_kb,
+        s.redb_state_capacity_bytes,
+        s.redb_indexer_capacity_bytes,
+        s.redb_addrbook_capacity_bytes,
+        s.avl_unpersisted_pinned_bytes,
     )
 }
 
@@ -157,6 +168,19 @@ pub fn open_or_init(path: &Path) -> io::Result<std::fs::File> {
         || std::fs::metadata(path)
             .map(|m| m.len() == 0)
             .unwrap_or(true);
+    if !needs_header {
+        use std::io::BufRead;
+        let first = std::io::BufReader::new(std::fs::File::open(path)?)
+            .lines()
+            .next()
+            .transpose()?;
+        if first.as_deref() != Some(HEADER) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "memory CSV schema changed; choose a new ERGO_MEM_CSV path",
+            ));
+        }
+    }
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     if needs_header {
         writeln!(f, "{HEADER}")?;
@@ -175,6 +199,10 @@ mod tests {
 
     fn fixture() -> MemSample {
         MemSample {
+            redb_state_capacity_bytes: 1073741824,
+            redb_indexer_capacity_bytes: 16777216,
+            redb_addrbook_capacity_bytes: 1048576,
+            avl_unpersisted_pinned_bytes: 1024,
             ts_ms: 1_730_000_000_000,
             best_header: 1_771_976,
             best_full_block: 1_771_976,
@@ -235,10 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn header_has_44_columns() {
+    fn header_has_48_columns() {
         // Pin the slice-2 wire shape: any column add/remove/rename must
         // bump this number deliberately and update downstream summarisers.
-        assert_eq!(HEADER.split(',').count(), 44);
+        assert_eq!(HEADER.split(',').count(), 48);
     }
 
     #[test]
@@ -255,7 +283,24 @@ mod tests {
         assert_eq!(cols[32], "1771900"); // indexer_indexed_height
         assert_eq!(cols[33], "76"); // indexer_lag
         assert_eq!(cols[34], "Syncing"); // indexer_status
+        assert_eq!(cols[44], "1073741824");
+        assert_eq!(cols[45], "16777216");
+        assert_eq!(cols[46], "1048576");
+        assert_eq!(cols[47], "1024");
         assert_eq!(cols[41], "1432156"); // smaps_anonymous_kb
+    }
+
+    #[test]
+    fn open_or_init_rejects_incompatible_existing_schema_without_appending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.csv");
+        let original = "ts_ms,old_column\n1,2\n";
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(
+            open_or_init(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

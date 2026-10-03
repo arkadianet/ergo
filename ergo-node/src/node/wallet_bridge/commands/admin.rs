@@ -2,6 +2,7 @@
 //!
 //! See `super::mod` for the WriterContext design and grouping rationale.
 
+use redb::ReadableDatabase;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::oneshot;
@@ -274,7 +275,7 @@ pub(crate) async fn rescan(
         None
     };
 
-    let flags = match RescanFlagsGuard::admit(ctx.store.clone(), start_h) {
+    let flags = match RescanFlagsGuard::admit(ctx.store.clone(), start_h, ctx.rescan.clone()) {
         Ok(flags) => flags,
         Err(error) => {
             let _ = reply.send(Err(error));
@@ -318,7 +319,7 @@ pub(crate) async fn rescan(
                         source: e,
                     })
             },
-            || !rescan.identity.owns(),
+            || !rescan.identity.owns() || rescan.identity.control.stopping(),
             scan_matcher
                 .as_ref()
                 .map(|matcher| matcher as &dyn ergo_state::wallet::scan::ScanRescanMatcher),
@@ -331,17 +332,17 @@ pub(crate) async fn rescan(
                 rescan_failure_state(start_h, &error)
             }
         };
-        if let Err(error) = persist_rescan_state(store.as_ref(), rescan.identity, &state) {
+        if let Err(error) = persist_rescan_state(store.as_ref(), &rescan.identity, &state) {
             tracing::error!(%error, "failed to persist wallet rescan outcome");
         }
     });
-    drop(task);
+    ctx.rescan_workers.lock().push(task);
     let _ = reply.send(Ok(()));
 }
 
 fn persist_rescan_state(
     store: &dyn ergo_state::wallet::WalletStore,
-    identity: crate::wallet_boot::RescanIdentity,
+    identity: &crate::wallet_boot::RescanIdentity,
     state: &ergo_state::wallet::RescanState,
 ) -> Result<(), ergo_state::wallet::WalletStoreError> {
     let mut write = store.begin_write()?;
@@ -384,6 +385,7 @@ impl RescanFlagsGuard {
     fn admit(
         store: std::sync::Arc<dyn ergo_state::wallet::WalletStore>,
         from_height: u32,
+        control: std::sync::Arc<crate::wallet_boot::RescanControl>,
     ) -> Result<Self, WalletAdminError> {
         // The existing wallet writer lock orders flag publication with cleanup
         // and rollback. In particular, releasing an identity and clearing its
@@ -391,11 +393,11 @@ impl RescanFlagsGuard {
         let mut write = store
             .begin_write()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let identity = crate::wallet_boot::RescanIdentity::admit().ok_or_else(|| {
+        let identity = control.admit().ok_or_else(|| {
             WalletAdminError::RescanUnavailable("rescan already in progress".to_string())
         })?;
-        crate::wallet_boot::RESCAN_FROM_HEIGHT.store(from_height, Ordering::SeqCst);
-        crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(from_height == 0, Ordering::SeqCst);
+        control.from_height.store(from_height, Ordering::SeqCst);
+        control.rebuilding.store(from_height == 0, Ordering::SeqCst);
         let result = write
             .set_rescan_state(&ergo_state::wallet::RescanState::Running { from_height })
             .and_then(|()| write.commit());
@@ -418,8 +420,11 @@ impl Drop for RescanFlagsGuard {
             }
         };
         if self.identity.release() {
-            crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.store(false, Ordering::SeqCst);
-            crate::wallet_boot::RESCAN_FROM_HEIGHT.store(0, Ordering::SeqCst);
+            self.identity
+                .control
+                .rebuilding
+                .store(false, Ordering::SeqCst);
+            self.identity.control.from_height.store(0, Ordering::SeqCst);
         }
     }
 }
@@ -1525,30 +1530,24 @@ mod tests {
 
     #[test]
     fn rescan_single_owner_persists_idle_and_releases_flags() {
-        let _lock = crate::wallet_boot::RESCAN_TEST_LOCK.lock().unwrap();
+        let control = std::sync::Arc::new(crate::wallet_boot::RescanControl::default());
         let dir = tempfile::tempdir().unwrap();
         let db =
             std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
             std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db));
-        let flags = super::RescanFlagsGuard::admit(store.clone(), 12).unwrap();
-        assert_eq!(
-            crate::wallet_boot::RESCAN_FROM_HEIGHT.load(super::Ordering::SeqCst),
-            12
-        );
-        assert!(!crate::wallet_boot::SCAN_REBUILD_IN_PROGRESS.load(super::Ordering::SeqCst));
+        let flags = super::RescanFlagsGuard::admit(store.clone(), 12, control.clone()).unwrap();
+        assert_eq!(control.from_height.load(super::Ordering::SeqCst), 12);
+        assert!(!control.rebuilding.load(super::Ordering::SeqCst));
         super::persist_rescan_state(
             store.as_ref(),
-            flags.identity,
+            &flags.identity,
             &ergo_state::wallet::RescanState::Idle,
         )
         .unwrap();
         drop(flags);
-        assert!(!crate::wallet_boot::rescan_in_progress());
-        assert_eq!(
-            crate::wallet_boot::RESCAN_FROM_HEIGHT.load(super::Ordering::SeqCst),
-            0
-        );
+        assert!(!control.in_progress());
+        assert_eq!(control.from_height.load(super::Ordering::SeqCst), 0);
         assert_eq!(
             store.begin_read().unwrap().rescan_state().unwrap(),
             ergo_state::wallet::RescanState::Idle
@@ -1559,26 +1558,25 @@ mod tests {
 
     #[test]
     fn rescan_cancelled_owner_preserves_successor_state_and_flags() {
-        use crate::wallet_boot::{
-            ProdRescanGuard, RESCAN_FROM_HEIGHT, RESCAN_TEST_LOCK, SCAN_REBUILD_IN_PROGRESS,
-        };
+        let control = std::sync::Arc::new(crate::wallet_boot::RescanControl::default());
         use ergo_state::wallet::{apply::RescanGuard, RescanState};
-        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let db =
             std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
             std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
         for (force, from_height) in [(false, 0), (true, 7)] {
-            let first = super::RescanFlagsGuard::admit(store.clone(), 10).unwrap();
+            let first = super::RescanFlagsGuard::admit(store.clone(), 10, control.clone()).unwrap();
             let txn = db.begin_write().unwrap();
             if force {
-                ProdRescanGuard.force_invalidate(&txn).unwrap();
+                control.force_invalidate(&txn).unwrap();
             } else {
-                ProdRescanGuard.abort_in_progress(&txn).unwrap();
+                control.abort_in_progress(&txn).unwrap();
             }
             txn.commit().unwrap();
-            let second = super::RescanFlagsGuard::admit(store.clone(), from_height).unwrap();
+            let second =
+                super::RescanFlagsGuard::admit(store.clone(), from_height, control.clone())
+                    .unwrap();
             assert!(
                 !first.identity.owns(),
                 "old callback must observe cancellation"
@@ -1590,7 +1588,7 @@ mod tests {
                     reason: "cancelled".into(),
                 },
             ] {
-                super::persist_rescan_state(store.as_ref(), first.identity, &state).unwrap();
+                super::persist_rescan_state(store.as_ref(), &first.identity, &state).unwrap();
                 assert_eq!(
                     store.begin_read().unwrap().rescan_state().unwrap(),
                     RescanState::Running { from_height }
@@ -1599,34 +1597,33 @@ mod tests {
             drop(first);
             assert!(second.identity.owns());
             assert_eq!(
-                SCAN_REBUILD_IN_PROGRESS.load(super::Ordering::SeqCst),
+                control.rebuilding.load(super::Ordering::SeqCst),
                 from_height == 0
             );
             assert_eq!(
-                RESCAN_FROM_HEIGHT.load(super::Ordering::SeqCst),
+                control.from_height.load(super::Ordering::SeqCst),
                 from_height
             );
             drop(second);
-            assert!(!SCAN_REBUILD_IN_PROGRESS.load(super::Ordering::SeqCst));
+            assert!(!control.rebuilding.load(super::Ordering::SeqCst));
         }
     }
 
     #[test]
     fn rescan_replaced_before_clear_transaction_preserves_invalidation() {
-        use crate::wallet_boot::{ProdRescanGuard, RESCAN_TEST_LOCK};
+        let control = std::sync::Arc::new(crate::wallet_boot::RescanControl::default());
         use ergo_state::wallet::{
             apply::RescanGuard,
             scan::{RescanError, WalletScanService},
         };
         use std::cell::Cell;
 
-        let _lock = RESCAN_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let db =
             std::sync::Arc::new(redb::Database::create(dir.path().join("state.redb")).unwrap());
         let store: std::sync::Arc<dyn ergo_state::wallet::WalletStore> =
             std::sync::Arc::new(ergo_state::wallet::RedbWalletStore::new(db.clone()));
-        let first = super::RescanFlagsGuard::admit(store.clone(), 0).unwrap();
+        let first = super::RescanFlagsGuard::admit(store.clone(), 0, control.clone()).unwrap();
         let mut second = None;
         let reached_tip = Cell::new(false);
         let result = WalletScanService::rescan_full_rebuild(
@@ -1646,9 +1643,11 @@ mod tests {
                     // Replace A after its unlocked cancellation snapshot. The
                     // next check, inside the clearing transaction, must see B.
                     let txn = db.begin_write().unwrap();
-                    ProdRescanGuard.abort_in_progress(&txn).unwrap();
+                    control.abort_in_progress(&txn).unwrap();
                     txn.commit().unwrap();
-                    second = Some(super::RescanFlagsGuard::admit(store.clone(), 0).unwrap());
+                    second = Some(
+                        super::RescanFlagsGuard::admit(store.clone(), 0, control.clone()).unwrap(),
+                    );
                 }
                 cancelled
             },

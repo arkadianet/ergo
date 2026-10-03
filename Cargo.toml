@@ -25,8 +25,22 @@ members = [
 [workspace.package]
 version    = "0.11.0"
 edition    = "2021"
+rust-version = "1.99.0"
 license    = "MIT OR Apache-2.0"
 repository = "https://github.com/arkadianet/ergo"
+
+# Small, reviewable policy shared by every member. Test unwraps remain allowed;
+# public API documentation is enforced by the strict rustdoc CI gate.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_html_tags = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 [workspace.dependencies]
 # Internal crates — keep paths here so a single edit moves every member.
@@ -49,18 +63,18 @@ ergo-api           = { path = "ergo-api" }
 ergo-rest-json     = { path = "ergo-rest-json" }
 
 # Cryptography
-aes-gcm  = "0.10"
+aes-gcm  = "0.11"
 blake2   = "0.10"
 k256     = "0.13"
 md5      = "0.7"
 pbkdf2   = "0.12"
 sha2     = "0.10"
 gf2_192  = "0.28"
-bip39    = "2"
+bip39    = { version = "2", features = ["zeroize"] }
 hmac     = "0.12"
 
 # Numerics
-num-bigint  = "0.4"
+num-bigint  = "0.5"
 num-integer = "0.1"
 num-traits  = "0.2"
 
@@ -83,12 +97,14 @@ bytes      = "1"
 # Errors / async runtime
 thiserror   = "2"
 tokio       = "1"
-async-trait = "0.1"
+async-trait = "0.1.92"
 zeroize    = { version = "1", features = ["derive"] }
 rpassword  = "7"
 
 # Storage / data structures
-redb              = "2"
+redb              = { version = "4", features = ["cache_metrics"] }
+# Read-only source locking and copy-only v2-to-v3 migration.
+redb_legacy = { package = "redb", version = "=2.6.3" }
 ergo_avltree_rust = "0.1.1"
 lru               = "0.18"
 crossbeam-channel = "0.5"

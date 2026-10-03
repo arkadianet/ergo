@@ -1,10 +1,10 @@
 //! Header validation: parent linkage, timestamp monotonicity, PoW,
 //! difficulty, and the four vote rules (212-215).
 //!
-//! - [`votes`] — the four vote-rule checks (212/213/214/215), kept
+//! - `votes` — the four vote-rule checks (212/213/214/215), kept
 //!   together deliberately: they are similar in shape and are
 //!   cross-tested together via `selected_candidate_votes_always_pass_header_validators`.
-//! - [`timestamp`] — parent-id / timestamp-monotonicity / future-timestamp
+//! - `timestamp` — parent-id / timestamp-monotonicity / future-timestamp
 //!   checks (rule 211 + the two structural pre-checks).
 //!
 //! `CheckedHeader`, `HeaderValidationError`, `PowCheckedHeader`, and the

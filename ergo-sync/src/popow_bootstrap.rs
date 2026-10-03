@@ -563,7 +563,7 @@ impl PopowBootstrap {
 /// Only the header at exactly `checkpoint.height` is constrained; a proof
 /// whose sparse prefix skips that height passes this check (it neither
 /// confirms nor contradicts the anchor — the snapshot-install anchor check
-/// in [`crate::snapshot_bootstrap::manifest`] is what refuses to *trust*
+/// in `crate::snapshot_bootstrap::manifest` is what refuses to *trust*
 /// state above an unconfirmed anchor).
 pub fn check_proof_against_checkpoint(
     proof: &NipopowProof,

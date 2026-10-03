@@ -709,6 +709,7 @@ fn open_does_not_migrate_archive_or_bootstrap_db() {
     {
         let mut store = open_test_store(&path);
         store.set_best_full_block_for_test([0xCD; 32], 5).unwrap();
+        store.test_force_set_committed_height(5).unwrap();
         assert_eq!(
             store.try_read_minimal_full_block_height_raw().unwrap(),
             None,

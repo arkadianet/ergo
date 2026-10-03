@@ -8,6 +8,7 @@
 
 use crate::error::WalletError;
 use bip39::Mnemonic as Bip39Mnemonic;
+use zeroize::Zeroizing;
 
 /// Allowed mnemonic strengths per BIP39. Words12 / Words15 / Words18 /
 /// Words21 / Words24 correspond to entropy sizes 128 / 160 / 192 / 224 /
@@ -46,7 +47,7 @@ impl Mnemonic {
     /// Generate a fresh mnemonic from the OS RNG.
     pub fn generate(strength: MnemonicStrength) -> Result<Self, WalletError> {
         let entropy_len = strength.entropy_bytes();
-        let mut entropy = vec![0u8; entropy_len];
+        let mut entropy = Zeroizing::new(vec![0u8; entropy_len]);
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut entropy);
         let inner = Bip39Mnemonic::from_entropy(&entropy)
             .map_err(|e| WalletError::InvalidMnemonic(e.to_string()))?;
@@ -72,8 +73,8 @@ impl Mnemonic {
     /// optional passphrase. BIP39 spec mandates NFKD normalisation on
     /// the passphrase; the `bip39` crate handles that internally so
     /// we don't need to re-implement it here.
-    pub fn to_seed(&self, passphrase: &str) -> [u8; 64] {
-        self.inner.to_seed(passphrase)
+    pub fn to_seed(&self, passphrase: &str) -> Zeroizing<[u8; 64]> {
+        Zeroizing::new(self.inner.to_seed(passphrase))
     }
 }
 

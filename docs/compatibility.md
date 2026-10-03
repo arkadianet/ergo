@@ -135,6 +135,17 @@ exact figure depends on peer and hardware conditions.
 
 ## How parity is checked
 
+Wallet-file encryption and the modern/pre-1627 derivation paths are pinned to
+fresh fixtures from Scala wallet 6.0.6 at commit
+`23aabead88774d27f2c9190ace3c9abbc8f1d5cb`. Every PR regenerates the fixture and
+unlocks a newly created Rust wallet with the Scala implementation. See
+[wallet fixture provenance](../test-vectors/wallet/README.md). Import accepts
+Scala's historical encrypted-stream field split, absent cipher algorithm/mode
+fields, and a missing/null legacy flag, as well as the authenticated field
+layout written by earlier Rust versions. New files use the Scala field split;
+older Rust binaries that only understand the previous split cannot unlock
+them. Keep an upgraded binary available before creating/restoring a wallet.
+
 Four independent oracles, ranked by signal strength, with a strict rule
 about which one counts for consensus:
 
@@ -177,15 +188,29 @@ Windows on every push and pull request; a `difftest` job runs the
 coverage gate) on Linux on every push; a nightly scheduled workflow runs
 longer structured and corpus-mutation campaigns (2,000,000 iterations each)
 plus bounded `cargo-fuzz` / libFuzzer / ASan passes on nightly Rust across
-six surfaces; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
+six surfaces; a nightly JVM consensus differential campaign with rotating,
+reproducible seeds and preserved oracle transcripts; plus the supply-chain auditors `cargo-audit`, `cargo-deny`,
 and `cargo-machete`. See
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
 [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
+
+## Storage compatibility
+
+The redb 2.6 → 4 file-format change is a storage compatibility boundary, not a
+consensus or wire-format change. Use the [offline copy-only migration](operating.md#migrating-legacy-redb-databases)
+for v2 databases before startup. Table schemas and typed row contents are
+verified under both real dependency versions, including the indexer's fixed
+width tuple keys and embedded wallet tables; unknown schemas fail closed.
+Keep the old data directory and binary for rollback because a database later
+written by redb 4 may contain type metadata unreadable by redb 2.6.
 
 ## Known limitations
 
 Areas where parity is incomplete, partial, or deliberately out of scope.
 Be aware of these before depending on the node.
+The [operating-mode evidence inventory](operating-mode-evidence.md) separates
+bounded fixture/recovery tests, recorded external campaigns and remaining
+closure criteria.
 
 ### Partial (landed but incomplete)
 
@@ -220,21 +245,30 @@ Be aware of these before depending on the node.
   Archive (`blocks_to_keep = -1`) and headers-only Mode 6
   (`blocks_to_keep = 0`) never seed one. Rollbacks whose replay window
   would reach below the sentinel are refused rather than half-applied.
-- **Mode 4 (pruned + UTXO bootstrap)** ? builds on Mode 3 (landed) plus
+- **Mode 4 (pruned + UTXO bootstrap)** — builds on Mode 3 (landed) plus
   the Mode 2 snapshot bootstrap. Tests cover a real snapshot install through
   boot and both NiPoPoW/UTXO orderings: proof-first composes; snapshot-first
   rejects the later proof and preserves state
-  (`ergo-node/tests/it/mode4_acceptance.rs`). End-to-end deferred snapshot
-  installation through real header catch-up inside `run_inner` and a live
-  multi-peer soak remain outstanding.
+  (`ergo-node/tests/it/mode4_acceptance.rs`). A three-peer acceptance test now drives snapshot discovery parked above
+  a NiPoPoW tip through real P2P header catch-up, snapshot installation, full
+  validation of the next mainnet block, and restart
+  (`ergo-node/tests/it/mode4_catchup.rs`). Long-running live multi-peer soak
+  coverage remains outstanding.
 - **Mode 5 (digest verifier)** — the storage schema, atomic-commit layer,
   and AD-proof apply seam exist; the node boots, survives the handshake,
   sync-info, and API seams, and syncs headers from live peers (the
   executor's header pipeline is backend-agnostic, so a digest store
   validates and persists headers exactly as a UTXO store does).
-  AD-proof block replay is oracle-pinned only against the mainnet window
-  in `test-vectors/mode5/`; broader corpus parity (further mainnet
-  windows, testnet, negatives) and the reorg-abort re-anchor remain open.
+  AD-proof block replay is oracle-pinned against the mainnet voting-boundary
+  window and additional mainnet/testnet windows in `test-vectors/mode5/`.
+  The additional corpus exercises full transaction validation, root-preserving
+  rollback/replay, and corrupted-proof rejection with unchanged committed
+  state (`ergo-sync/tests/it/mode5_corpus_breadth.rs`). Broader historical-era
+  coverage remains open. Bounded subprocess tests kill both digest and UTXO
+  executors after rollback/partial apply and recover external early-mainnet
+  replacement roots on reopen (`ergo-sync/src/executor/relay_tests.rs`).
+  External-window cold-open reorg campaigns still need an owned database with
+  complete historical rollback/index/parameter substrate.
 - **Mode 2 trust anchor** — the installed UTXO root verification is
   provisional pending a Scala-oracle vector. Operators using Mode 2 should
   cross-check the bootstrapped UTXO root against a known-good reference
@@ -277,6 +311,12 @@ potentially breaking:
 - Re-read [`CHANGELOG.md`](../CHANGELOG.md) before each upgrade — each entry
   calls out what moved.
 - Pin to a specific tag, not `latest`.
+
+Rust consumers upgrading to the `num-bigint 0.5` dependency must update their
+own direct dependency if they exchange `BigInt` or `BigUint` with this workspace
+(for example, through `SigmaValue`, evaluator values or difficulty helpers).
+Types from `num-bigint 0.4` and `0.5` are distinct. This dependency upgrade does
+not change the node's specified integer wire encodings.
 
 ## Reporting a consensus divergence
 

@@ -20,6 +20,7 @@
 
 mod lazy;
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_avltree_rust::batch_avl_prover::BatchAVLProver;
@@ -259,7 +260,7 @@ impl CommittedSnapshot {
 
     /// Look up the serialized bytes of an unspent box by id within this
     /// snapshot's one held read transaction. Delegates to the shared
-    /// [`crate::reader::lookup_box_in_txn`] so the descent is **byte-identical**
+    /// `crate::reader::lookup_box_in_txn` so the descent is **byte-identical**
     /// to `ChainStoreReader::lookup_box` (same `parse_walk_node`, which ignores
     /// balance/label bytes irrelevant to descent). `Ok(None)` for an empty tree
     /// or absent key; `Err(DbCorruption)` for a missing/malformed node or a

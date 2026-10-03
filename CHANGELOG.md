@@ -16,6 +16,29 @@ infrastructure.
 
 ## [Unreleased]
 
+### Added
+
+- Persist webhook registrations, signing secrets and admitted delivery retries
+  in a private `webhooks.redb` database. Restarts retain delivery IDs and retry
+  state; consumers must deduplicate retries and reconcile events missed before
+  admission. Storage failures disable webhooks while public API routes remain
+  available. See [`docs/configuration.md`](docs/configuration.md#webhook-state).
+
+### Changed
+
+- Upgrade normal storage to redb 4.3. Legacy redb 2.6 file-format v2 databases
+  require the copy-only `ergo-node migrate-redb SOURCE DESTINATION` command
+  before startup. Originals remain intact; the offline converter locks the
+  source, upgrades only a temporary copy, verifies schemas and contents, and
+  publishes without replacing an existing destination. See the migration,
+  backup, recovery and rollback instructions in [`docs/operating.md`](docs/operating.md#migrating-legacy-redb-databases).
+- Indexer apply and repair commits now use synchronous `Immediate` durability
+  instead of `Eventual`, preserving durable guarantees across platforms with
+  possible additional flush latency. Unsupported peer database formats
+  fail node startup. Live-file locks and I/O failures preserve the database
+  and keep the existing best-effort peer fallback; automatic quarantine is
+  limited to an explicit corruption error.
+
 ## [0.11.0] - 2026-09-30
 
 Scala consensus and compiler parity fixes, more reliable full-chain selection,

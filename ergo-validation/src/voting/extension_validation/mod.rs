@@ -3,7 +3,7 @@
 //!
 //! Pure function — no I/O.
 //!
-//! - [`match_rules`] — `matchParameters` (rule 409) / `matchParameters60`
+//! - `match_rules` — `matchParameters` (rule 409) / `matchParameters60`
 //!   (rule 414), the per-field parsed-vs-computed comparison Scala runs
 //!   at steps 5/6.
 //!

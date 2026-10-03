@@ -10,7 +10,6 @@ and `gf2_192` — sigma-rust is never a runtime dependency.
 **Depends on (workspace):** ergo-primitives, ergo-ser, ergo-sigma,
 ergo-validation, ergo-state, gf2_192
 **Depended on by:** (see codemap index)
-**Approx LOC:** ~8,900 (src/**/*.rs)
 
 ## Start here
 - `src/lib.rs` — module tree + crate-root re-exports (`Mnemonic`,
@@ -40,7 +39,8 @@ ergo-validation, ergo-state, gf2_192
 - `src/address.rs` — `pubkey_to_p2pk_address`: curve-validated P2PK
   encoding via `ergo_ser::address::encode_p2pk_from_pubkey`.
 - `src/encryption.rs` — `derive_key_pbkdf2` (PBKDF2-HMAC-SHA512) +
-  AES-256-GCM `encrypt`/`decrypt`; all buffers `Zeroizing`.
+  AES-256-GCM `encrypt`/`decrypt`; owned keys and decrypted plaintext use
+  `Zeroizing` (ciphertext and caller-owned inputs do not).
 - `src/storage.rs` — encrypted-secret-file format (`EncryptedSecret`,
   `CipherParams`, `uuid_from_ciphertext`), `SecretStorage` lock/unlock
   state machine, `UnlockedMaster`/`UnlockedSecret`.
@@ -82,7 +82,8 @@ ergo-validation, ergo-state, gf2_192
 - `external.rs` — `ProverExternalSecret`: decoded external secret for the
   locked-wallet signing path.
 - `hints.rs` — `Hint`/`HintsBag`/`TransactionHintsBag`, `FirstProverMessage`
-  (multi-sig commitment/proof exchange types).
+  (multi-sig commitment/proof exchange types), and `BoundTransactionHints`
+  for a consumed, transaction-bound native commitment round.
 - `node_position.rs` — `NodePosition`: depth-first tree addressing for hints.
 - `randomness.rs` — `ProvingRng` abstraction (OsRng + deterministic test RNG).
 - `schnorr.rs` — `prove_schnorr` (ProveDlog leaf proof).
@@ -115,18 +116,31 @@ ergo-validation, ergo-state, gf2_192
 
 ## Invariants & contracts
 - **Secret-file format parity.** The `<uuid>.json` encrypted-secret file is
-  byte-compatible with Scala `JsonSecretStorage`: PBKDF2-HMAC-SHA512 (default
-  128,000 iters) → AES-256-GCM; ciphertext is the 64-byte BIP39 *seed* (not
-  the phrase); `cipherParams` are enforced exactly on unlock
-  (`src/storage.rs:394-417`). Filename = Java `UUID.nameUUIDFromBytes(cipherText)`
-  (raw MD5 + version/variant patch), `src/storage.rs:98`.
+  interoperable with Scala `JsonSecretStorage`: PBKDF2-HMAC-SHA512 (default
+  128,000 iters) → AES-256-GCM over the 64-byte BIP39 seed. Scala names the
+  first 16 bytes of the encrypted stream `authTag` and the rest `cipherText`;
+  these names do not describe the cryptographic GCM components. Imports also
+  authenticate the conventional field layout written by earlier Rust versions.
+  Filename = Java `UUID.nameUUIDFromBytes(cipherText)` (raw MD5 plus
+  version/variant patch). Fresh Scala 6.0.6 fixtures and the reverse JVM unlock
+  gate are documented in [the fixture provenance](../../test-vectors/wallet/README.md).
+- **Secret-file publication.** Creation writes a same-directory temporary file
+  (owner-only on Unix), synchronizes it, publishes without replacing an existing
+  wallet, synchronizes the published file and (on Unix) the directory, then
+  updates cached metadata. Newly created directories and their parent entries
+  also receive Unix sync barriers; new directories are owner-only. An
+  interrupted write cannot expose a partial final
+  file. Pending files are ignored on discovery. A directory-sync failure can
+  leave a complete published file; reopening recovers it. Windows has no
+  portable directory-sync step, so sudden-power-loss durability of the name
+  is not promised there.
 - **Pre-1627 derivation bug fidelity.** `ExtendedSecretKeyLegacy` stores the
   child secret as *variable-length* unsigned bytes (leading zeros stripped,
   matching Java `BigIntegers.asUnsignedByteArray`); this leading-zero
   stripping is load-bearing for descendant HMAC inputs and is intentionally
   reproduced for parity (`src/extended_key.rs:313-386`). Modern derivation
   left-pads to 32 bytes.
-- **`usePre1627KeyDerivation` defaults to `true` when missing.** Legacy
+- **`usePre1627KeyDerivation` defaults to `true` when missing or null.** Legacy
   Scala secret files predate the field; defaulting to `true` is the only safe
   restore path (`src/storage.rs:74-84`).
 - **BIP32 retry is class-preserving (post-1627).** On `I_L >= n` or child
@@ -155,10 +169,20 @@ ergo-validation, ergo-state, gf2_192
   (`ChangeAddressUntracked`), so the wallet never signs for an address it
   cannot prove possession of (`ergo-node/src/node/wallet_bridge/commands/admin.rs:419`,
   `ergo-node/src/wallet_boot.rs:128`).
-- **Secret-material hygiene.** Master keys, leaf scalars, derived AES keys,
-  and commitment randomness `r` are `Zeroize`/`ZeroizeOnDrop`; `Debug` impls
-  on `ExtendedSecretKey*`, `UnlockedSecret`, and `OwnCommitment` redact the
-  bytes so secrets never reach a log line. `WalletError` never embeds key
-  material.
+- **Secret-material ownership.** The BIP39 mnemonic, generated entropy and
+  seed, master keys, registry secrets, owned real proof-tree scalars/nonces,
+  AES-derived keys, decrypted plaintext and owned commitment randomness have
+  drop-time zeroization. Secret type `Debug` implementations redact bytes.
+  This is a guarantee about those owned buffers, not all copies: library
+  internals, temporary scalar values, registers, swap and process dumps are
+  outside it. Exported phrases and compatibility JSON hint DTOs are plain
+  caller-owned strings/bytes; the caller must protect and erase them.
+- **Commitment nonce ownership.** Native callers can use
+  `generate_bound_commitments_for_tx` with `Prover::sign_bound`: secret hints
+  are private, the wrapper cannot be cloned, signing consumes it and rejects
+  a different canonical signing message. Public commitments are shareable.
+  The Scala-compatible low-level hint bags and JSON interface remain reusable
+  by design; callers must never reuse a private commitment nonce for another
+  message. Zeroization alone does not enforce that protocol rule.
 - **No `sigma-rust` at runtime.** Crypto is `k256` + `hmac-sha512` + `bip39`
   + `gf2_192`; sigma-rust is dev/test oracle only.

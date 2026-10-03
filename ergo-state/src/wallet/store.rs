@@ -1,3 +1,4 @@
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use redb::{Database, ReadTransaction, ReadableTable, ReadableTableMetadata, WriteTransaction};
@@ -166,7 +167,7 @@ impl WalletStore for RedbWalletStore {
 
     fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
         Ok(Box::new(RedbWalletWrite {
-            owned: Some(crate::begin_write_qr(&self.db).map_err(redb::Error::from)?),
+            owned: Some(crate::begin_write_qr(&self.db)?),
             borrowed: None,
         }))
     }

@@ -91,8 +91,13 @@ download_window = 384
 # sync_interval_stable_secs = 15
 
 [store]
-# redb + AVL arena page cache in bytes. Omit to use the binary default.
+# AVL arena clean-node cache in bytes, independent of redb caches.
 # cache_bytes = 1073741824
+# Separate per-database redb page-cache budgets (defaults: 1 GiB each).
+# These are cache limits, not process RSS limits. Zero disables that page cache.
+# state_redb_cache_bytes = 1073741824
+# indexer_redb_cache_bytes = 1073741824 # used only when indexing is enabled
+# peers_redb_cache_bytes = 1073741824
 
 [chain]
 # Devnet only (`network = "devnet"`): replace the private chain's P2P wire

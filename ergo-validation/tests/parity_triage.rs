@@ -9,7 +9,9 @@
 //!   - structural_error: structural/monetary/canonical rejection
 //!   - missing_utxo: input box not found (expected, skip)
 //!
-//! Run with: cargo test -p ergo-validation --test parity_triage -- --nocapture
+//! Extract at least one listed transaction/cost range and covering headers first.
+//! Run with `cargo test --locked -p ergo-validation --features diagnostics
+//! --test parity_triage -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 
@@ -88,6 +90,7 @@ struct ScalaCostVector {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Category {
     ExactMatch,
+    ValidatedWithoutOracle,
     CostMismatch,
     ProofFailed,
     EvalError,
@@ -104,6 +107,7 @@ struct TxResult {
 }
 
 #[test]
+#[ignore = "manual report; requires extracted 889k or 1500k transactions, JVM costs and covering headers"]
 fn triage_high_signal_ranges() {
     let result = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -142,13 +146,15 @@ fn triage_inner() {
 
         let tx_data: Vec<TxVector> =
             serde_json::from_str(&std::fs::read_to_string(&tx_file).unwrap()).unwrap();
-        let scala_costs: HashMap<String, u64> = if std::path::Path::new(&cost_file).exists() {
-            let raw: Vec<ScalaCostVector> =
-                serde_json::from_str(&std::fs::read_to_string(&cost_file).unwrap()).unwrap();
-            raw.into_iter().map(|c| (c.tx_id, c.block_cost)).collect()
-        } else {
-            HashMap::new()
-        };
+        assert!(!tx_data.is_empty(), "{tx_file}: no transactions to triage");
+        let raw: Vec<ScalaCostVector> = serde_json::from_str(
+            &std::fs::read_to_string(&cost_file)
+                .unwrap_or_else(|e| panic!("required JVM cost capture {cost_file}: {e}")),
+        )
+        .unwrap();
+        assert!(!raw.is_empty(), "{cost_file}: no JVM observations");
+        let scala_costs: HashMap<String, u64> =
+            raw.into_iter().map(|c| (c.tx_id, c.block_cost)).collect();
         let header_data: Vec<HeaderVector> =
             serde_json::from_str(&std::fs::read_to_string(header_file.unwrap()).unwrap()).unwrap();
         let header_info: HashMap<u32, ([u8; 33], u64)> = header_data
@@ -216,7 +222,7 @@ fn triage_inner() {
                     let category = match scala_costs.get(&v.id) {
                         Some(&sc) if sc == rust_cost => Category::ExactMatch,
                         Some(&_sc) => Category::CostMismatch,
-                        None => Category::ExactMatch, // no scala vector to compare
+                        None => Category::ValidatedWithoutOracle,
                     };
                     let detail = match scala_costs.get(&v.id) {
                         Some(&sc) if sc != rust_cost => {
@@ -266,6 +272,7 @@ fn triage_inner() {
         );
         for cat in &[
             Category::ExactMatch,
+            Category::ValidatedWithoutOracle,
             Category::CostMismatch,
             Category::ProofFailed,
             Category::EvalError,
