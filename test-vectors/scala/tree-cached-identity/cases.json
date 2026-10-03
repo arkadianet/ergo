@@ -1,0 +1,39 @@
+{
+  "authority": "Published sigma-state6.0.6 independent JVM reader executed2026-10-03; retained transcript, not a new capture",
+  "scala_version": "2.12.20",
+  "sigma_state_version": "6.0.6",
+  "capture_source_sha256": "63a99b91041426477dd6cb8562d0ff6753f6c38dbb0c411f343e8cb28be660fc",
+  "transcript_sha256": "c37abc23b5fc11bb02048442a443c8efe1290c9692d8398be5e1b38a9495d56d",
+  "reference_source_sha256": {
+    "v6.0.6-ErgoTree.scala": "26c9c095441f4b61fc6cb5872cfe6eb4ea27f667fd8db7c9c82503c8dd298488",
+    "v6.0.6-ErgoTreeSerializer.scala": "440e263a6c7ad7c8dc10ea3904ad015e1d488c35578c713f68bd679fe06fad8a"
+  },
+  "input_origin": "Existing sizeless_int_constants_tree generator at count0, BoolToSigmaProp(TrueLeaf)",
+  "cases": [
+    {
+      "activated_version": 1,
+      "tree_hex": "1000d17f",
+      "consumed": 4,
+      "cached_tree_hex": "1000d17f",
+      "serialized_tree_hex": "1000d10101",
+      "cached_template_hex": "d17f"
+    },
+    {
+      "activated_version": 2,
+      "tree_hex": "1000d17f",
+      "consumed": 4,
+      "cached_tree_hex": "1000d17f",
+      "serialized_tree_hex": "1000d10101",
+      "cached_template_hex": "d17f"
+    },
+    {
+      "activated_version": 3,
+      "tree_hex": "1000d17f",
+      "consumed": 4,
+      "cached_tree_hex": "1000d17f",
+      "serialized_tree_hex": "1000d10101",
+      "cached_template_hex": "d17f"
+    }
+  ],
+  "limits": "Reader/template ownership only; no whole transaction, proof, or canonical-chain occurrence claim."
+}

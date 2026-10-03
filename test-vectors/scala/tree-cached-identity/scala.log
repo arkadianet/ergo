@@ -1,0 +1,12 @@
+{"command": ["scala-cli", "run", "/home/arkadias/Coding/remote/ergo/audit/reports/20261003T085740Z-5d62fd58/ergo-ser-evidence/probe/AuditTreeProbe.scala", "--server=false"], "env": {"PATH_prefix": "/home/arkadias/.local/kdex-toolchain/bin", "COURSIER_CACHE": "/home/arkadias/.cache/ergo-test-tmp/coursier"}, "started": "2026-10-03T09:57:06.444363+00:00", "revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1"}
+[[33mhint[0m] ./audit/reports/20261003T085740Z-5d62fd58/ergo-ser-evidence/probe/AuditTreeProbe.scala:2:15
+[[33mhint[0m] "sigma-state is outdated, update to 6.0.7"
+[[33mhint[0m]      sigma-state 6.0.6 -> org.scorexfoundation::sigma-state:6.0.7
+[[33mhint[0m] //> using dep org.scorexfoundation::sigma-state:6.0.6
+[[33mhint[0m]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+activation-existing activation=1 REJECT sigma.serialization.SerializerException Cannot handle ValidationException, ErgoTree serialized without size bit.
+activation-existing activation=2 REJECT sigma.serialization.SerializerException Cannot handle ValidationException, ErgoTree serialized without size bit.
+activation-existing activation=3 REJECT sigma.serialization.SerializerException Cannot handle ValidationException, ErgoTree serialized without size bit.
+normalization-existing-generator-count0 activation=1 ACCEPT consumed=4 cached=1000d17f serialized=1000d10101 template=d17f root=true
+normalization-existing-generator-count0 activation=2 ACCEPT consumed=4 cached=1000d17f serialized=1000d10101 template=d17f root=true
+normalization-existing-generator-count0 activation=3 ACCEPT consumed=4 cached=1000d17f serialized=1000d10101 template=d17f root=true
