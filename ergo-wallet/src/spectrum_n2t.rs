@@ -151,6 +151,14 @@ fn minimum_value(
         .ok_or_else(|| invalid("minimum box value overflow"))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SwapTerms {
+    pub direction: Direction,
+    pub input: u64,
+    pub min_output: u64,
+    pub height: u32,
+}
+
 /// Build a zero-fee direct swap with the exact approved funding set. Each
 /// funding box is recreated separately, preserving its script/registers and
 /// every non-trade asset. No extra inputs, token burns or public relay occur.
@@ -158,12 +166,15 @@ pub fn build(
     pool: &Pool,
     funding: &[ErgoBox],
     receiving_tree: &[u8],
-    direction: Direction,
-    input: u64,
-    min_output: u64,
-    height: u32,
+    terms: SwapTerms,
     params: &ProtocolParams,
 ) -> Result<(UnsignedTransaction, u64), WalletError> {
+    let SwapTerms {
+        direction,
+        input,
+        min_output,
+        height,
+    } = terms;
     if funding.is_empty() || funding.len() > 32 {
         return Err(invalid("direct swaps require 1..=32 pinned funding boxes"));
     }
@@ -454,10 +465,12 @@ mod tests {
                 &pool,
                 std::slice::from_ref(&funding),
                 &ergo_ser::address::build_p2pk_tree_bytes(&key()).unwrap(),
-                direction,
-                input,
-                1,
-                context().sigma_pre_header.height,
+                SwapTerms {
+                    direction,
+                    input,
+                    min_output: 1,
+                    height: context().sigma_pre_header.height,
+                },
                 &ProtocolParams::mainnet_default(),
             )
             .unwrap();
@@ -506,10 +519,12 @@ mod tests {
             &pool,
             std::slice::from_ref(&funding),
             &tree,
-            Direction::ErgToToken,
-            100_000_000,
-            89_845,
-            1_111_336,
+            SwapTerms {
+                direction: Direction::ErgToToken,
+                input: 100_000_000,
+                min_output: 89_845,
+                height: 1_111_336
+            },
             &ProtocolParams::mainnet_default()
         )
         .is_err());
@@ -517,10 +532,12 @@ mod tests {
             &pool,
             &[funding],
             &tree,
-            Direction::TokenToErg,
-            100_000,
-            1,
-            1_111_336,
+            SwapTerms {
+                direction: Direction::TokenToErg,
+                input: 100_000,
+                min_output: 1,
+                height: 1_111_336
+            },
             &ProtocolParams::mainnet_default()
         )
         .is_err());
@@ -546,10 +563,12 @@ mod tests {
             &pool,
             std::slice::from_ref(&funding),
             &ergo_ser::address::build_p2pk_tree_bytes(&key()).unwrap(),
-            Direction::ErgToToken,
-            100_000_000,
-            1,
-            1_111_336,
+            SwapTerms {
+                direction: Direction::ErgToToken,
+                input: 100_000_000,
+                min_output: 1,
+                height: 1_111_336,
+            },
             &ProtocolParams::mainnet_default(),
         )
         .unwrap();
@@ -571,10 +590,12 @@ mod tests {
             &pool,
             std::slice::from_ref(&funding),
             &ergo_ser::address::build_p2pk_tree_bytes(&key()).unwrap(),
-            Direction::TokenToErg,
-            100_000,
-            1,
-            1_111_336,
+            SwapTerms {
+                direction: Direction::TokenToErg,
+                input: 100_000,
+                min_output: 1,
+                height: 1_111_336,
+            },
             &ProtocolParams::mainnet_default(),
         )
         .unwrap();
