@@ -443,7 +443,10 @@ mod tests {
             vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0],
         );
         let later = (12, [3; 33], vec![2]);
-        assert_eq!(visible_pubkeys_with_paths(&[master.clone()]), vec![[1; 33]]);
+        assert_eq!(
+            visible_pubkeys_with_paths(std::slice::from_ref(&master)),
+            vec![[1; 33]]
+        );
         assert_eq!(
             visible_pubkeys_with_paths(&[master.clone(), pre_eip3.clone()]),
             vec![[1; 33], [2; 33]]
