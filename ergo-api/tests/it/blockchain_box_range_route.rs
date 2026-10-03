@@ -82,6 +82,24 @@ async fn range_400_on_negative_offset() {
     assert_eq!(body["reason"], "bad-request");
 }
 
+#[tokio::test]
+async fn range_rejects_offsets_outside_scala_int_domain() {
+    for offset in [2147483648_i64, 4294967296, i64::MAX] {
+        let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+        let (status, body) = json_get(
+            app,
+            &format!("/blockchain/box/range?offset={offset}&limit=1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["reason"], "bad-request");
+    }
+    let app = build_app(Arc::new(StubIndexer::caught_up(Vec::new())));
+    let (status, body) = json_get(app, "/blockchain/box/range?offset=2147483647&limit=0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([]));
+}
+
 // ---- 200 dispatch + projection --------------------------------------------
 
 #[tokio::test]
@@ -93,6 +111,7 @@ async fn range_200_returns_bare_id_array() {
     ];
     let expected_ids: Vec<String> = boxes
         .iter()
+        .rev()
         .map(|b| hex::encode(b.box_data.box_id().expect("box_id").as_bytes()))
         .collect();
     let app = build_app(Arc::new(StubIndexer::caught_up(boxes)));
@@ -122,6 +141,67 @@ async fn range_200_post_get_parity() {
     assert_eq!(s_get, StatusCode::OK);
     assert_eq!(s_post, StatusCode::OK);
     assert_eq!(b_get, b_post);
+}
+
+// ---- mounted native query parity ------------------------------------------
+
+#[tokio::test]
+async fn native_ranges_apply_latest_window_to_persisted_global_counters() {
+    use ergo_indexer::{apply_block, IndexerBlock, IndexerStore};
+    use ergo_ser::input::{ContextExtension, Input, SpendingProof};
+    use ergo_ser::transaction::{transaction_id, Transaction};
+
+    let temporary = tempfile::TempDir::new().unwrap();
+    let (store, _) = IndexerStore::open(&temporary.path().join("indexer.redb")).unwrap();
+    let handle = IndexerHandle::with_store(store, 0);
+    let transactions: Vec<Transaction> = (0..2)
+        .map(|i| Transaction {
+            inputs: vec![Input {
+                box_id: BoxId::from_bytes([i + 1; 32]),
+                spending_proof: SpendingProof::new(Vec::new(), ContextExtension::empty()).unwrap(),
+            }],
+            data_inputs: Vec::new(),
+            output_candidates: (0..=i)
+                .map(|j| {
+                    fixture_box(
+                        [0x02; 33],
+                        1,
+                        1_000_000 + u64::from(i * 2 + j),
+                        i64::from(i * 2 + j),
+                    )
+                    .box_data
+                    .candidate
+                })
+                .collect(),
+        })
+        .collect();
+    let store = handle.store().unwrap();
+    let block = IndexerBlock {
+        height: 1,
+        header_id: BoxId::from_bytes([0x51; 32]),
+        transactions: &transactions,
+    };
+    apply_block(&store, &store.read_meta().unwrap(), &block).unwrap();
+    handle.set_status(IndexerStatus::CaughtUp);
+    let expected_box = hex::encode(
+        handle
+            .box_by_global_index(1)
+            .unwrap()
+            .unwrap()
+            .box_data
+            .box_id()
+            .unwrap()
+            .as_bytes(),
+    );
+    let expected_tx = hex::encode(transaction_id(&transactions[0]).unwrap().as_bytes());
+    let app = build_app(Arc::new(handle));
+    let (status, body) = json_get(app.clone(), "/blockchain/box/range?offset=1&limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([expected_box]));
+    let (status, body) =
+        json_post_empty(app, "/blockchain/transaction/range?offset=1&limit=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!([expected_tx]));
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -284,6 +364,17 @@ impl IndexerQuery for StubIndexer {
     }
     fn txs_by_global_range(&self, _: u64, _: u64) -> Result<Vec<IndexedTxDto>, IndexerReadError> {
         Ok(Vec::new())
+    }
+
+    fn boxes_latest_paged(&self, page: Page) -> Result<Vec<IndexedBoxDto>, IndexerReadError> {
+        Ok(self
+            .boxes
+            .iter()
+            .rev()
+            .skip(page.offset as usize)
+            .take(page.limit as usize)
+            .cloned()
+            .collect())
     }
 
     fn address_balance(&self, _: &TreeHash) -> Result<Option<BalanceDto>, IndexerReadError> {

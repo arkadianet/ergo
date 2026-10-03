@@ -1,0 +1,1 @@
+[{"counter":10,"offset":0,"limit":3,"indices":[9,8,7]},{"counter":10,"offset":2,"limit":3,"indices":[7,6,5]},{"counter":3,"offset":0,"limit":3,"indices":[2,1,0]},{"counter":3,"offset":1,"limit":2,"indices":[1,0]},{"counter":2,"offset":0,"limit":2,"indices":[1,0]},{"counter":2,"offset":1,"limit":1,"indices":[0]},{"counter":2,"offset":0,"limit":0,"indices":[]}]
