@@ -10,6 +10,7 @@ mod emission_contract_mainnet;
 mod mining_reward_mainnet;
 mod santa_avl_verify_corpus;
 mod schnorr_mainnet;
+mod shared_sigma_growth;
 mod sigma_composition;
 mod spending_proof_mainnet;
 mod traced_untraced_parity;

@@ -769,7 +769,7 @@ pub(crate) fn numeric_constant_parts(e: &TypedExpr) -> Option<(ConstPayload, STy
 /// Scala throws `ArithmeticException` on overflow; we return `Err(TyperError)`.
 /// Verdict parity is exact (both sides REJECT on out-of-range input).
 /// Class-tag deviation: ArithmeticException vs TyperError — recorded in
-/// lib.rs § "Known M2 deviations".
+/// compiler-design-ledger.md § "Known M2 deviations".
 pub(crate) fn narrow_numeric_const_to(
     e: &TypedExpr,
     target: &SType,

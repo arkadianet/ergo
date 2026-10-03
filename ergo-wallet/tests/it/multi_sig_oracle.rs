@@ -68,7 +68,7 @@ fn sb_from_json(v: &Value) -> SigmaBoolean {
                 .iter()
                 .map(sb_from_json)
                 .collect();
-            SigmaBoolean::Cand(children)
+            SigmaBoolean::Cand(children.into())
         }
         "Cor" => {
             let children: Vec<SigmaBoolean> = v["children"]
@@ -77,7 +77,7 @@ fn sb_from_json(v: &Value) -> SigmaBoolean {
                 .iter()
                 .map(sb_from_json)
                 .collect();
-            SigmaBoolean::Cor(children)
+            SigmaBoolean::Cor(children.into())
         }
         "Cthreshold" => {
             let k = u16::try_from(v["k"].as_u64().expect("k field missing"))
@@ -88,7 +88,10 @@ fn sb_from_json(v: &Value) -> SigmaBoolean {
                 .iter()
                 .map(sb_from_json)
                 .collect();
-            SigmaBoolean::Cthreshold { k, children }
+            SigmaBoolean::Cthreshold {
+                k,
+                children: children.into(),
+            }
         }
         other => panic!("unknown proposition type: {}", other),
     }

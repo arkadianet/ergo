@@ -2,23 +2,23 @@
 //!
 //! Wires the full pipeline source → bytes → address: parse → bind →
 //! typecheck ([`crate::typecheck_with_network`]) → root coercion → emit
-//! ([`crate::emit`]) → [`build_tree`] → wire write → P2S/P2SH address
+//! ([`fn@crate::emit`]) → `build_tree` → wire write → P2S/P2SH address
 //! construction. Mirrors the node's compile surface,
 //! `ScriptApiRoute.compileSource`
 //! (`ergo/src/main/scala/org/ergoplatform/http/api/ScriptApiRoute.scala:56-67`).
 //!
-//! This module keeps [`graph_build`] and [`compile`] centralized — the pass
+//! This module keeps `graph_build` and [`compile`] centralized — the pass
 //! ordering rationale for the nine-pass `graph_build` pipeline is dense and
 //! interdependent, so it stays attached to that one function rather than
 //! scattered across files. The rest is split across submodules:
-//! - [`assemble`] — [`CompileResult`], [`build_tree`], and constant
+//! - `assemble` — [`CompileResult`], `build_tree`, and constant
 //!   segregation.
-//! - [`v0_gate`] — the v0-header-unserializable-data walker.
-//! - [`lambda_gate`] — the GraphBuilding lambda/application verdict-parity
+//! - `v0_gate` — the v0-header-unserializable-data walker.
+//! - `lambda_gate` — the GraphBuilding lambda/application verdict-parity
 //!   reject gate.
-//! - [`walk`] — `push_children`, the `Payload` child-walker shared by both
+//! - `walk` — `push_children`, the `Payload` child-walker shared by both
 //!   gates (and by a test helper).
-//! - [`cast_fold`] — the direct-constant-cast folding subsystem.
+//! - `cast_fold` — the direct-constant-cast folding subsystem.
 
 use ergo_primitives::writer::VlqWriter;
 use ergo_ser::address::{encode_p2s, encode_p2sh, NetworkPrefix};
@@ -58,13 +58,13 @@ pub(crate) use walk::*;
 /// only difference between the two callers is whether the emitted root carried
 /// `ConstantPlaceholder` nodes for named params.
 pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
-    // GraphBuilding verdict-parity gates (lib.rs D-C5): reject the emitted
+    // GraphBuilding verdict-parity gates (compiler-design-ledger.md D-C5): reject the emitted
     // shapes Scala's full compiler rejects — lambda/application rules first.
     if let Some(e) = graph_building_lambda_reject(&root) {
         return Err(CompileError::Emit(e));
     }
 
-    // Explicit-cast folds, BOTH directions (lib.rs D-C7 cast bullet): fold
+    // Explicit-cast folds, BOTH directions (compiler-design-ledger.md D-C7 cast bullet): fold
     // `Downcast`/`Upcast` of a DIRECT constant (range-checked), while leaving
     // a cast-of-cast CHAIN's outer casts unfolded, exactly like Scala. MUST
     // run BEFORE `crate::fold::fold` below: a direct-constant `Upcast` (e.g.
@@ -238,7 +238,7 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 /// Compile ErgoScript `source` end-to-end: typecheck, lower to opcode IR,
 /// assemble the ErgoTree, serialize, and derive the P2S/P2SH addresses.
 ///
-/// Pipeline: parse → bind → typecheck → root-coerce → emit → [`build_tree`] →
+/// Pipeline: parse → bind → typecheck → root-coerce → emit → `build_tree` →
 /// `write_ergo_tree` → addresses. Mirrors `ScriptApiRoute.compileSource`
 /// (`ScriptApiRoute.scala:56-67`).
 ///
@@ -251,7 +251,7 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///    `VersionContext.withVersions` — never into the tree header.
 /// 2. **Wire header version (axis 2):** fixed at 0 (matching the route's
 ///    `ErgoTree.defaultHeaderWithVersion(0.toByte)` unconditionally). See
-///    [`build_tree`].
+///    `build_tree`.
 /// 3. **Activated script version (axis 3):** the EVALUATOR's
 ///    block-consensus version; a compile-time no-op here — it decides how a
 ///    node executes the tree, not what bytes we produce.
@@ -293,16 +293,16 @@ pub(crate) fn graph_build(root: Expr) -> Result<Expr, CompileError> {
 ///   ([`CompileError::Serializer`], mirroring Scala's
 ///   `SerializerException`).
 /// - Residual `SigmaPropIsProven` in mixed `Bool`/`SigmaProp` logical
-///   contexts: coercion-cancellation (lib.rs D-C3) —
-///   [`crate::isproven`] cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
+///   contexts: coercion-cancellation (compiler-design-ledger.md D-C3) —
+///   `crate::isproven` cancels the `BoolToSigmaProp`/`SigmaPropIsProven`
 ///   round trips before the fold and after the lowering block. The
 ///   surviving-sigma `HasSigmas` `SigmaAnd`/`SigmaOr` reconstruction (a
 ///   residual `0xCF` in some corpus outputs) stays open.
-/// - The GraphBuilding reject-gate family (lib.rs D-C5): bit ops,
+/// - The GraphBuilding reject-gate family (compiler-design-ledger.md D-C5): bit ops,
 ///   zero-arg/non-1-arg lambda applications, SFunc-typed lambda params,
 ///   postfix `size`, out-of-range `getReg` literals, pre-v3 SNumericType
 ///   methods, and the constant-fold overflow check
-///   ([`graph_building_lambda_reject`] below + [`crate::fold`]'s
+///   (`graph_building_lambda_reject` below + `crate::fold`'s
 ///   arithmetic-overflow reject arm + the emit-arm gates).
 ///
 /// # Examples
@@ -383,7 +383,7 @@ fn compile_inner(
     // still inline here, no placeholders yet), so hashing it is byte-equal to
     // Scala's re-inlining step AND cheaper than segregating then substituting
     // back. For a bare-constant root this is the body itself — equivalent. This
-    // is why segregation leaves the P2SH address INVARIANT (lib.rs D-C1/D-C7).
+    // is why segregation leaves the P2SH address INVARIANT (compiler-design-ledger.md D-C1/D-C7).
     let mut pw = VlqWriter::new();
     write_expr(&mut pw, &root, false)?;
     let proposition_bytes = pw.result();
@@ -400,7 +400,7 @@ fn compile_inner(
     write_ergo_tree(&mut w, &ergo_tree)?;
     let tree_bytes = w.result();
 
-    // Post-write self-check (lib.rs D-C6): the bytes about to be used to
+    // Post-write self-check (compiler-design-ledger.md D-C6): the bytes about to be used to
     // derive addresses must round-trip through our own deserializer. A
     // failure means compile() would hand out a P2S address whose script no
     // deserializer accepts — funds sent there would be stranded.
@@ -863,7 +863,7 @@ mod tests {
         }
     }
 
-    // ----- error paths: GraphBuilding parity gates (lib.rs D-C5) -----
+    // ----- error paths: GraphBuilding parity gates (compiler-design-ledger.md D-C5) -----
     // Every oracle fact below: captured 2026-07-07, 3 identical runs,
     // committed as compile_seed.json vectors (except the ACCEPT boundaries
     // that byte-mismatch pending val-inline/pruning — the unused/aliased
@@ -1254,11 +1254,11 @@ mod tests {
         // The P2SH address hashes the constant-INLINED proposition
         // (`d191a304c801`) — segregation-invariant, so it matches regardless
         // of the D-C1 flip. Wherever Scala's IR reshapes the proposition
-        // itself, the P2SH diverges (lib.rs D-C7).
+        // itself, the P2SH diverges (compiler-design-ledger.md D-C7).
         assert_eq!(r.p2sh_address, ORACLE_HGT_P2SH);
     }
 
-    // ----- oracle parity: lowerings/folds (lib.rs D-C6) -----
+    // ----- oracle parity: lowerings/folds (compiler-design-ledger.md D-C6) -----
     // Every oracle fact below: TyperOracle cc/ccs verbs, sigma-state 6.0.2,
     // ORACLE_TREE_VERSION=3, ORACLE_NETWORK=testnet
     // (committed as compile_seed.json vectors).

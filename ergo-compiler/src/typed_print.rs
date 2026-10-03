@@ -17,7 +17,7 @@
 //!   N5 — String fields render as `'text'`; numeric scalars as `@n`; SType
 //!        fields as `#TypeTermString`; MethodRef as `%Owner.name`; node
 //!        sequences as `[n1 n2 …]`; primitive arrays as `<@v1 @v2 …>`;
-//!        Option[SValue] as "None" or the unwrapped node; lambda args as
+//!        `Option[SValue]` as "None" or the unwrapped node; lambda args as
 //!        `[name:#Type …]`.
 
 use ergo_crypto::group_element::{decompress_to_affine_hex, strip_leading_zero_hex};

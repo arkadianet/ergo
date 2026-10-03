@@ -138,15 +138,18 @@ fn registry_with_dht(prop: &SigmaBoolean, secret: Scalar) -> SecretRegistry {
 }
 
 fn cand(children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cand(children)
+    SigmaBoolean::Cand(children.into())
 }
 
 fn cor(children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cor(children)
+    SigmaBoolean::Cor(children.into())
 }
 
 fn cthreshold(k: u16, children: Vec<SigmaBoolean>) -> SigmaBoolean {
-    SigmaBoolean::Cthreshold { k, children }
+    SigmaBoolean::Cthreshold {
+        k,
+        children: children.into(),
+    }
 }
 
 // ----- happy path -----

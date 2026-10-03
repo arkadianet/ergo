@@ -1416,7 +1416,7 @@ impl Mempool {
     /// is not removed in the same op (the cap guards against an O(family) spike),
     /// but it is not abandoned either: the removal returns the truncation
     /// frontier, which is queued in `pending_orphan_eviction` and swept by
-    /// [`Self::drain_orphan_evictions`] under this pass's cost budget, carrying
+    /// `Self::drain_orphan_evictions` under this pass's cost budget, carrying
     /// the deeper frontier forward until the whole invalid subtree is gone. Only
     /// evicting cascades feed that queue, so a transient `UnresolvedInput`
     /// (demoted-parent) tx is never swept.
@@ -1741,7 +1741,7 @@ impl Mempool {
     ///
     /// Suspects are an ADVISORY hint computed against a possibly-stale build
     /// snapshot, so every id is RE-VALIDATED against the live `tip_ctx` here
-    /// (via the shared [`Self::recheck_one`]): a suspect that is valid at the
+    /// (via the shared `Self::recheck_one`): a suspect that is valid at the
     /// current tip is kept; only still-hard-invalid ones are evicted, with the
     /// exact eviction/debit/blacklist semantics of the full pass. Ids no longer
     /// pooled (confirmed/already-evicted) are skipped. Bounded by the same

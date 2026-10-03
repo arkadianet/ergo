@@ -34,46 +34,63 @@ fn jit_cost(value: u64) -> JitCost {
 /// * `Cthreshold` adds the polynomial parse and per-child polynomial
 ///   evaluation cost on top of the conjunction sum.
 pub fn estimate_crypto_cost(prop: &SigmaBoolean) -> JitCost {
-    match prop {
-        SigmaBoolean::TrivialProp(_) => jit_cost(0),
-        SigmaBoolean::ProveDlog(_) => jit_cost(
-            PARSE_CHALLENGE_DLOG
-                .saturating_add(COMPUTE_COMMITMENTS_SCHNORR)
-                .saturating_add(TO_BYTES_SCHNORR),
-        ),
-        SigmaBoolean::ProveDHTuple { .. } => jit_cost(
-            PARSE_CHALLENGE_DHT
-                .saturating_add(COMPUTE_COMMITMENTS_DHT)
-                .saturating_add(TO_BYTES_DHT),
-        ),
-        SigmaBoolean::Cand(children) | SigmaBoolean::Cor(children) => {
-            let children_cost = children.iter().fold(0u64, |cost, child| {
-                cost.saturating_add(estimate_crypto_cost(child).value())
-            });
-            jit_cost(TO_BYTES_CONJUNCTION.saturating_add(children_cost))
+    // Cache each stored node, retaining multiplicity when a parent sums its
+    // children. Repeated references cost exactly as the expanded tree would,
+    // while estimation takes time proportional to the stored graph.
+    let mut costs = std::collections::HashMap::<*const SigmaBoolean, u64>::new();
+    let mut pending = vec![(prop, false)];
+    while let Some((node, children_ready)) = pending.pop() {
+        let key = node as *const SigmaBoolean;
+        if costs.contains_key(&key) {
+            continue;
         }
-        SigmaBoolean::Cthreshold { k, children } => {
-            let n_children = u64::try_from(children.len()).unwrap_or(u64::MAX);
-            let n_coefs = n_children.saturating_sub(u64::from(*k));
-            let children_cost = children.iter().fold(0u64, |cost, child| {
-                cost.saturating_add(estimate_crypto_cost(child).value())
-            });
-            // At k == n, Scala charges only the polynomial base costs.
-            // ParsePolynomial: PerItemCost(base=10, perChunk=10, chunk=1).cost(nCoefs)
-            let parse_cost = PARSE_POLYNOMIAL_BASE
-                .saturating_add(PARSE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs));
-            // EvaluatePolynomial: PerItemCost(base=3, perChunk=3, chunk=1).cost(nCoefs) * nChildren
-            let eval_per_child = EVALUATE_POLYNOMIAL_BASE
-                .saturating_add(EVALUATE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs));
-            let eval_cost = eval_per_child.saturating_mul(n_children);
-            jit_cost(
-                parse_cost
-                    .saturating_add(eval_cost)
+        let children = match node {
+            SigmaBoolean::Cand(children)
+            | SigmaBoolean::Cor(children)
+            | SigmaBoolean::Cthreshold { children, .. } => Some(children),
+            _ => None,
+        };
+        if !children_ready {
+            if let Some(children) = children {
+                pending.push((node, true));
+                pending.extend(children.iter().rev().map(|child| (child, false)));
+                continue;
+            }
+        }
+        let children_cost = children.map_or(0, |children| {
+            children.iter().fold(0u64, |sum, child| {
+                sum.saturating_add(costs[&(child as *const SigmaBoolean)])
+            })
+        });
+        let cost = match node {
+            SigmaBoolean::TrivialProp(_) => 0,
+            SigmaBoolean::ProveDlog(_) => {
+                PARSE_CHALLENGE_DLOG + COMPUTE_COMMITMENTS_SCHNORR + TO_BYTES_SCHNORR
+            }
+            SigmaBoolean::ProveDHTuple { .. } => {
+                PARSE_CHALLENGE_DHT + COMPUTE_COMMITMENTS_DHT + TO_BYTES_DHT
+            }
+            SigmaBoolean::Cand(_) | SigmaBoolean::Cor(_) => {
+                TO_BYTES_CONJUNCTION.saturating_add(children_cost)
+            }
+            SigmaBoolean::Cthreshold { k, children } => {
+                let n = u64::try_from(children.len()).unwrap_or(u64::MAX);
+                let n_coefs = n.saturating_sub(u64::from(*k));
+                let parse = PARSE_POLYNOMIAL_BASE
+                    .saturating_add(PARSE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs));
+                let eval = EVALUATE_POLYNOMIAL_BASE
+                    .saturating_add(EVALUATE_POLYNOMIAL_PER_CHUNK.saturating_mul(n_coefs))
+                    .saturating_mul(n);
+                parse
+                    .saturating_add(eval)
                     .saturating_add(TO_BYTES_CONJUNCTION)
-                    .saturating_add(children_cost),
-            )
-        }
+                    .saturating_add(children_cost)
+            }
+        };
+        // Preserve the existing per-node JIT saturation.
+        costs.insert(key, jit_cost(cost).value());
     }
+    jit_cost(costs[&(prop as *const SigmaBoolean)])
 }
 
 #[cfg(test)]
@@ -125,14 +142,14 @@ mod tests {
 
     #[test]
     fn and_composition_cost() {
-        let prop = SigmaBoolean::Cand(vec![dlog(), dlog()]);
+        let prop = SigmaBoolean::Cand(vec![dlog(), dlog()].into());
         // TO_BYTES_CONJUNCTION(15) + 2 * ProveDlog(3980) = 7975
         assert_eq!(estimate_crypto_cost(&prop), JitCost::from_jit(7975));
     }
 
     #[test]
     fn or_composition_cost() {
-        let prop = SigmaBoolean::Cor(vec![dlog(), dht()]);
+        let prop = SigmaBoolean::Cor(vec![dlog(), dht()].into());
         // TO_BYTES_CONJUNCTION(15) + ProveDlog(3980) + ProveDHT(7140) = 11135
         assert_eq!(estimate_crypto_cost(&prop), JitCost::from_jit(11135));
     }
@@ -146,7 +163,7 @@ mod tests {
         // total = 20 + 18 + 15 + 11940 = 11993
         let prop = SigmaBoolean::Cthreshold {
             k: 2,
-            children: vec![dlog(), dlog(), dlog()],
+            children: vec![dlog(), dlog(), dlog()].into(),
         };
         assert_eq!(estimate_crypto_cost(&prop), JitCost::from_jit(11993));
     }

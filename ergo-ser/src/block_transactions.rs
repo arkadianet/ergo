@@ -126,7 +126,7 @@ pub fn read_block_transactions(r: &mut VlqReader) -> Result<BlockTransactions, R
 /// node has already validated, applied and stored can only make its own history
 /// unreadable.
 ///
-/// This is not hypothetical: mainnet block 545,684 (tx[1], output[0]) holds the
+/// This is not hypothetical: mainnet block 545,684 (`tx[1]`, `output[0]`) holds the
 /// size-delimited ErgoTree `cd07021a8e6f59fd4a`, whose header byte claims tree
 /// version 5. Scala accepted it because at that height the activated script
 /// version was below `VersionContext.JitActivationVersion`, where

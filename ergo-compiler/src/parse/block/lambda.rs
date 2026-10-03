@@ -176,6 +176,7 @@ pub(crate) fn stable_id(c: &mut Cursor) -> Result<Expr, ParseError> {
             field: seg.text(c.src).to_string(),
             pos: seg.start,
         };
+        check_expr_depth(&acc)?;
     }
     Ok(acc)
 }
@@ -385,6 +386,7 @@ pub(crate) fn apply_suffix(f: Expr, suffixes: Vec<Suffix>) -> Result<Expr, Parse
                 }
             }
         };
+        check_expr_depth(&acc)?;
     }
     Ok(acc)
 }
