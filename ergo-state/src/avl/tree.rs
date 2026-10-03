@@ -1229,7 +1229,9 @@ impl AvlTree {
                         ..
                     } = left_node
                     {
-                        let old_value = left_value.clone();
+                        // The minimum of the right subtree is the deleted
+                        // key. The left leaf is its surviving predecessor.
+                        let old_value = self.find_min_value(right);
                         let (new_right, new_right_label) =
                             self.change_min_key_value(right, &left_key, &left_value);
                         // Same rationale: `id` is the internal being spliced
@@ -2085,6 +2087,33 @@ mod tests {
         let oracle = oracle_tree();
         let mut ours = AvlTree::new();
         assert_eq!(our_digest(&mut ours), oracle_digest(&oracle));
+    }
+
+    #[test]
+    fn remove_separator_returns_deleted_value_and_preserves_predecessor() {
+        for first in [0x10, 0x20] {
+            let mut tree = AvlTree::new();
+            let entries = [
+                ([0x10; 32], vec![1]),
+                ([0x20; 32], vec![2]),
+                ([0x30; 32], vec![3]),
+            ];
+            let mut oracle = oracle_tree();
+            for (key, value) in &entries {
+                tree.insert(*key, value.clone());
+                oracle_insert(&mut oracle, key, value);
+            }
+            let key = [first; 32];
+            assert_eq!(tree.remove(&key), Some(vec![first / 0x10]));
+            oracle_remove(&mut oracle, &key);
+            assert_eq!(our_digest(&mut tree), oracle_digest(&oracle));
+            assert_eq!(tree.lookup(&key), None);
+            for (other, value) in &entries {
+                if *other != key {
+                    assert_eq!(tree.lookup(other), Some(value.clone()));
+                }
+            }
+        }
     }
 
     #[test]

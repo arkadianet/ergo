@@ -270,6 +270,11 @@ impl StateStore {
                 what: "prove_with_db: store is not in Dense mode",
             });
         }
+        if m < 1 {
+            return Err(StateError::InvalidPrecondition {
+                what: "prove_with_db: m must be >= 1",
+            });
+        }
         if k < 1 {
             return Err(StateError::InvalidPrecondition {
                 what: "prove_with_db: k must be >= 1",
