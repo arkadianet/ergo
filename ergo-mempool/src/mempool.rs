@@ -16,7 +16,7 @@ use ergo_validation::{TxValidationCtx, TxValidationRules};
 use crate::admission::{
     self, AdmissionOutcome, CheckOutcome, RejectReason, Validated, ValidationErr, Validator,
 };
-use crate::budget::CostBudgets;
+use crate::budget::{BudgetVerdict, CostBudgets};
 use crate::invalidation::InvalidationCache;
 use crate::overlay::{CommittedOnly, PoolUtxoOverlay};
 use crate::pool::{Entry, FamilyBounds, OrderedPool};
@@ -51,6 +51,11 @@ struct PackageMember {
     size_bytes: u32,
     cost: u64,
     source: TxSource,
+}
+
+enum PackageValidationError {
+    Budget(RejectReason),
+    Validation(ValidationErr),
 }
 
 /// Top-level mempool handle. Bundles all the sub-components so callers
@@ -310,7 +315,7 @@ impl Mempool {
             return (outcome, Vec::new());
         }
         let mut held_out: Option<admission::HeldCandidate> = None;
-        let (outcome, mut actions) = {
+        let (mut outcome, mut actions) = {
             let mut cx = admission::AdmissionCtx {
                 tip_ctx,
                 config: &self.config,
@@ -332,19 +337,31 @@ impl Mempool {
         // Emit the PARENT admission's tracing/observer BEFORE any staging
         // side effect, so resolution's own per-child tracing (emitted inside
         // `resolve_orphans`) is not double-counted against this outcome.
-        emit_tracing_for_admission(
-            &outcome,
-            &actions,
-            &source,
-            self.pool.len(),
-            self.pool.total_bytes(),
-            self.observer.as_deref(),
-            self.tip,
-        );
+        // A package may turn the initial unresolved-input decision into an
+        // admission. Defer that one verdict; successful packages emit once
+        // per admitted member inside try_package.
+        let defer_verdict = self.config.staging_enabled
+            && matches!(
+                &outcome,
+                AdmissionOutcome::Rejected {
+                    reason: RejectReason::UnresolvedInput
+                }
+            );
+        if !defer_verdict {
+            emit_tracing_for_admission(
+                &outcome,
+                &actions,
+                &source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
+        }
 
         // ── Staging side effects — `process` ONLY (never `check`) ────────
-        // Staging never gossips; the only `BroadcastInv` here come from
-        // `resolve_orphans` promoting a child through the real commit path.
+        // Holding never gossips. Orphan promotion and package admission
+        // broadcast only after their real pool commit.
         if self.config.staging_enabled {
             match &outcome {
                 AdmissionOutcome::Admitted { tx_id, .. } => {
@@ -370,7 +387,22 @@ impl Mempool {
                     // (P4). Only if that isn't applicable do we fall back to
                     // holding the child as a plain orphan (P2).
                     match self.try_package(tx_bytes, &source, now, tip_ctx, validator) {
-                        Some(pkg_actions) => actions.extend(pkg_actions),
+                        Some((package_outcome, pkg_actions)) => {
+                            if matches!(
+                                &package_outcome,
+                                AdmissionOutcome::Rejected {
+                                    reason: RejectReason::PeerBudgetExhausted
+                                        | RejectReason::GlobalBudgetExhausted
+                                }
+                            ) {
+                                // The package was deferred for resources,
+                                // not for genuinely unknown ancestry. Allow
+                                // a later budget-reset retry to reach it.
+                                self.unresolved.remove(tx_bytes);
+                            }
+                            outcome = package_outcome;
+                            actions.extend(pkg_actions);
+                        }
                         None => self.stage_orphan(tx_bytes, &source, now, tip_ctx, validator),
                     }
                 }
@@ -395,6 +427,17 @@ impl Mempool {
                 }
                 _ => {}
             }
+        }
+        if defer_verdict && matches!(&outcome, AdmissionOutcome::Rejected { .. }) {
+            emit_tracing_for_admission(
+                &outcome,
+                &actions,
+                &source,
+                self.pool.len(),
+                self.pool.total_bytes(),
+                self.observer.as_deref(),
+                self.tip,
+            );
         }
         (outcome, actions)
     }
@@ -659,7 +702,7 @@ impl Mempool {
     /// * `None` — not a package situation (no held ancestor, or a deeper
     ///   non-held ancestor is still missing). The caller falls back to holding
     ///   the child as a plain orphan.
-    /// * `Some(actions)` — the package path handled the child. Either the
+    /// * `Some((outcome, actions))` — the package path handled the child. Either the
     ///   package was admitted (actions carry the members' `BroadcastInv` +
     ///   any incumbent `RevokeBroadcast`, plus cascade promotions), or it was
     ///   rejected and the child was itself held for a future descendant
@@ -672,7 +715,8 @@ impl Mempool {
         now: std::time::Instant,
         tip_ctx: &admission::TipContext<'_>,
         validator: &V,
-    ) -> Option<Vec<MempoolAction>> {
+    ) -> Option<(AdmissionOutcome, Vec<MempoolAction>)> {
+        let rejected = |reason| (AdmissionOutcome::Rejected { reason }, Vec::new());
         let s = validator.peek_structure(c_bytes).ok()?;
         // Walk up to the HELD staged ancestors, ancestors-first. `None` if a
         // missing input has no held creator (a plain orphan) or the walk
@@ -749,9 +793,14 @@ impl Mempool {
                         }
                         // Stale/invalid at the new tip → evict it and abort: the
                         // child's ancestor chain is broken.
-                        Err(_) => {
+                        Err(PackageValidationError::Budget(reason)) => {
+                            // Budget exhaustion is temporary, not evidence
+                            // that the held ancestor became invalid.
+                            return Some(rejected(reason));
+                        }
+                        Err(PackageValidationError::Validation(_)) => {
                             self.staging.remove(hid);
-                            return Some(Vec::new());
+                            return Some(rejected(RejectReason::UnresolvedInput));
                         }
                     }
                 }
@@ -773,11 +822,14 @@ impl Mempool {
                 Ok(v) => v,
                 // A deeper ancestor is still genuinely missing → let the caller
                 // hold the child as a plain orphan instead.
-                Err(ValidationErr::UnresolvedInput) | Err(ValidationErr::UnresolvedDataInput) => {
-                    return None
-                }
+                Err(PackageValidationError::Validation(
+                    ValidationErr::UnresolvedInput | ValidationErr::UnresolvedDataInput,
+                )) => return None,
                 // Hard-invalid (or other) → drop the child; the held ancestors stay.
-                Err(_) => return Some(Vec::new()),
+                Err(PackageValidationError::Validation(error)) => {
+                    return Some(rejected(admission::classify(&error, tip_ctx).0));
+                }
+                Err(PackageValidationError::Budget(reason)) => return Some(rejected(reason)),
             };
         let c_weight = self.weight_fn.compute(WeightInputs {
             tx_id: &c_validated.tx_id,
@@ -833,6 +885,7 @@ impl Mempool {
                 // these go out only because the package really entered the
                 // pool via the atomic commit).
                 for (tx_id, fee, size, weight) in &member_meta {
+                    let member_action_start = actions.len();
                     actions.push(MempoolAction::BroadcastInv {
                         tx_id: *tx_id,
                         // Exclude the peer that sent the child (which triggered
@@ -848,9 +901,19 @@ impl Mempool {
                             size: *size,
                         },
                     });
-                    if let Some(obs) = self.observer.as_deref() {
-                        obs.on_admitted(*tx_id, *fee, *size);
-                    }
+                    emit_tracing_for_admission(
+                        &AdmissionOutcome::Admitted {
+                            tx_id: *tx_id,
+                            fee: *fee,
+                            size: *size,
+                        },
+                        &actions[member_action_start..],
+                        source,
+                        self.pool.len(),
+                        self.pool.total_bytes(),
+                        self.observer.as_deref(),
+                        self.tip,
+                    );
                 }
                 emit_tracing_for_pool_actions(&actions, self.observer.as_deref(), self.tip);
                 // Cascade: the newly-pooled members' outputs may resolve other
@@ -862,7 +925,14 @@ impl Mempool {
                     .collect();
                 let cascade = self.resolve_orphans(member_outputs, now, tip_ctx, validator);
                 actions.extend(cascade);
-                Some(actions)
+                Some((
+                    AdmissionOutcome::Admitted {
+                        tx_id: c_validated.tx_id,
+                        fee: c_validated.fee,
+                        size: c_validated.size_bytes,
+                    },
+                    actions,
+                ))
             }
             None => {
                 // Package rejected. The child validated, so hold IT (so a future
@@ -883,7 +953,7 @@ impl Mempool {
                     now,
                     tip_ctx.tip,
                 );
-                Some(Vec::new())
+                Some(rejected(RejectReason::UnresolvedInput))
             }
         }
     }
@@ -959,9 +1029,26 @@ impl Mempool {
         source: &TxSource,
         tip_ctx: &admission::TipContext<'_>,
         validator: &V,
-    ) -> Result<Validated, ValidationErr> {
+    ) -> Result<Validated, PackageValidationError> {
+        // Every new evaluation must pass its own source's remaining budget,
+        // including stale held ancestors. Cached same-tip facts spend no work.
+        if !matches!(source, TxSource::DemotedFromBlock) {
+            match self.budgets.pre_admission_check(source.budget_source()) {
+                BudgetVerdict::Ok => {}
+                BudgetVerdict::PeerExhausted => {
+                    return Err(PackageValidationError::Budget(
+                        RejectReason::PeerBudgetExhausted,
+                    ))
+                }
+                BudgetVerdict::GlobalExhausted => {
+                    return Err(PackageValidationError::Budget(
+                        RejectReason::GlobalBudgetExhausted,
+                    ))
+                }
+            }
+        }
         let cap = JitCost::from_block_cost(self.config.max_tx_cost)
-            .map_err(|_| ValidationErr::CostExceeded)?;
+            .map_err(|_| PackageValidationError::Validation(ValidationErr::CostExceeded))?;
         let mut cost = CostAccumulator::new(cap);
         let overlay_view = PoolUtxoOverlay::new(tip_ctx.utxo, overlay);
         let committed_view = CommittedOnly::new(tip_ctx.utxo);
@@ -985,7 +1072,7 @@ impl Mempool {
         if !matches!(source, TxSource::DemotedFromBlock) {
             self.budgets.charge(source.budget_source(), cost.consumed());
         }
-        res
+        res.map_err(PackageValidationError::Validation)
     }
 
     /// Decide + atomically commit a package (members ancestors-first, each
