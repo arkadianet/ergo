@@ -1741,7 +1741,12 @@ mod tests {
             include_bytes!("../fuzz/corpus/ergo_box_candidate/nightly-2026-10-02-boolean-depth");
         let mut reader = VlqReader::new(seed).with_activated_script_version(3);
         let parsed = read_ergo_box_candidate(&mut reader).unwrap();
-        let candidate = ErgoBoxCandidate::try_from_raw_parts(
+        // This test-only unchecked carrier deliberately preserves received
+        // fixture bytes. The checked constructor now correctly caches canonical
+        // serialization, which expands this seed before the intended first read.
+        // Production callers must honor from_trusted_raw_parts' canonical-byte
+        // contract; this exception only frames the existing captured input.
+        let candidate = ErgoBoxCandidate::from_trusted_raw_parts(
             parsed.value,
             parsed.ergo_tree().clone(),
             parsed.ergo_tree_bytes().to_vec(),
@@ -1749,8 +1754,7 @@ mod tests {
             parsed.tokens.clone(),
             parsed.additional_registers().clone(),
             parsed.register_bytes().to_vec(),
-        )
-        .unwrap();
+        );
         let mut writer = VlqWriter::new();
         write_ergo_box_candidate(&mut writer, &candidate).unwrap();
         // The fuzz seed includes a suffix that the candidate reader ignores.

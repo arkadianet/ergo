@@ -70,6 +70,20 @@ pub struct ErgoBoxCandidate {
     /// Non-mandatory registers R4-R9 (densely packed from R4 upward).
     additional_registers: AdditionalRegisters,
     register_bytes: Vec<u8>,
+    // Present only for a parsed whole box whose received identity differs from
+    // canonical serialization. Include it in equality: identity-distinct
+    // received candidates must not alias in equality-keyed caller caches.
+    received_box_identity: Option<Box<ReceivedBoxIdentity>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ReceivedBoxIdentity {
+    id: Digest32,
+    value: u64,
+    creation_height: u32,
+    tokens: Vec<Token>,
+    transaction_id: ModifierId,
+    index: u16,
 }
 
 impl ErgoBoxCandidate {
@@ -96,6 +110,7 @@ impl ErgoBoxCandidate {
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         })
     }
 
@@ -135,6 +150,7 @@ impl ErgoBoxCandidate {
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         }
     }
 
@@ -145,16 +161,16 @@ impl ErgoBoxCandidate {
     /// Returns `WriteError::InvalidData` on any mismatch — including
     /// re-parse failure, trailing bytes after parse, or a parse
     /// success that does not equal the supplied parsed value. On
-    /// success the candidate carries the supplied raw bytes verbatim
-    /// (so non-canonical Scala-emitted forms are preserved for
-    /// `box_id` byte-identity).
+    /// success the candidate retains the received tree bytes for
+    /// `propositionBytes`, while writers use canonical tree and register
+    /// serialization. Sealing this candidate creates a new canonical box;
+    /// use a whole-box reader to retain a received whole box's cached ID.
     ///
-    /// Cost: one re-parse of the tree and registers per call. Use
-    /// this on construction paths where the caller cannot prove the
-    /// invariant by construction; prefer the unchecked
-    /// [`ErgoBoxCandidate::from_trusted_raw_parts`] in hot paths
-    /// where the bytes/parsed pair is guaranteed (e.g. `read_ergo_box*`
-    /// itself, which produces both atomically from the same reader).
+    /// Cost: one re-parse and canonical serialization of the tree and registers
+    /// per call. Prefer this constructor when the invariant is not guaranteed;
+    /// the unchecked [`ErgoBoxCandidate::from_trusted_raw_parts`] requires
+    /// canonical bytes. Internal readers produce the parsed and cached fields
+    /// atomically from the same reader.
     pub fn try_from_raw_parts(
         value: u64,
         ergo_tree: ErgoTree,
@@ -214,15 +230,20 @@ impl ErgoBoxCandidate {
             ));
         }
 
+        let canonical_tree_bytes = canonical_tree_bytes(&ergo_tree, &ergo_tree_bytes);
+        let mut writer = VlqWriter::new();
+        write_registers(&mut writer, &additional_registers)?;
+        let register_bytes = writer.result();
         Ok(Self {
             value,
             ergo_tree,
             ergo_tree_bytes,
-            canonical_tree_bytes: None,
+            canonical_tree_bytes,
             creation_height,
             tokens,
             additional_registers,
             register_bytes,
+            received_box_identity: None,
         })
     }
 
@@ -239,8 +260,9 @@ impl ErgoBoxCandidate {
         &self.ergo_tree_bytes
     }
 
-    /// The `ErgoTree` bytes a box is written with, and so the bytes its id and
-    /// its transaction's id commit to.
+    /// The `ErgoTree` bytes emitted by the candidate writers. Newly sealed
+    /// boxes and transaction serialization commit to these bytes. An unchanged
+    /// parsed whole box can retain a different received ID; see [`ErgoBox::box_id`].
     ///
     /// Scala writes a box's tree back from the parsed structure
     /// (`ErgoBoxCandidate.serializeBodyWithIndexedDigests` calls
@@ -298,6 +320,7 @@ impl ErgoBoxCandidate {
         }
         self.additional_registers = registers;
         self.register_bytes = bytes;
+        self.received_box_identity = None;
         Ok(())
     }
 
@@ -326,13 +349,55 @@ pub struct ErgoBox {
 }
 
 impl ErgoBox {
-    /// Compute the canonical `box_id` — `Blake2b256` of the box's
-    /// serialized wire form (candidate body, then the 32-byte
-    /// `transaction_id`, then the VLQ-`u16` `index`). See
-    /// [`box_id_with`] for an allocation-free scratch variant.
+    /// Seal a candidate as a new box, using its canonical serialization for ID.
+    /// This clears received whole-box identity even when resealing a clone with
+    /// the same transaction ID and index, matching Scala's new-box constructor.
+    pub fn new(mut candidate: ErgoBoxCandidate, transaction_id: ModifierId, index: u16) -> Self {
+        candidate.received_box_identity = None;
+        Self {
+            candidate,
+            transaction_id,
+            index,
+        }
+    }
+
+    /// The box's ID. An unchanged parsed whole box hashes its received bytes,
+    /// matching Scala's cached `ErgoBox.bytes`; a newly sealed or changed box
+    /// hashes canonical serialization. These identities can differ for accepted
+    /// non-canonical encodings. Use [`Self::new`] when sealing a candidate.
     pub fn box_id(&self) -> Result<Digest32, WriteError> {
+        if let Some(id) = self.received_box_id() {
+            return Ok(id);
+        }
         let bytes = serialize_ergo_box(self)?;
         Ok(blake2b256(&bytes))
+    }
+
+    fn received_box_id(&self) -> Option<Digest32> {
+        let original = self.candidate.received_box_identity.as_ref()?;
+        (self.candidate.value == original.value
+            && self.candidate.creation_height == original.creation_height
+            && self.candidate.tokens == original.tokens
+            && self.transaction_id == original.transaction_id
+            && self.index == original.index)
+            .then_some(original.id)
+    }
+
+    fn remember_received_bytes(&mut self, bytes: &[u8]) {
+        let id = blake2b256(bytes);
+        // Canonical boxes need no metadata; their existing structural equality
+        // and cheap candidate representation remain unchanged.
+        if serialize_ergo_box(self).is_ok_and(|canonical| blake2b256(&canonical) == id) {
+            return;
+        }
+        self.candidate.received_box_identity = Some(Box::new(ReceivedBoxIdentity {
+            id,
+            value: self.candidate.value,
+            creation_height: self.candidate.creation_height,
+            tokens: self.candidate.tokens.clone(),
+            transaction_id: self.transaction_id,
+            index: self.index,
+        }));
     }
 }
 
