@@ -15,6 +15,7 @@ use redb::{Database, ReadableTableMetadata, WriteTransaction};
 /// cannot suppress each other's live wallet writes.
 #[derive(Debug, Default)]
 pub struct RescanControl {
+    lifecycle: parking_lot::Mutex<()>,
     generation: AtomicU64,
     active: AtomicU64,
     pub from_height: std::sync::atomic::AtomicU32,
@@ -27,7 +28,21 @@ impl RescanControl {
     pub fn in_progress(&self) -> bool {
         self.active.load(Ordering::SeqCst) != 0
     }
+    #[cfg(test)]
     pub(crate) fn admit(self: &std::sync::Arc<Self>) -> Option<RescanIdentity> {
+        self.admit_inner(None)
+    }
+    pub(crate) fn admit_rescan(
+        self: &std::sync::Arc<Self>,
+        from_height: u32,
+    ) -> Option<RescanIdentity> {
+        self.admit_inner(Some(from_height))
+    }
+    fn admit_inner(
+        self: &std::sync::Arc<Self>,
+        from_height: Option<u32>,
+    ) -> Option<RescanIdentity> {
+        let _lifecycle = self.lifecycle.lock();
         if self.stopping.load(Ordering::SeqCst) {
             return None;
         }
@@ -40,16 +55,24 @@ impl RescanControl {
             .compare_exchange(0, id, Ordering::SeqCst, Ordering::SeqCst)
             .ok()?;
         if self.stopping.load(Ordering::SeqCst) {
-            self.cancel();
+            self.active.store(0, Ordering::SeqCst);
             return None;
         }
+        self.from_height
+            .store(from_height.unwrap_or(0), Ordering::SeqCst);
+        self.rebuilding
+            .store(from_height == Some(0), Ordering::SeqCst);
         Some(RescanIdentity {
             id,
             control: self.clone(),
         })
     }
     pub(crate) fn cancel(&self) -> bool {
-        self.active.swap(0, Ordering::SeqCst) != 0
+        let _lifecycle = self.lifecycle.lock();
+        let cancelled = self.active.swap(0, Ordering::SeqCst) != 0;
+        self.from_height.store(0, Ordering::SeqCst);
+        self.rebuilding.store(false, Ordering::SeqCst);
+        cancelled
     }
     pub(crate) fn stop(&self) {
         self.stopping.store(true, Ordering::SeqCst);
@@ -107,10 +130,17 @@ impl RescanIdentity {
         self.control.active.load(Ordering::SeqCst) == self.id
     }
     pub(crate) fn release(&self) -> bool {
-        self.control
+        let _lifecycle = self.control.lifecycle.lock();
+        let released = self
+            .control
             .active
             .compare_exchange(self.id, 0, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+            .is_ok();
+        if released {
+            self.control.from_height.store(0, Ordering::SeqCst);
+            self.control.rebuilding.store(false, Ordering::SeqCst);
+        }
+        released
     }
 }
 
