@@ -163,7 +163,7 @@ mod tests {
     /// Native read-table fixture isolates the indexer's branch ownership. These
     /// synthetic headers/transactions are not a consensus acceptance oracle.
     #[test]
-    fn native_forward_catchup_waits_until_applied_tip_joins_header_branch() {
+    fn native_catchup_uses_applied_branch_through_header_fork_and_state_reorg() {
         use ergo_indexer::{
             apply_block, IndexerBlock, IndexerHandle, IndexerMeta, IndexerPoll, IndexerStore,
             IndexerTask,

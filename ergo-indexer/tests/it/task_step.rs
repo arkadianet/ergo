@@ -730,11 +730,11 @@ async fn zero_idle_and_persistent_races_wait_between_polls_and_cancel_promptly()
     }
 }
 
-/// Bodies on a winning header fork are not applied State while its full tip
-/// still belongs to the old branch. Synthetic blocks exercise index ownership,
+/// Separately observed applied-chain heights can disagree with the captured
+/// tip during a State commit. Synthetic blocks exercise index ownership,
 /// not consensus acceptance.
 #[test]
-fn forward_catchup_below_fork_point_waits_for_applied_branch() {
+fn forward_catchup_rejects_an_inconsistent_applied_tip_anchor() {
     let (handle, _tmp) = open_handle();
     let common = genesis_block(Digest32::from_bytes([1; 32]));
     apply_via_handle(&handle, &common);
@@ -768,7 +768,7 @@ fn forward_catchup_below_fork_point_waits_for_applied_branch() {
 }
 
 #[test]
-fn forward_batch_aborts_when_applied_anchor_leaves_header_chain() {
+fn forward_batch_aborts_when_captured_applied_anchor_changes() {
     let (handle, _tmp) = open_handle();
     let common = genesis_block(Digest32::from_bytes([1; 32]));
     apply_via_handle(&handle, &common);
