@@ -313,6 +313,17 @@ impl SecretStorage {
         Self::find_secret_file(&self.secret_dir).is_ok()
     }
 
+    fn require_uninitialized(&self) -> Result<(), WalletError> {
+        if self.unlocked.is_some() || self.cached_secret_file.is_some() {
+            return Err(WalletError::WalletAlreadyInitialized);
+        }
+        match Self::find_secret_file(&self.secret_dir) {
+            Err(WalletError::WalletUninitialized) => Ok(()),
+            Ok(_) => Err(WalletError::WalletAlreadyInitialized),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Scala-parity directory scan rule per
     /// `JsonSecretStorage.scala:133-144`:
     /// - If exactly one file in `secret_dir`, load it regardless of
@@ -320,13 +331,18 @@ impl SecretStorage {
     /// - If multiple files, filter to `.json` and load the first match.
     /// - If zero files, return an error.
     pub fn find_secret_file(secret_dir: &Path) -> Result<PathBuf, WalletError> {
-        if !secret_dir.exists() {
+        if !secret_dir
+            .try_exists()
+            .map_err(|e| WalletError::SecretFile(format!("inspect {secret_dir:?}: {e}")))?
+        {
             return Err(WalletError::WalletUninitialized);
         }
         let entries: Vec<PathBuf> = std::fs::read_dir(secret_dir)
             .map_err(|e| WalletError::SecretFile(format!("read_dir {secret_dir:?}: {e}")))?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WalletError::SecretFile(format!("read_dir entry {secret_dir:?}: {e}")))?
+            .into_iter()
             .filter(|p| p.is_file())
             .filter(|p| {
                 !p.file_name()
@@ -353,6 +369,9 @@ impl SecretStorage {
     /// is what gets encrypted). Creates `secret_dir` if it doesn't
     /// exist; writes `<uuid>.json` containing the encrypted BIP39
     /// SEED (NOT the phrase — Scala parity).
+    /// Requires uninitialized storage; existing on-disk, cached, or unlocked
+    /// state is never replaced. Callers must exclusively own this directory
+    /// while initializing; this handle does not provide a cross-process lock.
     ///
     /// Post-conditions:
     /// - Exactly one file in `secret_dir`.
@@ -367,6 +386,7 @@ impl SecretStorage {
         password: &str,
         mnemonic_pass: &str,
     ) -> Result<String, WalletError> {
+        self.require_uninitialized()?;
         let mnemonic = crate::mnemonic::Mnemonic::generate(strength)?;
         let phrase = zeroize::Zeroizing::new(mnemonic.phrase());
         let seed = mnemonic.to_seed(mnemonic_pass);
@@ -380,6 +400,7 @@ impl SecretStorage {
     /// BIP39 passphrase is mixed into the seed here and discarded —
     /// you don't need it at unlock time because the seed is what
     /// gets encrypted.
+    /// Requires uninitialized storage under the same ownership contract as init.
     pub fn restore(
         &mut self,
         mnemonic_phrase: &str,
@@ -387,6 +408,7 @@ impl SecretStorage {
         password: &str,
         use_pre_1627: bool,
     ) -> Result<(), WalletError> {
+        self.require_uninitialized()?;
         let mnemonic = crate::mnemonic::Mnemonic::import(mnemonic_phrase)?;
         let seed = mnemonic.to_seed(mnemonic_pass);
         self.persist_seed(&seed, password, use_pre_1627)
@@ -546,6 +568,8 @@ impl SecretStorage {
         password: &str,
         use_pre_1627: bool,
     ) -> Result<(), WalletError> {
+        // Recheck after seed derivation, before touching the directory or cache.
+        self.require_uninitialized()?;
         create_secret_directory(&self.secret_dir)
             .map_err(|e| WalletError::SecretFile(format!("create secret directory: {e}")))?;
 
@@ -949,6 +973,80 @@ mod tests {
         // The basename is a v3 UUID hash of the ciphertext — we don't
         // know it in advance, but it should be 36 chars (UUID format).
         assert_eq!(name_str.len(), 36 + ".json".len());
+    }
+
+    #[test]
+    fn repeated_init_and_restore_preserve_locked_unlocked_and_reopened_wallets() {
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        for mode in ["locked", "unlocked", "reopened"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut storage = SecretStorage::open(dir.path().to_path_buf());
+            storage
+                .restore(PHRASE, "", "original-password", false)
+                .unwrap();
+            let path = SecretStorage::find_secret_file(dir.path()).unwrap();
+            let original_bytes = fs::read(&path).unwrap();
+            if mode == "unlocked" {
+                storage.unlock("original-password").unwrap();
+            } else if mode == "reopened" {
+                storage = SecretStorage::open(dir.path().to_path_buf());
+            }
+            let original_state = storage.lock_state();
+            let cached_before = storage
+                .cached_file()
+                .map(|s| serde_json::to_string(s).unwrap());
+            assert!(matches!(
+                storage.init(
+                    crate::mnemonic::MnemonicStrength::Words12,
+                    "new-password",
+                    ""
+                ),
+                Err(WalletError::WalletAlreadyInitialized)
+            ));
+            assert!(matches!(
+                storage.restore(PHRASE, "different-seed", "new-password", true),
+                Err(WalletError::WalletAlreadyInitialized)
+            ));
+            assert_eq!(storage.lock_state(), original_state);
+            assert_eq!(
+                storage
+                    .cached_file()
+                    .map(|s| serde_json::to_string(s).unwrap()),
+                cached_before
+            );
+            assert_eq!(fs::read(&path).unwrap(), original_bytes);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            if mode == "unlocked" {
+                assert!(
+                    storage.check_seed(PHRASE, ""),
+                    "the original unlocked master survives refusal"
+                );
+            }
+            storage.lock();
+            SecretStorage::open(dir.path().to_path_buf())
+                .unlock("original-password")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn initialization_refuses_corrupt_existing_files_and_directory_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        fs::write(&path, b"existing malformed wallet").unwrap();
+        let mut storage = SecretStorage::open(dir.path().to_path_buf());
+        assert!(matches!(
+            storage.init(crate::mnemonic::MnemonicStrength::Words12, "pw", ""),
+            Err(WalletError::WalletAlreadyInitialized)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"existing malformed wallet");
+
+        let mut wrong_directory = SecretStorage::open(path.clone());
+        assert!(matches!(
+            wrong_directory.init(crate::mnemonic::MnemonicStrength::Words12, "pw", ""),
+            Err(WalletError::SecretFile(_))
+        ));
+        assert_eq!(fs::read(path).unwrap(), b"existing malformed wallet");
     }
 
     #[cfg(unix)]

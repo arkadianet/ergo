@@ -175,6 +175,9 @@ pub(crate) async fn init(
     let result = storage
         .init(strength_enum, &pass, &mnemonic_pass)
         .map_err(|e| match e {
+            ergo_wallet::error::WalletError::WalletAlreadyInitialized => {
+                WalletAdminError::WalletExists
+            }
             ergo_wallet::error::WalletError::InvalidMnemonic(_) => {
                 WalletAdminError::InvalidMnemonic
             }
@@ -207,6 +210,9 @@ pub(crate) async fn restore(
     let result = storage
         .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
         .map_err(|e| match e {
+            ergo_wallet::error::WalletError::WalletAlreadyInitialized => {
+                WalletAdminError::WalletExists
+            }
             ergo_wallet::error::WalletError::InvalidMnemonic(_) => {
                 WalletAdminError::InvalidMnemonic
             }

@@ -125,6 +125,24 @@ pub static FAULT_INJECT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 pub struct WalletBootService;
 
+/// A decrypted master remains owned by the unlock operation until every
+/// synchronization step succeeds. Errors and unwinding erase secret state.
+struct UnlockSyncAttempt<'a> {
+    storage: &'a mut SecretStorage,
+    state: &'a mut WalletState,
+    complete: bool,
+}
+
+impl Drop for UnlockSyncAttempt<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.storage.lock();
+            self.state.set_prover(None);
+            self.state.set_unlocked(false);
+        }
+    }
+}
+
 impl WalletBootService {
     /// Single production unlock+hydrate+persist path. The 6-step lifecycle:
     ///
@@ -160,10 +178,13 @@ impl WalletBootService {
 
         // Step 3: Unlock (decrypts master key into memory).
         storage.unlock(password)?;
-        // Reflect the successful unlock in WalletState immediately so
-        // is_unlocked() returns true even if the subsequent steps fail
-        // and we roll back — the rollback paths below reset this to false.
-        state.set_unlocked(true);
+        let mut attempt = UnlockSyncAttempt {
+            storage,
+            state,
+            complete: false,
+        };
+        let storage = &mut *attempt.storage;
+        let state = &mut *attempt.state;
 
         // Step 4: Check if tables have entries.
         let already_persisted = {
@@ -217,23 +238,18 @@ impl WalletBootService {
                         .values()
                         .any(|tracked| *tracked == pk)
                     {
-                        // Rollback: drop master key, clear unlock flag.
-                        storage.lock();
-                        state.set_prover(None);
-                        state.set_unlocked(false);
                         return Err(WalletError::ChangeAddressUntracked);
                     }
                 }
                 Err(_) => {
                     // Persisted address doesn't decode — corruption signal.
-                    storage.lock();
-                    state.set_prover(None);
-                    state.set_unlocked(false);
                     return Err(WalletError::ChangeAddressUntracked);
                 }
             }
         }
 
+        state.set_unlocked(true);
+        attempt.complete = true;
         Ok(())
     }
 
@@ -539,6 +555,11 @@ mod tests {
             )
         }));
         assert!(result.is_err(), "fault injection must trigger panic");
+        assert!(
+            storage.unlocked().is_none(),
+            "unwinding must relock decrypted storage"
+        );
+        assert!(!state.is_unlocked());
 
         // Disarm so subsequent tests aren't affected.
         FAULT_INJECT.store(false, Ordering::SeqCst);
@@ -633,6 +654,57 @@ mod tests {
             tbl.get(()).unwrap().is_some(),
             "backfilled change address must be committed to WALLET_CHANGE_ADDRESS"
         );
+    }
+
+    #[test]
+    fn post_decryption_table_and_hydration_errors_relock_the_wallet() {
+        for malformed_table in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = redb::Database::create(dir.path().join("state.redb")).unwrap();
+            let mut storage = SecretStorage::open(dir.path().join("wallet"));
+            storage.restore("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", "", "pw", false).unwrap();
+            let write = db.begin_write().unwrap();
+            if malformed_table {
+                write
+                    .open_table(redb::TableDefinition::<u32, u32>::new(
+                        "wallet_tracked_pubkeys",
+                    ))
+                    .unwrap();
+            } else {
+                let pk: [u8; 33] = hex::decode(
+                    "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2",
+                )
+                .unwrap()
+                .try_into()
+                .unwrap();
+                write
+                    .open_table(WALLET_TRACKED_PUBKEYS)
+                    .unwrap()
+                    .insert(tracked_pubkey_key(0, &pk), vec![])
+                    .unwrap();
+                write
+                    .open_table(WALLET_VISIBLE_ADDRESSES)
+                    .unwrap()
+                    .insert(0, [0u8; 33])
+                    .unwrap();
+            }
+            write.commit().unwrap();
+            let mut state = WalletState::empty(false);
+            let result = WalletBootService::unlock_and_sync(
+                &mut storage,
+                &mut state,
+                &db,
+                ergo_ser::address::NetworkPrefix::Mainnet,
+                "pw",
+            );
+            assert!(
+                result.is_err(),
+                "a post-decryption synchronization step must fail"
+            );
+            assert!(storage.unlocked().is_none());
+            assert_eq!(storage.lock_state(), LockState::Locked);
+            assert!(!state.is_unlocked());
+        }
     }
     // ----- error paths -----
 
