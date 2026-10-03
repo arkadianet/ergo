@@ -278,7 +278,7 @@ paths:
         `GET /api/v1/addresses/{address}/balance`. `unconfirmed` is strictly
         additive (Scala parity) — pool outputs add; pool spends do NOT subtract from
         `confirmed`.
-      operationId: balance
+      operationId: v1_addresses_address_balance_get
       parameters:
       - name: address
         in: path
@@ -331,7 +331,7 @@ paths:
         `GET /api/v1/addresses/{address}/transactions` — a small tx summary
         projected DOWN from the shared indexed-tx builder (never re-derives the
         confirmation math).
-      operationId: transactions
+      operationId: v1_addresses_address_transactions_get
       parameters:
       - name: address
         in: path
@@ -1192,7 +1192,7 @@ paths:
       summary: |-
         `GET /api/v1/boxes/{box_id}` — a single box. `404 box_not_found` on miss (a
         real absent resource, not a disabled subsystem).
-      operationId: box_by_id
+      operationId: v1_boxes_box_id_get
       parameters:
       - name: box_id
         in: path
@@ -2122,7 +2122,7 @@ paths:
         `GET /api/v1/light/status`. `serves_*` are derived from whether the node
         wires a chain reader at all (the prover hooks live on it); a node without
         one honestly advertises `false` rather than 404.
-      operationId: status
+      operationId: v1_light_status_get
       responses:
         '200':
           description: Light-client serving capability advertisement
@@ -2394,7 +2394,7 @@ paths:
       summary: |-
         `GET /api/v1/mempool/transactions` — cursor-paginated pool listing,
         priority-weight descending by default (mining order).
-      operationId: transactions
+      operationId: v1_mempool_transactions_get
       parameters:
       - name: order
         in: query
@@ -2437,7 +2437,7 @@ paths:
         `GET /api/v1/mempool/transactions/{tx_id}` — one pooled tx: the `mempool_tx`
         row plus resolved `io_box` inputs/outputs (best-effort, from the extra index
         + the pool-output overlay). `404 tx_not_found` when not pooled.
-      operationId: transaction_by_id
+      operationId: v1_mempool_transactions_tx_id_get
       parameters:
       - name: tx_id
         in: path
@@ -2492,7 +2492,7 @@ paths:
         already snake_case + Scala-parity). `503 candidate_unavailable` when no
         candidate can be built. This CLOSES the finding-3 gap: the flat compat
         Both `/mining/candidate` and this v1 path require a configured API key.
-      operationId: candidate
+      operationId: v1_mining_candidate_get
       parameters:
       - name: longpoll
         in: query
@@ -2688,7 +2688,7 @@ paths:
         `GET /api/v1/mining/status` — T0. Composed from existing snapshot reads
         (`identity().mining` + `status().sync_state`); never triggers a `candidate()`
         build just to health-check.
-      operationId: status
+      operationId: v1_mining_status_get
       responses:
         '200':
           description: Mining capability + template freshness (nulls until the template-cache seam is wired)
@@ -3063,7 +3063,7 @@ paths:
       tags:
       - node
       summary: '`GET /api/v1/node/status` — T0. Bare `ApiStatus` (reused verbatim).'
-      operationId: status
+      operationId: v1_node_status_get
       responses:
         '200':
           description: Dashboard status snapshot
@@ -3288,7 +3288,7 @@ paths:
       summary: |-
         `GET /api/v1/scan/scans?limit=&cursor=` — every registered scan, ascending
         by `scan_id`, cursor-paginated on that natural key.
-      operationId: list
+      operationId: v1_scan_scans_get
       parameters:
       - name: limit
         in: query
@@ -3328,7 +3328,7 @@ paths:
       tags:
       - scan
       summary: '`POST /api/v1/scan/scans` — register a scan, returning its allocated id.'
-      operationId: register
+      operationId: v1_scan_scans_post
       requestBody:
         content:
           application/json:
@@ -3517,7 +3517,7 @@ paths:
         `GET /api/v1/scan/scans/{scan_id}/transactions` — wallet transactions tagged
         with this scan id. An unknown/deregistered id is an empty page, not 404
         (trait contract). Item = the wallet tx summary + `scan_ids`.
-      operationId: transactions
+      operationId: v1_scan_scans_scan_id_transactions_get
       parameters:
       - name: scan_id
         in: path
@@ -4068,7 +4068,7 @@ paths:
         `POST /script/simulate` — resolve a REAL on-chain box and reduce its guard
         against real chain state. `box_id` missing ⇒ `box_not_found`; the chain
         reader unwired ⇒ `chain_reader_unavailable` (never a bare 404).
-      operationId: simulate
+      operationId: v1_script_simulate_post
       requestBody:
         content:
           application/json:
@@ -4918,7 +4918,7 @@ paths:
       summary: |-
         `POST /api/v1/transactions/simulate` — dry-run an assembled tx: accept/reject
         + cost + conflicts, NO broadcast and NO mempool mutation.
-      operationId: simulate
+      operationId: v1_transactions_simulate_post
       requestBody:
         content:
           application/json:
@@ -5074,7 +5074,7 @@ paths:
         `GET /api/v1/transactions/{tx_id}/status` — lifecycle + ETA. Confirmed
         (extra-index) wins over pooled; a well-formed unknown id is a 200
         `state:"unknown"` (a legitimate polled answer), only a malformed id is a 400.
-      operationId: status
+      operationId: v1_transactions_tx_id_status_get
       parameters:
       - name: tx_id
         in: path
@@ -5122,7 +5122,7 @@ paths:
         preview has no projection in `ergo-api` and needs a read threaded
         through the candidate-builder crate; until then it answers the honest
         `route_unavailable` rather than fabricating vote bytes.
-      operationId: candidate
+      operationId: v1_voting_candidate_get
       responses:
         '503':
           description: Next-block vote-byte preview not wired on this node
@@ -5262,7 +5262,7 @@ paths:
       tags:
       - webhooks
       summary: '`GET /api/v1/webhooks` — list subscriptions (T1), cursor-paginated.'
-      operationId: list
+      operationId: v1_webhooks_get
       parameters:
       - name: limit
         in: query
@@ -5304,7 +5304,7 @@ paths:
       summary: |-
         `POST /api/v1/webhooks` — register a subscription (T1). Returns 201 with the
         subscription **and** the secret echoed exactly once.
-      operationId: register
+      operationId: v1_webhooks_post
       requestBody:
         content:
           application/json:

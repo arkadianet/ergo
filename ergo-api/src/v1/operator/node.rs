@@ -30,7 +30,8 @@ pub(crate) async fn info(State(s): State<OperatorState>) -> Response {
 
 /// `GET /api/v1/node/status` — T0. Bare `ApiStatus` (reused verbatim).
 #[utoipa::path(
-    get, path = "/api/v1/node/status", tag = "node",
+    get, path = "/api/v1/node/status",
+    operation_id = "v1_node_status_get", tag = "node",
     responses((status = 200, description = "Dashboard status snapshot", body = ApiStatus)),
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {

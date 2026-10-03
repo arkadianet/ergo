@@ -163,7 +163,8 @@ pub(crate) struct MiningStatus {
 /// (`identity().mining` + `status().sync_state`); never triggers a `candidate()`
 /// build just to health-check.
 #[utoipa::path(
-    get, path = "/api/v1/mining/status", tag = "mining",
+    get, path = "/api/v1/mining/status",
+    operation_id = "v1_mining_status_get", tag = "mining",
     responses((status = 200, description = "Mining capability + template freshness (nulls until the template-cache seam is wired)", body = MiningStatus)),
 )]
 pub(crate) async fn status(State(s): State<OperatorState>) -> Response {
@@ -193,7 +194,8 @@ pub(crate) struct CandidateQuery {
 /// candidate can be built. This CLOSES the finding-3 gap: the flat compat
 /// Both `/mining/candidate` and this v1 path require a configured API key.
 #[utoipa::path(
-    get, path = "/api/v1/mining/candidate", tag = "mining",
+    get, path = "/api/v1/mining/candidate",
+    operation_id = "v1_mining_candidate_get", tag = "mining",
     params(("longpoll" = Option<String>, Query, description = "getblocktemplate-style longpoll id — block until the candidate changes from this msg")),
     responses(
         (status = 200, description = "Work message (WorkMessageJson — Scala-parity shape)", body = serde_json::Value),

@@ -318,7 +318,8 @@ pub struct ListQuery {
 /// `GET /api/v1/mempool/transactions` — cursor-paginated pool listing,
 /// priority-weight descending by default (mining order).
 #[utoipa::path(
-    get, path = "/api/v1/mempool/transactions", tag = "mempool",
+    get, path = "/api/v1/mempool/transactions",
+    operation_id = "v1_mempool_transactions_get", tag = "mempool",
     params(
         ("order" = Option<String>, Query, description = "`weight` (default), `fee_per_byte`, or `first_seen`"),
         ("limit" = Option<u32>, Query, description = "Page size (default 50, cap 200)"),
@@ -354,7 +355,8 @@ pub async fn transactions(
 /// row plus resolved `io_box` inputs/outputs (best-effort, from the extra index
 /// + the pool-output overlay). `404 tx_not_found` when not pooled.
 #[utoipa::path(
-    get, path = "/api/v1/mempool/transactions/{tx_id}", tag = "mempool",
+    get, path = "/api/v1/mempool/transactions/{tx_id}",
+    operation_id = "v1_mempool_transactions_tx_id_get", tag = "mempool",
     params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
     responses(
         (status = 200, description = "Pooled tx + resolved io_box inputs/outputs", body = V1MempoolTxDetail),

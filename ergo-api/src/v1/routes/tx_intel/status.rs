@@ -61,7 +61,8 @@ pub(crate) struct StatusResponse {
 /// (extra-index) wins over pooled; a well-formed unknown id is a 200
 /// `state:"unknown"` (a legitimate polled answer), only a malformed id is a 400.
 #[utoipa::path(
-    get, path = "/api/v1/transactions/{tx_id}/status", tag = "transactions",
+    get, path = "/api/v1/transactions/{tx_id}/status",
+    operation_id = "v1_transactions_tx_id_status_get", tag = "transactions",
     params(("tx_id" = String, Path, description = "64-char lowercase hex transaction id")),
     responses(
         (status = 200, description = "Lifecycle status: confirmed / pending / unknown", body = StatusResponse),
