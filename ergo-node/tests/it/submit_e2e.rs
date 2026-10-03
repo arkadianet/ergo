@@ -605,7 +605,7 @@ bind_addr = "127.0.0.1:0"
             "compile",
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "missing field `source`",
+            "Failed to deserialize the JSON body into the target type",
         ),
         (
             "inspect",
@@ -629,13 +629,13 @@ bind_addr = "127.0.0.1:0"
             "simulate",
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "missing field `box_id`",
+            "Failed to deserialize the JSON body into the target type",
         ),
         (
             "explain",
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "missing field `box_id`",
+            "Failed to deserialize the JSON body into the target type",
         ),
         (
             "diff",
