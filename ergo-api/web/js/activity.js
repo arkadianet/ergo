@@ -2,10 +2,12 @@ import { api } from './api-client.js';
 import { getApiKey, subscribe, promptAuthorize, CONFIGURE_API_KEY } from './auth.js';
 import { ActivityBuffer, currentIssues, groupRecords, filterRecords, exportEvidence } from './activity-model.js';
 import { blockRejectionState } from './node-guidance.js';
+import { readIndexerCapability, indexStatusCopy } from './capabilities.js';
 
 const buffer = new ActivityBuffer();
 const PAGE_SIZE = 25;
 let root, active = false, inFlight = false, generation = 0, key = '', status = null, indexer = null;
+let indexDisabled = false;
 let statusAt = 0, indexAt = 0, reachable = false, indexReachable = false, logAt = 0, error = '', authError = false;
 let paused = false, frozen = [], frozenMeta = null, frozenAt = 0, pending = 0, page = 0;
 const filters = { query: '', level: 'highlights', subsystem: '', minutes: '', routine: false };
@@ -98,8 +100,11 @@ export async function onSlow() {
   inFlight = true;
   const ticket = generation;
   try {
-    const index = await api.indexerStatus();
+    const capability = await readIndexerCapability(api, await api.identity());
+    const index = capability.index;
     if (!active || ticket !== generation) return;
+    indexDisabled = capability.disabled;
+    if (indexDisabled) { indexer = null; indexAt = 0; }
     indexReachable = typeof index?.status === 'string';
     if (indexReachable) { indexer = index; indexAt = Date.now(); }
     renderCurrent();
@@ -172,7 +177,7 @@ function renderCurrent() {
       recovered.append(summary, body); host.append(recovered);
     }
   }
-  text('[data-index-status]', indexStale ? 'Search index status unavailable. Any retained index condition is last reported, not confirmed current.' : `Search index: ${indexer.status === 'caughtUp' ? 'caught up' : indexer.status || 'unknown'}.`);
+  text('[data-index-status]', indexStatusCopy(indexDisabled, indexStale, indexer));
 }
 
 function renderHistory() {
@@ -255,7 +260,7 @@ function groupRow(group) {
 }
 
 function exportMeta() {
-  return { exportedAt: new Date().toISOString(), sessionId: buffer.session, retention: meta(), filters: { ...filters }, gap: buffer.gap, clientTrimmed: buffer.trimmed, paused, pausedAt: paused ? frozenAt : null, lastSuccessfulRead: logAt, currentStatus: status, currentStatusAt: statusAt, statusReachable: reachable, indexer, indexStatusAt: indexAt, indexReachable };
+  return { exportedAt: new Date().toISOString(), sessionId: buffer.session, retention: meta(), filters: { ...filters }, gap: buffer.gap, clientTrimmed: buffer.trimmed, paused, pausedAt: paused ? frozenAt : null, lastSuccessfulRead: logAt, currentStatus: status, currentStatusAt: statusAt, statusReachable: reachable, indexer, indexStatusAt: indexAt, indexReachable, indexDisabled };
 }
 function download(records, name) {
   if (!getApiKey() || !records.length) return;

@@ -4,6 +4,7 @@
 // detail drawer (inputs/outputs/tokens) via the tx-detail endpoint.
 // Live updates come from WS `mempool`; HTTP is the 30s fallback + first paint.
 import { api } from './api-client.js';
+import { mempoolView } from './capabilities.js';
 import { makeTable, copyBtn } from './table.js';
 import { erg, num, bytes, ageMs, truncMiddle } from './format.js';
 import { feeCurve } from './sparkline.js';
@@ -18,6 +19,7 @@ let lastFullAt = 0;
 let refreshTimer = null;
 let refreshing = false;
 let syncState = null;
+let identity = null;
 let lastTransactions = [];
 
 const mempoolWs = createChannelSub({
@@ -229,9 +231,7 @@ function filterTransactions() {
 export function onFast({ status }) {
   if (status) syncState = status.sync_state;
   const copy = root?.querySelector('[data-empty-copy]');
-  if (copy) copy.textContent = syncState === 'syncing'
-    ? 'Your node is still syncing historical blocks. An empty local mempool does not mean the network has no transactions.'
-    : "Your node's mempool is empty. New transactions will appear here as they arrive.";
+  if (copy) copy.textContent = mempoolView(identity, syncState).copy;
 }
 
 function weightLabel(wf) {
@@ -255,6 +255,20 @@ async function fullRefresh() {
   refresh.disabled = true;
   refresh.textContent = 'Refreshing…';
   try {
+    identity = await api.identity();
+    const view = mempoolView(identity, syncState);
+    root.querySelector('[data-empty] h2').textContent = view.title;
+    root.querySelector('[data-empty-copy]').textContent = view.copy;
+    root.querySelector('.mp-cap').hidden = view.disabled;
+    if (view.disabled) {
+      root.querySelector('[data-load-status]').hidden = true;
+      root.querySelector('[data-count]').textContent = 'Disabled';
+      root.querySelector('[data-empty]').hidden = false;
+      for (const selector of ['[data-table]', '[data-filters]', '[data-list-meta]', '[data-fee-panel]']) root.querySelector(selector).hidden = true;
+      lastTransactions = []; table.update([]);
+      lastFullAt = Date.now();
+      return;
+    }
     const [summary, txWrap] = await Promise.all([api.mempoolSummary(), api.mempoolTransactions()]);
     const loadStatus = root.querySelector('[data-load-status]');
     if (!summary || !Array.isArray(txWrap?.items)) {
