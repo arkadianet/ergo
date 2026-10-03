@@ -285,13 +285,12 @@ impl VotingParams {
 
     /// Testnet defaults. Source: `testnet.conf` at v6.0.3 —
     /// `votingLength = 128`, `softForkEpochs = 32`,
-    /// `activationEpochs = 32`. The shorter epoch length matches
-    /// testnet's 45 s block interval so the wall-clock voting window
-    /// is comparable to mainnet's. No `version2ActivationHeight`
-    /// because `TestnetLaunchParameters.scala` sets
-    /// `BlockVersion = Interpreter60Version` (= 4) at genesis — there
-    /// is no v1 → v2 transition for the voting state machine to
-    /// trigger.
+    /// `activationEpochs = 32`. At the configured 45 s interval the voting
+    /// window is 51.2 hours (mainnet: 45.5 days). No scheduled
+    /// `version2ActivationHeight`: the launch parameter row is version 4,
+    /// while the captured height-1 genesis header retains version 1.
+    /// See `test-vectors/testnet/initial-context/` for pinned launch source
+    /// and the observed first epoch at height 128.
     pub const fn testnet() -> Self {
         Self {
             voting_length: 128,
