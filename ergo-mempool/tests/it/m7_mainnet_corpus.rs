@@ -1,23 +1,19 @@
 //! Mainnet corpus self-consistency harness for the mempool admission
 //! pipeline.
 //!
-//! Proves the mempool admits real-world transactions that were accepted
-//! by the live network. Corpus: 7,178 txs across heights 1,761,000 –
-//! 1,762,000 with pre-extracted input boxes and headers. Each tx is
-//! driven through `Mempool::process` with `TxSource::Api` against a
-//! progressive `UtxoView` primed with the historical input boxes and
-//! extended as txs are admitted.
+//! Historical capture consumer for heights 1,761,000–1,762,000. The inputs
+//! are retired from git and must be re-extracted before an explicit run.
+//! The harness checks the first 500 processed entries against retained count
+//! expectations using `Mempool::process` and a progressive historical UTXO.
 //!
 //! This is the Rust self-consistency half of the mempool oracle —
 //! it does NOT compare against Scala. A txn that lands in a mainnet
-//! block is definitionally valid, so any rejection here is our bug
-//! unless specifically classified (e.g. below-min-fee, which is a
-//! local policy choice).
+//! block provides an acceptance reference only when capture provenance and
+//! the validation context are established; local relay policy can differ.
 //!
-//! This test is `#[ignore]` by default because it's slow (~2 minutes
-//! under `opt-level=1`) and depends on test-vectors/ artifacts that
-//! vector-drift CI regenerates. Run with:
-//!   cargo test -p ergo-mempool --test m7_mainnet_corpus -- --ignored
+//! This test is ignored by default. Re-extract its three input files as
+//! described in `test-vectors/mainnet/FIXTURES.md`, then run:
+//!   cargo test --locked -p ergo-mempool --test it mempool_admits_mainnet_corpus_1761k -- --ignored
 
 use std::collections::HashMap;
 use std::time::Instant;

@@ -5,8 +5,10 @@
 //! anyway. We add it because our admission has real cost in the
 //! resolution step.
 
-use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
+
+use lru::LruCache;
 
 use ergo_primitives::digest::{blake2b256, Digest32};
 
@@ -16,47 +18,41 @@ struct Record {
 }
 
 pub struct UnresolvedCache {
-    entries: HashMap<Digest32, Record>,
-    by_insertion: VecDeque<(Digest32, Instant)>,
-    max_size: usize,
+    entries: Option<LruCache<Digest32, Record>>,
     ttl: Duration,
 }
 
 impl UnresolvedCache {
     pub fn new(max_size: usize, ttl: Duration) -> Self {
         Self {
-            entries: HashMap::with_capacity(max_size),
-            by_insertion: VecDeque::with_capacity(max_size),
-            max_size,
+            entries: NonZeroUsize::new(max_size).map(LruCache::new),
             ttl,
         }
     }
 
-    /// Hash of raw canonical tx bytes. This is stable across peers
-    /// because we've already canonical-checked before calling here.
+    /// Hash of received transaction bytes. Equal byte strings share a key;
+    /// this helper itself makes no parsing or canonicality assertion.
     pub fn key_of(bytes: &[u8]) -> Digest32 {
         blake2b256(bytes)
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.as_ref().map_or(0, LruCache::len)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     pub fn prune_expired(&mut self, now: Instant) {
-        while let Some((key, inserted_at)) = self.by_insertion.front().copied() {
-            if now.duration_since(inserted_at) < self.ttl {
+        let Some(entries) = self.entries.as_mut() else {
+            return;
+        };
+        while let Some((_, record)) = entries.peek_lru() {
+            if now.duration_since(record.inserted_at) < self.ttl {
                 break;
             }
-            self.by_insertion.pop_front();
-            if let Some(rec) = self.entries.get(&key) {
-                if rec.inserted_at == inserted_at {
-                    self.entries.remove(&key);
-                }
-            }
+            entries.pop_lru();
         }
     }
 
@@ -64,11 +60,13 @@ impl UnresolvedCache {
     /// early-drops on `true`.
     pub fn contains(&mut self, bytes: &[u8], now: Instant) -> bool {
         self.prune_expired(now);
-        self.entries.contains_key(&Self::key_of(bytes))
+        self.contains_key(&Self::key_of(bytes))
     }
 
     pub fn contains_key(&self, key: &Digest32) -> bool {
-        self.entries.contains_key(key)
+        self.entries
+            .as_ref()
+            .is_some_and(|entries| entries.contains(key))
     }
 
     /// Drop the suppression entry for `bytes`, if present. Used when the
@@ -77,8 +75,8 @@ impl UnresolvedCache {
     /// must not short-circuit them as `RecentlyUnresolved`.
     pub fn remove(&mut self, bytes: &[u8]) {
         let key = Self::key_of(bytes);
-        if self.entries.remove(&key).is_some() {
-            self.by_insertion.retain(|(k, _)| k != &key);
+        if let Some(entries) = self.entries.as_mut() {
+            entries.pop(&key);
         }
     }
 
@@ -87,13 +85,9 @@ impl UnresolvedCache {
     pub fn insert(&mut self, bytes: &[u8], now: Instant) {
         self.prune_expired(now);
         let key = Self::key_of(bytes);
-        if self.entries.len() >= self.max_size && !self.entries.contains_key(&key) {
-            if let Some((oldest, _)) = self.by_insertion.pop_front() {
-                self.entries.remove(&oldest);
-            }
+        if let Some(entries) = self.entries.as_mut() {
+            entries.put(key, Record { inserted_at: now });
         }
-        self.entries.insert(key, Record { inserted_at: now });
-        self.by_insertion.push_back((key, now));
     }
 }
 
@@ -150,5 +144,36 @@ mod tests {
         c.insert(b"five", t0);
         assert!(!c.contains(b"one", t0));
         assert!(c.contains(b"five", t0));
+    }
+
+    #[test]
+    fn refresh_owns_one_node_and_preserves_latest_insertion_order() {
+        let mut c = UnresolvedCache::new(2, Duration::from_secs(60));
+        let now = Instant::now();
+        c.insert(b"one", now);
+        c.insert(b"two", now);
+        c.insert(b"one", now);
+        c.insert(b"one", now);
+        assert_eq!(c.entries.as_ref().unwrap().iter().count(), 2);
+        assert!(
+            c.contains(b"two", now),
+            "a lookup does not refresh insertion order"
+        );
+        c.insert(b"three", now);
+        assert!(c.contains(b"one", now));
+        assert!(!c.contains(b"two", now));
+        c.remove(b"one");
+        assert_eq!(c.entries.as_ref().unwrap().iter().count(), 1);
+        c.prune_expired(now + Duration::from_secs(60));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn zero_capacity_disables_unresolved_suppression() {
+        let mut c = UnresolvedCache::new(0, Duration::from_secs(60));
+        let now = Instant::now();
+        c.insert(b"one", now);
+        assert!(!c.contains(b"one", now));
+        assert!(c.entries.is_none());
     }
 }

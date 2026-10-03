@@ -2,9 +2,9 @@
 //!
 //! Insertion-order eviction + TTL, capped at `max_size` entries. Reinserting
 //! an ID refreshes its position; lookups do not. First hit on a
-//! tx_id is a silent drop (we might have tagged it on a stale tip).
-//! A repeat hit within `spam_window` is peer-spammy and admission
-//! escalates to a spam penalty.
+//! tx_id and a repeat within `spam_window` have distinct library lookup
+//! results. Production uses this cache to filter inventory fetches;
+//! received transaction bytes still undergo full admission validation.
 
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
@@ -37,8 +37,8 @@ struct Record {
     reason: InvalidationReason,
 }
 
-/// Result of an invalidation lookup. Admission routes each case
-/// separately at step 7 of the pipeline.
+/// Result of the optional hit-counting lookup. Production's inventory filter
+/// uses `contains` and does not translate these results into peer penalties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupResult {
     NotCached,

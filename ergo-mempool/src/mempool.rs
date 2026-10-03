@@ -1526,8 +1526,8 @@ impl Mempool {
     /// inputs) never evicts on it — leaving it pooled leaks it, which is why
     /// Scala's `CleanupWorker` eliminates it. Eviction goes through
     /// the family-weight debiting wrapper and routes the FAILED ROOT
-    /// id through the shared `admission::record_failed_tx` classifier (here
-    /// always the blacklist arm, since only hard-invalid failures reach it), so
+    /// id through the shared `admission::record_failed_tx` classifier (the blacklist for hard failures, unresolved suppression for
+    /// a missing data input), so
     /// it stops being relayed. Cascade descendants are dependency-evicted only
     /// (never cached). A descendant BEYOND the `max_family_depth` cascade bound
     /// is not removed in the same op (the cap guards against an O(family) spike),
