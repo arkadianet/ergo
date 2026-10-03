@@ -124,13 +124,16 @@ help libFuzzer find interesting coverage quickly.
 ### Growing the corpus
 
 ```bash
-# From ergo-difftest/, use positional corpus directories. Both are mutated.
+# From ergo-difftest/: first directory receives generated corpus files;
+# later directories supply seed inputs and do not receive generated entries.
 mkdir -p fuzz/corpus-local/ergo_tree
 cargo +"$FUZZ_TOOLCHAIN" fuzz run ergo_tree \
   fuzz/corpus-local/ergo_tree fuzz/corpus/ergo_tree -- -max_total_time=60
 ```
 
-Use a disposable copy when seeds must remain unchanged. `-seed_inputs` and
+Mutation changes bytes in memory; output corpus entries go to the first path.
+Use a disposable copy when every input/output file must remain unchanged.
+`-seed_inputs` and
 `-corpus` are not the corpus-directory interface; cargo-fuzz passes positional
 directories to libFuzzer. Compiler/evaluator targets use `execution_fuzz.rs`;
 their bounded Rust checks are not JVM evaluation or compiled-output parity.
