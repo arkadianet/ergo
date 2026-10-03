@@ -67,13 +67,14 @@ Codecs that only ever appear *nested* inside another (`data_input`,
 surface, not standalone.
 
 ```bash
-cargo run -p ergo-difftest -- --iters 1000000 --seed 7
-cargo run -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
-cargo run -p ergo-difftest -- --repro 1b1501040a…     # triage one input
-cargo run -p ergo-difftest -- --selftest              # prove the detector has teeth
+cargo run --locked -p ergo-difftest -- --iters 1000000 --seed 7
+cargo run --locked -p ergo-difftest -- --surface ergo_tree --corpus test-vectors/mainnet
+cargo run --locked -p ergo-difftest -- --repro 1b1501040a…     # triage one input
+cargo run --locked -p ergo-difftest -- --selftest              # prove the detector has teeth
 ```
 
-Determinism: a `(seed, iter)` pair reproduces an identical input; every finding
+Determinism: a `(seed, iter)` pair reproduces an identical input when the mode,
+surface and corpus contents match. Corpus files load in lexical path order; every finding
 prints a `--repro <hex>`. `tests/it/smoke.rs` and `tests/it/selftest.rs` are the CI
 regression guards (no `scala-cli` needed).
 
@@ -89,12 +90,12 @@ node's verdict against the JVM's:
   node retains the original ergoTree slice).
 
 ```bash
-cargo run -p ergo-difftest -- --oracle --iters 2000 --corpus test-vectors/mainnet
+cargo run --locked -p ergo-difftest -- --oracle --iters 2000 --corpus test-vectors/mainnet
 ```
 
-Differential surfaces (context-complete consensus units):
+Differential surfaces (each has its own parse, dummy-context reduction or verifier contract):
 `ergo_tree`, `ergo_box_candidate`, `transaction`, `header`, `reduce`,
-`reduce_ctx`, `validate`, `verify_avl`. Bare `sigma_type` /
+`reduce_ctx`, `verify`, `validate`, `verify_avl`. Bare `sigma_type` /
 `constant` are intentionally **not** differential surfaces — the node's type/value
 codec is version-gated *inside a tree*, so testing it context-free over-reports;
 those codecs are exercised in-context via `ergo_tree`/`ergo_box_candidate`.
@@ -116,11 +117,32 @@ run resolves deps and compiles (~1 min), then queries are fast.
 
 ## Corpus
 
-`--corpus <dir>` loads seeds for mutation: `.hex` files (one hex string),
-`.json` files (every quoted hex value — covers the test-vector `bytes`/`ergoTree`
-fields), or raw bytes otherwise. Pointing at `test-vectors/mainnet` mutates real
-mainnet trees/boxes/txs/headers — the high-yield mode (bugs cluster near the
-valid manifold).
+`--corpus <dir>` loads regular files in lexical path order: `.hex` files
+(one UTF-8 hex string), `.json` files (decoded string values of at least eight
+hex characters, recursively through arrays and objects), or raw bytes otherwise.
+JSON object keys are excluded. Missing or unreadable directories/files, malformed
+JSON/hex and a corpus with no usable seeds fail with harness exit 3. Markdown and
+text files are skipped; directories and symlinks are not followed. Decompress
+JSON archives into a separate corpus directory first; `.json.gz` is otherwise
+raw seed data. Mutation reproducibility requires identical ordered seed contents.
+
+`--structured` uses its grammar generators and refuses `--corpus`, which would
+otherwise be ignored. `--min-coverage` requires a hermetic structured campaign,
+a finite threshold in 0..=1 and positive iterations. It measures constructor
+labels, not semantic branch coverage or known-bug rediscovery.
+
+`--structured --oracle` requires a supported `--surface`: `ergo_tree`,
+`ergo_box_candidate`, `transaction`, `header`, `reduce`, `reduce_ctx` or
+`validate`. `reduce` maps to `sigma_expr`, `reduce_ctx` to the context/box frame,
+and `validate` to transaction bytes. The framed `verify` and `verify_avl`
+protocols have no matching structured generator and are refused before a JVM
+starts; use existing explicit requests with `--repro` for those surfaces.
+
+`--check-canonical` requires a completely parsed ErgoTree and valid expected
+hex. A rejection, trailing input or writer error returns harness exit 3 because
+no complete comparison occurred; a byte mismatch returns 1. `catch_unwind`
+reports unwind panics as `Bug` while preserving the caller's process-wide panic
+hook. It does not catch aborts, allocation failure or stack overflow.
 
 ## Promote findings to regression tests
 

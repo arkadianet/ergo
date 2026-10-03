@@ -9,7 +9,7 @@ decoders, and asserts two hermetic invariants (no decode ever panics; a
 layers the JVM oracle on top: a long-lived `scala-cli` process runs `ErgoSerdeOracle.scala`
 (the real sigmastate 6.0.6 runtime) while the harness streams inputs over a pipe and
 diffs accept/reject verdicts and canonical re-serializations. A structure-aware
-generator (`src/gen/`) covers a 28-variant `Feature` vocabulary (27 adversarial + an on-manifold
+generator (`src/gen/`) covers a 35-variant `Feature` vocabulary (34 adversarial + an on-manifold
 baseline), each mapped where applicable to a named catalog bug, with a measurable coverage ratio. A greedy delta-debugging minimizer
 shrinks findings, a triage classifier distinguishes genuine bugs from parse-surface
 artifacts, and a `known_bugs/manifest.toml` (27 entries) drives a re-injection gate
@@ -25,13 +25,13 @@ the node binary
   campaign entry points; `run_campaign` uses byte-mutation from a seed corpus while
   `run_structured_campaign` feeds the grammar-aware generators and measures adversarial
   feature coverage.
-- `surfaces::registry` (`src/surfaces.rs:104`) — the complete list of 26 named
-  hermetic surfaces (23 read-write fixed-point checks + `batch_merkle_proof`
-  read-only no-panic + `validate` stateless check + `verify_avl`); this is where
+- `surfaces::registry` (`src/surfaces.rs:104`) — the complete list of 28 named
+  hermetic surfaces, including the codec fixed points, reduction/context frames,
+  full verification, batch-Merkle read-only check, stateless validation and AVL verification; this is where
   every decoder surface is wired to its invariant.
 - `oracle::oracle_surfaces` + `oracle::diff` (`src/oracle.rs:145` / `:558`) — Phase 2
-  differential layer: 7 oracle-diffable surfaces (`ergo_tree`, `ergo_box_candidate`,
-  `transaction`, `header`, `reduce`, `validate`, `verify_avl`), the `reduce` surface
+  differential layer: 9 oracle-diffable surfaces (`ergo_tree`, `ergo_box_candidate`,
+  `transaction`, `header`, `reduce`, `reduce_ctx`, `verify`, `validate`, `verify_avl`), the `reduce` surface
   being the eval/cost differential that catches cost-accounting bugs invisible to the
   parse surfaces.
 - `src/bin/difftest.rs` — the primary CLI entry point (also the `default-run` binary);
@@ -44,8 +44,8 @@ the node binary
 
 ## Modules
 - `src/lib.rs` — campaign API: `run_campaign`, `run_structured_campaign`, `run_input`,
-  `selftest`; `Outcome` / `Finding` / `Stats` types; `SilencePanics` RAII hook guard
-  that suppresses the default panic hook so decoder panics are caught, not printed.
+  `selftest`; `Outcome` / `Finding` / `Stats` types. Unwind panics are caught
+  without replacing the caller's global panic hook.
 - `src/surfaces.rs` — surface registry and invariant checks: `Surface` / `RunFn`
   types; `rw_check` read-write fixed-point helper shared by 23 `ergo-ser` codec
   surfaces; plus `batch_merkle_proof` (read-only), `validate` (`ergo-validation`
@@ -73,8 +73,8 @@ the node binary
 - `src/avl_frame.rs` — shared AVL+ batch-proof frame layout (`AvlOp` / `AvlFrame`);
   binary wire format defined once for both the Rust harness and the Scala oracle
   sidecar so framing errors show up immediately.
-- `src/gen/mod.rs` — structured generator framework: `Feature` enum (28 adversarial
-  variants each mapped to a catalog bug id); `FeatureSet` (u32 bitset); `GenMode`
+- `src/gen/mod.rs` — structured generator framework: `Feature` enum (35
+  variants each mapped to a catalog bug id); `FeatureSet` (u64 bitset); `GenMode`
   (`OnManifold` / `Adversarial`); `GenOutput`; `gen_structured_at` (deterministic
   `(seed, iter, surface)` dispatch); `declared_vocabulary`; `Coverage` /
   `SurfaceCoverage` with a measurable coverage ratio.
@@ -123,11 +123,11 @@ the node binary
   panic as `Outcome::Bug`; run out-of-process by `tests/it/selftest.rs` — `src/lib.rs:219`
 - `Surface` (struct) — `name: &'static str` + `run: RunFn`; one named invariant check
   — `src/surfaces.rs:24`
-- `surfaces::registry` (fn) — build the 26-surface hermetic registry, optionally
+- `surfaces::registry` (fn) — build the 28-surface hermetic registry, optionally
   filtered by name — `src/surfaces.rs:104`
 - `Oracle` (struct) — long-lived `scala-cli` process with pipe I/O; `spawn`,
   `query`, `query_raw`; kills + reaps the child on `Drop` — `src/oracle.rs:56`
-- `oracle_surfaces` (fn) — 7 oracle-diffable `SurfaceSpec` entries — `src/oracle.rs:145`
+- `oracle_surfaces` (fn) — 9 oracle-diffable `SurfaceSpec` entries — `src/oracle.rs:145`
 - `SurfaceSpec` (struct) — `name`, `rust_verdict`, `compare_canonical`,
   `soft_fork_header`; drives the `diff` combinator — `src/oracle.rs:128`
 - `Divergence` (struct) — `surface`, `kind` (`AcceptReject` / `Canonical`),
@@ -151,10 +151,10 @@ the node binary
   append for Pending only; idempotent — `src/regressions.rs:235`
 - `classify_and_file` (fn) — classify + build record + file in one call —
   `src/regressions.rs:293`
-- `Feature` (enum, 28 variants) — adversarial wire vocabulary; each variant has a
+- `Feature` (enum, 35 variants) — adversarial wire vocabulary; each variant has a
   `name()` (stable report id) and optional `bug_id()` (catalog entry it surfaces)
   — `src/gen/mod.rs:53`
-- `FeatureSet` (struct) — compact u32 bitset over `Feature::ALL`; `insert`,
+- `FeatureSet` (struct) — compact u64 bitset over `Feature::ALL`; `insert`,
   `contains`, `union`, `intersect`, `difference`, `iter` — `src/gen/mod.rs:234`
 - `GenOutput` (struct) — `surface`, `bytes`, `intended_valid`, `mode`, `features`
   — `src/gen/mod.rs:311`
@@ -180,10 +180,10 @@ the node binary
   `Rng` is SplitMix64 with no OS-entropy calls; structured generation uses
   `derive_seed(seed, iter, surface)` so each triple is decorrelated without
   interfering with others (`src/rng.rs`, `src/gen/mod.rs:369`).
-- **Panics are caught, not propagated.** `SilencePanics` installs a no-op hook and
-  `run_one` wraps every surface call in `catch_unwind`; a decoder panic becomes
-  `Outcome::Bug("PANIC: …")`, never aborts the process. The selftest confirms this
-  machinery has teeth (`src/lib.rs:206`,`:219`).
+- **Unwind panics become findings.** `run_one` uses `catch_unwind` and leaves the
+  caller's process-wide panic hook installed. A decoder unwind becomes
+  `Outcome::Bug("PANIC: …")`; aborts, stack overflow and allocation failure remain
+  outside this guarantee. The subprocess selftest exercises the actual CLI path.
 - **`fuzz_one` panics on Bug, silent otherwise.** libFuzzer treats a panic as a
   crash and saves the input; non-Bug outcomes (`Accepted`, `Rejected`,
   `WriteRejected`) and unknown surface names return `()` without a false-positive
