@@ -71,8 +71,7 @@ Pinned in `ergo-ser/src/sigma_value.rs::tests::bigint_golden_wire_bytes_for_minu
   (12 required fields per `JsonCodecs.scala:440-454`). The
   source-citation oracle above is the available proof.
 - **Mainnet corpus scan for >32-byte SBigInt usage** — would prove no
-  historical block is invalidated by the new cap. Not run; relies on
-  the indirect evidence that the project's existing mainnet sync
-  milestone (`ergo-rust-node-checklist.md:502`) operated correctly with
-  the (overly-permissive) old reader, implying no honest block carries
-  >32-byte SBigInt.
+  selected historical input contains an oversize value. Not run. A sync
+  milestone with an overly permissive reader cannot establish the absence
+  of values that a stricter reader would reject. The source-derived cap
+  and these finite codec tests provide no historical corpus denominator.

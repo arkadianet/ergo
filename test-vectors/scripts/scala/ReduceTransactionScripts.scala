@@ -1,17 +1,20 @@
-//> using scala 2.12
-//> using dep org.ergoplatform::ergo-wallet:6.1.0
+//> using scala 2.12.20
+//> using dep org.ergoplatform::ergo-wallet:6.0.6
+//> using dep org.scorexfoundation::sigma-state:6.0.6
 //> using dep io.circe::circe-parser:0.14.5
 
-// Validate a signed transaction against provided input boxes.
+// Reduce input scripts after limited structural/monetary prechecks.
+// This diagnostic does not verify spending proofs, apply protocol monetary
+// limits, or establish signed transaction validity.
 //
 // Input format (stdin, JSONL — one entry per line):
 //   {"txBytes":"<hex>","inputBoxes":[{...box JSON...}],"dataInputBoxes":[{...}],"height":700000,"minerPk":"<33-byte hex>","timestamp":1600000000000}
 //
 // Output format (stdout, one line per input):
-//   PASS <txId>
+//   REDUCED_UNVERIFIED <txId>
 //   FAIL <txId> <errorCategory> <message>
 //
-// Error categories: STRUCTURAL, MONETARY, SCRIPT, PROOF, COST, CANONICAL, UNKNOWN
+// Diagnostic failure categories: STRUCTURAL, MONETARY, SCRIPT, COST, UNKNOWN
 
 import org.ergoplatform._
 import org.ergoplatform.sdk.JsonCodecs
@@ -30,7 +33,7 @@ import sigma.VersionContext
 import scorex.util.ModifierId
 import java.io._
 
-object ValidateTransaction extends JsonCodecs {
+object ReduceTransactionScripts extends JsonCodecs {
   def main(args: Array[String]): Unit = {
     val reader = new BufferedReader(new InputStreamReader(System.in))
     var line: String = null
@@ -55,7 +58,7 @@ object ValidateTransaction extends JsonCodecs {
     val txHex = cursor.get[String]("txBytes").getOrElse(sys.error("missing txBytes"))
     val txBytes = Base16.decode(txHex).get
     val tx = ErgoLikeTransactionSerializer.parse(SigmaSerializer.startReader(txBytes))
-    val txId = Base16.encode(tx.id)
+    val txId = tx.id.toString
 
     val inputBoxesJson = cursor.downField("inputBoxes").focus.getOrElse(sys.error("missing inputBoxes"))
     val inputBoxes = inputBoxesJson.as[Seq[ErgoBox]](
@@ -122,7 +125,7 @@ object ValidateTransaction extends JsonCodecs {
       }
     }
 
-    // Script evaluation + proof verification per input
+    // Script reduction per input; spending proofs are deliberately unverified
     val preHeader = CPreHeader(
       2.toByte,
       Colls.fromArray(Array.fill(32)(0.toByte)),
@@ -149,32 +152,22 @@ object ValidateTransaction extends JsonCodecs {
             JitCost.fromBlockCost(0),
             Some(JitCost.fromBlockCost(1000000)))
           val settings = CErgoTreeEvaluator.DefaultEvalSettings
-          val evaluator = new CErgoTreeEvaluator(
-            ctxV.toSigmaContext(),
-            ergoTree.constants.asInstanceOf[IndexedSeq[sigma.ast.Constant[sigma.ast.SType]]],
-            costAcc, null, settings)
-          val prop = ergoTree.toProposition(ergoTree.isConstantSegregation)
-          val reduced = evaluator.evalWithEnv(CErgoTreeEvaluator.EmptyDataEnv, prop)
+          val prop = ergoTree.toProposition(ergoTree.isConstantSegregation && ergoTree.hasDeserialize)
+          val (reduced, _) = CErgoTreeEvaluator.eval(
+            ctxV.toSigmaContext(), costAcc, ergoTree.constants, prop, settings)
 
           // Check if the proposition reduced to false
           reduced match {
             case sigma.data.CSigmaProp(sigma.data.TrivialProp.FalseProp) =>
               println(s"FAIL $txId SCRIPT false_proposition input=$idx")
               return
-            case _ => // continue to proof check
+            case _ => // reduction succeeded; no proof-validity claim
           }
 
-          // Verify the spending proof against the reduced proposition
-          val sigmaProp = reduced.asInstanceOf[sigma.data.CSigmaProp]
-          val sigmaBoolean = sigmaProp.sigmaTree
-          val proofBytes = input.spendingProof.proof
-          if (proofBytes.nonEmpty || !sigmaBoolean.isInstanceOf[sigma.data.TrivialProp]) {
-            // Non-trivial propositions need proof verification
-            val verifier = new sigmastate.interpreter.ErgoTreeEvaluator.DefaultVerifier()
-            // The actual proof verification is done by the protocol layer
-            // For our purposes, if reduction succeeded and proof bytes exist, we accept
-            // (we trust the mainnet proof was valid; mutations will fail at byte level)
-          }
+          // No verifier is invoked. Non-trivial propositions and arbitrary
+          // proof bytes may reach REDUCED_UNVERIFIED; callers must separately
+          // use the pinned protocol verifier for transaction validity.
+
         }
       } catch {
         case e: Exception =>
@@ -188,6 +181,6 @@ object ValidateTransaction extends JsonCodecs {
       }
     }
 
-    println(s"PASS $txId")
+    println(s"REDUCED_UNVERIFIED $txId")
   }
 }
