@@ -119,9 +119,10 @@ pub fn to_big_int(bytes: &[u8]) -> BigUint {
 
 /// Convert a `BigUint` to a 32-byte big-endian array, left-padding
 /// shorter values with zeros and truncating longer ones to the low
-/// 32 bytes. Mirrors Java `BigIntegers.asUnsignedByteArray(32, value)`
-/// — used at the v1 EC equation path through `biguint_to_scalar`
-/// (to derive a `k256::FieldBytes`) and at the v2 final-hash step.
+/// 32 bytes. Current callers pass values bounded to 32 bytes: a reduced
+/// v1 scalar or the v2 sum of 32 31-byte elements. On that domain this
+/// matches Java `BigIntegers.asUnsignedByteArray(32, value)`. For oversized
+/// values this local helper truncates, whereas BouncyCastle rejects them.
 pub(super) fn biguint_to_32bytes(val: &BigUint) -> [u8; 32] {
     let bytes = val.to_bytes_be();
     let mut out = [0u8; 32];
