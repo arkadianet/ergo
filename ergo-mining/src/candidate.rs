@@ -287,12 +287,12 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     // 2b. Epoch-boundary recompute. At a voting-epoch start the candidate's
     //     extension must carry the recomputed parameter map + cumulative
     //     validation settings, and its header version is the RECOMPUTED version
-    //     (exBlockVersion, rule 410). We run the SAME `compute_next_params` the
-    //     block validator runs (`block_proc.rs`), so a peer re-running it accepts
-    //     the block by construction. Off-boundary ⇒ `None`, version unchanged.
-    //     NB: the block's transactions still validate under the PREVIOUS epoch's
-    //     params (`active_params`) — Scala applies the recomputed set only from
-    //     the next block — so tx selection below is unaffected.
+    //     (exBlockVersion, rule 410). We run the same `compute_next_params` as
+    //     block validation; this establishes the epoch payload relation, while
+    //     the remaining block checks still apply. Off-boundary ⇒ `None`.
+    //     The target extension takes effect before its transactions execute;
+    //     selection below uses the same target parameters and cumulative
+    //     script settings as full-block validation.
     let is_epoch_start =
         candidate_height > 0 && candidate_height.is_multiple_of(voting_settings.voting_length);
     let epoch_payload = if is_epoch_start {
@@ -483,15 +483,19 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         .transpose()?;
 
     // 9. Validate the emission (coinbase) tx → CheckedTransaction, using the
-    //    live voted params (from_active) so cost / min-value / storage
-    //    params match the validator that judges the submitted block.
-    let block_cap = JitCost::from_block_cost(active_params.max_block_cost as u64).map_err(|e| {
+    //    target voted parameters and accumulated script statuses, matching
+    //    the validator that judges the submitted block.
+    let params = ProtocolParams::for_block(
+        &active_params,
+        epoch_payload.as_ref().map(|payload| &payload.computed),
+        &validation_settings,
+    );
+    let block_cap = JitCost::from_block_cost(params.max_block_cost).map_err(|e| {
         MiningError::IdComputation {
             op: "max_block_cost_to_jit",
             reason: format!("{e:?}"),
         }
     })?;
-    let params = ProtocolParams::from_active(&active_params);
     let ctx = TransactionContext {
         height: candidate_height,
         miner_pubkey: *miner_pk,
@@ -566,8 +570,10 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
         //     overlay BEFORE mempool selection so any conflicting fee-bearing
         //     claim on the same box is excluded. Zero fee; proceeds to the
         //     miner P2PK.
-        let max_block_cost = active_params.max_block_cost as u64;
+        let max_block_cost = params.max_block_cost;
         let safety_gap = block_cost_safety_gap(max_block_cost);
+        // Rule306 prices the serialized section against the parent row,
+        // while target epoch parameters price the transaction scripts.
         let max_block_size = active_params.max_block_size as u64;
         let phase_start = std::time::Instant::now();
         let rent_cost_ceiling = max_block_cost
@@ -865,7 +871,7 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             transactions_size_bytes,
             max_block_size_bytes: active_params.max_block_size as u64,
             validation_cost: final_validation_cost,
-            max_block_cost: active_params.max_block_cost as u64,
+            max_block_cost: params.max_block_cost,
         },
     };
 

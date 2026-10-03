@@ -501,8 +501,11 @@ pub(super) fn process_block_digest(
         };
     // The target epoch extension is validated before its parameters price transactions.
     let rule_306_max_block_size = ProtocolParams::from_active(store.active_params()).max_block_size;
-    let active_for_this_block =
-        ProtocolParams::for_block(store.active_params(), voted_params_row.as_ref());
+    let active_for_this_block = ProtocolParams::for_block(
+        store.active_params(),
+        voted_params_row.as_ref(),
+        store.validation_settings(),
+    );
     let params = &active_for_this_block;
     let ctx = BlockValidationContext {
         parent: &parent_checked,
