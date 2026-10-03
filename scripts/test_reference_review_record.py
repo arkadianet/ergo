@@ -73,7 +73,8 @@ class ReviewRecordTests(unittest.TestCase):
             copy = pathlib.Path(directory) / "record"
             shutil.copytree(review.RECORD, copy)
             ledger = copy / "inputs/state-status.json"
-            ledger.write_bytes(ledger.read_bytes().replace(b'"remaining_evidence"', b'"fixed"', 1))
+            # Tamper a byte independently of any finding's current disposition.
+            ledger.write_bytes(ledger.read_bytes() + b"\n")
             with self.assertRaisesRegex(ValueError, "snapshot integrity mismatch"):
                 review.generate(copy, review.ROOT)
 
