@@ -571,7 +571,6 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     if ctx.rescan.stopping() {
         return Ok(());
     }
-    let height = ctx.chain.tip_height().map_err(internal)?;
     let mut pending = records(ctx.db)?;
     if pending
         .iter()
@@ -579,6 +578,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     {
         return Ok(());
     }
+    let height = ctx.chain.tip_height().map_err(internal)?;
     // One bounded authoritative read per wake. Unavailable metadata is never
     // treated as absence and never authorizes re-signing uncertain old work.
     let metadata = match queue_metadata(ctx).await {
