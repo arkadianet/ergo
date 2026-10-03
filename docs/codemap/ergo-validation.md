@@ -77,3 +77,9 @@
 - **Epoch-boundary determinism.** `compute_next_params`/`parse_active_params` reject non-epoch-start heights and out-of-range params; `ActiveProtocolParameters` round-trips byte-stably (unknown ids preserved in `extra`), so the persisted active set never drifts from the wire form.
 - **No fork-choice, no storage, no P2P.** This crate owns acceptance rules only; chain-graph / reorg / AVL+ mutation live in `ergo-state`, mempool admission in `ergo-mempool`.
 
+
+`scala_launch_testnet()` follows the pinned v6.0.5 version-4 launch row with
+proposed disables 215/409 and empty activated settings. The finite
+`tests/it/testnet_launch_oracle.rs` consumes captured heights 1, 2, 128 and
+1024, checking external header IDs/PoW/extension commitments and the first-epoch
+bootstrap. It does not execute a continuous chain or migrate historical rows.
