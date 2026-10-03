@@ -194,6 +194,11 @@ pub enum StateError {
         "install_snapshot_state: reconstructed state_root {computed} != expected state_root {expected}"
     )]
     InstallSnapshotRootMismatch { computed: String, expected: String },
+    /// An older snapshot import used node zero as its root, conflicting with
+    /// the runtime null-node sentinel. Reinstall into a fresh database rather
+    /// than guessing how to relocate historical nodes and undo references.
+    #[error("snapshot has legacy zero-based node IDs; retain this database and reinstall a verified snapshot into a fresh database")]
+    LegacySnapshotNodeIds,
     /// `install_snapshot_state` was called with a `snapshot_height`
     /// above the store's current `best_header_height`. Production
     /// Mode 4 always runs header sync (NiPoPoW prefix or Mode 2's
