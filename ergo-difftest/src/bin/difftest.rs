@@ -704,6 +704,36 @@ fn run_oracle(
         }
     }
 
+    let execution = match ergo_difftest::execution_metadata::ExecutionMetadata::capture(
+        &oracle,
+        regressions_dir,
+        serde_json::json!({
+            "seed": seed, "iters": iters, "surfaces": surfaces.iter().map(|spec| spec.name).collect::<Vec<_>>(),
+            "generation_mode": if structured { "structured-gen" } else { "oracle-mutation" },
+            "ordered_corpus_sha256": corpus.iter().map(|bytes| {
+                use sha2::Digest;
+                format!("{:x}", sha2::Sha256::digest(bytes))
+            }).collect::<Vec<_>>(),
+        }),
+    ) {
+        Ok(execution) => {
+            for spec in &surfaces {
+                if !execution.complete_for(spec.name) {
+                    eprintln!(
+                        "{ORACLE_ERROR_MARKER} actual JVM/JAR authority unavailable for {}",
+                        spec.name
+                    );
+                    harness_error = true;
+                }
+            }
+            Some(execution)
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} execution journal failed: {error}");
+            harness_error = true;
+            None
+        }
+    };
     let unique = classes.len();
     println!(
         "oracle: checks={checked} surfaces={} unique_classes={unique} total_divergences={total}",
@@ -752,6 +782,7 @@ fn run_oracle(
             } else {
                 "oracle-mutation"
             },
+            execution.as_ref(),
         )
     {
         // Optional processing failures remain harness errors even when original
@@ -770,6 +801,7 @@ fn run_oracle(
 ///
 /// Any processing or filing error makes the run incomplete. Successful fallback
 /// filing preserves evidence; it does not convert failed minimization to a pass.
+#[allow(clippy::too_many_arguments)]
 fn minimize_and_file_campaign(
     sorted: &[CampaignClass],
     surfaces: &[ergo_difftest::oracle::SurfaceSpec],
@@ -777,6 +809,7 @@ fn minimize_and_file_campaign(
     regressions_dir: &std::path::Path,
     campaign_seed: u64,
     provenance: &str,
+    execution: Option<&ergo_difftest::execution_metadata::ExecutionMetadata>,
 ) -> bool {
     use ergo_difftest::from_hex;
     use ergo_difftest::minimize::minimize_divergence;
@@ -806,7 +839,7 @@ fn minimize_and_file_campaign(
             eprintln!("minimize: {} ({} bytes)", div.surface, bytes.len());
             minimize_divergence(&bytes, spec, oracle).map(|(_, divergence)| divergence)
         })();
-        let record = record_after_minimization(
+        let mut record = record_after_minimization(
             div,
             result,
             Some(SeedInfo {
@@ -815,6 +848,14 @@ fn minimize_and_file_campaign(
             }),
             provenance,
         );
+        if let Some(execution) = execution {
+            if let Err(error) = execution.attach(&mut record, regressions_dir) {
+                eprintln!("{ORACLE_ERROR_MARKER} record authority failed: {error}");
+                complete = false;
+            }
+        } else {
+            complete = false;
+        }
         if let Some(error) = &record.processing_error {
             eprintln!("{ORACLE_ERROR_MARKER} minimize failed for {}: {error}; retaining original pending input", div.surface);
             complete = false;
@@ -935,8 +976,25 @@ fn run_oracle_repro_minimize(
         }
     };
     let result = minimize_divergence(bytes, &spec, &mut oracle).map(|(_, divergence)| divergence);
-    let record = record_after_minimization(&original, result, None, "repro");
-    let failed = record.processing_error.is_some();
+    let mut record = record_after_minimization(&original, result, None, "repro");
+    let mut failed = record.processing_error.is_some();
+    match ergo_difftest::execution_metadata::ExecutionMetadata::capture(
+        &oracle,
+        regressions_dir,
+        serde_json::json!({"surfaces": [surface], "generation_mode": "repro", "input_hex": ergo_difftest::to_hex(bytes)}),
+    ) {
+        Ok(execution) => {
+            failed |= !execution.complete_for(surface);
+            if let Err(error) = execution.attach(&mut record, regressions_dir) {
+                eprintln!("{ORACLE_ERROR_MARKER} record authority failed: {error}");
+                failed = true;
+            }
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} execution journal failed: {error}");
+            failed = true;
+        }
+    }
     if let Some(error) = &record.processing_error {
         eprintln!(
             "{ORACLE_ERROR_MARKER} minimize failed: {error}; retaining original pending input"

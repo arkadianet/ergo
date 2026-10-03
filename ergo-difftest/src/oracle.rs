@@ -178,6 +178,16 @@ impl Oracle {
         Ok(metadata)
     }
 
+    /// Preserve exact sources even when a failed child has no runtime identity.
+    /// This source-only evidence never substitutes for executing JVM/JAR data.
+    pub fn source_snapshots(&self) -> serde_json::Value {
+        let mut metadata = self.source_metadata.clone();
+        if let Some(verify) = self.verify_oracle.as_ref() {
+            metadata["verify_sidecar"] = verify.source_snapshots();
+        }
+        metadata
+    }
+
     /// Ask the JVM reference for its verdict on `bytes` at `surface`.
     pub fn query(&mut self, surface: &str, bytes: &[u8]) -> io::Result<Verdict> {
         let line = self.query_raw(surface, bytes)?;
@@ -196,13 +206,14 @@ impl Oracle {
     pub fn query_raw(&mut self, surface: &str, bytes: &[u8]) -> io::Result<String> {
         if surface == "verify" {
             if self.verify_oracle.is_none() {
-                self.verify_oracle = Some(Box::new(Self::spawn_command(
+                let script = std::env::var("DIFFTEST_VERIFY_ORACLE_SCRIPT").unwrap_or_else(|_| {
                     concat!(
                         env!("CARGO_MANIFEST_DIR"),
                         "/../scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala"
-                    ),
-                    true,
-                )?));
+                    )
+                    .to_string()
+                });
+                self.verify_oracle = Some(Box::new(Self::spawn_command(&script, true)?));
             }
             let oracle = self
                 .verify_oracle
@@ -395,8 +406,8 @@ pub fn oracle_surfaces() -> Vec<SurfaceSpec> {
 }
 
 /// The activated script version the JVM oracle runs every surface under
-/// (`ErgoSerdeOracle.scala` `handle`: `VersionContext.withVersions(3, …)`, mainnet
-/// 6.0.2). The node-side readers are scoped to the same version so the
+/// (`ErgoSerdeOracle.scala` `handle`: `VersionContext.withVersions(3, …)`, pinned
+/// sigma-state 6.0.6). The node-side readers are scoped to the same version so the
 /// `ergoTreeVersion <= activatedVersion` gate (`check_tree_version_supported`)
 /// fires on both sides for the same bytes.
 const ORACLE_ACTIVATED_VERSION: u8 = 3;
@@ -934,8 +945,7 @@ fn verify_avl_verdict(bytes: &[u8]) -> (Verdict, usize) {
 
 /// Compute the node's verdict for `bytes` and query the JVM for the same
 /// (possibly truncated) input, returning both plus the exact bytes fed to the
-/// JVM. Shared by [`diff`] and [`crate::regressions::classify`] so both agree
-/// on what "the same input" means for a given [`SurfaceSpec`].
+/// JVM. [`diff`] uses this exact consumed range for its [`SurfaceSpec`].
 pub fn query_verdicts(
     spec: &SurfaceSpec,
     bytes: &[u8],
@@ -957,11 +967,9 @@ pub fn query_verdicts(
 /// Distinguishes an **explicit** agreement (both sides parsed/rejected the
 /// input the same consensus-relevant way) from an **indeterminate** one (the
 /// oracle could not evaluate at least one side, `Verdict::Err`) — a caller
-/// that needs to know "did they actually agree" (e.g.
-/// [`crate::regressions::classify`], reconciling a parse-surface divergence
-/// against a `reduce`/`reduce_ctx` channel) must not fold `Indeterminate` into
-/// `Agree`: an oracle that couldn't evaluate the reduction channel proves
-/// nothing about whether the original divergence is benign.
+/// that needs to know whether they agreed must not fold `Indeterminate` into
+/// `Agree`. Agreement on another surface or context does not establish that an
+/// original divergence is benign; new findings remain pending for review.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reconciliation {
     /// Both sides reached the same consensus-relevant outcome.

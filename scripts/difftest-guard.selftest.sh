@@ -55,7 +55,7 @@ out="$WORK/guard.out"
 set +e
 PATH="$WORK/bin:$PATH" \
     DIFFTEST_BIN="$WORK/fake-difftest" \
-    "$GUARD" --surfaces "fake-surface" --iters 5 --keep-regressions \
+    "$GUARD" --surfaces "reduce" --iters 5 --keep-regressions \
     --regressions-dir "$WORK/regressions" \
     >"$out" 2>&1
 rc=$?
@@ -80,7 +80,7 @@ exit 1
 EOF
 set +e
 PATH="$WORK/bin:$PATH" DIFFTEST_BIN="$WORK/fake-difftest" \
-    "$GUARD" --surfaces "fake-surface" --iters 5 --keep-regressions \
+    "$GUARD" --surfaces "reduce" --iters 5 --keep-regressions \
     --regressions-dir "$WORK/regressions" >"$WORK/missing-record.out" 2>&1
 rc=$?
 set -e

@@ -185,8 +185,11 @@ It runs the structure-aware generators against the live oracle on `reduce`,
 `reduce_ctx`, `transaction`, `ergo_box_candidate` and `validate`, minimizes and
 files every observed divergence class as pending, and prints a per-surface
 table. Classes retain their first concrete generating iteration and actual
-structured/mutation mode. Records land under `ergo-difftest/regressions/`
-(gitignored); `QUEUE.md` lists pending records. If shrinking fails, the original
+structured/mutation mode. The guard uses a fresh, gitignored
+`ergo-difftest/regressions-run.*` directory by default. An explicit
+`--regressions-dir` must be new, or kept deliberately with `--keep-regressions`;
+existing output is never cleared. Each invocation preserves separate logs.
+`QUEUE.md` is a derived view of immutable pending records. If shrinking fails, the original
 input/verdicts are saved with `minimized: false` and `processing_error`; that
 failure still returns harness exit3. A failed file write also returns3.
 
@@ -202,20 +205,32 @@ having checked almost nothing. Independent assertions guard against it: the
 campaign's own exit code (`difftest` returns 3 on a spawn or pipe failure, never
 folding one into a clean summary), an `oracle: HARNESS ERROR:` marker grep over
 the log, a `checks == iters` count per surface, and complete pending-record
-accounting for every observed divergence class. To see it work, set
+accounting for every observed divergence class, plus validated execution
+journals and record identities. Runtime identity that could not be captured
+makes the run incomplete, including a run with no findings. To inspect the
+existing failure-path mechanism, see
 `DIFFTEST_ORACLE_DIE_AFTER=<n>` — a fault-injection knob in the oracle script that
 answers `n` queries and exits.
 
 ### The accepted baseline
 
-A guard that is red on day one teaches nobody anything: a new finding is
-indistinguishable from the ones already known, and the red becomes wallpaper.
-`known_bugs/baseline.toml` lists the divergences that are present on `main`
-right now, each keyed by its content-addressed record identity
-(`<surface>/sha256(input_hex)[..16]`, the same key `auto_file` writes to) and
-each carrying a **required** `ref` matching `(PR|issue) #<number>`. An entry
-without a tracking reference is refused — that is a muted divergence, not an
-accepted one.
+`known_bugs/baseline.toml` retains historical tracked divergences. New baseline
+keys are `<surface>/<64-character semantic SHA-256>` and require a `ref`
+matching `(PR|issue) #<number>`. The semantic digest includes surface, kind,
+input, both verdicts, compiled-source/compiler configuration, archived oracle
+sources, executing JVM/JAR identities, and the surface/context policy. Seed,
+iteration and temporary paths remain in the evidence without changing this
+comparison key. Historical 16-character input keys remain visible as stale
+entries and cannot mute a comparison under unbound authority.
+
+The separate record filename hashes the complete canonical JSON, so different
+processing or execution evidence is preserved. Records are published atomically
+under a filing lock; identical records are idempotent. `runs/` holds immutable
+execution journals and exact primary/verify Scala source archives. Repro commands
+select those archives, including `DIFFTEST_VERIFY_ORACLE_SCRIPT` for the sidecar.
+The build-script source inventory and running executable hash are diagnostic
+provenance, not a signed build attestation. File synchronization and atomic
+publication do not establish power-loss durability.
 
 The guard fails only on pendings that are *not* listed; baselined ones print in
 their own table, and a baseline entry the run did not reproduce is called out
@@ -223,7 +238,9 @@ too (either the fix landed and the entry should be deleted, or coverage was
 lost). When a referenced fix merges, delete the entry: the guard going red on
 the next run is the signal that the fix did not close the class.
 
-`KnownArtifact` records are reported and never fail the run.
+An explicit reviewed `KnownArtifact` disposition is stored separately. Refile
+reviewed records through the filing API; editing immutable JSON in place breaks
+its identity. Dummy-context agreement never assigns that disposition automatically.
 
 ### The `EvaluatedValue` vocabulary (`src/gen/evaluated_value.rs`)
 
