@@ -329,8 +329,9 @@ fn eval_error_triage_inner() {
                 all_errors.extend(errs);
                 ranges_processed += 1;
             }
-            Err(_) => {
+            Err(payload) => {
                 eprintln!("{}: PANIC during collection", range.label);
+                std::panic::resume_unwind(payload);
             }
         }
     }

@@ -18,7 +18,7 @@ settings, and start the node with an explicit config and data directory:
 
 ```sh
 cp config/ergo-node.toml ./ergo-node.toml
-./ergo-node --config ./ergo-node.toml --data-dir ./ergo-data
+./ergo-node --config ./ergo-node.toml --data-dir ../ergo-data
 ```
 
 On Windows use `ergo-node.exe`. The packaged default selects mainnet with

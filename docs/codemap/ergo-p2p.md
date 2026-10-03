@@ -8,7 +8,7 @@
 ## Start here
 - The crate doc comment + module list in `src/lib.rs:1-51` — the authoritative module map and the layer's charter (sits on `ergo_primitives` + `ergo_ser`, driven by the sync coordinator).
 - `framing.rs` (`serialize_frame`/`deserialize_frame`, `src/framing.rs:69`/`:97`) — the wire-frame contract (`magic||code||len||checksum||payload`); everything else is payloads inside this envelope.
-- `message.rs` — the message-code constants (`CODE_*`, `src/message/mod.rs:19-33`) and the per-message payload codecs; the clearest map of what protocol messages exist.
+- `src/message/mod.rs` — the message-code constants (`CODE_*`, `src/message/mod.rs:19-33`) and the per-message payload codecs; the clearest map of what protocol messages exist.
 - `handshake.rs` (`Handshake`, `PeerSpec`, `Version`, `PeerFeature`) — the connection-admission gate and the wire types reused by the `Peers` gossip message.
 - `peer_manager/mod.rs` (`PeerManager`) — the connection lifecycle + anti-eclipse policy hub; the largest behavioral surface.
 
