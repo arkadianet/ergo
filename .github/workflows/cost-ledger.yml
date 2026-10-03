@@ -30,7 +30,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Ledger checker self-tests
-        run: python3 scripts/cost-ledger.py --selftest
+        run: |
+          python3 scripts/cost-ledger.py --selftest
+          python3 -m unittest discover -s scripts -p 'test_cost_ledger_evidence.py'
+          python3 -m unittest discover -s scripts -p 'test_l4_*.py'
       - name: JVM artifact integrity
         run: python3 scripts/jvm_cost_constants_extractor/verify.py
       - name: Ledger integrity
@@ -66,62 +69,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-l4-inputs.sh
       - name: Record workspace passing evidence
-        env:
-          # libtest-json is experimental and makes --message-format mandatory, so it is
-          # scoped to this step only; the fixture step above runs nextest in its default mode.
-          NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1"
-          NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
-        run: |
-          mkdir -p target
-          rm -f "$COST_LEDGER_TEST_RESULTS"
-          # External replay tests are ignored even when diagnostics is enabled.
-          # nextest also emits ignored events for tests excluded by a filter.
-          # Preserve both raw logs, then retain one source of evidence per test.
-          # Operator REST captures and live-node oracles remain manual.
-          cargo nextest run --locked --workspace --features ergo-validation/diagnostics --no-fail-fast \
-            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))' \
-            --message-format libtest-json > target/cost-ledger-workspace.jsonl
-          cargo nextest run --locked -p ergo-validation --features diagnostics --no-fail-fast \
-            --run-ignored only \
-            -E 'test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)' \
-            --message-format libtest-json > target/cost-ledger-manual.jsonl
-          python3 - <<'PY_EVIDENCE'
-          import json, os
-          from pathlib import Path
-
-          delegated = {
-              "ergo-validation::it$cost_parity::ranges::cost_parity_stratified_ranges_match_jvm",
-              "ergo-validation::it$cost_parity::ranges::cost_parity_required_selection_matches_jvm",
-              "ergo-validation::it$l4_manifest::l4_manifest_compressed_vectors_preserve_input_hashes",
-          }
-          def read_events(path):
-              return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
-
-          ordinary = read_events("target/cost-ledger-workspace.jsonl")
-          manual = read_events("target/cost-ledger-manual.jsonl")
-          terminal = {name: [] for name in delegated}
-          for event in manual:
-              if event.get("type") == "test":
-                  if event.get("name") in delegated:
-                      if event.get("event") != "started":
-                          terminal[event["name"]].append(event.get("event"))
-                  else:
-                      assert event.get("event") in {"started", "ignored"}, event
-          assert all(outcomes == ["ok"] for outcomes in terminal.values()), terminal
-
-          evidence = []
-          for event in ordinary:
-              if event.get("type") == "test" and event.get("name") in delegated:
-                  assert event.get("event") in {"started", "ignored"}, event
-              else:
-                  evidence.append(event)
-          evidence.extend(event for event in manual
-                          if event.get("type") == "test" and event.get("name") in delegated)
-          Path(os.environ["COST_LEDGER_TEST_RESULTS"]).write_text(
-              "".join(json.dumps(event) + "\n" for event in evidence))
-          PY_EVIDENCE
+        run: python3 scripts/cost_ledger_evidence.py
       - name: Validate closure evidence
         if: ${{ always() && !cancelled() }}
         run: |
           test -f "$COST_LEDGER_TEST_RESULTS"
-          python3 scripts/cost-ledger.py check
+          python3 scripts/cost-ledger.py check --strict
