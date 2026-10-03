@@ -19,6 +19,20 @@ pub use ergo_state::wallet::hydration::HydrationSource;
 use crate::storage::UnlockedSecret;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Public-key visibility for tracked entries ordered by derivation index.
+/// Scala WalletCache hides the first master only when the following key has
+/// the EIP-3 account prefix. The number of later keys does not affect that rule.
+pub fn visible_pubkeys_with_paths(tracked: &[(u64, [u8; 33], Vec<u32>)]) -> Vec<[u8; 33]> {
+    let eip3_prefix = [44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000];
+    let hide_master =
+        tracked.len() > 1 && tracked[0].2.is_empty() && tracked[1].2.starts_with(&eip3_prefix);
+    tracked
+        .iter()
+        .skip(usize::from(hide_master))
+        .map(|(_, pk, _)| *pk)
+        .collect()
+}
+
 /// `WalletState`. Fields are public-within-crate so the apply hook (in
 /// `ergo-state`) can read them through a reader trait; public API for
 /// outside-crate access goes through the `WalletReader` abstraction in
@@ -35,11 +49,10 @@ pub struct WalletState {
     /// Rebuilt from `cached_pubkeys` on every modification.
     pub(crate) tracked_p2pk_trees: BTreeSet<Vec<u8>>,
 
-    /// Public addresses for `/wallet/addresses` — filtered per
-    /// Scala `WalletCache.publicKeyAddresses`: when the wallet has
-    /// exactly two tracked pubkeys (master + EIP-3 first child),
-    /// the master pubkey is HIDDEN. Otherwise all pubkeys' addresses
-    /// are surfaced. Rebuilt atomically with cached_pubkeys.
+    /// Public addresses from the persisted visibility table. Low-level
+    /// insert/remove calls lack derivation paths and expose all tracked keys;
+    /// production writers persist the path-based WalletCache filter and hydrate
+    /// from that complete snapshot.
     pub(crate) visible_addresses: Vec<String>,
 
     /// Persisted change address (None if never set; defaults to
@@ -156,6 +169,8 @@ impl WalletState {
     }
 
     /// Insert a tracked HD pubkey at the given derivation-path index.
+    /// This low-level method has no derivation path metadata and exposes every
+    /// tracked key. Production HD writers use persisted path-based visibility.
     /// Rebuilds `tracked_p2pk_trees` and `visible_addresses`
     /// atomically. Returns error if the pubkey's P2PK encoding fails
     /// (which means the pubkey isn't a valid SEC1 compressed point —
@@ -193,17 +208,14 @@ impl WalletState {
     ) -> Result<(), crate::error::WalletError> {
         let mut trees = BTreeSet::new();
         let mut visible = Vec::new();
-        let skip_first = pubkeys.len() == 2;
-        for (index, pubkey) in pubkeys.values().enumerate() {
+        for pubkey in pubkeys.values() {
             let tree = ergo_ser::address::build_p2pk_tree_bytes(pubkey).map_err(|e| {
                 crate::error::WalletError::InvalidPublicKey(format!("p2pk tree build: {e:?}"))
             })?;
             trees.insert(tree);
             // Validate every key, including keys hidden from the public list.
             let address = crate::address::pubkey_to_p2pk_address(pubkey, network)?;
-            if !skip_first || index != 0 {
-                visible.push(address);
-            }
+            visible.push(address);
         }
         self.cached_pubkeys = pubkeys;
         self.tracked_p2pk_trees = trees;
@@ -393,15 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_two_pubkeys_master_hidden() {
-        // Scala WalletCache.publicKeyAddresses filter: when there are
-        // exactly two tracked pubkeys AND the shape is master +
-        // EIP-3 first child, the master is HIDDEN from
-        // /wallet/addresses. We don't try to detect that exact shape;
-        // the simpler heuristic is: with exactly 2 cached
-        // pubkeys, hide index 0 (master) and show only index 1+. This
-        // matches the auto-derive case at unlock. For 1 pubkey or 3+,
-        // show all.
+    fn raw_insert_does_not_infer_hd_paths_from_key_count() {
         let mut s = WalletState::empty(false);
         let master_pk: [u8; 33] =
             hex::decode("0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2")
@@ -424,8 +428,42 @@ mod tests {
         assert_eq!(s.cached_pubkeys().len(), 2);
         assert_eq!(
             s.visible_addresses().len(),
-            1,
-            "with master + first-child shape, master is hidden",
+            2,
+            "raw inserts have no path metadata for hiding a master",
+        );
+    }
+
+    #[test]
+    fn path_based_visibility_retains_the_wallet_cache_shape_rule() {
+        let master = (10, [1; 33], vec![]);
+        let pre_eip3 = (11, [2; 33], vec![1]);
+        let eip3 = (
+            11,
+            [2; 33],
+            vec![44 | 0x8000_0000, 429 | 0x8000_0000, 0x8000_0000, 0, 0],
+        );
+        let later = (12, [3; 33], vec![2]);
+        assert_eq!(
+            visible_pubkeys_with_paths(std::slice::from_ref(&master)),
+            vec![[1; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), pre_eip3.clone()]),
+            vec![[1; 33], [2; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master.clone(), eip3.clone(), later]),
+            vec![[2; 33], [3; 33]]
+        );
+        assert_eq!(
+            visible_pubkeys_with_paths(&[pre_eip3, eip3.clone()]),
+            vec![[2; 33], [2; 33]]
+        );
+        // SDK DerivationPath.isEip3 accepts the account prefix itself.
+        let account = (11, [2; 33], eip3.2[..3].to_vec());
+        assert_eq!(
+            visible_pubkeys_with_paths(&[master, account]),
+            vec![[2; 33]]
         );
     }
 

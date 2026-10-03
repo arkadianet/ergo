@@ -39,9 +39,8 @@ pub(crate) fn render_derivation_path(components: &[u32]) -> String {
 /// the next path and is never independently reconciled against the tracked
 /// set). `derive_key_impl` passes `None` — it has no head to advance.
 ///
-/// WALLET_VISIBLE_ADDRESSES is rebuilt from scratch from all tracked pubkeys
-/// except the hidden master (path_idx == 0, derivation_path == []).
-/// Matches `wallet_boot.rs`'s equivalent rebuild step.
+/// WALLET_VISIBLE_ADDRESSES is rebuilt using the ordered paths: hide the master
+/// only when the next tracked entry has the EIP-3 account prefix.
 pub(crate) fn persist_tracked_pubkey(
     db: &redb::Database,
     path_idx: u64,
@@ -69,8 +68,7 @@ pub(crate) fn persist_tracked_pubkey(
             .insert(tracked_pubkey_key(path_idx, pubkey), meta_bytes)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
 
-        // Rebuild WALLET_VISIBLE_ADDRESSES from all tracked entries (skip
-        // hidden master: path_idx 0 with empty derivation_path).
+        // Rebuild visibility from the ordered derivation metadata.
         // We clear first, then reinsert all visible entries. The table is
         // small (typically < 1000 keys), so a full rebuild is safe.
         let all_tracked: Vec<(u64, [u8; 33], Vec<u32>)> = {
@@ -108,17 +106,16 @@ pub(crate) fn persist_tracked_pubkey(
                 .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
 
-        // Reinsert all visible (non-hidden-master) entries.
-        // Hidden master: path_idx == 0 with empty derivation_path (matches boot logic).
-        let mut visible_idx = 0u32;
-        for (idx, pk, path) in &all_tracked {
-            let is_hidden_master = *idx == 0 && path.is_empty();
-            if !is_hidden_master {
-                visible
-                    .insert(visible_idx, *pk)
-                    .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-                visible_idx += 1;
-            }
+        for (index, pk) in ergo_wallet::state::visible_pubkeys_with_paths(&all_tracked)
+            .into_iter()
+            .enumerate()
+        {
+            let index = u32::try_from(index).map_err(|_| {
+                WalletAdminError::Internal("visible wallet index exceeds u32".into())
+            })?;
+            visible
+                .insert(index, pk)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         }
 
         if let Some(new_head) = new_derivation_head {
@@ -211,7 +208,11 @@ pub(crate) async fn derive_key_impl(
     // Update in-memory WalletState.
     {
         let mut s = state.write();
-        s.insert_tracked_pubkey(next_idx, pubkey, network)
+        let read = db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+        s.hydrate_from_reader(&reader, network)
             .map_err(|e| WalletAdminError::Internal(format!("deriveKey: state update: {e}")))?;
     }
 
@@ -319,7 +320,11 @@ pub(crate) async fn derive_next_key_impl(
     // Update in-memory WalletState.
     {
         let mut s = state.write();
-        s.insert_tracked_pubkey(next_idx, pubkey, network)
+        let read = db
+            .begin_read()
+            .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+        let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+        s.hydrate_from_reader(&reader, network)
             .map_err(|e| WalletAdminError::Internal(format!("deriveNextKey: state update: {e}")))?;
     }
 
@@ -396,4 +401,74 @@ pub(crate) async fn get_private_key_impl(
     let w = hex::encode(scalar_bytes);
 
     Ok(GetPrivateKeyResponse { w })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_state::wallet::hydration::HydrationSource;
+
+    #[test]
+    fn persisted_visibility_and_live_hydration_follow_pinned_paths() {
+        let reference: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-vectors/wallet/path-visibility/scala_6_0_6.json"
+        )))
+        .unwrap();
+        // WalletCache.scala v6.0.5's ordered shape rule, independently of key
+        // count: only master followed by an EIP-3 path hides the first key.
+        let visible_starts = [0, 0, 1, 1, 0, 1];
+        for (case, start) in reference["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(visible_starts)
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wallet.redb");
+            let db = redb::Database::create(&path).unwrap();
+            let keys = case["keys"].as_array().unwrap();
+            for (index, key) in keys.iter().enumerate() {
+                let public_key: [u8; 33] = hex::decode(key["publicKey"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                let meta = ergo_state::wallet::types::TrackedPubkeyMeta {
+                    derivation_path: key["components"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| u32::try_from(x.as_u64().unwrap()).unwrap())
+                        .collect(),
+                    derivation_path_label: String::new(),
+                    added_at_height: 0,
+                };
+                // The master need not have storage index zero.
+                persist_tracked_pubkey(&db, index as u64 + 10, &public_key, &meta, None).unwrap();
+            }
+            let expected: Vec<String> = keys
+                .iter()
+                .skip(start)
+                .map(|x| x["address"].as_str().unwrap().to_owned())
+                .collect();
+            let mut live = ergo_wallet::state::WalletState::empty(false);
+            {
+                let read = db.begin_read().unwrap();
+                let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+                assert_eq!(reader.visible_pubkeys().unwrap().len(), expected.len());
+                live.hydrate_from_reader(&reader, ergo_ser::address::NetworkPrefix::Mainnet)
+                    .unwrap();
+            }
+            assert_eq!(live.visible_addresses(), expected, "{}", case["name"]);
+            drop(db);
+            let reopened = redb::Database::open(path).unwrap();
+            let read = reopened.begin_read().unwrap();
+            let reader = ergo_state::wallet::reader::WalletReader::new(&read);
+            let mut after = ergo_wallet::state::WalletState::empty(false);
+            after
+                .hydrate_from_reader(&reader, ergo_ser::address::NetworkPrefix::Mainnet)
+                .unwrap();
+            assert_eq!(after.visible_addresses(), live.visible_addresses());
+        }
+    }
 }
