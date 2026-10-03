@@ -96,8 +96,8 @@ pub struct ScalaPowSolutions {
 /// Shared by the two such fields on the REST surface: the mining target
 /// `b` (`WorkMessage`) and the Autolykos v1 PoW distance `d`
 /// (`AutolykosSolution`). These fields use a nonnegative magnitude policy.
-/// Header wire serialization of `d` separately applies the signed BigInt
-/// leading-zero convention; this helper does not choose that wire encoding.
+/// Header serialization of `d` uses unsigned magnitude bytes without a sign
+/// disambiguation byte; this helper returns the magnitude, not its wire framing.
 ///
 /// `arbitrary_precision` retains the decimal spelling without an f64 round trip.
 /// Nonzero results are limited to the reference's 2^18 decimal digits before
