@@ -1,85 +1,18 @@
-//! Mode 3 prune-sentinel activation at the headers-synced flip.
+//! Preserve the applied parent state when activating pruned UTXO downloads.
 //!
-//! Scala seeds `minimalFullBlockHeight` the moment the headers chain
-//! is declared synced, not on the first full-block apply:
-//! `ToDownloadProcessor.toDownload` sees the first fresh header, calls
-//! `FullBlockPruningProcessor.updateBestFullBlock(header)`
-//! (`ToDownloadProcessor.scala:110-118` →
-//! `FullBlockPruningProcessor.scala:48-69`), and from then on
-//! `nextModifiersToDownload` starts its walk at
-//! `minimalFullBlockHeight` for a node with no full blocks yet
-//! (`ToDownloadProcessor.scala:99-102`).
-//!
-//! Rust's sentinel previously only advanced inside a full-block apply
-//! (`ergo-state/src/store/mod.rs` eviction seam and its `persist.rs`
-//! pipeline twin), so a fresh pruned node performed a full
-//! genesis-onward IBD and only started evicting afterwards. This module
-//! closes that gap with a one-shot seed driven from both flip
-//! observation points — boot (`boot::sync_setup`, where
-//! `recover_coordinator` may flip the latch off the best header's
-//! timestamp) and the periodic tick (`sync_tick`, covering the
-//! `on_header` freshness edge and the caught-up-to-peers fallback).
-//!
-//! The policy itself is
-//! [`ergo_state::store::activation_minimal_full_block_height`], pinned
-//! against the Scala oracle by
-//! `ergo-state/tests/prune_activation_scala_oracle.rs`.
-//!
-//! **Seed height.** Scala seeds from the *flipping* header's own
-//! height, inside `toDownload` at the moment it flips
-//! (`ToDownloadProcessor.scala:110-112`). This module's `on_header`
-//! observation point can run one or more headers after that edge —
-//! `SyncState::check_headers_synced` flips the latch synchronously as
-//! part of validating a specific header, but this helper is invoked
-//! from the next `sync_tick`, and further headers may validate in
-//! between. `SyncState::flip_seed_height` closes that gap: the
-//! freshness edge records the flipping header's own height there, and
-//! this module prefers it over the live `best_header_height` when
-//! present. The two other observation points don't need it — boot's
-//! `sync_setup` calls this immediately after `recover_coordinator`
-//! detects the flip in the same synchronous step, and the
-//! caught-up-to-peers fallback has no single flipping header to begin
-//! with (its own current-tip height already **is** the value to seed
-//! from). Net effect either way is benign even uncorrected: a
-//! higher-than-Scala seed still leaves the retained suffix at least
-//! `blocks_to_keep` deep relative to the (also higher) tip it was
-//! computed against — it only ever seeds equal to or later than Scala.
+//! This backend validates sequentially from its applied UTXO tip. A retention
+//! floor computed only from a fresh header tip cannot supply the skipped parent
+//! state. Fresh Mode3 nodes therefore replay full blocks from genesis and prune
+//! after apply. Installed snapshots and already-applied pruned stores retain
+//! their durable download floor.
 
-use ergo_state::store::activation_minimal_full_block_height;
 use ergo_state::ChainStateRead;
 use ergo_sync::coordinator::SyncCoordinator;
 use ergo_sync::executor::{HydrationError, SyncExecutor};
 use tracing::{info, warn};
 
-/// Boot-path arm: seed the sentinel at the flip, then rebuild the
-/// coordinator's pending range against it.
-///
-/// Boot runs `recover_coordinator` *before* this seeding step (it is
-/// what flips the headers-synced latch in the first place), so on a
-/// from-scratch Mode 3 node that walk anchors at
-/// `best_full_block_height = 0` and registers the bottom of the chain —
-/// a range `SyncState::blocks_to_download` then discards wholesale,
-/// because the seed that lands a moment later puts the sentinel far
-/// above it. Recovery has already latched `recovery_done`, so no later
-/// tick repeats the walk, and the seed helper is one-shot, so nothing
-/// repopulates the queue either: section requests stop and full-block
-/// sync stalls before it starts.
-///
-/// Re-running recovery after a fresh seed closes that window. The
-/// second walk sees the sentinel in `SyncState` and anchors on the same
-/// floor the download window uses. `reset_recovery_done` is safe here
-/// because `recover_coordinator` is idempotent — `add_pending_block`
-/// and `register_header` both de-duplicate by header id.
-///
-/// The periodic tick uses the same path: it seeds before its own
-/// recovery call, so on the normal flip the single walk already sees
-/// the sentinel and the rebuild here is what its step 3 would have done
-/// anyway. The rebuild matters on the tick when a *retried* seed lands —
-/// an earlier observation whose sentinel write failed has already
-/// latched `recovery_done` over a range below the future sentinel.
-///
-/// Returns the seeded sentinel, or `None` when the flip must not move
-/// it (every no-op condition of [`seed_prune_sentinel_at_flip`]).
+/// Repair a header-only floor left by older boot activation, then rebuild the
+/// pending window from the actual applied tip. A fresh valid floor is a no-op.
 pub(super) fn seed_prune_sentinel_and_rebuild_pending(
     store: &mut ergo_state::StateBackendKind,
     executor: &mut SyncExecutor,
@@ -93,101 +26,43 @@ pub(super) fn seed_prune_sentinel_and_rebuild_pending(
     let recovered = executor.recover_coordinator(store, coordinator)?;
     info!(
         sentinel,
-        recovered,
-        pending = coordinator.sync_state().pending_blocks_len(),
-        "Mode 3: pending download range rebuilt above the freshly seeded \
-         prune sentinel",
+        recovered, "fresh UTXO download window rebuilt from genesis"
     );
     Ok(Some(sentinel))
 }
 
-/// Seed the prune sentinel if the headers-synced flip has happened on a
-/// pruned store that holds no full blocks yet. Persists the value and
-/// mirrors it into `SyncState` so the coordinator's request-side gate
-/// and download window both see it on the same tick.
-///
-/// Returns the seeded value, or `None` when the flip must not move the
-/// sentinel. Idempotent: the seed materializes the sentinel row, and a
-/// present row is one of the `None` conditions, so a second call is a
-/// no-op. Cheap to call every tick — `blocks_to_keep <= 0` (archive /
-/// Mode 6) and `best_full_block_height > 0` short-circuit before any
-/// redb read.
+/// Header synchronization cannot advance a fresh UTXO download floor past the
+/// first unapplied block. Reset the old header-only sentinel when present;
+/// pruning after apply and snapshot installation own all later floors.
 pub(super) fn seed_prune_sentinel_at_flip(
     store: &mut ergo_state::StateBackendKind,
     coordinator: &mut SyncCoordinator,
-    blocks_to_keep: i32,
+    _blocks_to_keep: i32,
 ) -> Option<u32> {
-    if !coordinator.sync_state().headers_chain_synced() {
+    if !coordinator.sync_state().headers_chain_synced()
+        || store.chain_state_meta().best_full_block_height != 0
+    {
         return None;
     }
-    if blocks_to_keep <= 0 {
-        return None;
-    }
-    let meta = store.chain_state_meta();
-    if meta.best_full_block_height > 0 {
-        return None;
-    }
-    // Mode 3 pruning is UTXO-backend only: the digest backend's two
-    // canonical configurations are Mode 5 (`blocks_to_keep = -1`) and
-    // Mode 6 (`= 0`), both already excluded above. Bail rather than
-    // widen the backend trait for a combination the runtime gate
-    // refuses.
-    let utxo = store.as_utxo()?;
-    let voting_length = utxo.voting_settings().voting_length;
-    let sentinel_row = match utxo.try_read_minimal_full_block_height_raw() {
-        Ok(row) => row,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Mode 3: cannot read the prune sentinel row; \
-                 activation seeding skipped this tick",
-            );
+    let utxo = store.as_utxo_mut()?;
+    let sentinel = match utxo.try_read_minimal_full_block_height_raw() {
+        Ok(Some(sentinel)) if sentinel > 1 => sentinel,
+        Ok(_) => return None,
+        Err(error) => {
+            warn!(%error, "cannot read fresh UTXO download floor; retrying next tick");
             return None;
         }
     };
-    // Seed from the height Scala actually flips on
-    // (`ToDownloadProcessor.scala:110-112`) when we captured it: the
-    // `on_header` freshness edge (`SyncState::check_headers_synced`)
-    // records the flipping header's own height, but this helper may
-    // observe the flip on a LATER tick than the one that flipped it —
-    // any headers validated in between would otherwise inflate the
-    // seed height above what Scala wrote. Falls back to the live
-    // `best_header_height` when the flip has no single flipping header
-    // (the caught-up-to-peers fallback) or when this is the boot-path
-    // observation immediately following the flip it just detected,
-    // where the two are identical anyway.
-    let seed_height = coordinator
-        .sync_state()
-        .flip_seed_height()
-        .unwrap_or(meta.best_header_height);
-    let seeded = activation_minimal_full_block_height(
-        sentinel_row,
-        seed_height,
-        meta.best_full_block_height,
-        blocks_to_keep,
-        voting_length,
-    )?;
-    if let Err(e) = utxo.write_minimal_full_block_height(seeded) {
-        warn!(
-            error = %e,
-            sentinel = seeded,
-            "Mode 3: prune sentinel activation write failed; \
-             retrying on the next flip observation",
-        );
+    if let Err(error) = utxo.repair_unapplied_pruning_floor() {
+        warn!(%error, sentinel, "cannot reset unapplied UTXO download floor; retrying next tick");
         return None;
     }
-    coordinator.sync_state_mut().set_prune_sentinel(seeded);
+    coordinator.sync_state_mut().set_prune_sentinel(1);
     info!(
-        sentinel = seeded,
-        seed_height,
-        best_header_height = meta.best_header_height,
-        blocks_to_keep,
-        voting_length,
-        "Mode 3: headers chain synced — prune sentinel seeded; \
-         full-block download starts here (Scala \
-         FullBlockPruningProcessor.updateBestFullBlock parity)",
+        old_floor = sentinel,
+        "reset header-only UTXO floor; full replay requires the applied parent state"
     );
-    Some(seeded)
+    Some(1)
 }
 
 #[cfg(test)]
@@ -213,10 +88,7 @@ mod tests {
     /// header_height = 1200, blocksToKeep = 250, votingLength = 1024)` —
     /// oracle vector `flip_h1200_keep250_mainnet`. `1200 - 250 + 1 = 951`.
     const EXPECTED_SENTINEL: u32 = 951;
-    /// Deliberately smaller than `HEADER_TIP - EXPECTED_SENTINEL` would
-    /// need to reach the sentinel from height 0: with this window a walk
-    /// anchored at `best_full_block_height = 0` stops at 384, far below
-    /// the sentinel, which is exactly the stall under test.
+    /// A bounded initial download window, beginning at the first unapplied block.
     const DOWNLOAD_WINDOW: usize = 384;
 
     fn now_ms() -> u64 {
@@ -296,8 +168,8 @@ mod tests {
         (ergo_state::StateBackendKind::Utxo(store), dir)
     }
 
-    /// Replay the boot sequence up to (but not including) the activation
-    /// seed: hydrate, build the header index, recover the coordinator.
+    /// Replay the boot sequence up to (but not including) the legacy floor
+    /// repair: hydrate, build the header index, recover the coordinator.
     fn boot_up_to_the_seed(
         store: &mut ergo_state::StateBackendKind,
     ) -> (SyncExecutor, SyncCoordinator) {
@@ -329,47 +201,74 @@ mod tests {
     // ----- happy path -----
 
     #[test]
-    fn boot_seed_above_the_recovered_window_rebuilds_the_pending_range() {
-        // Boot order is recover-then-seed, so the walk anchors at
-        // `best_full_block_height = 0` and registers 1..=384 while the
-        // seed lands at 951. `blocks_to_download` drops every entry below
-        // the sentinel, `recovery_done` is already latched, and the seed
-        // helper is one-shot — nothing would ever repopulate the queue.
+    fn fresh_pruned_utxo_downloads_preserve_the_first_unapplied_parent() {
         let (mut store, _dir) = seeded_store();
         let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
-
-        let seeded = seed_prune_sentinel_and_rebuild_pending(
-            &mut store,
-            &mut executor,
-            &mut coordinator,
-            BLOCKS_TO_KEEP,
-        )
-        .expect("rebuild must not fail on an intact header chain");
-        assert_eq!(seeded, Some(EXPECTED_SENTINEL), "Scala-parity seed value");
-
+        assert_eq!(
+            seed_prune_sentinel_and_rebuild_pending(
+                &mut store,
+                &mut executor,
+                &mut coordinator,
+                BLOCKS_TO_KEEP
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(store.read_minimal_full_block_height().unwrap(), 1);
         let queued = coordinator.sync_state().blocks_to_download();
-        assert!(
-            !queued.is_empty(),
-            "an empty download queue is the stall: no section request goes \
-             out, so best_full_block_height never leaves 0",
+        assert_eq!(queued.first().map(|block| block.height), Some(1));
+        assert_eq!(
+            queued.last().map(|block| block.height),
+            Some(DOWNLOAD_WINDOW as u32)
+        );
+    }
+
+    #[test]
+    fn older_unapplied_header_floor_is_reset_and_pending_window_is_rebuilt() {
+        let (mut store, _dir) = seeded_store();
+        store
+            .as_utxo()
+            .unwrap()
+            .write_minimal_full_block_height(EXPECTED_SENTINEL)
+            .unwrap();
+        let (mut executor, mut coordinator) = boot_up_to_the_seed(&mut store);
+        coordinator
+            .sync_state_mut()
+            .set_prune_sentinel(EXPECTED_SENTINEL);
+        assert_eq!(
+            seed_prune_sentinel_and_rebuild_pending(
+                &mut store,
+                &mut executor,
+                &mut coordinator,
+                BLOCKS_TO_KEEP
+            )
+            .unwrap(),
+            Some(1)
+        );
+        assert_eq!(store.read_minimal_full_block_height().unwrap(), 1);
+        assert_eq!(
+            coordinator
+                .sync_state()
+                .blocks_to_download()
+                .first()
+                .map(|block| block.height),
+            Some(1)
         );
         assert_eq!(
-            queued.first().map(|b| b.height),
-            Some(EXPECTED_SENTINEL),
-            "the rebuilt range must start at the sentinel — the first \
-             block a pruned node is allowed to hold",
-        );
-        assert_eq!(
-            queued.last().map(|b| b.height),
-            Some(HEADER_TIP),
-            "and run to the header tip, which is inside the window from \
-             the sentinel floor",
+            seed_prune_sentinel_and_rebuild_pending(
+                &mut store,
+                &mut executor,
+                &mut coordinator,
+                BLOCKS_TO_KEEP
+            )
+            .unwrap(),
+            None
         );
     }
 
     #[test]
     fn boot_seed_refused_for_an_archive_node_leaves_the_pending_range_intact() {
-        // Same fixture with `blocks_to_keep = -1`. The seed is refused, so
+        // Same fixture with `blocks_to_keep = -1`. Its valid fresh floor is unchanged, so
         // the helper must not disturb the range boot recovery already
         // built: an archive node downloads from genesis onward.
         let (mut store, _dir) = seeded_store();
