@@ -198,6 +198,19 @@ impl PrivateTransactionQueue {
         now_ms: u64,
         tip_height: u32,
     ) -> Result<PrivateTransactionEntry, String> {
+        self.admit_at_tip(entry, options, now_ms, tip_height, None)
+    }
+
+    /// Persist the initial applied branch identity with the first admission,
+    /// including if the process stops before its next lifecycle tick.
+    pub fn admit_at_tip(
+        &self,
+        entry: &Entry,
+        options: PrivateTransactionOptions,
+        now_ms: u64,
+        tip_height: u32,
+        tip_id: Option<String>,
+    ) -> Result<PrivateTransactionEntry, String> {
         if options
             .expires_at_ms
             .is_some_and(|deadline| deadline <= now_ms)
@@ -263,6 +276,7 @@ impl PrivateTransactionQueue {
         let mut updated = store.clone();
         if updated.records.is_empty() {
             updated.observed_height = tip_height;
+            updated.observed_tip = tip_id;
         }
         updated.records.insert(
             tx_id,

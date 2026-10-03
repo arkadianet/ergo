@@ -161,7 +161,7 @@ pub(super) fn admit(
     )
     .with_output_boxes(validated.outputs);
     let result = queue
-        .admit(
+        .admit_at_tip(
             &entry,
             ergo_mining::private_queue::PrivateTransactionOptions {
                 expires_at_ms: options.expires_at_ms,
@@ -171,6 +171,7 @@ pub(super) fn admit(
             },
             crate::snapshot::unix_now_ms(),
             owned.tip.height,
+            Some(hex::encode(owned.tip.header_id.as_bytes())),
         )
         .map_err(MiningApiError::BadRequest)?;
     state.mempool.register_private_transaction(entry.tx_id);

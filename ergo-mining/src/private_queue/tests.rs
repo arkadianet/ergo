@@ -272,3 +272,22 @@ fn cancelling_a_conflict_prevents_reactivation_after_rollback() {
         PrivateTransactionState::Cancelled
     );
 }
+
+#[test]
+fn first_admission_persists_branch_identity_before_lifecycle_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let queue = PrivateTransactionQueue::open(&path).unwrap();
+    let tip = hex::encode([9; 32]);
+    queue
+        .admit_at_tip(
+            &entry(1),
+            PrivateTransactionOptions::default(),
+            10,
+            100,
+            Some(tip.clone()),
+        )
+        .unwrap();
+    let restarted = PrivateTransactionQueue::open(&path).unwrap();
+    assert_eq!(restarted.observation_cursor(), (100, Some(tip)));
+}
