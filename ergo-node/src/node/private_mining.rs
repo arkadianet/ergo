@@ -11,8 +11,8 @@ use ergo_mining::handle::MiningHandle;
 use ergo_mining::private_queue::PrivateTransactionState;
 use ergo_primitives::cost::{CostAccumulator, JitCost};
 use ergo_primitives::digest::Digest32;
-use ergo_state::{ChainStateRead, HeaderSectionStore};
-use ergo_validation::{TxValidationCtx, TxValidationRules, UtxoView};
+use ergo_state::HeaderSectionStore;
+use ergo_validation::{TxValidationCtx, TxValidationRules};
 
 use super::{tip_context::build_tip_context, NodeState};
 
@@ -279,7 +279,11 @@ pub(super) fn reconcile(state: &NodeState, handle: &MiningHandle) -> Result<bool
                 .candidate
                 .transactions
                 .iter()
-                .map(|tx| hex::encode(tx.tx_id()))
+                .filter_map(|tx| {
+                    ergo_ser::transaction::transaction_id(tx)
+                        .ok()
+                        .map(|id| hex::encode(id.as_bytes()))
+                })
                 .collect()
         })
         .unwrap_or_default();

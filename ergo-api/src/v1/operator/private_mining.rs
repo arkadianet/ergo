@@ -63,7 +63,7 @@ pub(crate) async fn cancel(State(s): State<OperatorState>, Path(tx_id): Path<Str
         Ok(m) => m,
         Err(e) => return *e,
     };
-    if hex::decode(&tx_id).is_err_or(|id| id.len() != 32) {
+    if !hex::decode(&tx_id).is_ok_and(|id| id.len() == 32) {
         return crate::mining::MiningApiError::BadRequest(
             "tx_id must be 32 bytes of hexadecimal".into(),
         )

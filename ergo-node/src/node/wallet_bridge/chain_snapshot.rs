@@ -485,7 +485,11 @@ mod tests {
         };
         let submitter = RecordingSubmitter::default();
         let response = super::super::support::sign_submit::send_transaction_native_impl(
-            &SendTxRequest::Intent { intent },
+            &SendTxRequest::Intent {
+                intent,
+                delivery: Default::default(),
+                private_options: None,
+            },
             &parking_lot::RwLock::new(storage),
             &parking_lot::RwLock::new(wallet),
             &db,

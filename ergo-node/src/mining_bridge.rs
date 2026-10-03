@@ -591,6 +591,11 @@ mod tests {
                     MiningRequest::SubmitSolution { reply, .. } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
                     }
+                    MiningRequest::ListPrivateTransactions { .. }
+                    | MiningRequest::SubmitPrivateTransaction { .. }
+                    | MiningRequest::CancelPrivateTransaction { .. } => {
+                        panic!("private requests are not expected in this fixture")
+                    }
                     MiningRequest::GetRewardKey { reply } => {
                         let _ = reply.send(Err(MiningApiError::Unavailable("n/a".into())));
                     }
