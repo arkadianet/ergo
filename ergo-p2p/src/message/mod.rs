@@ -142,8 +142,14 @@ pub fn single_modifier_fits(byte_len: usize) -> bool {
 }
 
 pub fn serialize_modifiers(data: &ModifiersData) -> Result<Vec<u8>, MessageError> {
+    if ModifierTypeId::from_byte(data.type_id).is_none() {
+        return Err(MessageError::UnknownModifierType(data.type_id));
+    }
     if data.modifiers.is_empty() {
         return Err(MessageError::EmptyModifiers);
+    }
+    if data.modifiers.len() > MAX_MODIFIERS {
+        return Err(MessageError::TooManyModifiers(data.modifiers.len()));
     }
     let mut w = VlqWriter::new();
     w.put_u8(data.type_id);
