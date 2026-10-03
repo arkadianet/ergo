@@ -105,6 +105,163 @@ fn parse_block_tx(tx_hex: &str) -> Transaction {
 // ----- happy path -----
 
 #[test]
+fn snapshot_install_preserves_mainnet_lookups_forward_apply_and_reopen() {
+    use ergo_avltree_rust::authenticated_tree_ops::AuthenticatedTreeOps;
+    use ergo_ser::header::read_header;
+    use ergo_state::avl::snapshot_codec::reconstruct_tree;
+    use ergo_state::chain::HeaderMeta;
+
+    let headers: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/headers_1_10.json"
+    ))
+    .unwrap();
+    let tx_rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../test-vectors/mainnet/transactions_1_10.json"
+    ))
+    .unwrap();
+    let parsed: Vec<_> = headers
+        .iter()
+        .map(|row| {
+            let bytes = hex::decode(row["bytes"].as_str().unwrap()).unwrap();
+            let header = read_header(&mut VlqReader::new(&bytes)).unwrap();
+            let id: [u8; 32] = hex::decode(row["id"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let tx = tx_rows
+                .iter()
+                .find(|tx| tx["height"].as_u64() == Some(u64::from(header.height)))
+                .unwrap();
+            (
+                header,
+                id,
+                bytes,
+                parse_block_tx(tx["bytes"].as_str().unwrap()),
+            )
+        })
+        .collect();
+    let source_dir = tempfile::tempdir().unwrap();
+    let mut source = StateStore::open(&source_dir.path().join("state.redb")).unwrap();
+    init_genesis(&mut source);
+    for (header, id, _, tx) in parsed.iter().take(9) {
+        source
+            .apply_block_unchecked_for_test(
+                header.height,
+                id,
+                &header.state_root,
+                std::slice::from_ref(tx),
+            )
+            .unwrap();
+    }
+    let pinned_root = parsed[8].0.state_root;
+    assert_eq!(source.root_digest(), pinned_root);
+    let served = source.build_snapshot_at_tip(2).unwrap();
+    let chunks = served.chunks.iter().cloned().collect();
+    let spend_id = *parsed[9].3.inputs[0].box_id.as_bytes();
+    let spend_bytes = source.get_box_bytes(&spend_id).unwrap();
+
+    for (pipelined, reopen_before_install) in [(false, true), (true, false), (true, true)] {
+        for reopen_before_apply in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("state.redb");
+            let mut store = StateStore::open(&path).unwrap();
+            init_genesis(&mut store);
+            if reopen_before_install {
+                // An ordinary reopen materializes the genesis allocator row.
+                drop(store);
+                store = StateStore::open(&path).unwrap();
+            }
+            for (header, id, bytes, _) in &parsed {
+                let meta = HeaderMeta {
+                    height: header.height,
+                    parent_id: *header.parent_id.as_bytes(),
+                    timestamp: header.timestamp,
+                    cumulative_score: u64::from(header.height).to_be_bytes().to_vec(),
+                    pow_validity: 1,
+                };
+                store
+                    .store_validated_header(
+                        id,
+                        bytes,
+                        &meta,
+                        Some((header.height, meta.cumulative_score.clone())),
+                    )
+                    .unwrap();
+            }
+            if pipelined {
+                store.enable_persist_pipeline(2).unwrap();
+            }
+            let old_root = store.root_digest();
+            let old_committed = store.committed_snapshot().unwrap().unwrap();
+            store
+                .install_snapshot_state(
+                    reconstruct_tree(&served.manifest_bytes, &chunks).unwrap(),
+                    9,
+                    parsed[8].1,
+                    &pinned_root,
+                )
+                .unwrap();
+            assert_eq!(store.height(), 9);
+            assert_eq!(store.root_digest(), pinned_root);
+            assert_eq!(old_committed.state_root(), old_root);
+            assert_eq!(old_committed.lookup_box(&spend_id).unwrap(), None);
+            drop(old_committed);
+            assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            let committed = store.committed_snapshot().unwrap().unwrap();
+            assert_eq!(
+                committed.lookup_box(&spend_id).unwrap(),
+                Some(spend_bytes.clone())
+            );
+            assert_eq!(
+                committed
+                    .hydrate_prover()
+                    .unwrap()
+                    .digest()
+                    .unwrap()
+                    .as_ref(),
+                pinned_root.as_bytes()
+            );
+            drop(committed);
+
+            if reopen_before_apply {
+                store.shutdown_cleanly().unwrap();
+                drop(store);
+                store = StateStore::open(&path).unwrap();
+                assert_eq!(store.height(), 9);
+                assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+                if pipelined {
+                    store.enable_persist_pipeline(2).unwrap();
+                }
+            }
+            store
+                .apply_block_unchecked_for_test(
+                    10,
+                    &parsed[9].1,
+                    &parsed[9].0.state_root,
+                    std::slice::from_ref(&parsed[9].3),
+                )
+                .unwrap();
+            store.flush_persist_pipeline().unwrap();
+            if pipelined {
+                let progress = store.persistence_progress().unwrap();
+                assert_eq!(progress.enqueued_jobs, 1);
+                assert_eq!(progress.committed_jobs, 1);
+            }
+            assert_eq!(store.root_digest(), parsed[9].0.state_root);
+            store.rollback_to(9, None, None).unwrap();
+            assert_eq!(store.root_digest(), pinned_root);
+            assert_eq!(store.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+            store.shutdown_cleanly().unwrap();
+            drop(store);
+            let mut reopened = StateStore::open(&path).unwrap();
+            assert_eq!(reopened.height(), 9);
+            assert_eq!(reopened.root_digest(), pinned_root);
+            assert_eq!(reopened.get_box_bytes(&spend_id), Some(spend_bytes.clone()));
+        }
+    }
+}
+
+#[test]
 fn blocks_1_10_digests_match_with_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = StateStore::open(dir.path().join("state.redb").as_path()).unwrap();

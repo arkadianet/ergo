@@ -322,6 +322,31 @@ fn install_snapshot_state_sentinel_survives_reopen() {
 }
 
 #[test]
+fn snapshot_install_preserves_state_after_pending_persist_failure() {
+    let dir = TempDir::new().unwrap();
+    let mut store = open_test_store(&dir.path().join("state.redb"));
+    store
+        .apply_popow_proof(&nipopow_proof_dense_from_2())
+        .unwrap();
+    let header_id = store
+        .get_header_id_at_height(SUFFIX_TIP_HEIGHT)
+        .unwrap()
+        .unwrap();
+    let (tree, root) = build_reconstructed_tree(3);
+    let before = store.root_digest();
+    store.inject_pending_persist_failure_for_test(SUFFIX_TIP_HEIGHT);
+    assert!(matches!(
+        store.install_snapshot_state(tree, SUFFIX_TIP_HEIGHT, header_id, &root),
+        Err(StateError::PersistFailed { .. })
+    ));
+    assert_eq!(store.height(), 0);
+    assert_eq!(store.root_digest(), before);
+    assert_eq!(store.chain_state().best_full_block_height, 0);
+    assert_eq!(store.read_minimal_full_block_height().unwrap(), 2);
+    assert!(!store.was_utxo_bootstrapped().unwrap());
+}
+
+#[test]
 fn install_snapshot_state_seeds_chain_index_anchor_at_snapshot_height() {
     // Phase 4 rollback boundary regression: a rollback whose
     // target is `sentinel - 1 = snapshot_height` is legal under
