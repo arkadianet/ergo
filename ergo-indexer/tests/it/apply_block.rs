@@ -591,15 +591,51 @@ fn apply_then_spend_decrements_owner_balance() {
 
 #[test]
 fn apply_records_token_bundle_on_owner_address() {
+    // Native storage fixture: mint B in the first block, then consume both
+    // its output and a funding output while minting A in the second block.
+    // This exercises token transfer as well as owner-balance accumulation.
     let (store, _tmp) = open_store();
-    let token_a = Digest32::from_bytes([0xAA; 32]);
     let token_b = Digest32::from_bytes([0xBB; 32]);
+    let mut funding_tree = size_delimited_tree();
+    funding_tree.body = Expr::Const {
+        tpe: SigmaType::SBoolean,
+        val: SigmaValue::Boolean(false),
+    };
+    let funding =
+        ErgoBoxCandidate::new(1_000, funding_tree, 1, vec![], AdditionalRegisters::empty())
+            .unwrap();
+    let mint_b = Transaction {
+        inputs: vec![fake_input(0xBB)],
+        data_inputs: vec![],
+        output_candidates: vec![
+            funding,
+            candidate_with_tokens(
+                1_000_000,
+                1,
+                vec![Token {
+                    token_id: token_b,
+                    amount: 7,
+                }],
+            ),
+        ],
+    };
+    let block1 = IndexerBlock {
+        height: 1,
+        header_id: Digest32::from_bytes([0x11; 32]),
+        transactions: std::slice::from_ref(&mint_b),
+    };
+    let meta1 = apply_block(&store, &IndexerMeta::empty(), &block1).unwrap();
+    let token_a = sealed_box_id(&mint_b, 0);
+    let mut funding_input = fake_input(0);
+    funding_input.box_id = token_a;
+    let mut transfer_input = fake_input(0);
+    transfer_input.box_id = sealed_box_id(&mint_b, 1);
     let tx = Transaction {
-        inputs: vec![fake_input(0xCC)],
+        inputs: vec![funding_input, transfer_input],
         data_inputs: vec![],
         output_candidates: vec![candidate_with_tokens(
             1_000_000,
-            1,
+            2,
             vec![
                 Token {
                     token_id: token_a,
@@ -612,15 +648,18 @@ fn apply_records_token_bundle_on_owner_address() {
             ],
         )],
     };
-    let block = IndexerBlock {
-        height: 1,
-        header_id: Digest32::from_bytes([0x11; 32]),
+    let block2 = IndexerBlock {
+        height: 2,
+        header_id: Digest32::from_bytes([0x12; 32]),
         transactions: std::slice::from_ref(&tx),
     };
-    apply_block(&store, &IndexerMeta::empty(), &block).unwrap();
-
-    let th = tree_hash_of(&size_delimited_tree());
-    let bal = store.read_address(&th).unwrap().unwrap().balance.unwrap();
+    apply_block(&store, &meta1, &block2).unwrap();
+    let bal = store
+        .read_address(&tree_hash_of(&size_delimited_tree()))
+        .unwrap()
+        .unwrap()
+        .balance
+        .unwrap();
     assert_eq!(bal.nano_ergs, 1_000_000);
     assert_eq!(bal.tokens, vec![(token_a, 5), (token_b, 7)]);
 }

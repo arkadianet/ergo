@@ -29,7 +29,7 @@ use ergo_ser::ergo_tree::{template_hash_from_bytes, TemplateHashError};
 use redb::{ReadableTable, Table};
 
 use crate::error::IndexerError;
-use crate::segment::{read_segment, write_segment, Segment};
+use crate::segment::{read_persisted_segment, write_segment, Segment};
 
 /// Parent record under `INDEXED_TEMPLATE`, keyed by `template_hash`.
 ///
@@ -72,7 +72,7 @@ pub fn read_indexed_template(r: &mut VlqReader) -> Result<IndexedTemplate, ReadE
     let mut hash_arr = [0u8; 32];
     hash_arr.copy_from_slice(hash_bytes);
     let template_hash = Digest32::from_bytes(hash_arr);
-    let segment = read_segment(r)?;
+    let segment = read_persisted_segment(r)?;
     Ok(IndexedTemplate {
         template_hash,
         segment,

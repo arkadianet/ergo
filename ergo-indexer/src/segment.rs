@@ -87,35 +87,38 @@ pub fn write_segment(w: &mut VlqWriter, s: &Segment) {
 
 /// Parse a `Segment` body. Inverse of [`write_segment`].
 ///
-/// Returns `InvalidData` if the wire format declares a negative array
-/// length — Scala uses signed `Int` for these counts and a malicious
-/// or corrupted record could carry a negative value, which would
-/// otherwise underflow a `usize` cast.
+/// Rejects negative array lengths/spill counts and arrays that cannot fit in
+/// the remaining input. Transient over-threshold arrays can be decoded here;
+/// persisted parent/spill readers additionally enforce the 512-entry bound.
 pub fn read_segment(r: &mut VlqReader) -> Result<Segment, ReadError> {
-    let txs_len = r.get_i32()?;
-    if txs_len < 0 {
-        return Err(ReadError::InvalidData(format!(
-            "segment txs length is negative: {txs_len}"
-        )));
-    }
-    let mut txs = Vec::with_capacity(txs_len as usize);
+    read_segment_with_bounds(r, false)
+}
+
+/// Stored rows must have completed spilling before serialization.
+pub(crate) fn read_persisted_segment(r: &mut VlqReader) -> Result<Segment, ReadError> {
+    read_segment_with_bounds(r, true)
+}
+
+fn read_segment_with_bounds(r: &mut VlqReader, persisted: bool) -> Result<Segment, ReadError> {
+    let txs_len = read_count(r, "txs", persisted)?;
+    let mut txs = Vec::with_capacity(txs_len.min(SEGMENT_THRESHOLD));
     for _ in 0..txs_len {
         txs.push(r.get_i64()?);
     }
 
-    let boxes_len = r.get_i32()?;
-    if boxes_len < 0 {
-        return Err(ReadError::InvalidData(format!(
-            "segment boxes length is negative: {boxes_len}"
-        )));
-    }
-    let mut boxes = Vec::with_capacity(boxes_len as usize);
+    let boxes_len = read_count(r, "boxes", persisted)?;
+    let mut boxes = Vec::with_capacity(boxes_len.min(SEGMENT_THRESHOLD));
     for _ in 0..boxes_len {
         boxes.push(r.get_i64()?);
     }
 
     let box_segment_count = r.get_i32()?;
     let tx_segment_count = r.get_i32()?;
+    if box_segment_count < 0 || tx_segment_count < 0 {
+        return Err(ReadError::InvalidData(
+            "segment spill count is negative".into(),
+        ));
+    }
 
     Ok(Segment {
         txs,
@@ -123,6 +126,26 @@ pub fn read_segment(r: &mut VlqReader) -> Result<Segment, ReadError> {
         box_segment_count,
         tx_segment_count,
     })
+}
+
+fn read_count(r: &mut VlqReader, field: &str, persisted: bool) -> Result<usize, ReadError> {
+    let count = r.get_i32()?;
+    let count = usize::try_from(count).map_err(|_| {
+        ReadError::InvalidData(format!("segment {field} length is negative: {count}"))
+    })?;
+    if persisted && count > SEGMENT_THRESHOLD {
+        return Err(ReadError::InvalidData(format!(
+            "stored segment {field} length exceeds {SEGMENT_THRESHOLD}: {count}"
+        )));
+    }
+    // Every signed VLQ value needs at least one byte. Do not reserve from a
+    // declared count before establishing that input can contain the entries.
+    if count > r.remaining() {
+        return Err(ReadError::InvalidData(format!(
+            "segment {field} length exceeds remaining input: {count}"
+        )));
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -209,7 +232,7 @@ mod tests {
             txs: vec![0, i64::MAX, 1, i64::MIN + 1],
             boxes: vec![i64::MIN + 1, -1, 0, 1, i64::MAX],
             box_segment_count: i32::MAX,
-            tx_segment_count: i32::MIN,
+            tx_segment_count: i32::MAX,
         };
         roundtrip(&s);
     }
@@ -226,6 +249,48 @@ mod tests {
         match err {
             ReadError::InvalidData(msg) => assert!(msg.contains("negative")),
             other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stored_rows_refuse_unspilled_arrays_but_transient_codec_accepts_them() {
+        for boxes in [false, true] {
+            let mut segment = Segment::empty();
+            if boxes {
+                segment.boxes = vec![1; SEGMENT_THRESHOLD + 1];
+            } else {
+                segment.txs = vec![1; SEGMENT_THRESHOLD + 1];
+            }
+            let bytes = roundtrip(&segment);
+            assert!(matches!(
+                read_persisted_segment(&mut VlqReader::new(&bytes)),
+                Err(ReadError::InvalidData(message)) if message.contains("stored segment")
+            ));
+        }
+    }
+
+    #[test]
+    fn segment_counts_require_available_bytes_and_nonnegative_spill_counts() {
+        let mut writer = VlqWriter::new();
+        writer.put_i32(2);
+        writer.put_i64(1);
+        let bytes = writer.result();
+        assert!(matches!(
+            read_segment(&mut VlqReader::new(&bytes)),
+            Err(ReadError::InvalidData(message)) if message.contains("remaining input")
+        ));
+        for box_count in [false, true] {
+            let segment = Segment {
+                box_segment_count: if box_count { -1 } else { 0 },
+                tx_segment_count: if box_count { 0 } else { -1 },
+                ..Segment::empty()
+            };
+            let mut writer = VlqWriter::new();
+            write_segment(&mut writer, &segment);
+            assert!(matches!(
+                read_segment(&mut VlqReader::new(&writer.result())),
+                Err(ReadError::InvalidData(message)) if message.contains("spill count is negative")
+            ));
         }
     }
 }

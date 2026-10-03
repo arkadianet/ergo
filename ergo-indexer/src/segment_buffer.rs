@@ -45,7 +45,7 @@ use tracing::warn;
 
 use crate::address::IndexedAddress;
 use crate::error::IndexerError;
-use crate::segment::{read_segment, Segment, SEGMENT_THRESHOLD};
+use crate::segment::{read_persisted_segment, Segment, SEGMENT_THRESHOLD};
 use crate::segment_id::{box_segment_id, tx_segment_id};
 
 /// Map keyed by spill segment id. The caller seeds this with the empty
@@ -565,7 +565,7 @@ fn read_spill_from_table(
     };
     let bytes = guard.value();
     let mut r = VlqReader::new(bytes);
-    let seg = read_segment(&mut r).map_err(|source| IndexerError::DbDecode {
+    let seg = read_persisted_segment(&mut r).map_err(|source| IndexerError::DbDecode {
         context: "segment",
         source,
     })?;

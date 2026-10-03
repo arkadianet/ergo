@@ -150,6 +150,10 @@ pub enum IndexerError {
     /// A constructed height or next global index cannot be represented on disk.
     #[error("indexer {field} is outside its supported range")]
     CounterRange { field: &'static str },
+    /// Primary boxes reference a token whose emission record is missing.
+    /// Chain-free repair cannot reconstruct its original mint metadata.
+    #[error("indexer token mint metadata missing for {token_id:?}")]
+    TokenMetadataMissing { token_id: crate::TokenId },
 
     // ----- write-path (encode / hash / size cast) -----
     /// A persistence-write-path serializer call returned an error.
@@ -389,6 +393,7 @@ impl IndexerError {
             | Self::StaleCheckpoint
             | Self::RepairInProgress
             | Self::CounterRange { .. }
+            | Self::TokenMetadataMissing { .. }
             | Self::Serialize { .. }
             | Self::LengthExceedsI32 { .. }
             | Self::HashDerivation { .. }

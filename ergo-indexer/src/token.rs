@@ -39,7 +39,7 @@ use redb::{ReadableTable, Table};
 use ergo_indexer_types::{BoxId, TokenId};
 
 use crate::error::IndexerError;
-use crate::segment::{read_segment, write_segment, Segment};
+use crate::segment::{read_persisted_segment, write_segment, Segment};
 use crate::segment_id::token_unique_id;
 
 /// Parent record under `INDEXED_TOKEN`, keyed by
@@ -153,7 +153,7 @@ pub fn read_indexed_token(r: &mut VlqReader) -> Result<IndexedToken, ReadError> 
     let name = read_option_string(r)?;
     let description = read_option_string(r)?;
     let decimals = read_option_decimals(r)?;
-    let segment = read_segment(r)?;
+    let segment = read_persisted_segment(r)?;
     Ok(IndexedToken {
         token_id,
         creating_box_id,
@@ -225,26 +225,21 @@ pub(crate) fn load_token_into_map<'a>(
     }
 }
 
-/// Lookup-only helper for the non-mint segment-append path. Does NOT
-/// create an empty placeholder on miss — returns `Ok(None)` so the
-/// caller can skip the segment append for tokens that have no
-/// IndexedToken record. `[derived]` defensive: mainnet invariant says
-/// the record exists for every chain-validated token (every token
-/// originates from an EIP-4 mint that creates the record), but
-/// preserving the skip path keeps the indexer from synthesizing
-/// placeholders that Scala's `findAndUpdateToken` would have dropped.
-pub(crate) fn try_load_token_into_map<'a>(
-    token_table: &Table<&[u8], &[u8]>,
+/// Load an existing mint record for a token transfer or secondary rebuild.
+/// Missing metadata prevents a complete projection. Refuse the transaction
+/// rather than silently dropping entries or fabricating emission metadata.
+pub(crate) fn load_required_token_into_map<'a>(
+    token_table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     map: &'a mut HashMap<TokenId, IndexedToken>,
     token_id: TokenId,
-) -> Result<Option<&'a mut IndexedToken>, IndexerError> {
+) -> Result<&'a mut IndexedToken, IndexerError> {
     use std::collections::hash_map::Entry;
     match map.entry(token_id) {
-        Entry::Occupied(e) => Ok(Some(e.into_mut())),
+        Entry::Occupied(e) => Ok(e.into_mut()),
         Entry::Vacant(e) => {
             let key = token_unique_id(&token_id);
             let Some(g) = token_table.get(key.as_bytes().as_slice())? else {
-                return Ok(None);
+                return Err(IndexerError::TokenMetadataMissing { token_id });
             };
             let mut r = VlqReader::new(g.value());
             let loaded = read_indexed_token(&mut r).map_err(|source| IndexerError::DbDecode {
@@ -258,7 +253,7 @@ pub(crate) fn try_load_token_into_map<'a>(
                     got: g.value().len(),
                 });
             }
-            Ok(Some(e.insert(loaded)))
+            Ok(e.insert(loaded))
         }
     }
 }
