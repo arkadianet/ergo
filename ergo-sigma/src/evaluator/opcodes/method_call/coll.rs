@@ -50,8 +50,8 @@ use crate::evaluator::cost::{add_method_cost, collection_len, eq_with_cost};
 use crate::evaluator::dispatch::eval_expr;
 use crate::evaluator::eval_ctx::EvalCtx;
 use crate::evaluator::helpers::{
-    coll_elem_type, collection_to_values, sigma_type_compatible, value_to_sigma_type, values_equal,
-    values_to_collection, CollKind,
+    coll_elem_type, collection_to_values, infer_expr_type, sigma_type_compatible,
+    value_to_sigma_type, values_equal, values_to_collection, CollKind,
 };
 use crate::evaluator::opcodes::binding::check_closure_param_types;
 use crate::evaluator::types::{EvalError, Value};
@@ -276,14 +276,17 @@ pub(super) fn get(obj_val: Value, args: &[Expr], cx: &mut EvalCtx<'_>) -> Result
 
 // SColl(12).flatMap(15) -> Coll[B]
 // Scala: xs.flatMap(f) — map each element to a collection, flatten results.
-/// Best-effort static output element type `B` of a flatMap mapper body (a
-/// `Coll[B]` expression), for typing the EMPTY result when the receiver is
-/// empty. Covers the statically-determinable IR shapes; `None` otherwise, so
-/// the caller keeps the legacy `Coll[Byte]` fallback (a documented residual).
-/// A returned type is always correct (it IS the body's collection element
-/// type), so this can never introduce a new divergence.
-fn flatmap_output_elem_type(body: &Expr) -> Option<SigmaType> {
+/// Recover the element type without invoking a mapper on an empty receiver.
+/// Captured values and parameter types are part of the closure's environment.
+fn flatmap_output_elem_type(
+    body: &Expr,
+    bindings: &std::collections::HashMap<u32, SigmaType>,
+    constants: &[(SigmaType, ergo_ser::sigma_value::SigmaValue)],
+) -> Option<SigmaType> {
     use ergo_ser::opcode::Payload;
+    if let Some(SigmaType::SColl(elem)) = infer_expr_type(body, bindings, constants) {
+        return Some(*elem);
+    }
     match body {
         Expr::Const {
             tpe: SigmaType::SColl(elem),
@@ -295,7 +298,7 @@ fn flatmap_output_elem_type(body: &Expr) -> Option<SigmaType> {
             // If (0x95): both branches share the `Coll[B]` result type, so the
             // then-branch determines B.
             Payload::Three(_cond, then_branch, _else_branch) if node.opcode == 0x95 => {
-                flatmap_output_elem_type(then_branch)
+                flatmap_output_elem_type(then_branch, bindings, constants)
             }
             _ => None,
         },
@@ -372,42 +375,22 @@ pub(super) fn flat_map(
                 inner_colls.push(inner);
             }
 
-            // Flatten by type: merge all inner collections into one.
-            // The boxed-element coll carrier (`CollGeneric`)
-            // from conditional expressions represents a Coll:
-            // - CollGeneric([])                 â†’ empty Coll (skip)
-            // - CollGeneric([Tuple([CollBytes, Long]), ...]) â†’ Tokens
-            // - CollGeneric([Int, Int, ...])    â†’ CollInt
-            // Normalize these before flattening. The inner
-            // `Tuple(inner)` patterns are real 2-tuple pairs,
-            // intentionally unchanged.
+            // Only the exact token element type can use the Tokens carrier.
+            // The shared conversion is lossless: a short byte collection or
+            // another non-token pair keeps every element in CollGeneric.
+            let token_elem_type = SigmaType::STuple(vec![
+                SigmaType::SColl(Box::new(SigmaType::SByte)),
+                SigmaType::SLong,
+            ]);
             for c in inner_colls.iter_mut() {
-                if let Value::CollGeneric(elems, _) | Value::CollLegacyPair(elems, _, _) = c {
-                    if elems.is_empty() {
-                                        // Will be removed below
-                                    } else if elems.iter().all(|e| matches!(e, Value::Tuple(inner) if inner.len() == 2 && matches!(&inner[0], Value::CollBytes(_)))) {
-                                        // CollGeneric of (CollBytes, Long) pairs â†’ Tokens
-                                        let tokens: Vec<([u8; 32], u64)> = elems.drain(..).filter_map(|e| {
-                                            if let Value::Tuple(mut inner) = e {
-                                                if inner.len() == 2 {
-                                                    let amount = match inner.pop().unwrap() {
-                                                        Value::Long(n) => n as u64,
-                                                        Value::Int(n) => n as u64,
-                                                        _ => return None,
-                                                    };
-                                                    if let Value::CollBytes(b) = inner.pop().unwrap() {
-                                                        if b.len() == 32 {
-                                                            let mut arr = [0u8; 32];
-                                                            arr.copy_from_slice(&b);
-                                                            return Some((arr, amount));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None
-                                        }).collect();
-                                        *c = Value::Tokens(tokens);
-                                    }
+                if let Value::CollGeneric(elems, elem) | Value::CollLegacyPair(elems, elem, _) = c {
+                    if !elems.is_empty() && **elem == token_elem_type {
+                        *c = values_to_collection(
+                            CollKind::Token,
+                            std::mem::take(elems),
+                            token_elem_type.clone(),
+                        )?;
+                    }
                 }
             }
             // Capture the pre-filter shape so an all-empty
@@ -433,11 +416,22 @@ pub(super) fn flat_map(
                 // Empty receiver: no inner collection exists to read the shape
                 // from, so recover the output element type B from the mapper
                 // body's static `Coll[B]` type (Scala threads `RType[B]`),
-                // rather than collapsing to `Coll[Byte]`. Undeterminable bodies
-                // still fall back to the legacy `Coll[Byte]` — a documented
-                // residual; a recovered type is always correct.
+                // rather than losing the type of a captured collection. The
+                // existing fallback remains for types inference cannot recover.
+                let mut bindings: std::collections::HashMap<_, _> = captured_env
+                    .iter()
+                    .filter_map(|(id, value)| value_to_sigma_type(value).map(|tpe| (*id, tpe)))
+                    .collect();
+                bindings.extend(
+                    param_types
+                        .iter()
+                        .filter_map(|(id, tpe)| tpe.clone().map(|tpe| (*id, tpe))),
+                );
                 first_shape
-                    .or_else(|| flatmap_output_elem_type(&body).map(|b| empty_coll_for_elem(&b)))
+                    .or_else(|| {
+                        flatmap_output_elem_type(&body, &bindings, cx.constants)
+                            .map(|b| empty_coll_for_elem(&b))
+                    })
                     .unwrap_or_else(|| Value::CollBytes(Vec::new()))
             } else {
                 match &inner_colls[0] {
