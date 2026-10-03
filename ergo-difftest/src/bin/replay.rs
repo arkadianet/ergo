@@ -4,7 +4,8 @@
 //! in-process via the same pipeline the Rust node uses, and diffs the
 //! resulting state root against the Scala-committed `stateRoot` field.
 //! Any divergence is emitted as a JSONL record; the final summary line
-//! reports totals. Exit non-zero on any divergence or pin mismatch.
+//! reports totals. Exit non-zero on any divergence or pin mismatch. The fixed
+//! context model supports contiguous early-mainnet heights 1..=200 only.
 //!
 //! Usage:
 //! `replay [--from <h>] --to <h> [--node <url>] [--pins <path>]`
@@ -56,8 +57,13 @@ use serde::Deserialize;
 /// Same file as `ergo-state/tests/chain_validate_1_*.rs`.
 static GENESIS_BOXES_JSON: &str = include_str!("../../../test-vectors/mainnet/genesis_boxes.json");
 
+// This is a diagnostic model boundary, not a protocol height limit. Later
+// epochs need historical voted parameters, soft-fork and parent-extension state.
+const MAX_SUPPORTED_HEIGHT: u32 = 200;
+
 // ── CLI args ────────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct Args {
     from: u32,
     to: u32,
@@ -100,9 +106,13 @@ impl Args {
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
+        let to = to.ok_or("--to is required")?;
+        if from != 1 || !(1..=MAX_SUPPORTED_HEIGHT).contains(&to) {
+            return Err(format!("supported replay window is --from 1 --to 1..={MAX_SUPPORTED_HEIGHT}; later contexts are not implemented"));
+        }
         Ok(Args {
             from,
-            to: to.ok_or("--to is required")?,
+            to,
             node,
             pins_path,
         })
@@ -113,10 +123,11 @@ impl Args {
 
 #[derive(Deserialize)]
 struct PinFile {
+    network: String,
     heights: HashMap<String, PinEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PinEntry {
     #[serde(rename = "headerId")]
     header_id: String,
@@ -127,14 +138,29 @@ struct PinEntry {
 fn load_pins(path: &str) -> Result<HashMap<u32, PinEntry>, String> {
     let data = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read pins file {path}: {e}"))?;
+    parse_pins(&data)
+}
+
+fn parse_pins(data: &str) -> Result<HashMap<u32, PinEntry>, String> {
     let pf: PinFile =
-        serde_json::from_str(&data).map_err(|e| format!("pins JSON parse error: {e}"))?;
+        serde_json::from_str(data).map_err(|e| format!("pins JSON parse error: {e}"))?;
+    if pf.network != "mainnet" {
+        return Err("the replay context and genesis fixtures support mainnet only".to_string());
+    }
     let mut out = HashMap::new();
     for (k, v) in pf.heights {
         let h: u32 = k
             .parse()
             .map_err(|e| format!("pin key {k:?} is not a u32: {e}"))?;
-        out.insert(h, v);
+        if h == 0
+            || hex32(&v.header_id).is_err()
+            || !hex::decode(&v.state_root).is_ok_and(|bytes| bytes.len() == 33)
+        {
+            return Err(format!("invalid height/header/root pin: {k}"));
+        }
+        if out.insert(h, v).is_some() {
+            return Err(format!("duplicate numeric pin height: {h}"));
+        }
     }
     Ok(out)
 }
@@ -425,6 +451,7 @@ fn parse_genesis_box(json: &GenesisBoxJson) -> Result<(ModifierId, Vec<u8>), Str
 /// Decode a `ScalaFullBlock` into its wire-byte sections using
 /// `DecodeMode::Preserve` (accepts soft-fork ergoTrees already on chain).
 struct BlockSections {
+    header_id: [u8; 32],
     header_bytes: Vec<u8>,
     block_transactions_bytes: Vec<u8>,
     extension_bytes: Vec<u8>,
@@ -474,11 +501,12 @@ fn check_v1_pow_d(header: &ScalaHeader, header_bytes: &[u8]) -> Result<(), Strin
 }
 
 fn decode_block(block: &ScalaFullBlock) -> Result<BlockSections, String> {
-    // The recomputed modifier id is intentionally discarded: the replay driver
-    // uses the archival node's authoritative id (see `checked_header_with_oracle_id`).
-    let (header_bytes, _hid_modifier) =
+    let (header_bytes, header_id) =
         decode_scala_header(&block.header).map_err(|(r, d)| format!("header decode ({r}): {d}"))?;
     check_v1_pow_d(&block.header, &header_bytes)?;
+    if hex32(&block.header.id)? != *header_id.as_bytes() {
+        return Err("header JSON id does not match the decoded wire bytes".to_string());
+    }
 
     let block_transactions_bytes =
         decode_block_transactions_with_mode(&block.block_transactions, DecodeMode::Preserve)
@@ -488,6 +516,7 @@ fn decode_block(block: &ScalaFullBlock) -> Result<BlockSections, String> {
         .map_err(|(r, d)| format!("extension decode ({r}): {d}"))?;
 
     Ok(BlockSections {
+        header_id: *header_id.as_bytes(),
         header_bytes,
         block_transactions_bytes,
         extension_bytes,
@@ -573,15 +602,6 @@ fn main() {
         }
     };
 
-    if args.from != 1 {
-        eprintln!(
-            "error: --from {} is not supported; contiguous-from-genesis (--from 1) only.\n\
-             The in-process apply pipeline needs the full UTXO history from height 1.",
-            args.from
-        );
-        std::process::exit(1);
-    }
-
     // Load pin file
     let pins = match load_pins(&args.pins_path) {
         Ok(p) => p,
@@ -609,24 +629,26 @@ fn main() {
     let mut had_fatal = false;
 
     // Block 1 (genesis block) — apply unchecked
-    match apply_genesis_block(&args.node, &pins, &mut store, &mut pins_verified) {
-        Ok(tx_count) => {
-            blocks_applied += 1;
-            tx_total += tx_count;
-        }
-        Err(e) => {
-            eprintln!("fatal: genesis block (height 1) failed: {e}");
-            print_summary(
-                args.from,
-                args.to,
-                blocks_applied,
-                tx_total,
-                divergences,
-                pins_verified,
-            );
-            std::process::exit(1);
-        }
-    }
+    let genesis_checked_header =
+        match apply_genesis_block(&args.node, &pins, &mut store, &mut pins_verified) {
+            Ok(result) => {
+                blocks_applied += 1;
+                tx_total += result.tx_count;
+                result.checked_header
+            }
+            Err(e) => {
+                eprintln!("fatal: genesis block (height 1) failed: {e}");
+                print_summary(
+                    args.from,
+                    args.to,
+                    blocks_applied,
+                    tx_total,
+                    divergences,
+                    pins_verified,
+                );
+                std::process::exit(1);
+            }
+        };
 
     if args.to < 2 {
         print_summary(
@@ -639,24 +661,6 @@ fn main() {
         );
         std::process::exit(0);
     }
-
-    // We need the genesis block's CheckedHeader to seed the parent context for height 2.
-    // Fetch it again (cheap — same data we just fetched).
-    let genesis_checked_header = match fetch_and_make_genesis_checked_header(&args.node) {
-        Ok(ch) => ch,
-        Err(e) => {
-            eprintln!("fatal: cannot build genesis CheckedHeader for chain context: {e}");
-            print_summary(
-                args.from,
-                args.to,
-                blocks_applied,
-                tx_total,
-                divergences,
-                pins_verified,
-            );
-            std::process::exit(1);
-        }
-    };
 
     // We need the genesis block's extension to seed interlink validation.
     // For simplicity we pass `parent_extension: None` (matches Scala's
@@ -743,29 +747,30 @@ fn apply_genesis_block(
     pins: &HashMap<u32, PinEntry>,
     store: &mut StateStore,
     pins_verified: &mut usize,
-) -> Result<usize, String> {
+) -> Result<BlockResult, String> {
     let header_id_hex = fetch_header_id_at(node, 1)?;
-
-    // Pin check for height 1
-    if let Some(pin) = pins.get(&1) {
-        if !header_id_hex.eq_ignore_ascii_case(&pin.header_id) {
-            return Err(format!(
-                "PIN MISMATCH at height 1: node returned {header_id_hex}, pin expects {}",
-                pin.header_id
-            ));
-        }
-        *pins_verified += 1;
-    }
-
     let block = fetch_full_block(node, &header_id_hex)?;
     let sections = decode_block(&block)?;
+    apply_genesis_sections(
+        &sections,
+        &header_id_hex,
+        pins.get(&1),
+        store,
+        pins_verified,
+    )
+}
 
-    // Parse the header to extract the stateRoot
-    let header = parse_header(&sections.header_bytes)?;
+fn apply_genesis_sections(
+    sections: &BlockSections,
+    served_id: &str,
+    pin: Option<&PinEntry>,
+    store: &mut StateStore,
+    pins_verified: &mut usize,
+) -> Result<BlockResult, String> {
+    let header = validate_header_binding(1, served_id, sections, pin)?;
     let state_root = header.state_root;
-    // Use the archival node's authoritative id (see `checked_header_with_oracle_id`
-    // for the deferred Autolykos-`d` decode note).
-    let header_id = hex32(&header_id_hex)?;
+    let header_id = sections.header_id;
+    let checked_header = make_checked_header(&sections.header_bytes, header_id)?;
 
     // Parse block transactions to get the raw transactions
     let bt = parse_block_transactions(&sections.block_transactions_bytes)?;
@@ -795,7 +800,11 @@ fn apply_genesis_block(
             other => format!("height 1 apply_genesis: {other}"),
         })?;
 
-    Ok(tx_count)
+    complete_pin(1, pin, store.root_digest().as_bytes(), pins_verified)?;
+    Ok(BlockResult {
+        checked_header,
+        tx_count,
+    })
 }
 
 /// Parse a 32-byte hex modifier id (header id) into bytes.
@@ -806,30 +815,47 @@ fn hex32(s: &str) -> Result<[u8; 32], String> {
         .map_err(|_| format!("header id not 32 bytes: {s}"))
 }
 
-/// The archival Scala node is the oracle for the header id, so use the id it
-/// serves (`/blocks/at/{h}`) rather than the one `decode_scala_header`
-/// recomputes from the JSON round-trip. This sidesteps a KNOWN, DEFERRED
-/// production decode bug: `ergo-rest-json` decodes the Autolykos v1 pow `d`
-/// field as SIGNED two's-complement, but Scala serializes it UNSIGNED
-/// (`asUnsignedByteArray`). For early v1 headers whose `d` high byte is >= 0x80
-/// (height 3 is the first on mainnet) the signed decode prepends a spurious
-/// 0x00, producing a wrong header id — which then fails the BlockTransactions
-/// section-id match. `d` is the header's trailing PoW field (unused here: PoW is
-/// trusted, meta_pow_validity = 1), so the correct id + the intact stateRoot /
-/// height / parentId prefix are all we need for state-root replay. The
-/// production fix (correcting the decode itself) remains deferred.
-fn checked_header_with_oracle_id(
+/// Bind the served identity, decoded wire identity, height and any stored pin.
+/// Pin inconsistencies are source-integrity errors, not chain-split verdicts.
+fn validate_header_binding(
+    height: u32,
+    served_id: &str,
     sections: &BlockSections,
-    oracle_id_hex: &str,
-) -> Result<CheckedHeader, String> {
-    make_checked_header(&sections.header_bytes, hex32(oracle_id_hex)?)
+    pin: Option<&PinEntry>,
+) -> Result<Header, String> {
+    let header = parse_header(&sections.header_bytes)?;
+    if header.height != height || hex32(served_id)? != sections.header_id {
+        return Err(format!(
+            "header height/decoded identity mismatch at height {height}"
+        ));
+    }
+    if let Some(pin) = pin {
+        if hex32(&pin.header_id)? != sections.header_id
+            || !hex::encode(header.state_root.as_bytes()).eq_ignore_ascii_case(&pin.state_root)
+        {
+            return Err(format!(
+                "PIN MISMATCH at height {height}: decoded header identity/root differs"
+            ));
+        }
+    }
+    Ok(header)
 }
 
-fn fetch_and_make_genesis_checked_header(node: &str) -> Result<CheckedHeader, String> {
-    let header_id_hex = fetch_header_id_at(node, 1)?;
-    let block = fetch_full_block(node, &header_id_hex)?;
-    let sections = decode_block(&block)?;
-    checked_header_with_oracle_id(&sections, &header_id_hex)
+fn complete_pin(
+    height: u32,
+    pin: Option<&PinEntry>,
+    applied_root: &[u8],
+    pins_verified: &mut usize,
+) -> Result<(), String> {
+    if let Some(pin) = pin {
+        if !hex::encode(applied_root).eq_ignore_ascii_case(&pin.state_root) {
+            return Err(format!(
+                "PIN MISMATCH at height {height}: applied root differs"
+            ));
+        }
+        *pins_verified += 1;
+    }
+    Ok(())
 }
 
 // ── per-block apply (height 2+) ───────────────────────────────────────────────
@@ -854,25 +880,11 @@ fn apply_one_block(
     // 1. Fetch header id at this height
     let header_id_hex = fetch_header_id_at(node, h)?;
 
-    // 2. Pin check
-    if let Some(pin) = pins.get(&h) {
-        if !header_id_hex.eq_ignore_ascii_case(&pin.header_id) {
-            // Hard error: reorg or wrong node. Stop the run.
-            return Err(format!(
-                "PIN MISMATCH at height {h}: node returned {header_id_hex}, pin expects {}",
-                pin.header_id
-            ));
-        }
-        *pins_verified += 1;
-    }
-
-    // 3. Fetch and decode full block
+    // Bind decoded bytes and any pin before validation/application.
     let block = fetch_full_block(node, &header_id_hex)?;
     let sections = decode_block(&block)?;
-
-    // 4. Parse header bytes → CheckedHeader (trust the Scala oracle's PoW + id;
-    //    see `checked_header_with_oracle_id` for the deferred Autolykos-`d` note).
-    let checked_header = checked_header_with_oracle_id(&sections, &header_id_hex)?;
+    validate_header_binding(h, &header_id_hex, &sections, pins.get(&h))?;
+    let checked_header = make_checked_header(&sections.header_bytes, sections.header_id)?;
 
     // 5. Parse block transactions + extension
     let bt = parse_block_transactions(&sections.block_transactions_bytes)?;
@@ -952,35 +964,12 @@ fn apply_one_block(
     // 9. Apply block to state
     match store.apply_block(&checked_block, None, None) {
         Ok(()) => {
-            // 9. Diff: Rust root_digest() was just asserted inside apply_block
-            //    (it returns StateError::DigestMismatch if wrong). If we got
-            //    here, the root matched. Also check the pin's stateRoot if present.
-            if let Some(pin) = pins.get(&h) {
-                let rust_root = hex::encode(store.root_digest().as_bytes());
-                if !rust_root.eq_ignore_ascii_case(&pin.state_root) {
-                    let div = Divergence {
-                        surface: format!("block:{h}"),
-                        kind: "RootMismatch",
-                        height: h,
-                        rust: DivergenceDetail {
-                            verdict: "Accept",
-                            detail: format!("root={rust_root}"),
-                        },
-                        jvm: DivergenceDetail {
-                            verdict: "Accept",
-                            detail: format!("pinned root={}", pin.state_root),
-                        },
-                        provenance: format!("replay:h{h}"),
-                        triage: "PENDING",
-                    };
-                    emit_divergence(&div);
-                    *divergences += 1;
-                    // Root vs pin mismatch: the block was applied (AVL root matched
-                    // the Scala header's stateRoot), but the pin disagrees with what
-                    // we computed. This is a data integrity issue, not a chain split,
-                    // so we continue.
-                }
-            }
+            complete_pin(
+                h,
+                pins.get(&h),
+                store.root_digest().as_bytes(),
+                pins_verified,
+            )?;
         }
         Err(StateError::DigestMismatch { computed, expected }) => {
             // Rust AVL root != header's stateRoot: real RootMismatch divergence.
@@ -1037,4 +1026,165 @@ fn print_summary(
         pins_verified,
     };
     println!("{}", serde_json::to_string(&summary).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ergo_primitives::writer::VlqWriter;
+    use ergo_ser::block_transactions::write_block_transactions;
+    use ergo_ser::transaction::read_transaction;
+
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    fn genesis_sections() -> BlockSections {
+        let headers: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/headers_1_10.json"
+        ))
+        .unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/mainnet/blocks_1_5.json"
+        ))
+        .unwrap();
+        let header_id = hex32(headers[0]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            blocks[0]["headerId"].as_str().unwrap(),
+            hex::encode(header_id)
+        );
+        let transactions = blocks[0]["transactions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tx| {
+                let bytes = hex::decode(tx["bytes"].as_str().unwrap()).unwrap();
+                let mut reader = VlqReader::new(&bytes);
+                let transaction = read_transaction(&mut reader).unwrap();
+                assert_eq!(reader.position(), bytes.len());
+                transaction
+            })
+            .collect();
+        let mut writer = VlqWriter::new();
+        write_block_transactions(
+            &mut writer,
+            &BlockTransactions {
+                header_id: ModifierId::from_bytes(header_id),
+                transactions,
+            },
+        )
+        .unwrap();
+        BlockSections {
+            header_id,
+            header_bytes: hex::decode(headers[0]["bytes"].as_str().unwrap()).unwrap(),
+            block_transactions_bytes: writer.as_slice().to_vec(),
+            extension_bytes: Vec::new(), // genesis apply does not consume extension
+        }
+    }
+
+    fn fixture_pins() -> HashMap<u32, PinEntry> {
+        parse_pins(include_str!("../../replay-pins.json")).unwrap()
+    }
+
+    fn cli(args: &[&str]) -> Result<Args, String> {
+        Args::parse(
+            std::iter::once("replay")
+                .chain(args.iter().copied())
+                .map(str::to_owned),
+        )
+    }
+
+    // ── happy path ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn supports_only_the_implemented_early_context_window() {
+        assert_eq!(cli(&["--to", "1"]).unwrap().to, 1);
+        assert_eq!(cli(&["--from", "1", "--to", "200"]).unwrap().to, 200);
+        for args in [["--to", "0"], ["--to", "201"]] {
+            assert!(cli(&args).unwrap_err().contains("supported replay window"));
+        }
+        assert!(cli(&["--from", "2", "--to", "200"]).is_err());
+    }
+
+    #[test]
+    fn a_pin_counts_only_after_the_applied_digest_matches() {
+        let pins = fixture_pins();
+        let pin = &pins[&1];
+        let root = hex::decode(&pin.state_root).unwrap();
+        let mut count = 0;
+        complete_pin(1, None, &root, &mut count).unwrap();
+        assert_eq!(count, 0);
+        assert!(complete_pin(1, Some(pin), &[0; 33], &mut count).is_err());
+        assert_eq!(count, 0);
+        complete_pin(1, Some(pin), &root, &mut count).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // ── round-trips ────────────────────────────────────────────────────────
+
+    // ── error paths ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn pin_metadata_must_describe_mainnet_with_valid_identifiers() {
+        let valid = include_str!("../../replay-pins.json");
+        assert!(parse_pins(valid).unwrap().contains_key(&836_113));
+        assert!(parse_pins(&valid.replace("mainnet", "testnet")).is_err());
+        let pin = &fixture_pins()[&1];
+        for header in ["00", "zz"] {
+            let data = serde_json::json!({"network":"mainnet", "heights": {
+                "1": {"headerId":header, "stateRoot":pin.state_root}
+            }});
+            assert!(parse_pins(&data.to_string()).is_err());
+        }
+        let entry = serde_json::json!({"headerId":pin.header_id, "stateRoot":pin.state_root});
+        let alias = serde_json::json!({"network":"mainnet", "heights":{"1":entry, "01":entry}});
+        assert!(parse_pins(&alias.to_string())
+            .unwrap_err()
+            .contains("duplicate numeric"));
+        let zero = serde_json::json!({"network":"mainnet", "heights":{"0":entry}});
+        assert!(parse_pins(&zero.to_string()).is_err());
+    }
+
+    #[test]
+    fn served_identity_height_and_pin_must_bind_the_decoded_header() {
+        let sections = genesis_sections();
+        let pins = fixture_pins();
+        let pin = &pins[&1];
+        validate_header_binding(1, &pin.header_id, &sections, Some(pin)).unwrap();
+        assert!(validate_header_binding(2, &pin.header_id, &sections, Some(pin)).is_err());
+        assert!(validate_header_binding(1, &"00".repeat(32), &sections, Some(pin)).is_err());
+        let wrong_root = PinEntry {
+            header_id: pin.header_id.clone(),
+            state_root: "00".repeat(33),
+        };
+        assert!(validate_header_binding(1, &pin.header_id, &sections, Some(&wrong_root)).is_err());
+    }
+
+    // ── oracle parity ──────────────────────────────────────────────────────
+
+    #[test]
+    fn committed_genesis_fixture_applies_and_counts_its_external_pin() {
+        let sections = genesis_sections();
+        let pins = fixture_pins();
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = StateStore::open(&directory.path().join("fixture.redb")).unwrap();
+        seed_genesis(&mut store).unwrap();
+        let mut count = 0;
+        let result = apply_genesis_sections(
+            &sections,
+            &pins[&1].header_id,
+            Some(&pins[&1]),
+            &mut store,
+            &mut count,
+        )
+        .unwrap();
+        assert_eq!(result.tx_count, 1);
+        assert_eq!(count, 1);
+        assert_eq!(
+            hex::encode(store.root_digest().as_bytes()),
+            pins[&1].state_root
+        );
+        assert_eq!(
+            hex::encode(result.checked_header.header_id()),
+            pins[&1].header_id
+        );
+    }
 }
