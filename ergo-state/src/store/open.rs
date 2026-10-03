@@ -129,6 +129,14 @@ impl StateStore {
                             .get("root")?
                             .map(|guard| StateMeta::deserialize(guard.value()))
                             .transpose()?;
+                        if meta.as_ref().is_some_and(|meta| meta.root_node_id == 0)
+                            && table.get(UTXO_BOOTSTRAP_INSTALLED_V1_KEY)?.is_some()
+                        {
+                            // Relocating only the current root would leave its
+                            // children and historical undo references inconsistent.
+                            // Refuse before allocator migration or mutable use.
+                            return Err(StateError::LegacySnapshotNodeIds);
+                        }
                         let (has_alloc, alloc_nid) = match table.get("allocator")? {
                             Some(ag) => (true, AllocMeta::deserialize(ag.value())?.next_id),
                             None => (false, 0),

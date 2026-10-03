@@ -89,7 +89,8 @@ pub(crate) const NODE_FORMAT_V2: &[u8] = b"v2";
 /// codec) into a runtime [`AvlNode`] suitable for AVL_NODES
 /// storage. Preserves separator keys (Internal) and v2-format
 /// cached labels (left/right). Outer `label` is None — recomputed
-/// lazily on first traversal.
+/// lazily on first traversal. Snapshot indices start at zero; runtime node
+/// IDs start at one because zero is the null-node sentinel.
 fn reconstructed_to_avl(rec: &crate::avl::snapshot_codec::ReconstructedNode) -> AvlNode {
     use crate::avl::snapshot_codec::ReconstructedNode;
     match rec {
@@ -112,8 +113,8 @@ fn reconstructed_to_avl(rec: &crate::avl::snapshot_codec::ReconstructedNode) -> 
             right_label,
         } => AvlNode::Internal {
             key: *key,
-            left: *left as crate::avl::node::NodeId,
-            right: *right as crate::avl::node::NodeId,
+            left: *left as crate::avl::node::NodeId + 1,
+            right: *right as crate::avl::node::NodeId + 1,
             balance: *balance,
             left_label: Some(*left_label),
             right_label: Some(*right_label),
@@ -997,7 +998,9 @@ impl StateStore {
             .map(crate::persist::PersistPipeline::progress)
     }
 
-    /// Current committed height (0 = genesis, no blocks applied).
+    /// Foreground applied height (0 = genesis, no blocks applied).
+    /// Background persistence can lag; use `committed_snapshot` for a
+    /// transaction pinned to committed state.
     pub fn height(&self) -> u32 {
         self.height
     }
@@ -1333,6 +1336,30 @@ impl StateStore {
             });
         }
 
+        // Reserve runtime node zero for NULL_NODE. Validate the index space
+        // before replacing either the committed tree or its arena.
+        let next_id = u64::try_from(reconstructed.nodes.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .filter(|next| *next > 1)
+            .ok_or(StateError::InvalidPrecondition {
+                what: "snapshot must contain a root and fit runtime node IDs",
+            })?;
+        for node in &reconstructed.nodes {
+            if let crate::avl::snapshot_codec::ReconstructedNode::Internal { left, right, .. } =
+                node
+            {
+                if *left >= reconstructed.nodes.len() || *right >= reconstructed.nodes.len() {
+                    return Err(StateError::InvalidPrecondition {
+                        what: "snapshot child index is outside its node arena",
+                    });
+                }
+            }
+        }
+        // The imported image and any prior jobs must not overlap. Retain the
+        // worker's monotonic job sequence when attaching the replacement arena.
+        self.flush_persist_pipeline()?;
+
         // 3. Atomic write. Stage the new ChainStateMeta into a
         // local; do NOT mutate `self.chain_state` until after the
         // write_txn commits. If any fallible step inside the txn
@@ -1345,9 +1372,10 @@ impl StateStore {
         new_cs.best_full_block_height = snapshot_height;
         {
             let mut avl_table = write_txn.open_table(AVL_NODES)?;
+            avl_table.retain(|_, _| false)?;
             for (idx, rec_node) in reconstructed.nodes.iter().enumerate() {
                 let avl_node = reconstructed_to_avl(rec_node);
-                avl_table.insert(idx as u64, node_to_bytes(&avl_node).as_slice())?;
+                avl_table.insert(idx as u64 + 1, node_to_bytes(&avl_node).as_slice())?;
             }
 
             // StateMeta.root_digest is the 33-byte ADDigest:
@@ -1360,10 +1388,11 @@ impl StateStore {
                 height: snapshot_height,
                 tree_height: reconstructed.tree_height,
                 root_digest,
-                root_node_id: 0,
+                root_node_id: 1,
             };
             let mut meta_table = write_txn.open_table(STATE_META)?;
             meta_table.insert("root", meta.serialize().as_slice())?;
+            meta_table.insert("allocator", AllocMeta { next_id }.serialize().as_slice())?;
             meta_table.insert(NODE_FORMAT_VERSION_KEY, NODE_FORMAT_V2)?;
             // Persistent UTXO-bootstrap provenance marker. One
             // byte, never cleared. Distinguishes a true Mode 2
@@ -1418,6 +1447,8 @@ impl StateStore {
         // the staged in-memory state. A failure above leaves the
         // store observably unchanged.
         self.chain_state = ChainState::from_persisted(&new_cs);
+        self.height = snapshot_height;
+        self.genesis_committed = true;
         self.mode2_trust_first_epoch = true;
 
         // 4. Rebuild the in-memory tree so subsequent reads find
@@ -1430,12 +1461,15 @@ impl StateStore {
         ));
         let new_tree = AvlTree::new_with_arena(
             arena,
-            0,
+            1,
             reconstructed.tree_height,
-            reconstructed.nodes.len() as u64,
+            next_id,
             reconstructed.root_label,
         );
         self.tree = new_tree;
+        if let Some(pipeline) = &self.persist_pipeline {
+            pipeline.rebind_arena_progress(self.tree.arena_durable_seq_handle());
+        }
 
         Ok(())
     }
@@ -4169,6 +4203,37 @@ pub use crate::avl::serialization::{node_from_bytes, node_to_bytes};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_zero_based_snapshot_is_refused_before_allocator_migration() {
+        let (mut store, _directory) = fresh_store();
+        let path = store.db_path.clone();
+        store.initialize_genesis(&[]).unwrap();
+        let txn = crate::begin_write_qr(&store.db).unwrap();
+        {
+            let mut table = txn.open_table(STATE_META).unwrap();
+            let mut meta = {
+                let row = table.get("root").unwrap().unwrap();
+                StateMeta::deserialize(row.value()).unwrap()
+            };
+            meta.root_node_id = 0;
+            table.insert("root", meta.serialize().as_slice()).unwrap();
+            table
+                .insert(UTXO_BOOTSTRAP_INSTALLED_V1_KEY, &[1u8][..])
+                .unwrap();
+            table.remove("allocator").unwrap();
+        }
+        txn.commit().unwrap();
+        drop(store);
+        assert!(matches!(
+            StateStore::open(&path),
+            Err(StateError::LegacySnapshotNodeIds)
+        ));
+        let db = Database::create(&path).unwrap();
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(STATE_META).unwrap();
+        assert!(table.get("allocator").unwrap().is_none());
+    }
 
     #[test]
     fn ibd_periodic_barrier_runs_on_nth_job_and_exit_drains_remaining_jobs() {
