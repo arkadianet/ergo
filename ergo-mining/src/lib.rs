@@ -22,6 +22,7 @@ pub mod extension_builder;
 pub mod handle;
 pub mod inspection;
 pub mod policy;
+pub mod private_queue;
 pub mod reemission;
 pub mod reward_script;
 pub mod solution;

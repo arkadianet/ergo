@@ -116,6 +116,10 @@ pub struct BuildIntent {
     pub expected_height: u32,
     /// Frozen mempool view (built on the loop, where `&Mempool` lives).
     pub mempool: Arc<MempoolReadSnapshot>,
+    /// Trusted transactions excluded from every public mempool/relay view.
+    pub private_transactions: Arc<Vec<ergo_mempool::pool::Entry>>,
+    /// Captured operator state; stale work must never publish after withdrawal.
+    pub operator_generation: u64,
     /// Reward key resolved on the loop (`Ready` only — the loop does not
     /// signal while the wallet key is `Pending`).
     pub miner_pk: [u8; 33],
@@ -589,6 +593,8 @@ mod tests {
 
     fn intent(parent: [u8; 32], expected_height: u32) -> BuildIntent {
         BuildIntent {
+            private_transactions: Arc::new(Vec::new()),
+            operator_generation: 0,
             expected_parent: parent,
             expected_height,
             mempool: Arc::new(MempoolReadSnapshot::empty()),

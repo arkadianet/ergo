@@ -947,6 +947,8 @@ mod tests {
         mempool: ergo_mempool::MempoolReadSnapshot,
     ) -> ergo_mining::engine::BuildIntent {
         ergo_mining::engine::BuildIntent {
+            private_transactions: Arc::new(Vec::new()),
+            operator_generation: 0,
             expected_parent: [0u8; 32],
             expected_height: 0,
             mempool: std::sync::Arc::new(mempool),
