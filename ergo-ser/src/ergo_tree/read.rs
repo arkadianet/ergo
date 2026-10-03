@@ -25,34 +25,24 @@ pub fn read_ergo_tree(r: &mut VlqReader) -> Result<ErgoTree, ReadError> {
     Ok(tree)
 }
 
-/// Like [`read_ergo_tree`] but gates V6-EMBEDDABLE TYPE CODES (`SUnsignedBigInt`
-/// = code 9, …) under `activated_version` rather than the tree's header version.
+/// Read an ErgoTree under an explicit activated script version.
 ///
-/// This mirrors Scala `TypeSerializer.getEmbeddableType`, which selects
-/// `embeddableV5`/`embeddableV6` by `VersionContext.current.isV6Activated` — the
-/// ACTIVATED version (`VersionContext.scala:33`), NOT the tree header. The
-/// default [`read_ergo_tree`] gates embeddable codes on the header version
-/// (`embeddable_gate_version`), which is correct for the consensus path but wrong
-/// for the ergo-compiler post-write self-check: the compile route emits a
-/// header-v0 tree (`ErgoTree.defaultHeaderWithVersion(0)`), yet a
-/// `tree_version >= 3` (V6-activated) compile legitimately produces a body
-/// carrying code 9 that Scala re-parses fine on a V6-activated network
-/// (`ErgoTreeSerializer.scala:148-154`, deser runs body/type parse under
-/// `withVersions(activatedVersion, treeVersion)`).
-///
-/// ONLY the compiler self-check uses this — passing its requested `tree_version`
-/// as the activated-version floor. Every consensus caller keeps
-/// [`read_ergo_tree`] (header-version gating); this function does not exist on
-/// their path and is byte-inert for them. The override is restored to its prior
-/// value on return so a shared reader is unaffected.
+/// Activation and the emitted header remain separate: Scala selects validation
+/// rules using activation, but `TypeSerializer.embeddableIdToType` selects its
+/// table using the tree's version. This helper preserves header-based membership
+/// and temporarily clears the low-level type-table override. It restores both
+/// reader settings on success or failure. Parsing remains the lenient tree
+/// reader; box/script acceptance gates are separate.
 pub fn read_ergo_tree_with_activated_version(
     r: &mut VlqReader,
     activated_version: u8,
 ) -> Result<ErgoTree, ReadError> {
-    let saved = r.embeddable_activated_version();
-    r.set_embeddable_activated_version(Some(activated_version));
+    let saved_activation = r.set_activated_script_version(Some(activated_version));
+    let saved_table = r.embeddable_activated_version();
+    r.set_embeddable_activated_version(None);
     let result = read_ergo_tree_tracking_wrap(r);
-    r.set_embeddable_activated_version(saved);
+    r.set_embeddable_activated_version(saved_table);
+    r.set_activated_script_version(saved_activation);
     result.map(|(tree, _was_wrapped)| tree)
 }
 
@@ -194,11 +184,9 @@ pub(super) fn read_ergo_tree_tracking_template(
             // this tree's header version, like Scala's version-scoped
             // `getEmbeddableType`. Covers segregated constants + the body.
             inner.set_ergo_tree_version(Some(version));
-            // Also propagate the activated-version override (set by the
-            // ergo-compiler self-check) into the size-delimited body reader, so a
-            // header-v0 tree gates SUnsignedBigInt (v6-only) by the activated
-            // version rather than version 0. Byte-inert on every consensus caller
-            // (the override is `None`, falling back to the header version).
+            // Preserve a caller's low-level type-table override. The public
+            // whole-tree activated helper clears it before entering this path;
+            // ordinary tree parsing selects membership from the header.
             inner.set_embeddable_activated_version(r.embeddable_activated_version());
             // Scala parses this body on the SAME reader, so its nesting level
             // (`CoreByteReader.lvl`) keeps climbing across the boundary. This
@@ -519,6 +507,38 @@ mod tests {
     use super::*;
 
     // ----- oracle parity -----
+
+    #[test]
+    fn activated_tree_reader_preserves_pinned_header_type_table_and_reader_scope() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test-vectors/ergoscript/compiled-reader/cases.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            let bytes = hex::decode(case["tree_hex"].as_str().unwrap()).unwrap();
+            for reference in case["reader_results"].as_array().unwrap() {
+                assert_eq!(reference["outcome"], "READ_ERROR");
+                let activation = reference["activated_version"].as_u64().unwrap() as u8;
+                let mut reader = VlqReader::new(&bytes).with_activated_script_version(2);
+                reader.set_embeddable_activated_version(Some(3));
+                let result = read_ergo_tree_with_activated_version(&mut reader, activation);
+                assert!(result.is_err(), "{} activation {activation}", case["id"]);
+                assert_eq!(reader.activated_script_version(), Some(2));
+                assert_eq!(reader.embeddable_activated_version(), Some(3));
+            }
+            let control = hex::decode(case["header3_control_hex"].as_str().unwrap()).unwrap();
+            assert_eq!(case["header3_control_result"]["outcome"], "READ_RIGHT");
+            let mut reader = VlqReader::new(&control);
+            let tree = read_ergo_tree_with_activated_version(&mut reader, 3).unwrap();
+            assert_eq!(tree.version, 3);
+            assert!(!matches!(tree.body, opcode::Expr::Unparsed(_)));
+            assert!(reader.is_empty());
+            assert_eq!(reader.activated_script_version(), None);
+            assert_eq!(reader.embeddable_activated_version(), None);
+        }
+    }
 
     // ledger: ORDER-constplaceholder
     #[test]

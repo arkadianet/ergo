@@ -21,9 +21,8 @@ pub(crate) struct Cursor<'a> {
     toks: Vec<Token>,
     i: usize,
     pub(crate) tree_version: u8,
-    /// Shared `expr()`/`type_()` structural-nesting recursion counter (see
-    /// `MAX_PARSE_DEPTH`). Incremented/decremented ONLY by the depth-guard
-    /// wrappers around those two entry points, never touched elsewhere.
+    /// Shared expression/type and discarded pattern/type-parameter recursion
+    /// counter. Only `with_depth_guard` changes it; see `MAX_PARSE_DEPTH`.
     depth: usize,
 }
 
@@ -307,10 +306,10 @@ pub(crate) fn is_id(t: &Token) -> bool {
     )
 }
 
-/// The shared depth-guard wrapper used by [`type_`] and [`expr`]: increment
+/// The shared expression/type and discarded-grammar depth guard: increment
 /// the cursor's depth, reject past [`MAX_PARSE_DEPTH`] (position = the token
 /// about to be parsed), run the guarded body, and decrement on every path.
-/// One implementation so the two guards cannot drift.
+/// One implementation keeps guard entry/exit behavior consistent.
 pub(crate) fn with_depth_guard<T>(
     c: &mut Cursor,
     f: impl FnOnce(&mut Cursor) -> Result<T, ParseError>,
