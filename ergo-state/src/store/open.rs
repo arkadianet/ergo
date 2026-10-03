@@ -41,12 +41,11 @@ impl StateStore {
     /// Open with explicit launch parameters. Production callers feed
     /// `scala_launch_for_network(chain_spec.network)` so the height-0
     /// voted-params row matches Scala `LaunchParameters` for that
-    /// network. In Scala, `MainnetLaunchParameters` and
-    /// `TestnetLaunchParameters` carry identical data (`DefaultParameters`
-    /// plus empty `proposedUpdate`); the dispatch is preserved here so
-    /// the seam is in place if a future network introduces a real launch
-    /// override. Only `DevnetLaunchParameters` and
-    /// `Devnet60LaunchParameters` do today, by setting `BlockVersion`.
+    /// network. Pinned Scala6.0.5 mainnet launches at version1; testnet
+    /// launches at version4 with proposed disables215/409 and no activated
+    /// settings. Devnet variants also override launch version. Launch data
+    /// initializes a missing height0 row; opening an existing row preserves
+    /// its stored parameters rather than silently migrating them.
     pub fn open_with_launch_params(
         path: &Path,
         launch_params: ergo_validation::ActiveProtocolParameters,

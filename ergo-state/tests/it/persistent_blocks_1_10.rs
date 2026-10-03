@@ -752,21 +752,18 @@ fn rollback_to_height_4_then_reapply() {
     let (reachable, arena, tree_h) = store.debug_tree_stats();
     eprintln!("after rollback to 4: reachable={reachable} arena={arena} tree_h={tree_h}");
 
-    let expected_3 = digests.iter().find(|d| d.height == 4).unwrap();
-    let expected_digest_3 = ADDigest::from_bytes(
-        hex::decode(&expected_3.state_root)
+    let expected_4 = digests.iter().find(|d| d.height == 4).unwrap();
+    let expected_digest_4 = ADDigest::from_bytes(
+        hex::decode(&expected_4.state_root)
             .unwrap()
             .try_into()
             .unwrap(),
     );
     assert_eq!(
         store.root_digest(),
-        expected_digest_3,
+        expected_digest_4,
         "digest after rollback to height 4 should match original"
     );
-
-    // Verify all boxes that should exist at height 3 can be looked up
-    // (the emission box and its predecessors should be in the UTXO set)
 
     // Re-apply block 5 — must produce the same digest
     for height in 5u32..=5 {
