@@ -29,6 +29,7 @@ use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 
 pub mod chain_snapshot;
+mod jobs;
 pub use chain_snapshot::{ChainSnapshot, ChainStateError, ChainTip};
 
 /// Abstracts the chain submit path so the wallet writer can submit a
@@ -182,6 +183,18 @@ fn private_mining_submit_error(error: ergo_api::MiningApiError) -> ergo_api::typ
 
 /// Command sent from the API task to the wallet writer task.
 pub enum WalletCommand {
+    MiningJobs {
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError>>,
+    },
+    CreateMiningJob {
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+    CancelMiningJob {
+        job_id: String,
+        reply: oneshot::Sender<Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError>>,
+    },
+
     Status {
         reply: oneshot::Sender<Result<WalletStatus, WalletAdminError>>,
     },
@@ -476,6 +489,29 @@ impl NodeWalletAdmin {
 
 #[async_trait]
 impl WalletAdmin for NodeWalletAdmin {
+    async fn mining_jobs(
+        &self,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJobs, WalletAdminError> {
+        self.send_cmd(|reply| WalletCommand::MiningJobs { reply })
+            .await
+    }
+
+    async fn create_mining_job(
+        &self,
+        request: ergo_api::wallet::native::dto::WalletJobRequest,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CreateMiningJob { request, reply })
+            .await
+    }
+
+    async fn cancel_mining_job(
+        &self,
+        job_id: String,
+    ) -> Result<ergo_api::wallet::native::dto::WalletJob, WalletAdminError> {
+        self.send_cmd(move |reply| WalletCommand::CancelMiningJob { job_id, reply })
+            .await
+    }
+
     async fn status(&self) -> Result<WalletStatus, WalletAdminError> {
         self.send_cmd(|reply| WalletCommand::Status { reply }).await
     }
@@ -1388,6 +1424,8 @@ pub async fn run_wallet_writer_supervised(
     let unlock_limiter = commands::admin::AttemptLimiter::new();
     let check_limiter = commands::admin::AttemptLimiter::new();
     let mut failure = None;
+    let mut jobs_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    jobs_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if rescan.stopping() || *shutdown.borrow() {
             break;
@@ -1413,11 +1451,30 @@ pub async fn run_wallet_writer_supervised(
             biased;
             _ = shutdown.changed() => { rescan.stop(); rx.close(); break; },
             command = rx.recv() => match command { Some(command) => command, None => break },
+            _ = jobs_tick.tick() => {
+                if let Err(error) = jobs::tick(&ctx).await {
+                    tracing::error!(%error, "wallet mining job journal failure");
+                    failure.get_or_insert(error);
+                    rescan.stop();
+                    rx.close();
+                    break;
+                }
+                continue;
+            },
         };
         let Some(cmd) = scan_guard::gate(cmd, store.as_ref()) else {
             continue;
         };
         match cmd {
+            WalletCommand::MiningJobs { reply } => {
+                let _ = reply.send(jobs::list(&db));
+            }
+            WalletCommand::CreateMiningJob { request, reply } => {
+                let _ = reply.send(jobs::create_owned(&ctx, request));
+            }
+            WalletCommand::CancelMiningJob { job_id, reply } => {
+                let _ = reply.send(jobs::cancel(&ctx, &job_id).await);
+            }
             WalletCommand::Status { reply } => commands::admin::status(&ctx, reply).await,
             WalletCommand::Init {
                 pass,
