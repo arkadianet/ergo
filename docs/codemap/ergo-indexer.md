@@ -35,7 +35,7 @@
 - `IndexerStore` (struct) — owns the `Arc<redb::Database>`; wipe/resume `open`; every read accessor.
 - `IndexerHandle` (struct) — read-side handle, implements `IndexerQuery`; `boot` returns `None` only when disabled, else `Some(syncing|halted)`.
 - `IndexerTask<C>` (struct) — poll driver over `IndexerChainSource` — `src/task.rs`.
-- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `full_block` read surface; production wires `ChainStoreReader`.
+- `IndexerChainSource` (trait) — `committed_tip` / `header_id_at` / `full_block` read surface; production wires `ChainStoreReader` with fully applied `CHAIN_INDEX` IDs.
 - `IndexerPoll` (enum) — `Idle`/`Applied`/`RolledBack`/`SectionRetry`/`Race`/`Halted` step outcomes.
 - `apply_block` / `apply_block_with_scratch` (fn) — forward apply; scratch variant reuses arenas — `src/apply.rs`.
 - `rollback_one_block` (fn) — inverse apply, undo-snapshot meta restore.

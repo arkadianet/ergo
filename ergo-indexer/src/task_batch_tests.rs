@@ -638,6 +638,8 @@ fn every_batch_source_error_aborts_all_uncommitted_rows() {
         ("header", 4),
         ("header", 5),
         ("header", 6),
+        ("header", 7),
+        ("header", 8),
     ] {
         let (_tmp, handle, chain, _) = setup(&blocks);
         let source = Arc::new(FailingChain {
