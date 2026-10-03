@@ -644,6 +644,44 @@ components:
           type: integer
           format: int32
 
+    WalletTransactionsPage:
+      type: object
+      required: [total, items]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletTransactionEntry'
+
+    WalletTransactionEntry:
+      type: object
+      description: Lean wallet summary; does not contain full transaction inputs and outputs.
+      required: [txId, blockHeight, blockId, walletOutputs, walletInputs]
+      properties:
+        txId:
+          $ref: '#/components/schemas/TransactionId'
+        blockHeight:
+          type: integer
+          minimum: 0
+        blockId:
+          $ref: '#/components/schemas/ModifierId'
+        walletOutputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModifierId'
+        walletInputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModifierId'
+        scanIds:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+
     WalletTransaction:
       type: object
       description: Transaction augmented with some useful information
@@ -2501,13 +2539,13 @@ components:
       type: object
       required:
         - lastIncomingMessage
-        - currentNetworkTime
+        - currentSystemTime
       properties:
         lastIncomingMessage:
           type: integer
           allOf:
             - $ref: '#/components/schemas/Timestamp'
-        currentNetworkTime:
+        currentSystemTime:
           type: integer
           allOf:
             - $ref: '#/components/schemas/Timestamp'
@@ -2597,24 +2635,18 @@ components:
 
     TrackInfo:
       type: object
-      required:
-        - invalidModifierApproxSize
-        - requested
-        - received
+      description: Aggregate delivery counters served by this node.
+      required: [numRequested, numReceived, numFailed]
       properties:
-        invalidModifierApproxSize:
+        numRequested:
           type: integer
-          example: 65780
-        requested:
-          type: object
-          description: Currently requested modifiers
-          additionalProperties:
-            $ref: '#/components/schemas/RequestedInfoByModifierId'
-        received:
-          type: object
-          description: Received modifiers
-          additionalProperties:
-            $ref: '#/components/schemas/ConnectedPeerByModifierId'
+          minimum: 0
+        numReceived:
+          type: integer
+          minimum: 0
+        numFailed:
+          type: integer
+          minimum: 0
 
     BlacklistedPeers:
       type: object
@@ -3345,7 +3377,7 @@ paths:
     post:
       summary: Send a mined block
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       operationId: sendMinedBlock
       tags:
         - blocks
@@ -4065,13 +4097,13 @@ paths:
                 type: string
       responses:
         '200':
-          description: List of unconfirmed transaction ids
+          description: List of matching unconfirmed transactions
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  type: string
+                  $ref: '#/components/schemas/ErgoTransaction'
         default:
           description: Error
           content:
@@ -4473,7 +4505,7 @@ paths:
     post:
       summary: Add address to peers list
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       operationId: connectToPeer
       tags:
         - peers
@@ -4533,9 +4565,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/PeersStatus'
+                $ref: '#/components/schemas/PeersStatus'
         default:
           description: Error
           content:
@@ -4577,9 +4607,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/TrackInfo'
+                $ref: '#/components/schemas/TrackInfo'
         default:
           description: Error
           content:
@@ -4835,7 +4863,7 @@ paths:
   /wallet/init:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Initialize new wallet with randomly generated seed
       operationId: walletInit
       tags:
@@ -4863,7 +4891,7 @@ paths:
   /wallet/restore:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Create new wallet from existing mnemonic seed
       operationId: walletRestore
       tags:
@@ -4887,7 +4915,7 @@ paths:
   /wallet/check:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Check whether mnemonic phrase is corresponding to the wallet seed
       operationId: checkSeed
       tags:
@@ -4915,7 +4943,7 @@ paths:
   /wallet/unlock:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Unlock wallet
       operationId: walletUnlock
       tags:
@@ -4939,7 +4967,7 @@ paths:
   /wallet/lock:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Lock wallet
       operationId: walletLock
       tags:
@@ -4957,7 +4985,7 @@ paths:
   /wallet/rescan:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Rescan wallet (all the available full blocks). When fromHeight is set wallet would not see any boxes below it.
       description: >-
         A full rescan (fromHeight omitted or 0) replays every available full block and rebuilds
@@ -4995,7 +5023,7 @@ paths:
   /wallet/status:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet status
       operationId: getWalletStatus
       tags:
@@ -5017,7 +5045,7 @@ paths:
   /wallet/updateChangeAddress:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Update address to be used to send change to
       operationId: walletUpdateChangeAddress
       tags:
@@ -5046,7 +5074,7 @@ paths:
   /wallet/deriveKey:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Derive new key according to a provided path
       operationId: walletDeriveKey
       tags:
@@ -5074,7 +5102,7 @@ paths:
   /wallet/deriveNextKey:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Derive next key
       operationId: walletDeriveNextKey
       tags:
@@ -5096,7 +5124,7 @@ paths:
   /wallet/balances:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get total amount of confirmed Ergo tokens and assets
       operationId: walletBalances
       tags:
@@ -5118,41 +5146,24 @@ paths:
   /wallet/transactions:
     parameters:
       - in: query
-        name: minInclusionHeight
-        required: false
-        description: Minimal tx inclusion height
+        name: offset
+        description: Number of wallet summaries to skip
         schema:
           type: integer
-          format: int32
           minimum: 0
+          default: 0
       - in: query
-        name: maxInclusionHeight
-        required: false
-        description: Maximal tx inclusion height
+        name: limit
+        description: Maximum number of wallet summaries to return
         schema:
           type: integer
-          format: int32
           minimum: 0
-      - in: query
-        name: minConfirmations
-        required: false
-        description: Minimal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
-      - in: query
-        name: maxConfirmations
-        required: false
-        description: Maximal confirmations number
-        schema:
-          type: integer
-          format: int32
-          minimum: 0
+          default: 50
     get:
       security:
-        - ApiKeyAuth: [api_key]
-      summary: Get a list of all wallet-related transactions
+        - ApiKeyAuth: []
+      summary: Get wallet transaction summaries (paged)
+      description: Lean summaries served by this node; Scala full-transaction arrays and height/confirmation filters are not implemented.
       operationId: walletTransactions
       tags:
         - wallet
@@ -5162,9 +5173,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/WalletTransaction'
+                $ref: '#/components/schemas/WalletTransactionsPage'
         default:
           description: Error
           content:
@@ -5182,7 +5191,7 @@ paths:
           type: string
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet-related transaction by id
       operationId: walletGetTransaction
       tags:
@@ -5193,9 +5202,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/WalletTransaction'
+                $ref: '#/components/schemas/WalletTransactionEntry'
         '404':
           description: Transaction with specified id not found in wallet
           content:
@@ -5235,7 +5242,7 @@ paths:
           default: 50
     get:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Get scan-related transactions by scan id
       description: >-
         Scan 10 (payments) returns the wallet's own transaction listing; user
@@ -5340,7 +5347,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get a list of all wallet-related boxes, both spent and unspent. Set minConfirmations to -1 to get
         mempool boxes included.
       operationId: walletBoxes
@@ -5365,7 +5372,7 @@ paths:
   /wallet/boxes/collect:
     post:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Get a list of collected boxes.
       operationId: walletBoxesCollect
       tags:
@@ -5450,7 +5457,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get a list of unspent boxes. Set minConfirmations to -1 to have mempool boxes considered.
       operationId: walletUnspentBoxes
       tags:
@@ -5474,7 +5481,7 @@ paths:
   /wallet/balances/withUnconfirmed:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get summary amount of confirmed plus unconfirmed Ergo tokens and assets
       operationId: walletBalancesUnconfirmed
       tags:
@@ -5496,7 +5503,7 @@ paths:
   /wallet/addresses:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get wallet addresses
       operationId: walletAddresses
       tags:
@@ -5520,7 +5527,7 @@ paths:
   /wallet/transaction/generate:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate arbitrary transaction from array of requests.
       operationId: walletTransactionGenerate
       tags:
@@ -5563,7 +5570,7 @@ paths:
   /wallet/transaction/generateUnsigned:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate unsigned transaction from array of requests.
       operationId: walletUnsignedTransactionGenerate
       tags:
@@ -5599,7 +5606,7 @@ paths:
   /wallet/transaction/sign:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Sign arbitrary unsigned transaction with wallet secrets and also secrets provided.
       operationId: walletTransactionSign
       tags:
@@ -5640,7 +5647,7 @@ paths:
   /wallet/transaction/send:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate and send arbitrary transaction
       operationId: walletTransactionGenerateAndSend
       tags:
@@ -5675,7 +5682,7 @@ paths:
   /wallet/payment/send:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate and send payment transaction (default fee of 0.001 Erg is used)
       operationId: walletPaymentTransactionGenerateAndSend
       tags:
@@ -5711,7 +5718,7 @@ paths:
   /wallet/getPrivateKey:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Get the private key corresponding to a known address
       operationId: walletGetPrivateKey
       tags:
@@ -5745,7 +5752,7 @@ paths:
   /mining/candidate:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Request block candidate
       operationId: miningRequestBlockCandidate
       tags:
@@ -5780,7 +5787,7 @@ paths:
   /mining/candidateWithTxs:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Request block candidate
       operationId: miningRequestBlockCandidateWithMandatoryTransactions
       tags:
@@ -5808,7 +5815,7 @@ paths:
   /mining/rewardAddress:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Read miner reward address
       operationId: miningReadMinerRewardAddress
       tags:
@@ -5830,7 +5837,7 @@ paths:
   /mining/rewardPublicKey:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Read public key associated with miner rewards
       operationId: miningReadMinerRewardPubkey
       tags:
@@ -5852,7 +5859,7 @@ paths:
   /mining/solution:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Submit solution for current candidate
       operationId: miningSubmitSolution
       tags:
@@ -5882,7 +5889,7 @@ paths:
   /utxo/getBoxesBinaryProof:
     post:
       security:
-        -  ApiKeyAuth: [api_key]
+        -  ApiKeyAuth: []
       summary: Get serialized batch proof for given set of boxes
       operationId: getBoxesBinaryProof
       tags:
@@ -6319,7 +6326,7 @@ paths:
   /script/executeWithContext:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Execute script with context
       operationId: executeWithContext
       tags:
@@ -6353,7 +6360,7 @@ paths:
   /scan/register:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Register a scan
       operationId: registerScan
       tags:
@@ -6387,7 +6394,7 @@ paths:
   /scan/deregister:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Stop tracking and deregister scan
       operationId: deregisterScan
       tags:
@@ -6421,7 +6428,7 @@ paths:
   /scan/listAll:
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List all the registered scans
       operationId: listAllScans
       tags:
@@ -6504,7 +6511,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List boxes which are not spent.
       operationId: listUnspentScans
       tags:
@@ -6602,7 +6609,7 @@ paths:
           default: 0
     get:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: List boxes which are spent.
       operationId: listSpentScans
       tags:
@@ -6641,7 +6648,7 @@ paths:
   /scan/stopTracking:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Stop scan-related box tracking
       operationId: scanStopTracking
       tags:
@@ -6677,7 +6684,7 @@ paths:
   /scan/p2sRule:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Create and register a scan to track P2S address provided
       operationId: scriptP2SRule
       tags:
@@ -6716,7 +6723,7 @@ paths:
   /wallet/generateCommitments:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Generate signature commitments for inputs of an unsigned transaction
       operationId: generateCommitments
       tags:
@@ -6751,7 +6758,7 @@ paths:
   /wallet/extractHints:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: Extract hints from a transaction
       operationId: extractHints
       tags:
@@ -6786,7 +6793,7 @@ paths:
   /scan/addBox:
     post:
       security:
-        - ApiKeyAuth: [api_key]
+        - ApiKeyAuth: []
       summary: >-
         Adds a box to scans, writes box to database if it is not there.
         Scan ids must be registered user scans (ids 1-10 are reserved and
@@ -6830,7 +6837,7 @@ paths:
   /node/shutdown:
     post:
       security:
-        - ApiKeyAuth: [ api_key ]
+        - ApiKeyAuth: []
       summary: Shuts down the node
       operationId: nodeShutdown
       tags:
