@@ -78,7 +78,10 @@ pub(super) fn build_tip_context(state: &NodeState) -> Option<OwnedTipContext> {
     // cache is updated synchronously with chain_state in apply_block /
     // rollback_to / execute_reorg, so this read is consistent with the
     // tip we just observed above.
-    let params = ergo_validation::ProtocolParams::from_active(state.store.active_params());
+    let params = ergo_validation::ProtocolParams::from_active_with_settings(
+        state.store.active_params(),
+        state.store.validation_settings(),
+    );
     // Same EIP-27 rule inputs the block validator uses (installed on the
     // executor at boot); `None` on networks without re-emission.
     let reemission = state.executor.reemission_rules().cloned();
