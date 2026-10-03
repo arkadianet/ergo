@@ -6,15 +6,17 @@
 //! `WalletError` type were referenced from inside ergo-state).
 //!
 //! Trait methods return only PRIMITIVE types (u32, u64, [u8; 33]) —
-//! no `ergo-state::wallet` data-shape leakage. This keeps the
+//! errors are returned as diagnostic strings, with no wallet data-shape leakage. This keeps the
 //! interface stable across schema changes inside ergo-state.
 
 /// Minimal interface a wallet hydration source must provide.
+/// Missing tables represent an uninitialized wallet. Other read failures must
+/// be returned rather than reported as an empty or partial successful snapshot.
 /// Implemented in `ergo-state/src/wallet/reader.rs::WalletReader`.
 pub trait HydrationSource {
     /// Iterate tracked pubkeys in `(derivation_path_index, pubkey)`
     /// ASC order — the BTreeMap order from `WALLET_TRACKED_PUBKEYS`.
-    fn tracked_pubkeys(&self) -> Box<dyn Iterator<Item = (u64, [u8; 33])> + '_>;
+    fn tracked_pubkeys(&self) -> Result<Vec<(u64, [u8; 33])>, String>;
 
     /// Iterate persisted visible-pubkeys in index-ASC order — the
     /// BTreeMap order from `WALLET_VISIBLE_ADDRESSES` (u32 → [u8; 33]).
@@ -22,13 +24,13 @@ pub trait HydrationSource {
     /// Returns the raw pubkey bytes — address rendering happens at
     /// REST read time (so we don't bake the network prefix into
     /// persistent state).
-    fn visible_pubkeys(&self) -> Box<dyn Iterator<Item = (u32, [u8; 33])> + '_>;
+    fn visible_pubkeys(&self) -> Result<Vec<(u32, [u8; 33])>, String>;
 
     /// The persisted change-address pubkey from
     /// `WALLET_CHANGE_ADDRESS` (one row, value = `[u8; 33]`).
     /// Returns `None` if never set or table is empty.
     /// Rendered to a base58 address at REST read time.
-    fn change_address_pubkey(&self) -> Option<[u8; 33]>;
+    fn change_address_pubkey(&self) -> Result<Option<[u8; 33]>, String>;
 }
 
 use std::collections::{BTreeMap, BTreeSet};
