@@ -442,7 +442,9 @@ jobs:
       - name: Shared compiler, lint, action and lockfile policy
         run: python scripts/ci-policy.py
       - name: Engineering policy and release helper tests
-        run: python -m unittest discover -s scripts -p 'test_release*.py'
+        run: |
+          python -m unittest discover -s scripts -p 'test_release*.py'
+          python -m unittest discover -s scripts -p 'test_evaluated_probe.py'
       - name: Strict public documentation (all features)
         env:
           RUSTDOCFLAGS: -D warnings

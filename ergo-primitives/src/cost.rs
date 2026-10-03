@@ -32,26 +32,11 @@ pub struct JitCost(pub(crate) u64);
 /// must respect to match the Scala oracle's `addExact` /
 /// `multiplyExact` failure boundary.
 ///
-/// **Hostile-input unreachability for the structured error.**
-/// All three runtime arithmetic paths
-/// ([`JitCost::try_from_jit`], [`JitCost::from_block_cost`],
-/// [`JitCost::checked_add`]) return [`JitCostError::Overflow`] if
-/// the result would exceed `SCALA_INT_MAX`. The error path is
-/// unreachable from honest validation because Ergo's protocol
-/// parameter `max_block_cost` (mainnet: ~4.77M block units, see
-/// `ergo-validation/active_params.rs:816`) caps total accumulated
-/// JIT cost at `~47.7M`, which is **~45× below `SCALA_INT_MAX`**
-/// (= 2.147B). [`CostAccumulator::add`] returns
-/// [`CostError::LimitExceeded`] long before the underlying
-/// arithmetic could overflow.
-///
-/// The pin test [`tests::accumulator_at_protocol_cap_is_well_under_scala_int_max`]
-/// asserts the safety margin against the live mainnet
-/// `max_block_cost` value. If a future protocol soft-fork raises
-/// `max_block_cost` to within the safety margin, that test fires
-/// — but the API now returns a structured error rather than
-/// panicking, so the consensus layer would reject the offending
-/// block cleanly instead of bringing down the node.
+/// This arithmetic bound is independent of voted block limits. `add` performs
+/// checked arithmetic before testing the accumulator limit, so a large single
+/// charge can report overflow even with a small limit. Callers must validate
+/// dynamically obtained limits and charges; a historical cap sample cannot
+/// establish their reachability or predict future voted parameters.
 const SCALA_INT_MAX: u64 = i32::MAX as u64;
 
 /// Failures returned by [`JitCost`] runtime arithmetic when a
@@ -91,9 +76,9 @@ impl JitCost {
     /// **Const** constructor for compile-time literals. The bound check
     /// runs at const-eval time, so an out-of-range literal fails to
     /// compile — that's the only intended use. The `panic!` arm exists
-    /// because `const fn` cannot return `Result`; it's an unreachable
-    /// fallback for the literal-only path, mirroring `NonZero*::new_unchecked`-
-    /// flavored compile-time invariants.
+    /// because this API deliberately provides infallible literal construction.
+    /// Const functions can return `Result`, but dynamic callers should use the
+    /// separate checked constructor.
     ///
     /// **Runtime callers must use [`Self::try_from_jit`]** to get a
     /// structured [`JitCostError`] instead of a panic.
@@ -233,18 +218,16 @@ impl CostKind {
 pub enum CostError {
     #[error("cost limit exceeded: {current} > {limit} (JitCost units)")]
     LimitExceeded { current: u64, limit: u64 },
-    /// Underlying [`JitCost`] arithmetic overflowed
-    /// `SCALA_INT_MAX`. Unreachable from honest mainnet input
-    /// (see `SCALA_INT_MAX` doc for the unreachability proof and
-    /// the pin test that enforces the safety margin) — but the
-    /// API surfaces it structurally so the consensus layer can
-    /// reject the offending input cleanly rather than panicking.
+    /// Underlying [`JitCost`] arithmetic exceeded Scala's signed-Int bound.
+    /// This check precedes the configured limit check and remains active in
+    /// recording-only mode.
     #[error("JitCost arithmetic overflowed: {0}")]
     Overflow(#[from] JitCostError),
 }
 
 /// Accumulates JitCost during evaluation, optionally enforcing a limit.
-/// The accumulator is additive-only -- there is no way to reduce the current cost.
+/// Charges add to the total. `snap_to_block_boundary` deliberately removes the
+/// sub-block remainder of a completed evaluation's delta, retaining its baseline.
 #[derive(Clone)]
 pub struct CostAccumulator {
     current: JitCost,
@@ -284,9 +267,8 @@ impl CostAccumulator {
     /// - `Err(CostError::LimitExceeded)` if enforcing and the
     ///   accumulated cost exceeds the configured limit.
     /// - `Err(CostError::Overflow(_))` if the underlying
-    ///   `JitCost::checked_add` would exceed `SCALA_INT_MAX`
-    ///   (unreachable from honest input — see `SCALA_INT_MAX`
-    ///   doc).
+    ///   `JitCost::checked_add` would exceed `SCALA_INT_MAX`, before any
+    ///   configured-limit check.
     pub fn add(&mut self, cost: JitCost) -> Result<(), CostError> {
         // `?` here propagates JitCostError → CostError via the
         // `#[from]` derive on the Overflow variant.
@@ -317,6 +299,8 @@ impl CostAccumulator {
     /// (`toBlockCost = jit / 10`) before adding crypto cost.  Rust
     /// accumulates everything as JitCost and truncates once.  Calling this
     /// after script evaluation (before crypto cost) aligns the rounding.
+    /// The baseline's own remainder is retained; a baseline beyond the current
+    /// total is a no-op. This operation does not recheck an earlier limit error.
     pub fn snap_to_block_boundary(&mut self, baseline: JitCost) {
         let delta = self.current.0.saturating_sub(baseline.0);
         let remainder = delta % 10;
@@ -605,72 +589,52 @@ mod tests {
         }
     }
 
-    /// **Pin: hostile-input error-unreachability invariant.**
-    ///
-    /// The three JitCost arithmetic paths return
-    /// [`JitCostError::Overflow`] at SCALA_INT_MAX
-    /// (i32::MAX = 2_147_483_647 JIT units). For this error to be
-    /// reachable from a malicious script, accumulated cost would
-    /// have to exceed that bound — which requires honest-protocol
-    /// `max_block_cost` (mainnet voted-param ID 4) to be set within
-    /// the error's reach when scaled `× 10` to JIT units.
-    ///
-    /// Mainnet value (per `ergo-validation/active_params.rs:816`):
-    /// `max_block_cost = 0x0048C570 = 4_769_136` block units →
-    /// `47_691_360` JIT units. SCALA_INT_MAX / mainnet_jit_cap ≈ 45×.
-    ///
-    /// If a future protocol soft-fork raises `max_block_cost` past
-    /// `~214_748_364` block units (= SCALA_INT_MAX / 10), this
-    /// test fires. Unlike the pre-conversion design (which would
-    /// have panicked the node), the structured error means the
-    /// consensus layer can reject the offending block cleanly via
-    /// `CostError::Overflow` — but the validator should still be
-    /// updated to handle the new operating regime.
+    /// The recorded mainnet height 417792 parameter is historical evidence,
+    /// not a live voted-parameter lookup or a proof about individual charges.
     #[test]
-    fn accumulator_at_protocol_cap_is_well_under_scala_int_max() {
-        // Live mainnet max_block_cost (block units).
-        const MAINNET_MAX_BLOCK_COST: u64 = 4_769_136;
-        // Scaled to JIT units: × 10.
-        const MAINNET_MAX_JIT_COST: u64 = MAINNET_MAX_BLOCK_COST * 10;
-
-        // Sanity: the JIT cap fits well under SCALA_INT_MAX.
-        // (Clippy flags this as constant-valued — that's the point;
-        // we want the assertion to fail to compile if someone bumps
-        // either constant past the boundary.)
-        #[allow(clippy::assertions_on_constants)]
-        {
-            assert!(
-                MAINNET_MAX_JIT_COST < SCALA_INT_MAX,
-                "mainnet JIT cap >= SCALA_INT_MAX — JitCostError::Overflow is now \
-                 reachable from honest payloads; consensus layer must handle it",
-            );
+    fn historical_cap_sample_has_margin_and_enforces_its_limit() {
+        const HISTORICAL_MAX_BLOCK_COST: u64 = 4_769_136;
+        const HISTORICAL_MAX_JIT_COST: u64 = HISTORICAL_MAX_BLOCK_COST * 10;
+        const {
+            assert!(HISTORICAL_MAX_JIT_COST < SCALA_INT_MAX);
+            assert!(SCALA_INT_MAX / HISTORICAL_MAX_JIT_COST >= 10);
         }
+        let cap = JitCost::from_block_cost(HISTORICAL_MAX_BLOCK_COST).unwrap();
+        let mut accumulator = CostAccumulator::new(cap);
+        accumulator.add(cap).unwrap();
+        assert!(matches!(
+            accumulator.add(JitCost::from_jit(1)),
+            Err(CostError::LimitExceeded { .. })
+        ));
+    }
 
-        // Document the actual margin so future reviewers see how
-        // close (or far) we are. >=10× is a comfortable buffer.
-        let margin = SCALA_INT_MAX / MAINNET_MAX_JIT_COST;
-        assert!(
-            margin >= 10,
-            "mainnet safety margin shrunk to {margin}× — baseline is 45×; \
-             consensus layer should be audited for Overflow handling",
+    #[test]
+    fn arithmetic_overflow_precedes_even_a_small_accumulator_limit() {
+        let mut accumulator = CostAccumulator::new(JitCost::from_jit(10));
+        accumulator.add(JitCost::from_jit(1)).unwrap();
+        assert!(matches!(
+            accumulator.add(JitCost::from_jit(SCALA_INT_MAX)),
+            Err(CostError::Overflow(_))
+        ));
+        assert_eq!(
+            accumulator.total().value(),
+            1,
+            "overflow preserves previous total"
         );
+    }
 
-        // End-to-end: building a JitCost from the protocol cap
-        // succeeds (no error), and a CostAccumulator with that
-        // limit accepts adds up to the cap then rejects the next
-        // add via LimitExceeded — never via Overflow.
-        let cap = JitCost::from_block_cost(MAINNET_MAX_BLOCK_COST).unwrap();
-        let mut acc = CostAccumulator::new(cap);
-        // Fill to exactly the cap.
-        acc.add(cap).unwrap();
-        // One more JIT unit must be rejected via LimitExceeded
-        // (the structural cap on honest input), NOT via Overflow
-        // (which would only fire above SCALA_INT_MAX).
-        let err = acc.add(JitCost::from_jit(1)).unwrap_err();
-        assert!(
-            matches!(err, CostError::LimitExceeded { .. }),
-            "expected LimitExceeded (honest path), got {err:?}",
-        );
+    #[test]
+    fn snapping_preserves_nonzero_baseline_and_rounds_only_its_delta() {
+        let mut accumulator = CostAccumulator::recording_only();
+        accumulator.add(JitCost::from_jit(9)).unwrap();
+        let baseline = accumulator.total();
+        accumulator.add(JitCost::from_jit(17)).unwrap();
+        accumulator.snap_to_block_boundary(baseline);
+        assert_eq!(accumulator.total().value(), 19);
+        accumulator.snap_to_block_boundary(baseline);
+        assert_eq!(accumulator.total().value(), 19);
+        accumulator.snap_to_block_boundary(JitCost::from_jit(100));
+        assert_eq!(accumulator.total().value(), 19);
     }
     // ----- oracle parity -----
 
