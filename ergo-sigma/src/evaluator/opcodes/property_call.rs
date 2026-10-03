@@ -973,6 +973,10 @@ pub(super) fn eval_no_arg_method(
                     v.reverse();
                     Value::CollBool(v)
                 }
+                Value::CollSigmaProp(mut v) => {
+                    v.reverse();
+                    Value::CollSigmaProp(v)
+                }
                 other => {
                     let elem_type = coll_elem_type(&other).unwrap_or(SigmaType::SAny);
                     let (_kind, mut items) = collection_to_values(other, ctx)?;
