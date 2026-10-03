@@ -41,6 +41,14 @@ struct Record {
     cancel_requested: bool,
 }
 
+// Mined generations and conflicts with retained signed bytes can become
+// eligible again after a reorg. Keep their journal and funding reservations
+// until authoritative queue tracking confirms a terminal retirement.
+fn tracks_signed_terminal(record: &Record) -> bool {
+    record.swap.state == WalletJobState::Mined
+        || (record.swap.state == WalletJobState::Conflicted && record.signed_hex.is_some())
+}
+
 fn internal(error: impl std::fmt::Display) -> WalletAdminError {
     WalletAdminError::Internal(format!("wallet mining swaps: {error}"))
 }
@@ -210,7 +218,7 @@ pub(super) fn list(db: &redb::Database) -> Result<MiningSwaps, WalletAdminError>
 pub(crate) fn reserved_inputs(db: &redb::Database) -> Result<BTreeSet<[u8; 32]>, WalletAdminError> {
     let mut result = BTreeSet::new();
     for (_, record) in records(db)? {
-        if (record.swap.state.terminal() && record.swap.state != WalletJobState::Mined)
+        if (record.swap.state.terminal() && !tracks_signed_terminal(&record))
             || record.swap.state == WalletJobState::Preparing
         {
             continue;
@@ -362,7 +370,7 @@ fn create(
         Some(
             prior
                 .iter()
-                .find(|(_, record)| record.swap.state.terminal())
+                .find(|(_, record)| record.swap.state.terminal() && !tracks_signed_terminal(record))
                 .map(|(id, _)| *id)
                 .ok_or_else(|| bad("all bounded swap slots are active"))?,
         )
@@ -473,7 +481,9 @@ pub(super) async fn cancel(
         .find(|(key, _)| *key == id)
         .map(|(_, record)| record)
         .ok_or_else(|| bad("swap intent not found"))?;
-    if record.swap.state.terminal() {
+    if record.swap.state.terminal()
+        && !(record.swap.state == WalletJobState::Conflicted && record.signed_hex.is_some())
+    {
         return Ok(record.swap);
     }
     record.cancel_requested = true;
@@ -563,9 +573,10 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     }
     let height = ctx.chain.tip_height().map_err(internal)?;
     let mut pending = records(ctx.db)?;
-    if pending.iter().all(|(_, record)| {
-        record.swap.state.terminal() && record.swap.state != WalletJobState::Mined
-    }) {
+    if pending
+        .iter()
+        .all(|(_, record)| record.swap.state.terminal() && !tracks_signed_terminal(record))
+    {
         return Ok(());
     }
     // One bounded authoritative read per wake. Unavailable metadata is never
@@ -601,7 +612,7 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
                 }
             }};
         }
-        if record.swap.state.terminal() && record.swap.state != WalletJobState::Mined {
+        if record.swap.state.terminal() && !tracks_signed_terminal(&record) {
             continue;
         }
         if let Some(tx_id) = &record.swap.tx_id {
@@ -1162,6 +1173,9 @@ mod tests {
         transition(&mut record, WalletJobState::Cancelled, None);
         save(&db, id, &record).unwrap();
         assert!(reserved_inputs(&db).unwrap().is_empty());
+        transition(&mut record, WalletJobState::Conflicted, None);
+        save(&db, id, &record).unwrap();
+        assert!(reserved_inputs(&db).unwrap().is_empty());
     }
 
     // ----- round-trips -----
@@ -1243,6 +1257,101 @@ mod tests {
         transition(&mut record, WalletJobState::Mined, None);
         save(&db, id, &record).unwrap();
         assert!(reserved_inputs(&db).unwrap().contains(&[0x33; 32]));
+    }
+
+    #[test]
+    fn swap_signed_conflicts_retain_reservations_and_cannot_be_pruned() {
+        let (_dir, db) = database();
+        for _ in 0..MAX_SWAPS {
+            let item = create(&db, request(), 10, [1; 32]).unwrap();
+            let id = item.id.parse().unwrap();
+            let mut record = records(&db)
+                .unwrap()
+                .into_iter()
+                .find(|(key, _)| *key == id)
+                .unwrap()
+                .1;
+            record.swap.tx_id = Some("44".repeat(32));
+            record.signed_hex = Some("abcd".into());
+            let state = if id == 1 {
+                WalletJobState::Mined
+            } else {
+                WalletJobState::Conflicted
+            };
+            transition(&mut record, state, None);
+            save(&db, id, &record).unwrap();
+        }
+        assert!(reserved_inputs(&db).unwrap().contains(&[0x33; 32]));
+        assert!(create(&db, request(), 10, [1; 32]).is_err());
+        assert_eq!(records(&db).unwrap().len(), MAX_SWAPS);
+        let (id, mut record) = records(&db).unwrap().remove(1);
+        record.signed_hex = None;
+        record.swap.tx_id = None;
+        save(&db, id, &record).unwrap();
+        assert_eq!(create(&db, request(), 10, [1; 32]).unwrap().id, "129");
+        assert!(records(&db).unwrap().iter().any(|(key, _)| *key == 1));
+        assert!(!records(&db).unwrap().iter().any(|(key, _)| *key == id));
+    }
+
+    #[tokio::test]
+    async fn swap_signed_conflict_can_be_cancelled_without_public_submission() {
+        let queue = queue("conflicted", false, false);
+        let harness = Harness::new(queue.clone(), 10);
+        harness.signed();
+        let (id, mut record) = records(&harness.db).unwrap().remove(0);
+        transition(&mut record, WalletJobState::Conflicted, None);
+        save(&harness.db, id, &record).unwrap();
+        assert!(reserved_inputs(&harness.db).unwrap().contains(&[0x33; 32]));
+        assert_eq!(
+            cancel(&harness.ctx(), "1").await.unwrap().state,
+            WalletJobState::Cancelled
+        );
+        let record = records(&harness.db).unwrap().remove(0).1;
+        assert!(record.signed_hex.is_none());
+        assert!(record.swap.tx_id.is_none());
+        assert!(reserved_inputs(&harness.db).unwrap().is_empty());
+        assert_eq!(
+            queue
+                .cancellations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            queue
+                .public_submissions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_signed_conflict_recovers_authoritative_candidate_without_resigning() {
+        let queue = queue("in_candidate", false, false);
+        let mut harness = Harness::new(queue.clone(), 10);
+        harness.signed();
+        committed_inputs(&mut harness);
+        let (id, mut record) = records(&harness.db).unwrap().remove(0);
+        record.swap.request.max_attempts = 1;
+        record.swap.attempts = 1;
+        transition(&mut record, WalletJobState::Conflicted, None);
+        save(&harness.db, id, &record).unwrap();
+        tick(&harness.ctx()).await.unwrap();
+        let record = records(&harness.db).unwrap().remove(0).1;
+        assert_eq!(record.swap.state, WalletJobState::InCandidate);
+        assert_eq!(record.signed_hex.as_deref(), Some("abcd"));
+        assert_eq!(record.swap.attempts, 1);
+        assert_eq!(
+            queue
+                .metadata_reads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            queue
+                .cancellations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
