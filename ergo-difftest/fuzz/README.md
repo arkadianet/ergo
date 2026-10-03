@@ -141,7 +141,7 @@ their bounded Rust checks are not JVM evaluation or compiled-output parity.
 
 ## Pinned CI setup and lock maintenance
 
-Use the versions in [`.github/ci-tools.toml`](../../../.github/ci-tools.toml)
+Use the versions in [`.github/ci-tools.toml`](../../.github/ci-tools.toml)
 to reproduce CI. From the repository root:
 
 ```bash
