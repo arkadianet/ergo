@@ -16,6 +16,9 @@ cargo install cargo-fuzz --locked
 # fuzz/ dir either way):
 cd ergo-difftest/fuzz
 
+# Resolve this separate workspace against its committed dependency lock.
+cargo +nightly metadata --locked --format-version 1 > /dev/null
+
 # Build every target (ASan-instrumented, release).
 cargo +nightly fuzz build
 
@@ -23,6 +26,10 @@ cargo +nightly fuzz build
 # (seconds) or a bounded run count — either works, pick one:
 cargo +nightly fuzz run ergo_tree -- -max_total_time=60
 cargo +nightly fuzz run constant -- -runs=20000
+
+# cargo-fuzz has no --locked flag; check that its build preserved the lock.
+# CI performs this check even when a fuzz target reports a crash.
+git diff --exit-code -- Cargo.lock
 
 # All surface/target names
 cargo +nightly fuzz list
@@ -180,7 +187,9 @@ reproducers and full details).
 
 ## JVM oracle differential
 
-The JVM-oracle differential (`difftest --oracle`) and the replay driver
-(`difftest --replay`) are NOT in CI — they require `scala-cli` + a live Scala
-node (`localhost:9053`). Run them manually as documented in
+The nightly workflow schedules a JVM consensus differential campaign with a
+recorded seed, reference version and oracle transcripts. Its separate archival
+state-root replay job requires `REPLAY_NODE_URL` and explicitly reports when
+that endpoint is unset. Neither workflow wiring nor a skipped replay is a
+successful external campaign receipt. Local oracle setup is documented in
 `ergo-difftest/docs/interface-contracts.md`.

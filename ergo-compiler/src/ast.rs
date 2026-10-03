@@ -447,7 +447,7 @@ impl Expr {
     ///   ZKProof callee, which carries `SFunc`).
     /// - `Select` — `resType.getOrElse(obj.tpe match { SProduct => method-lookup;
     ///   _ => NoType })` (values.scala:1171-1178), delegated to
-    ///   [`product_method_tpe`], which ports the COMPLETE closure of reachable
+    ///   `product_method_tpe`, which ports the COMPLETE closure of reachable
     ///   method tables (tuple / numeric / `SColl` / `SOption` / v6 BigInt).
     ///   `resType` is `None` at parse time; a NoType/identifier-rooted object stays
     ///   `NoType` (so `-OUTPUTS.size` accepts), but a parse-time-typed *product*

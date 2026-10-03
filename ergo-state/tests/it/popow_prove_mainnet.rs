@@ -13,40 +13,31 @@
 //!    (full round-trip: construct on serve side, verify on consume
 //!    side, against the chain it was constructed from).
 //!
-//! Test passes vacuously when no archival data_dir is available —
-//! CI doesn't require a 6 GB mainnet state. Run locally after a
-//! mainnet sync to exercise the fast path.
+//! Both tests are manual and require a stopped Mode 1 archive (or an offline
+//! copy) with historical extensions. Run `ERGO_MAINNET_DATA_DIR=/path/to/archive
+//! cargo test --locked -p ergo-state --test it popow_prove_mainnet
+//! -- --ignored --nocapture --test-threads=1`. Missing or unsuitable archives
+//! fail the manual invocation; no operator database is opened by normal tests.
 
 use std::path::PathBuf;
 
-fn locate_data_dir() -> Option<PathBuf> {
-    if let Ok(env_path) = std::env::var("ERGO_MAINNET_DATA_DIR") {
-        let p = PathBuf::from(env_path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // Repo-root default — set by the live mainnet capture session.
-    let p = PathBuf::from("../ergo-data.backup-pre-nipopow-attempt");
-    if p.exists() {
-        return Some(p);
-    }
-    None
+fn locate_data_dir() -> PathBuf {
+    let path = std::env::var_os("ERGO_MAINNET_DATA_DIR").map_or_else(
+        || PathBuf::from("../ergo-data.backup-pre-nipopow-attempt"),
+        PathBuf::from,
+    );
+    assert!(
+        path.join("state.redb").is_file(),
+        "required Mode 1 archive absent at {}; set ERGO_MAINNET_DATA_DIR to a stopped mainnet archive",
+        path.display()
+    );
+    path
 }
 
 #[test]
+#[ignore = "requires a stopped Mode 1 mainnet archive; set ERGO_MAINNET_DATA_DIR and run serially"]
 fn prove_with_db_against_live_mainnet_archive() {
-    let data_dir = match locate_data_dir() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[skipped] no mainnet archival data_dir available. \
-                 Set ERGO_MAINNET_DATA_DIR or place a synced data_dir at \
-                 ergo-data.backup-pre-nipopow-attempt to exercise prove_with_db."
-            );
-            return;
-        }
-    };
+    let data_dir = locate_data_dir();
 
     // The node convention: data_dir contains `state.redb`. Pass the
     // `.redb` file directly (StateStore::open takes a redb file
@@ -59,19 +50,17 @@ fn prove_with_db_against_live_mainnet_archive() {
         cs.best_header_height, cs.best_full_block_height, cs.header_availability
     );
 
-    // Sparse-mode archive nodes can't serve — skip.
-    if !matches!(
-        cs.header_availability,
-        ergo_state::chain::HeaderAvailability::Dense
-    ) {
-        eprintln!("[skipped] data_dir is sparse-mode (NiPoPoW-bootstrapped)");
-        return;
-    }
-    // Too-short chain — skip.
-    if cs.best_header_height < 100 {
-        eprintln!("[skipped] chain too short (height < 100)");
-        return;
-    }
+    assert!(
+        matches!(
+            cs.header_availability,
+            ergo_state::chain::HeaderAvailability::Dense
+        ),
+        "requires Dense Mode 1 archive; sparse NiPoPoW bootstrap cannot serve this proof"
+    );
+    assert!(
+        cs.best_header_height >= 100,
+        "requires archive height >= 100"
+    );
 
     // Probe whether genesis has its extension stored. A Mode 2-
     // bootstrapped node only has extensions from snapshot_height
@@ -81,14 +70,10 @@ fn prove_with_db_against_live_mainnet_archive() {
     let genesis_popow = store
         .popow_header_at_height(1)
         .expect("HEADER_CHAIN_INDEX read succeeds");
-    if genesis_popow.is_none() {
-        eprintln!(
-            "[skipped] data_dir lacks historical extension data \
-             (likely Mode 2-bootstrapped, not a Mode 1 native archive). \
-             Re-run on a node synced from genesis to exercise serve side."
-        );
-        return;
-    }
+    assert!(
+        genesis_popow.is_some(),
+        "archive lacks historical extensions; requires Mode 1 sync from genesis"
+    );
 
     let t0 = std::time::Instant::now();
     let proof = store
@@ -170,29 +155,30 @@ fn prove_with_db_against_live_mainnet_archive() {
 /// the same equivalence discipline as Scala's `PoPowAlgosWithDBSpec`
 /// (in-memory prover == DB prover).
 #[test]
+#[ignore = "requires a stopped Mode 1 mainnet archive; set ERGO_MAINNET_DATA_DIR and run serially"]
 fn reader_prover_matches_store_prover_byte_exact() {
-    let data_dir = match locate_data_dir() {
-        Some(p) => p,
-        None => {
-            eprintln!("[skipped] no mainnet archival data_dir available.");
-            return;
-        }
-    };
+    let data_dir = locate_data_dir();
     let db_path = data_dir.join("state.redb");
     let store = ergo_state::store::StateStore::open(&db_path).expect("open state.redb");
     let cs = store.chain_state();
-    if !matches!(
-        cs.header_availability,
-        ergo_state::chain::HeaderAvailability::Dense
-    ) || cs.best_header_height < 100
-        || store
+    assert!(
+        matches!(
+            cs.header_availability,
+            ergo_state::chain::HeaderAvailability::Dense
+        ),
+        "requires Dense Mode 1 archive"
+    );
+    assert!(
+        cs.best_header_height >= 100,
+        "requires archive height >= 100"
+    );
+    assert!(
+        store
             .popow_header_at_height(1)
             .expect("index read")
-            .is_none()
-    {
-        eprintln!("[skipped] data_dir can't serve proofs (sparse/short/no-genesis-extension)");
-        return;
-    }
+            .is_some(),
+        "requires historical genesis extension"
+    );
 
     let params = ergo_chain_spec::DifficultyParams::mainnet();
     let reader = store.reader_handle();

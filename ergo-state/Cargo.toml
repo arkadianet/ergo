@@ -3,6 +3,7 @@ name        = "ergo-state"
 description = "Authenticated UTXO state for the Ergo Rust node: AVL+ tree with arena-backed storage and incremental label maintenance, redb-persisted state store with atomic apply / undo / reorg, header chain index, voted-protocol-parameter persistence, and pruning. Provides the StateStore that block validation applies to."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -59,3 +60,6 @@ tempfile          = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

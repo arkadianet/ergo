@@ -3,6 +3,7 @@ name        = "ergo-difftest"
 description = "Differential / invariant fuzzing harness for Ergo wire-format decoders. Generates and mutates bytes, runs them through the consensus decoders, and checks oracle-free invariants (no-panic, parse/serialize fixed point). The JVM-oracle differential layer (scripts/jvm_serde_oracle) is layered on top for accept/reject parity."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -46,3 +47,6 @@ path = "src/bin/replay.rs"
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

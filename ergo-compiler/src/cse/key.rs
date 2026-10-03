@@ -7,7 +7,7 @@ use ergo_ser::sigma_value::SigmaValue;
 // ----- symbol identity -----
 
 /// A build-time symbol identity. Assigned densely in interning (evaluation)
-/// order; the numeric value doubles as the index into [`super::Interner::syms`].
+/// order; the numeric value doubles as the index into `super::Interner::syms`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SymId(pub u32);
 

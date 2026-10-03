@@ -10,9 +10,10 @@
 //!      against the same ground truth, reporting Kendall τ for each.
 //!
 //! This test is gated behind the `diagnostics` feature because it
-//! needs a running Scala node. Run with:
+//! needs a running Scala node and remains explicitly ignored in hermetic
+//! all-feature runs. Run it manually with:
 //!   NODE_URL=http://localhost:9053 \
-//!   cargo test -p ergo-mempool --features diagnostics --test m7_scala_oracle
+//!   cargo test --locked -p ergo-mempool --features diagnostics --test it m7_scala_oracle -- --ignored --nocapture
 //!
 //! The test NEVER asserts a specific ordering score — ordering divergence
 //! between ByCost and BySize is expected and intentional. What IS
@@ -45,9 +46,14 @@ use ergo_validation::UtxoView;
 fn curl_get(node_url: &str, path: &str) -> serde_json::Value {
     let url = format!("{node_url}{path}");
     let out = Command::new("curl")
-        .args(["-s", "--max-time", "10", &url])
+        .args(["--silent", "--show-error", "--max-time", "10", &url])
         .output()
         .unwrap_or_else(|e| panic!("curl failed: {e}"));
+    assert!(
+        out.status.success(),
+        "curl failed for {url}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("JSON parse failed for {url}: {e}"))
 }
@@ -317,6 +323,7 @@ fn kendall_tau(a_ids: &[Digest32], b_ids: &[Digest32]) -> f64 {
 // ─── The oracle test ──────────────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires an explicitly configured live Scala node; run manually with diagnostics and --ignored"]
 fn scala_pending_tx_oracle() {
     let node_url = std::env::var("NODE_URL").unwrap_or_else(|_| "http://localhost:9053".into());
 
@@ -329,10 +336,10 @@ fn scala_pending_tx_oracle() {
     let txs = pending
         .as_array()
         .expect("expected array from /transactions/unconfirmed");
-    if txs.is_empty() {
-        eprintln!("[m7-oracle] no pending txs — skip");
-        return;
-    }
+    assert!(
+        !txs.is_empty(),
+        "live Scala pending-transaction oracle requires a nonempty mempool"
+    );
 
     // ── Fetch tip header for TransactionContext ──
     let headers = curl_get(&node_url, "/blocks/lastHeaders/1");

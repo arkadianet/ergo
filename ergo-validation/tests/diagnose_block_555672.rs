@@ -6,26 +6,26 @@
 //! diagnostic procedure: decode each tx → recompute id → diff
 //! against Scala's claimed id to isolate the culprit field.
 
+//!
+//! Run the capture diagnostic explicitly with `cargo test --locked
+//! -p ergo-validation --features diagnostics --test diagnose_block_555672
+//! -- --ignored --nocapture`. Missing captures fail this manual invocation.
+
 use ergo_primitives::reader::VlqReader;
 use ergo_rest_json::{decode_scala_transaction, ScalaTransaction};
 use ergo_ser::transaction::{read_transaction, transaction_id};
 
 #[test]
+#[ignore = "manual diagnostic; requires Scala REST capture /tmp/block_555672_txs.json"]
 fn diff_per_tx_ids_for_block_555672() {
-    // Operator diagnostic: needs a REST capture at this path. Skip, rather than
-    // fail, when it is absent so feature-enabled CI runs stay green.
-    let raw = match std::fs::read_to_string("/tmp/block_555672_txs.json") {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping: capture file /tmp/block_555672_txs.json absent");
-            return;
-        }
-        Err(error) => panic!("reading capture /tmp/block_555672_txs.json: {error}"),
-    };
+    let raw = std::fs::read_to_string("/tmp/block_555672_txs.json").expect(
+        "capture Scala /blocks/{blockId}/transactions into /tmp/block_555672_txs.json first",
+    );
     let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let txs_json = value["transactions"]
         .as_array()
         .expect("transactions array");
+    assert!(!txs_json.is_empty(), "capture has no transactions");
     eprintln!("block 555672: {} txs in JSON", txs_json.len());
 
     let mut mismatches: Vec<(usize, String, String)> = Vec::new();

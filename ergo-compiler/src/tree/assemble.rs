@@ -6,7 +6,7 @@ use ergo_ser::opcode::{parse_expr, write_expr_segregating, ConstantSink, Expr};
 use ergo_ser::sigma_type::SigmaType;
 use ergo_ser::sigma_value::SigmaValue;
 
-/// The output of a successful [`compile`]: the assembled tree, its wire
+/// The output of a successful [`crate::compile`]: the assembled tree, its wire
 /// bytes, and both script-address encodings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileResult {

@@ -1,6 +1,13 @@
 name: Cost ledger
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to validate for a release
+        type: string
+        required: false
+        default: ''
   pull_request:
   push:
     branches: [main]
@@ -16,8 +23,9 @@ jobs:
   ledger-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.ref || github.sha }}
           # Artifact provenance verification reads the recorded generator commit.
           fetch-depth: 0
           persist-credentials: false
@@ -37,20 +45,22 @@ jobs:
     env:
       COST_LEDGER_TEST_RESULTS: target/cost-ledger-test-results.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust
+        id: rust
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: cost-ledger
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        with:
+          tool: cargo-nextest@${{ steps.rust.outputs.nextest }}
       - name: Tracked cost fixtures
         env:
           NEXTEST_NO_TESTS: warn
-        run: cargo nextest run -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
+        run: cargo nextest run --locked -p ergo-sigma -p ergo-validation -E 'test(/cost_(pin|ledger_fixtures|sweeps|block_fixtures|crypto_truncation)/)'
       - name: Fetch the L4 replay inputs (hash-pinned data release)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,16 +73,53 @@ jobs:
           NEXTEST_MESSAGE_FORMAT_VERSION: "0.1"
         run: |
           mkdir -p target
-          # Closing tests for the L4 rows live behind ergo-validation's `diagnostics`
-          # feature (the mainnet replay), so a default-feature run would report them
-          # as missing passing evidence. Only that feature: --all-features would also
-          # enable live-node oracle tests that need a running Scala node. The same
-          # feature gates operator-only diagnostics that read local REST captures
-          # (diagnose_block_*, trace_*, parity_triage, eval_error_triage); those are
-          # excluded here and are not closing evidence for any row.
-          cargo nextest run --workspace --features ergo-validation/diagnostics --no-fail-fast \
-            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage))' \
-            --message-format libtest-json > "$COST_LEDGER_TEST_RESULTS"
+          rm -f "$COST_LEDGER_TEST_RESULTS"
+          # External replay tests are ignored even when diagnostics is enabled.
+          # nextest also emits ignored events for tests excluded by a filter.
+          # Preserve both raw logs, then retain one source of evidence per test.
+          # Operator REST captures and live-node oracles remain manual.
+          cargo nextest run --locked --workspace --features ergo-validation/diagnostics --no-fail-fast \
+            -E 'not (binary(/^diagnose_block_/) | binary(/^trace_/) | binary(parity_triage) | binary(eval_error_triage) | test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/))' \
+            --message-format libtest-json > target/cost-ledger-workspace.jsonl
+          cargo nextest run --locked -p ergo-validation --features diagnostics --no-fail-fast \
+            --run-ignored only \
+            -E 'test(/cost_parity_stratified_ranges_match_jvm|cost_parity_required_selection_matches_jvm|l4_manifest_compressed_vectors_preserve_input_hashes/)' \
+            --message-format libtest-json > target/cost-ledger-manual.jsonl
+          python3 - <<'PY_EVIDENCE'
+          import json, os
+          from pathlib import Path
+
+          delegated = {
+              "ergo-validation::it$cost_parity::ranges::cost_parity_stratified_ranges_match_jvm",
+              "ergo-validation::it$cost_parity::ranges::cost_parity_required_selection_matches_jvm",
+              "ergo-validation::it$l4_manifest::l4_manifest_compressed_vectors_preserve_input_hashes",
+          }
+          def read_events(path):
+              return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+          ordinary = read_events("target/cost-ledger-workspace.jsonl")
+          manual = read_events("target/cost-ledger-manual.jsonl")
+          terminal = {name: [] for name in delegated}
+          for event in manual:
+              if event.get("type") == "test":
+                  if event.get("name") in delegated:
+                      if event.get("event") != "started":
+                          terminal[event["name"]].append(event.get("event"))
+                  else:
+                      assert event.get("event") in {"started", "ignored"}, event
+          assert all(outcomes == ["ok"] for outcomes in terminal.values()), terminal
+
+          evidence = []
+          for event in ordinary:
+              if event.get("type") == "test" and event.get("name") in delegated:
+                  assert event.get("event") in {"started", "ignored"}, event
+              else:
+                  evidence.append(event)
+          evidence.extend(event for event in manual
+                          if event.get("type") == "test" and event.get("name") in delegated)
+          Path(os.environ["COST_LEDGER_TEST_RESULTS"]).write_text(
+              "".join(json.dumps(event) + "\n" for event in evidence))
+          PY_EVIDENCE
       - name: Validate closure evidence
         if: ${{ always() && !cancelled() }}
         run: |

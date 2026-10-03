@@ -3,6 +3,7 @@ name        = "ergo-mempool"
 description = "Mempool for the Ergo Rust node: single-writer admission with anti-DoS budgeting, weighted ordering, invalidation + unresolved caches, pool-aware UTXO overlays, and reorg-driven revalidation. Drives the validator under the same active-protocol-parameters as block validation."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish    = false
@@ -38,3 +39,6 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "it"
 path = "tests/it/main.rs"
+
+[lints]
+workspace = true

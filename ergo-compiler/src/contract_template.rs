@@ -3,7 +3,7 @@
 //! (`sc/.../sigma/compiler/SigmaTemplateCompiler.scala:22-53`, sigma-state
 //! 6.0.2). Drives [`crate::contract_parse::parse_contract`] → typer (with the
 //! named-param TYPE env) → the SHARED graph-building pipeline
-//! ([`crate::tree::graph_build`]) with one `ConstantPlaceholder(index, tpe)`
+//! (`crate::tree::graph_build`) with one `ConstantPlaceholder(index, tpe)`
 //! seeded per param → a [`ContractTemplate`] metadata record.
 //!
 //! ## Placeholder-index assignment — map iteration order
@@ -19,7 +19,7 @@
 //! declaration order. For **≥5** params the `.toMap` upgrades to a
 //! JVM `HashMap` whose iteration order is `improve(String.hashCode)` bucket
 //! order, NOT declaration order — reproduced here via
-//! [`crate::param_order::iteration_order_2_12`] (Scala 2.12 `HashTrieMap` walk,
+//! `crate::param_order::iteration_order_2_12` (Scala 2.12 `HashTrieMap` walk,
 //! the version the `ct` oracle and ergo-appkit pin).
 //!
 //! CRUCIAL: `constTypes`/`constValues`/`parameters` (and each
@@ -47,7 +47,7 @@ use crate::typed::{node_tpe, ConstPayload};
 /// Scala's `Map1..Map4` preserve insertion order; `.toMap` upgrades to a
 /// hash map ABOVE this many entries. At or below it, placeholder
 /// index assignment is declaration order; above it, Scala 2.12 `HashTrieMap`
-/// iteration order ([`crate::param_order::iteration_order_2_12`]).
+/// iteration order (`crate::param_order::iteration_order_2_12`).
 pub const MAX_DECLARATION_ORDER_PARAMS: usize = 4;
 
 /// A contract-template parameter record (`org.ergoplatform.sdk.Parameter`,

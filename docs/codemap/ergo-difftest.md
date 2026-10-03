@@ -19,7 +19,6 @@ that confirms each fix still blocks its trigger. Not compiled into the node bina
 ergo-validation, ergo-rest-json
 **Depended on by:** none — dev/test-only crate (`publish = false`), not linked into
 the node binary
-**Approx LOC:** ~7,540 (src only, including `src/bin/`)
 
 ## Start here
 - `run_campaign` / `run_structured_campaign` (`src/lib.rs:78` / `:130`) — the two
@@ -85,7 +84,7 @@ the node binary
 - `src/gen/ergo_tree.rs` — ErgoTree generator (on-manifold + adversarial); covers the
   largest declared vocabulary: 12 features including `FunDefNTpeArgsHighBit`,
   `STypeVarIllFormedUtf8`, `Relation2CompactBoolPair`, `OffCurveGroupElement`.
-- `src/gen/sigma_expr.rs` — eval-rich ErgoTree generator (952 lines); targets the
+- `src/gen/sigma_expr.rs` — eval-rich ErgoTree generator; targets the
   `reduce` oracle surface with well-typed bodies that reduce non-trivially against the
   dummy context; covers 13 eval/cost features including `EvalAtLeast` (#13),
   `EvalCollEqEarly` (#15), `EvalTokenEq` (#16), `EvalDeserializeNode` (#3).

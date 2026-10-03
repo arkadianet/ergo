@@ -7,6 +7,11 @@
 //! Each input has 2× LogicalNot = 10 JitCost overcharge per input.
 //! 3 inputs × 10 = 30 JitCost = 3 block_cost.
 //! Fix: change 0xEF from fixed(20) to fixed(15).
+//!
+//! Requires transactions_889000_890000.json, headers_889000_890300.json
+//! and tx_costs_889000_890000.json in test-vectors/mainnet. Run with
+//! `cargo test --locked -p ergo-validation --features cost-trace
+//! --test trace_mismatch_889k -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 
@@ -85,7 +90,7 @@ struct ScalaCostVector {
 }
 
 #[test]
-#[ignore] // diagnostic: run manually with --ignored --nocapture
+#[ignore = "manual trace; requires extracted 889k transactions, headers and JVM costs"]
 fn trace_889k_mismatches() {
     let result = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
