@@ -1,5 +1,6 @@
 mod apply_block;
 mod backfill_corpus;
+mod checkpoint_mutations;
 mod error_taxonomy;
 mod handle_boot;
 mod handle_query;

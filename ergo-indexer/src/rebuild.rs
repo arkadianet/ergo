@@ -88,6 +88,7 @@ pub fn rebuild_secondary_indexes_until(
     store: &IndexerStore,
     cancel: &AtomicBool,
 ) -> Result<(), IndexerError> {
+    let _repair = store.acquire_repair()?;
     ensure_repair_marker_armed(store)?;
 
     let total = store.read_meta()?.global_box_index; // exclusive upper bound on gi
@@ -656,6 +657,9 @@ mod tests {
                 .unwrap();
             }
             let mut meta = crate::store::IndexerMeta::empty();
+            meta.indexed_height = 1;
+            meta.indexed_header_id = Some(Digest32::from_bytes([0xC1; 32]));
+            meta.global_tx_index = 1;
             meta.global_box_index = 3;
             meta_io::write_meta(&wt, &meta).unwrap();
             meta_io::set_secondary_repair_pending(&wt).unwrap();
@@ -716,6 +720,9 @@ mod tests {
                 .unwrap();
             }
             let mut meta = crate::store::IndexerMeta::empty();
+            meta.indexed_height = 1;
+            meta.indexed_header_id = Some(Digest32::from_bytes([0xC2; 32]));
+            meta.global_tx_index = 1;
             meta.global_box_index = 2;
             meta_io::write_meta(&wt, &meta).unwrap();
             meta_io::set_secondary_repair_pending(&wt).unwrap();
