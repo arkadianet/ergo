@@ -41,7 +41,12 @@ section rejects typos:
 
 | Strict (unknown key = error) | Lenient (unknown key ignored) |
 |---|---|
-| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[api]`, `[api.security]`, `[api.script]`, `[mining]` |
+| `[node]`, `[node.utxo]`, `[node.nipopow]`, `[mempool]`, `[indexer]`, `[wallet]`, `[voting]`, `[logging]`, `[logging.file]`, `[api]`, `[api.security]`, `[api.script]` | top-level, `[peers]`, `[sync]`, `[store]`, `[chain]`, `[mining]` |
+
+**Upgrade:** Formerly ignored unknown keys in `[api]`, `[api.security]` and
+`[api.script]` now fail configuration loading and prevent startup. Remove
+unsupported keys or rename misspelled keys to their documented names in
+existing configs before upgrading.
 
 ## Top-level keys
 

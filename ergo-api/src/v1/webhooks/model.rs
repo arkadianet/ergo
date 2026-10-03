@@ -221,8 +221,8 @@ pub struct UrlPolicy {
     /// Require the `https` scheme (reject `http` with `insecure_url`). Default
     /// `true`. An operator may allow `http` for loopback/dev targets.
     pub require_https: bool,
-    /// Allow loopback targets (`127.0.0.0/8`, `::1`, `localhost`). Default
-    /// `false`.
+    /// Allow local-host targets: loopback (`127.0.0.0/8`, `::1`, `localhost`),
+    /// unspecified addresses and IPv4 `0.0.0.0/8`. Default `false`.
     pub allow_loopback: bool,
     /// Allow RFC1918 / ULA / link-local private targets. Default `false`.
     pub allow_private: bool,
@@ -293,14 +293,23 @@ fn ip_is_forbidden(ip: IpAddr) -> bool {
 
 /// Check both literal URLs and resolved socket destinations against one policy.
 /// IPv4-mapped IPv6 addresses use the embedded IPv4 address's policy.
+/// Multicast and IPv4 broadcast destinations are always denied.
 pub(crate) fn address_allowed(ip: IpAddr, policy: &UrlPolicy) -> bool {
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         _ => ip,
     };
-    !ip_is_forbidden(ip)
-        || (ip.is_loopback() && policy.allow_loopback)
-        || (!ip.is_loopback() && policy.allow_private)
+    if ip.is_multicast() || matches!(ip, IpAddr::V4(v4) if v4.is_broadcast()) {
+        return false;
+    }
+    let local_host = ip.is_loopback()
+        || ip.is_unspecified()
+        || matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 0);
+    if local_host {
+        policy.allow_loopback
+    } else {
+        !ip_is_forbidden(ip) || policy.allow_private
+    }
 }
 
 /// Validate the canonical URL that the HTTP client will use. The delivery
@@ -432,6 +441,72 @@ mod tests {
     }
 
     // ----- SSRF url policy -----
+
+    #[test]
+    fn address_policy_permission_matrix() {
+        // Columns: neither opt-in, private only, loopback only, both opt-ins.
+        let cases = [
+            ("127.0.0.1", [false, false, true, true]),
+            ("::1", [false, false, true, true]),
+            ("0.0.0.0", [false, false, true, true]),
+            ("0.1.2.3", [false, false, true, true]),
+            ("0.255.255.255", [false, false, true, true]),
+            ("::", [false, false, true, true]),
+            ("::ffff:127.0.0.1", [false, false, true, true]),
+            ("::ffff:0.0.0.0", [false, false, true, true]),
+            ("::ffff:0.1.2.3", [false, false, true, true]),
+            ("10.0.0.1", [false, true, false, true]),
+            ("172.16.0.1", [false, true, false, true]),
+            ("192.168.0.1", [false, true, false, true]),
+            ("169.254.1.1", [false, true, false, true]),
+            ("100.64.0.1", [false, true, false, true]),
+            ("192.0.2.1", [false, true, false, true]),
+            ("198.18.0.1", [false, true, false, true]),
+            ("240.0.0.1", [false, true, false, true]),
+            ("fc00::1", [false, true, false, true]),
+            ("fe80::1", [false, true, false, true]),
+            ("fec0::1", [false, true, false, true]),
+            ("2001:db8::1", [false, true, false, true]),
+            ("::ffff:10.0.0.1", [false, true, false, true]),
+            ("8.8.8.8", [true, true, true, true]),
+            ("2001:4860:4860::8888", [true, true, true, true]),
+            ("::ffff:8.8.8.8", [true, true, true, true]),
+            ("224.0.0.1", [false, false, false, false]),
+            ("239.255.255.255", [false, false, false, false]),
+            ("255.255.255.255", [false, false, false, false]),
+            ("ff02::1", [false, false, false, false]),
+            ("::ffff:224.0.0.1", [false, false, false, false]),
+            ("::ffff:255.255.255.255", [false, false, false, false]),
+        ];
+        for require_https in [false, true] {
+            for (column, (allow_loopback, allow_private)) in
+                [(false, false), (false, true), (true, false), (true, true)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let policy = UrlPolicy {
+                    require_https,
+                    allow_loopback,
+                    allow_private,
+                };
+                for (address, expected) in cases {
+                    let ip = address.parse::<IpAddr>().unwrap();
+                    assert_eq!(
+                        address_allowed(ip, &policy),
+                        expected[column],
+                        "{address}: {policy:?}"
+                    );
+                    let url = format!("https://{}/h", std::net::SocketAddr::new(ip, 443));
+                    let result = if expected[column] {
+                        Ok(())
+                    } else {
+                        Err(UrlReject::ForbiddenTarget)
+                    };
+                    assert_eq!(validate_url(&url, &policy), result, "{url}: {policy:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn canonical_and_mapped_private_hosts_are_rejected() {
