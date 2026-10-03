@@ -570,9 +570,7 @@ pub(crate) async fn update_change_address(
     }
     // Persist to WALLET_CHANGE_ADDRESS.
     let result: Result<(), WalletAdminError> = (|| -> Result<(), WalletAdminError> {
-        let txn = ctx
-            .db
-            .begin_write()
+        let txn = ergo_state::begin_write_qr(ctx.db)
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         {
             let mut tbl = txn

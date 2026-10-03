@@ -101,9 +101,8 @@ pub(crate) fn persist_tracked_pubkey(
     let meta_bytes = bincode::serialize(meta)
         .map_err(|e| WalletAdminError::Internal(format!("bincode TrackedPubkeyMeta: {e}")))?;
 
-    let write_txn = db
-        .begin_write()
-        .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+    let write_txn =
+        ergo_state::begin_write_qr(db).map_err(|e| WalletAdminError::Internal(e.to_string()))?;
     {
         // Insert the new tracked pubkey.
         let mut tracked = write_txn
