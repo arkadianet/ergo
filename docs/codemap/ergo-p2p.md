@@ -72,3 +72,11 @@ in `test-vectors/ergo-p2p/PROVISIONING.md`: four full frames and one source-deri
 V2 payload. These finite fixtures do not establish full legacy-peer exchange or
 runtime parity for every supported message. Peer caps/penalties/seeds are local
 policy, not authenticated peer identity or a universal eclipse-resistance proof.
+
+Legacy V1 wire IDs are oldest-first/tip-last, including a zero pregenesis
+sentinel when the offered best-chain suffix reaches height1. Comparison uses
+only the last position for Equal. SYNC normalizes incoming V1 IDs to newest-first
+for common-point searches; V2 already uses newest-first. The exact selected
+Scala v6.0.5 methods and finite JVM observations are shipped under
+`test-vectors/ergo-p2p/sync-v1/`, consumed by P2P and SYNC. This pins the selected
+metadata contract, not a full reference-node network exchange.

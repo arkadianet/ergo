@@ -77,3 +77,11 @@ Adding these requires opening a Scala-side PR to add the byte
 assertion (or, for handshake, parameterising the serializer to
 take fixed timestamp + session-id constants). Tracked as a
 post-Phase-10 follow-up.
+
+## Legacy V1 metadata and ordering
+
+`sync-v1/` ships pinned v6.0.5 history/header source, exact selected-method JVM
+wrapper and seven comparison/four producer observations. P2P consumes every
+comparison row; SYNC consumes every producer row and asserts common-point
+normalization/initial continuation. This is separate from the framed wire
+literals above and does not claim a complete legacy-node exchange.
