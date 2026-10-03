@@ -297,14 +297,15 @@ impl<'a> VlqReader<'a> {
         self.header_spans.as_deref().unwrap_or(&[])
     }
 
-    /// Record a group-element encoding seen during the parse (the raw 33 bytes,
-    /// exactly as on the wire). Called by the deserializers at every point the
-    /// Scala reference would curve-check a group element.
+    /// Record a parsed group-element encoding for deferred curve validation.
+    /// The group reader normalizes every zero-prefix identity to 33 zero bytes;
+    /// this sideband is not the original wire slice. Use `data_slice` with
+    /// recorded positions when original bytes are required.
     pub fn record_group_element(&mut self, ge: [u8; 33]) {
         self.group_elements.push(ge);
     }
 
-    /// All group-element encodings seen so far.
+    /// All parsed/normalized group-element encodings recorded so far.
     pub fn group_elements(&self) -> &[[u8; 33]] {
         &self.group_elements
     }

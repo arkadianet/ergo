@@ -62,7 +62,18 @@
       "generator": "scripts/gen-evaluated-probe.py",
       "scala_cli": "Scala CLI version: 1.12.1\nScala version (default): 3.8.1",
       "scala_directive": "2.12",
-      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)"
+      "jvm": "openjdk version \"17.0.17\" 2025-10-21 LTS\nOpenJDK Runtime Environment Corretto-17.0.17.10.1 (build 17.0.17+10-LTS)\nOpenJDK 64-Bit Server VM Corretto-17.0.17.10.1 (build 17.0.17+10-LTS, mixed mode, sharing)",
+      "git_sha_role": "historically recorded checkout base; not an exact source revision",
+      "source_state": {
+        "recorded_base_revision": "d3c7de477ddd56044aa5044774156c17be1760c4",
+        "tracked_source_at_recorded_base_sha256": "5ff2c2d1b45b4989fda7602a18aee099469757d37700184c38027dfa3c336d49",
+        "source_matches_recorded_base": false,
+        "source_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+        "source_snapshot": "test-vectors/scala/source-snapshots/b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93/EvaluatedValueOracle.scala",
+        "recovered_matching_source_revision": "5d62fd5851e74fcb965b4aba50e1b423127f46f1",
+        "recovered_revision_role": "contains matching source bytes; original execution revision is unknown",
+        "original_checkout_clean_dirty": "UNKNOWN: not recorded by the original producer"
+      }
     },
     "context": {
       "network": "offline direct JVM probe",
@@ -86,26 +97,36 @@
       "request_jsonl_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "response_json_sha256": "1611afa87c8d02858ab10060f7a4771569dc70b8156ed82fb009a444b8826a8f"
     },
-    "rent_run": {
-      "files": [
-        "test-vectors/ergo-sigma/verify/rent-requests.jsonl",
-        "test-vectors/ergo-sigma/verify/rent-responses.jsonl",
-        "test-vectors/ergo-sigma/verify/rent-cases.json"
-      ],
-      "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl",
-      "artifacts": "sigma-state 6.0.6 from Maven Central; ergo-core, ergo-wallet and avldb 6.0.6 published locally with sbt publishLocal (tag v6.0.6, ergo 23aabead88774d27f2c9190ace3c9abbc8f1d5cb)",
-      "script_git_sha": "d3c7de4",
-      "script_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
-      "scala_cli": "1.12.1",
-      "jvm": "OpenJDK Corretto 17.0.17.10.1 (17.0.17+10-LTS)",
-      "timestamp_utc": "2026-09-29T17:33:56.250162+00:00",
-      "selected": 10,
-      "executed": 10,
-      "skipped": 0,
-      "failed": 0,
-      "reproduction_check": "Re-captured at 6.0.6 from the checked-in requests; a same-setup 6.0.2 run reproduces every checked-in 6.0.2 field of all 32 responses. 6.0.2 vs 6.0.6 differ only in fix-cases[5] (rent-enabled-storage-factor-string) failure_class/rejection_detail: circe 0.13.0 -> 0.14.15 renamed the request-decoding DecodingFailure class; verdict RejectOther unchanged."
-    },
     "scala_sigmastate": "6.0.6",
-    "date": "2026-09-29T17:40:37.964713+00:00"
+    "date": "2026-09-29T17:40:37.964713+00:00",
+    "historical_unrelated_inheritance": {
+      "rent_run": {
+        "files": [
+          "test-vectors/ergo-sigma/verify/rent-requests.jsonl",
+          "test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+          "test-vectors/ergo-sigma/verify/rent-cases.json"
+        ],
+        "command": "scala-cli run scripts/jvm_evaluated_value_oracle/EvaluatedValueOracle.scala --server=false -- verify < test-vectors/ergo-sigma/verify/rent-requests.jsonl > test-vectors/ergo-sigma/verify/rent-responses.jsonl",
+        "artifacts": "sigma-state 6.0.6 from Maven Central; ergo-core, ergo-wallet and avldb 6.0.6 published locally with sbt publishLocal (tag v6.0.6, ergo 23aabead88774d27f2c9190ace3c9abbc8f1d5cb)",
+        "script_git_sha": "d3c7de4",
+        "script_sha256": "b16454cc77645aac499d9c06d8dbfd26a93dc99369368a9a96c9d8daf6770c93",
+        "scala_cli": "1.12.1",
+        "jvm": "OpenJDK Corretto 17.0.17.10.1 (17.0.17+10-LTS)",
+        "timestamp_utc": "2026-09-29T17:33:56.250162+00:00",
+        "selected": 10,
+        "executed": 10,
+        "skipped": 0,
+        "failed": 0,
+        "reproduction_check": "Re-captured at 6.0.6 from the checked-in requests; a same-setup 6.0.2 run reproduces every checked-in 6.0.2 field of all 32 responses. 6.0.2 vs 6.0.6 differ only in fix-cases[5] (rent-enabled-storage-factor-string) failure_class/rejection_detail: circe 0.13.0 -> 0.14.15 renamed the request-decoding DecodingFailure class; verdict RejectOther unchanged."
+      },
+      "note": "Retained historical metadata from a separate rent/verify capture; it is not execution evidence for this direct probe."
+    },
+    "source_reconciliation": {
+      "recapture": "test-vectors/scala/direct-cost-recapture.json",
+      "recapture_sha256": "33ed143700c7a90a45850ba90736ac55322766b8cdb0d8b5440ee111ab81af24",
+      "cases_equal": true,
+      "response_hash_equal": true,
+      "note": "Original case outcomes and timestamps are preserved. Fresh execution of the archived exact source independently reproduces them; no historical checkout state is inferred."
+    }
   }
 }
