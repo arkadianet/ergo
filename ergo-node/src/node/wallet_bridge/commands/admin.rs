@@ -384,7 +384,6 @@ fn rescan_failure_state(
 
 struct RescanFlagsGuard {
     identity: crate::wallet_boot::RescanIdentity,
-    store: std::sync::Arc<dyn ergo_state::wallet::WalletStore>,
 }
 
 impl RescanFlagsGuard {
@@ -393,21 +392,19 @@ impl RescanFlagsGuard {
         from_height: u32,
         control: std::sync::Arc<crate::wallet_boot::RescanControl>,
     ) -> Result<Self, WalletAdminError> {
-        // The existing wallet writer lock orders flag publication with cleanup
-        // and rollback. In particular, releasing an identity and clearing its
-        // flags cannot straddle a new admission.
+        // The writer transaction orders durable state with rollback. The local
+        // controller serializes identity and flag publication/cleanup without
+        // requiring a successful storage operation to release finished work.
         let mut write = store
             .begin_write()
             .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
-        let identity = control.admit().ok_or_else(|| {
+        let identity = control.admit_rescan(from_height).ok_or_else(|| {
             WalletAdminError::RescanUnavailable("rescan already in progress".to_string())
         })?;
-        control.from_height.store(from_height, Ordering::SeqCst);
-        control.rebuilding.store(from_height == 0, Ordering::SeqCst);
         let result = write
             .set_rescan_state(&ergo_state::wallet::RescanState::Running { from_height })
             .and_then(|()| write.commit());
-        let flags = Self { identity, store };
+        let flags = Self { identity };
         result.map_err(|e| WalletAdminError::Internal(e.to_string()))?;
         Ok(flags)
     }
@@ -415,23 +412,7 @@ impl RescanFlagsGuard {
 
 impl Drop for RescanFlagsGuard {
     fn drop(&mut self) {
-        if !self.identity.owns() {
-            return;
-        }
-        let _write = match self.store.begin_write() {
-            Ok(write) => write,
-            Err(error) => {
-                tracing::error!(%error, "failed to acquire wallet writer for rescan cleanup");
-                return;
-            }
-        };
-        if self.identity.release() {
-            self.identity
-                .control
-                .rebuilding
-                .store(false, Ordering::SeqCst);
-            self.identity.control.from_height.store(0, Ordering::SeqCst);
-        }
+        self.identity.release();
     }
 }
 
@@ -1558,6 +1539,62 @@ mod tests {
             store.begin_read().unwrap().rescan_state().unwrap(),
             ergo_state::wallet::RescanState::Idle
         );
+    }
+
+    #[test]
+    fn rescan_cleanup_releases_memory_when_storage_writes_fail() {
+        use ergo_state::wallet::{WalletRead, WalletStore, WalletStoreError, WalletWrite};
+        struct ToggleStore {
+            inner: ergo_state::wallet::RedbWalletStore,
+            fail: std::sync::atomic::AtomicBool,
+            write_attempts: std::sync::atomic::AtomicUsize,
+        }
+        impl WalletStore for ToggleStore {
+            fn begin_read(&self) -> Result<Box<dyn WalletRead>, WalletStoreError> {
+                self.inner.begin_read()
+            }
+            fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
+                self.write_attempts.fetch_add(1, super::Ordering::SeqCst);
+                if self.fail.load(super::Ordering::SeqCst) {
+                    Err(WalletStoreError::Decode("synthetic write failure".into()))
+                } else {
+                    self.inner.begin_write()
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            std::sync::Arc::new(redb::Database::create(dir.path().join("wallet.redb")).unwrap());
+        let store = std::sync::Arc::new(ToggleStore {
+            inner: ergo_state::wallet::RedbWalletStore::new(db),
+            fail: std::sync::atomic::AtomicBool::new(false),
+            write_attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let control = std::sync::Arc::new(crate::wallet_boot::RescanControl::default());
+        let first = super::RescanFlagsGuard::admit(store.clone(), 0, control.clone()).unwrap();
+        assert!(control.rebuilding.load(super::Ordering::SeqCst));
+        store.fail.store(true, super::Ordering::SeqCst);
+        assert!(super::persist_rescan_state(
+            store.as_ref(),
+            &first.identity,
+            &ergo_state::wallet::RescanState::Idle
+        )
+        .is_err());
+        let attempts = store.write_attempts.load(super::Ordering::SeqCst);
+        drop(first);
+        assert_eq!(
+            store.write_attempts.load(super::Ordering::SeqCst),
+            attempts,
+            "volatile release cannot require another storage operation"
+        );
+        assert!(!control.in_progress());
+        assert!(!control.rebuilding.load(super::Ordering::SeqCst));
+        assert_eq!(control.from_height.load(super::Ordering::SeqCst), 0);
+        store.fail.store(false, super::Ordering::SeqCst);
+        let successor = super::RescanFlagsGuard::admit(store, 7, control.clone()).unwrap();
+        assert_eq!(control.from_height.load(super::Ordering::SeqCst), 7);
+        drop(successor);
+        assert!(!control.in_progress());
     }
 
     // ----- error paths -----
