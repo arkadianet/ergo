@@ -24,6 +24,7 @@ pub struct ScalaCompatStatic {
     pub name: String,
     pub app_version: String,
     pub network: String,
+    pub state_type: crate::config::StateType,
     pub voting_length: u32,
     pub launch_time_unix_ms: u64,
     pub rest_api_url: Option<String>,
@@ -137,7 +138,7 @@ impl NodeChainQuery for ScalaCompatBridge {
             current_time: unix_now_ms(),
             network: cfg.network.clone(),
             name: cfg.name.clone(),
-            state_type: "utxo".to_string(),
+            state_type: cfg.state_type.as_str().to_owned(),
             // Decoded from the best-header tip's nBits. `u64` is a
             // Scala-surface cap only — native truth is the full-precision
             // String on `ApiTip`; this saturates if difficulty ever
@@ -1219,6 +1220,16 @@ mod votes_history_tests {
     // ----- helpers -----
 
     fn votes_history_for_network(network: Network) -> ApiVotesHistory {
+        bridge_value_for_network(network, crate::config::StateType::Utxo, |bridge| {
+            bridge.votes_history()
+        })
+    }
+
+    fn bridge_value_for_network<T>(
+        network: Network,
+        state_type: crate::config::StateType,
+        read: impl FnOnce(ScalaCompatBridge) -> T,
+    ) -> T {
         let spec = ChainSpec::for_network(network);
         let tmp = tempfile::tempdir().unwrap();
         let store = ergo_state::store::StateStore::open(&tmp.path().join("state.redb")).unwrap();
@@ -1240,6 +1251,7 @@ mod votes_history_tests {
                 name: "test".into(),
                 app_version: "test".into(),
                 network: network.as_str().into(),
+                state_type,
                 launch_time_unix_ms: 0,
                 voting_length: spec.voting.voting_length,
                 rest_api_url: None,
@@ -1248,7 +1260,19 @@ mod votes_history_tests {
             store.reader_handle(),
             spec.difficulty,
         );
-        bridge.votes_history()
+        read(bridge)
+    }
+
+    #[test]
+    fn info_reports_the_configured_state_backend() {
+        for state_type in [
+            crate::config::StateType::Utxo,
+            crate::config::StateType::Digest,
+        ] {
+            let info =
+                bridge_value_for_network(Network::Mainnet, state_type, |bridge| bridge.info());
+            assert_eq!(info.state_type, state_type.as_str());
+        }
     }
 
     // ----- happy path -----
