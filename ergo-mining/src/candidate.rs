@@ -57,7 +57,9 @@ use std::collections::{BTreeMap, HashSet};
 /// decrease and id-9 votes; while active only `{1..=8, 120}` are accepted.
 const RULE_HDR_VOTES_UNKNOWN: u16 = 215;
 
-use crate::candidate_selection::{select_user_txs_with_policy_cancellable, CandidateOverlay};
+use crate::candidate_selection::{
+    protected_rent_inputs, select_user_txs_with_policy_cancellable, CandidateOverlay,
+};
 use crate::coinbase::{build_fee_tx, build_pre_eip27_emission_tx};
 use crate::emission_box::lookup_emission_box_from_parent;
 use crate::emission_rules::MonetarySettings;
@@ -672,12 +674,21 @@ pub fn generate_candidate_with_policy_cancellable<V: CandidateStateView>(
             policy.private_reserved_size_basis_points,
             !private_transactions.is_empty(),
         );
+        let protected_inputs = protected_rent_inputs(mempool, private_transactions, policy)?;
+        let rent_boxes: Vec<_> = eligible_rent_boxes
+            .iter()
+            .filter(|box_| {
+                box_.box_id()
+                    .is_ok_and(|id| !protected_inputs.contains(&id))
+            })
+            .cloned()
+            .collect();
         let (checked_rent, rent_cost, rent_size) =
             match build_budget_bounded_rent_claim_with_policy(
-                eligible_rent_boxes,
+                &rent_boxes,
                 candidate_height,
                 &params,
-                eligible_rent_boxes.len(),
+                rent_boxes.len(),
                 miner_pk,
                 &ctx,
                 last_headers.as_slice(),

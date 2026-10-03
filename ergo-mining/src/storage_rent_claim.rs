@@ -143,6 +143,7 @@ pub fn build_rent_claim_with_policy(
     // both the total output count and each index must fit Scala's Short cap.
     let max_claims = max_claims.min(i16::MAX as usize - 1);
     let max_box_size = params.max_box_size as usize;
+    let p2pk_tree = parse_p2pk_tree(miner_pubkey)?;
 
     // Destination of each claimed box's value, decided in one pass so the
     // aggregate P2PK output index (which full-consume inputs name in var
@@ -286,7 +287,7 @@ pub fn build_rent_claim_with_policy(
                 // outputs/value growth from forcing a late token truncation.
                 let probe = build_p2pk_box(
                     i64::MAX as u64,
-                    &parse_p2pk_tree(miner_pubkey)?,
+                    &p2pk_tree,
                     current_height,
                     prospective.clone(),
                 )?;
@@ -324,8 +325,6 @@ pub fn build_rent_claim_with_policy(
     } else {
         1
     };
-    let p2pk_tree = parse_p2pk_tree(miner_pubkey)?;
-
     // Trim seized tokens until the P2PK output fits max_box_size; excess
     // tokens are burned (consensus-legal: outputs may carry fewer tokens
     // than inputs).

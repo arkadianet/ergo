@@ -462,6 +462,26 @@ struct SelectionPlan<'a> {
     excluded: HashSet<Digest32>,
 }
 
+/// Inputs owned by the private lane or a required transaction/ancestor must
+/// not be swept by the rent prefix before user selection gets to them.
+pub fn protected_rent_inputs(
+    snapshot: &MempoolReadSnapshot,
+    private: &[Entry],
+    policy: &BlockPolicy,
+) -> Result<HashSet<Digest32>, MiningError> {
+    let plan = selection_plan(snapshot, private, policy)?;
+    Ok(private
+        .iter()
+        .flat_map(|entry| entry.inputs.iter().copied())
+        .chain(
+            plan.ordered
+                .into_iter()
+                .filter(|entry| plan.required.contains(&entry.tx_id))
+                .flat_map(|entry| entry.inputs.iter().copied()),
+        )
+        .collect())
+}
+
 fn selection_plan<'a>(
     snapshot: &'a MempoolReadSnapshot,
     private: &'a [Entry],
@@ -539,7 +559,7 @@ fn selection_plan<'a>(
                 );
             }
             parents.extend(entry.parents_in_pool.iter().copied());
-            parents.sort_unstable();
+            parents.sort_unstable_by_key(|id| *id.as_bytes());
             parents.dedup();
             for parent in parents.into_iter().rev() {
                 if entries.contains_key(&parent) {
@@ -1688,5 +1708,130 @@ mod tests {
             sel.checked.is_empty(),
             "a fee-bearing claim conflicting with the pinned rent claim must be excluded",
         );
+    }
+
+    fn policy_entry(tx: &Transaction, fee: u64) -> Entry {
+        let mut entry = wire_entry(tx, fee, 0);
+        let id = transaction_id(tx).unwrap();
+        entry.tx_id = Digest32::from_bytes(*id.as_bytes());
+        entry.outputs = tx
+            .output_candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                ErgoBox {
+                    candidate: candidate.clone(),
+                    transaction_id: id,
+                    index: index as u16,
+                }
+                .box_id()
+                .unwrap()
+            })
+            .collect();
+        entry
+    }
+
+    #[test]
+    fn private_transaction_wins_conflict_against_public_fee_transaction() {
+        let input = box_at(1_000_000_000, HEIGHT, 0x11);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let private = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let mut public = private.clone();
+        public.output_candidates[0].creation_height = HEIGHT - 1;
+        let private = policy_entry(&private, 0);
+        let public = policy_entry(&public, 1_000_000);
+        let public_id = public.tx_id;
+        let snapshot = MempoolReadSnapshot::from_entries(vec![public]);
+        let selected = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            std::slice::from_ref(&private),
+            &BlockPolicy::default(),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 1);
+        assert_eq!(selected.checked[0].0.tx_id(), private.tx_id.as_bytes());
+        assert!(selected
+            .excluded
+            .iter()
+            .any(|e| e.tx_id == public_id && e.reason == "input_conflict"));
+        assert!(
+            protected_rent_inputs(&snapshot, &[private], &BlockPolicy::default())
+                .unwrap()
+                .contains(&input.box_id().unwrap())
+        );
+    }
+
+    #[test]
+    fn mandatory_child_includes_parent_before_it_and_bundle_cannot_partially_fit() {
+        let input = box_at(1_000_000_000, HEIGHT, 0x12);
+        let utxo = MapUtxo::new(std::slice::from_ref(&input));
+        let parent_tx = spend_tx(&input, 1_000_000_000, HEIGHT);
+        let parent_id = transaction_id(&parent_tx).unwrap();
+        let parent_output = ErgoBox {
+            candidate: parent_tx.output_candidates[0].clone(),
+            transaction_id: parent_id,
+            index: 0,
+        };
+        let child = policy_entry(&spend_tx(&parent_output, 1_000_000_000, HEIGHT), 0);
+        let parent = policy_entry(&parent_tx, 0);
+        let policy = BlockPolicy {
+            required_bundles: vec![vec![hex::encode(child.tx_id.as_bytes())]],
+            ..Default::default()
+        };
+        let snapshot = MempoolReadSnapshot::from_entries(vec![child.clone(), parent.clone()]);
+        let selected = select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::MAX,
+            None,
+            &[],
+            &policy,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(selected.checked.len(), 2);
+        assert_eq!(selected.checked[0].0.tx_id(), parent.tx_id.as_bytes());
+        assert_eq!(selected.checked[1].0.tx_id(), child.tx_id.as_bytes());
+        assert_eq!(selected.required.len(), 2);
+        assert!(select_user_txs_with_policy_cancellable(
+            &mut CandidateOverlay::new(&utxo),
+            &snapshot,
+            &ctx(),
+            &ProtocolParams::mainnet_default(),
+            &[],
+            u64::MAX,
+            u64::from(parent.size_bytes),
+            None,
+            &[],
+            &policy,
+            &|| false
+        )
+        .is_err());
+        let excluded_parent = BlockPolicy {
+            excluded_tx_ids: vec![hex::encode(parent.tx_id.as_bytes())],
+            ..policy
+        };
+        assert!(selection_plan(&snapshot, &[], &excluded_parent).is_err());
+    }
+
+    #[test]
+    fn required_missing_transaction_stops_even_an_empty_candidate_selection() {
+        let policy = BlockPolicy {
+            required_tx_ids: vec!["ab".repeat(32)],
+            ..Default::default()
+        };
+        assert!(selection_plan(&MempoolReadSnapshot::empty(), &[], &policy).is_err());
     }
 }
