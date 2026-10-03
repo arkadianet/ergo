@@ -2494,6 +2494,16 @@ impl StateStore {
         self.headers.get_header_id_at_height(height)
     }
 
+    /// Header ID on the fully applied chain at `height`, as committed in
+    /// `CHAIN_INDEX`. Queued persistence is not visible until commit. Use a
+    /// `CommittedSnapshot` when several reads must share one frozen view.
+    pub fn get_applied_header_id_at_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<[u8; 32]>, StateError> {
+        crate::reader::applied_header_id_in_txn(&self.db.begin_read()?, height)
+    }
+
     /// Scan `HEADER_CHAIN_INDEX` for the canonical height of a given
     /// header id, asserting Dense-mode index invariants while
     /// scanning. Returns `Ok(None)` only after a clean, fully-
