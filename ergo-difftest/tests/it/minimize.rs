@@ -15,7 +15,9 @@
 //!   `KnownArtifact` records are not.
 
 use ergo_difftest::minimize::minimize;
-use ergo_difftest::regressions::{auto_file, build_record, DivergenceRecord, SeedInfo, Triage};
+use ergo_difftest::regressions::{
+    auto_file, build_record, record_after_minimization, DivergenceRecord, SeedInfo, Triage,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimizer mechanics
@@ -321,4 +323,63 @@ fn auto_file_is_idempotent_same_path() {
         1,
         "re-filing the same record must not duplicate its QUEUE.md line"
     );
+}
+
+// Failure recovery checks diagnostic record mechanics, not Scala verdicts.
+#[test]
+fn failed_minimization_preserves_original_pending_evidence() {
+    let original = ergo_difftest::oracle::Divergence {
+        surface: "ergo_tree",
+        kind: ergo_difftest::oracle::DivergenceKind::Canonical,
+        input_hex: "deadbeef".into(),
+        rust: ergo_difftest::oracle::Verdict::Accept("00".into()),
+        jvm: ergo_difftest::oracle::Verdict::Accept("01".into()),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    for kind in [
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::InvalidData,
+        std::io::ErrorKind::Other,
+        std::io::ErrorKind::BrokenPipe,
+    ] {
+        let record = record_after_minimization(
+            &original,
+            Err(std::io::Error::new(kind, "ordinary processing fixture")),
+            Some(SeedInfo { seed: 7, iter: 42 }),
+            "structured-gen",
+        );
+        assert_eq!(record.input_hex, original.input_hex);
+        assert_eq!(record.rust.detail, "00");
+        assert_eq!(record.jvm.detail, "01");
+        assert_eq!(record.seed, Some(SeedInfo { seed: 7, iter: 42 }));
+        assert_eq!(record.triage, "PENDING");
+        assert!(!record.minimized);
+        assert!(record
+            .processing_error
+            .as_ref()
+            .unwrap()
+            .contains(&format!("{kind:?}")));
+        let path = auto_file(&record, directory.path()).unwrap();
+        let stored: DivergenceRecord =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(stored, record);
+    }
+}
+
+#[test]
+fn successful_minimization_uses_reverified_input_and_stays_pending() {
+    let original = ergo_difftest::oracle::Divergence {
+        surface: "ergo_tree",
+        kind: ergo_difftest::oracle::DivergenceKind::Canonical,
+        input_hex: "deadbeef".into(),
+        rust: ergo_difftest::oracle::Verdict::Accept("00".into()),
+        jvm: ergo_difftest::oracle::Verdict::Accept("01".into()),
+    };
+    let mut minimized = original.clone();
+    minimized.input_hex = "dead".into();
+    let record = record_after_minimization(&original, Ok(minimized), None, "repro");
+    assert_eq!(record.input_hex, "dead");
+    assert!(record.minimized);
+    assert_eq!(record.triage, "PENDING");
+    assert!(record.processing_error.is_none());
 }

@@ -594,6 +594,28 @@ fn run_structured(
     ExitCode::SUCCESS
 }
 
+/// One observed differential class, retaining its first concrete occurrence.
+struct CampaignClass {
+    count: u64,
+    first_iter: u64,
+    divergence: ergo_difftest::oracle::Divergence,
+}
+
+fn observe_divergence(
+    classes: &mut std::collections::HashMap<String, CampaignClass>,
+    divergence: ergo_difftest::oracle::Divergence,
+    iter: u64,
+) {
+    classes
+        .entry(divergence_signature(&divergence))
+        .and_modify(|class| class.count += 1)
+        .or_insert(CampaignClass {
+            count: 1,
+            first_iter: iter,
+            divergence,
+        });
+}
+
 /// Differential campaign against the JVM reference oracle. Without `only` it
 /// diffs every oracle surface per input; with `only` it restricts to that one
 /// (already validated against the oracle surface set in `main`). When
@@ -635,9 +657,9 @@ fn run_oracle(
         .filter(|spec| only.is_none_or(|o| spec.name == o))
         .collect();
     let mut rng = Rng::new(seed);
-    // Dedup by root-cause signature so a soak reports unique CLASSES (with a
-    // count + one representative), not thousands of instances of the same bug.
-    let mut classes: std::collections::HashMap<String, (u64, ergo_difftest::oracle::Divergence)> =
+    // Group by observable signature, not a proven common root cause. Retain
+    // the first concrete generating iteration with its representative input.
+    let mut classes: std::collections::HashMap<String, CampaignClass> =
         std::collections::HashMap::new();
     let mut total = 0u64;
     let mut checked = 0u64;
@@ -660,10 +682,7 @@ fn run_oracle(
                 Ok(None) => {}
                 Ok(Some(d)) => {
                     total += 1;
-                    classes
-                        .entry(divergence_signature(&d))
-                        .and_modify(|e| e.0 += 1)
-                        .or_insert((1, d));
+                    observe_divergence(&mut classes, d, iter);
                 }
                 Err(e) => {
                     // A dead pipe is a HARNESS failure, not a clean campaign.
@@ -705,8 +724,15 @@ fn run_oracle(
         return ExitCode::SUCCESS;
     }
     let mut sorted: Vec<_> = classes.into_values().collect();
-    sorted.sort_by_key(|(count, _)| std::cmp::Reverse(*count));
-    for (count, d) in &sorted {
+    sorted.sort_by_key(|class| {
+        (
+            std::cmp::Reverse(class.count),
+            divergence_signature(&class.divergence),
+        )
+    });
+    for class in &sorted {
+        let count = class.count;
+        let d = &class.divergence;
         println!(
             "  [{:?}] {} (x{count})\n    rust={:?}\n    jvm ={:?}\n    repro: difftest --repro {}",
             d.kind, d.surface, d.rust, d.jvm, d.input_hex
@@ -721,12 +747,15 @@ fn run_oracle(
             &mut oracle,
             regressions_dir,
             seed,
-            "oracle-mutation",
+            if structured {
+                "structured-gen"
+            } else {
+                "oracle-mutation"
+            },
         )
     {
-        // A pipe death during minimize/classify means records were NOT filed,
-        // so the pending count downstream is an undercount. Fail as a harness
-        // error rather than let a partial record set read as the whole truth.
+        // Optional processing failures remain harness errors even when original
+        // pending records were preserved. Incomplete filing also fails loudly.
         harness_error = true;
     }
 
@@ -737,107 +766,81 @@ fn run_oracle(
     }
 }
 
-/// Minimize every unique divergence from a campaign, classify it, and file it.
+/// Minimize and file every observed class, retaining the original on failure.
 ///
-/// Returns `false` when the ORACLE PIPE failed part-way — a minimize or
-/// classify step that could not reach the JVM leaves the record set
-/// incomplete, which the caller must surface as a harness error rather than as
-/// a smaller-than-real finding count. A minimizer that merely cannot shrink an
-/// input (a local, non-pipe failure) is not a harness error.
+/// Any processing or filing error makes the run incomplete. Successful fallback
+/// filing preserves evidence; it does not convert failed minimization to a pass.
 fn minimize_and_file_campaign(
-    sorted: &[(u64, ergo_difftest::oracle::Divergence)],
+    sorted: &[CampaignClass],
     surfaces: &[ergo_difftest::oracle::SurfaceSpec],
     oracle: &mut ergo_difftest::oracle::Oracle,
     regressions_dir: &std::path::Path,
     campaign_seed: u64,
     provenance: &str,
 ) -> bool {
+    use ergo_difftest::from_hex;
     use ergo_difftest::minimize::minimize_divergence;
-    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
-    use ergo_difftest::{from_hex, to_hex};
+    use ergo_difftest::regressions::{auto_file, record_after_minimization, SeedInfo};
 
     let mut minimized_count = 0u64;
-    let mut pending_count = 0u64;
-    let mut artifact_count = 0u64;
-    let mut pipe_ok = true;
-
-    for (_, div) in sorted {
-        // Find the matching SurfaceSpec for this divergence's surface.
-        let Some(spec) = surfaces.iter().find(|s| s.name == div.surface) else {
-            eprintln!(
-                "minimize: no SurfaceSpec for surface {:?} — skip",
-                div.surface
-            );
-            continue;
-        };
-
-        let Some(orig_bytes) = from_hex(&div.input_hex) else {
-            eprintln!("minimize: bad input_hex for {} — skip", div.surface);
-            continue;
-        };
-
-        // Minimize.
-        eprint!("minimize: {} ({} bytes)…", div.surface, orig_bytes.len());
-        let (min_bytes, min_div) = match minimize_divergence(&orig_bytes, spec, oracle) {
-            Ok(pair) => pair,
-            Err(e) => {
-                let msg = e.to_string();
-                // `minimize_divergence` surfaces both local shrink failures and
-                // io errors from the pipe through one Err channel; only the
-                // latter invalidates the record set.
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.kind() == std::io::ErrorKind::BrokenPipe
-                {
-                    eprintln!("{ORACLE_ERROR_MARKER} minimize pipe failure: {msg}");
-                    pipe_ok = false;
-                } else {
-                    eprintln!(" FAILED: {msg}");
-                }
-                continue;
-            }
-        };
-        eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
-        minimized_count += 1;
-
-        // Classify + file.
-        let seed_info = Some(SeedInfo {
-            seed: campaign_seed,
-            iter: 0, // campaign iter not tracked per-class; use 0
-        });
-        match classify_and_file(
-            &min_div,
-            spec,
-            oracle,
-            seed_info,
+    let mut filed_count = 0u64;
+    let mut complete = true;
+    for class in sorted {
+        let div = &class.divergence;
+        let result = (|| {
+            let spec = surfaces
+                .iter()
+                .find(|spec| spec.name == div.surface)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "missing SurfaceSpec for detected divergence",
+                    )
+                })?;
+            let bytes = from_hex(&div.input_hex).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid input_hex in detected divergence",
+                )
+            })?;
+            eprintln!("minimize: {} ({} bytes)", div.surface, bytes.len());
+            minimize_divergence(&bytes, spec, oracle).map(|(_, divergence)| divergence)
+        })();
+        let record = record_after_minimization(
+            div,
+            result,
+            Some(SeedInfo {
+                seed: campaign_seed,
+                iter: class.first_iter,
+            }),
             provenance,
-            regressions_dir,
-        ) {
-            Ok((path, triage)) => {
-                if triage.is_pending() {
-                    pending_count += 1;
-                    println!("  [PENDING]       filed → {}", path.display());
-                } else {
-                    artifact_count += 1;
-                    println!("  [KnownArtifact] filed → {}", path.display());
-                }
+        );
+        if let Some(error) = &record.processing_error {
+            eprintln!("{ORACLE_ERROR_MARKER} minimize failed for {}: {error}; retaining original pending input", div.surface);
+            complete = false;
+        } else {
+            minimized_count += 1;
+        }
+        match auto_file(&record, regressions_dir) {
+            Ok(path) => {
+                filed_count += 1;
+                println!("  [PENDING] filed → {}", path.display());
             }
-            Err(e) => {
+            Err(error) => {
                 eprintln!(
-                    "{ORACLE_ERROR_MARKER} classify/file error for {}: {e}",
+                    "{ORACLE_ERROR_MARKER} file error for {}: {error}",
                     div.surface
                 );
-                pipe_ok = false;
+                complete = false;
             }
         }
     }
-
     println!(
-        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} \
-         pending_queued={pending_count} known_artifacts={artifact_count}",
-        sorted.iter().map(|(c, _)| c).sum::<u64>(),
+        "\nminimize summary: checks={} unique_divergences={} minimized={minimized_count} pending_queued={filed_count} known_artifacts=0",
+        sorted.iter().map(|class| class.count).sum::<u64>(),
         sorted.len(),
     );
-    pipe_ok
+    complete && usize::try_from(filed_count).ok() == Some(sorted.len())
 }
 
 /// Replay a SINGLE input against the JVM oracle (the `--oracle --repro` path), so
@@ -900,9 +903,8 @@ fn run_oracle_repro_minimize(
     regressions_dir: &std::path::Path,
 ) -> ExitCode {
     use ergo_difftest::minimize::minimize_divergence;
-    use ergo_difftest::oracle::{oracle_surfaces, Oracle};
-    use ergo_difftest::regressions::{classify_and_file, SeedInfo};
-    use ergo_difftest::to_hex;
+    use ergo_difftest::oracle::{diff, oracle_surfaces, Oracle};
+    use ergo_difftest::regressions::{auto_file, record_after_minimization};
 
     let script = script.unwrap_or_else(|| "scripts/jvm_serde_oracle/ErgoSerdeOracle.scala".into());
     eprintln!(
@@ -921,36 +923,37 @@ fn run_oracle_repro_minimize(
         return ExitCode::from(2);
     };
 
-    eprint!("minimize: {} ({} bytes)…", surface, bytes.len());
-    let (min_bytes, min_div) = match minimize_divergence(bytes, &spec, &mut oracle) {
-        Ok(pair) => pair,
-        Err(e) => {
-            eprintln!(" FAILED: {e}");
-            return ExitCode::FAILURE;
+    let original = match diff(&spec, bytes, &mut oracle) {
+        Ok(Some(divergence)) => divergence,
+        Ok(None) => {
+            println!("node and JVM reference agree on this input; nothing to minimize");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} initial repro check failed: {error}");
+            return exit_harness_error();
         }
     };
-    eprintln!(" → {} bytes ({})", min_bytes.len(), to_hex(&min_bytes));
-
-    match classify_and_file(
-        &min_div,
-        &spec,
-        &mut oracle,
-        None::<SeedInfo>,
-        "repro",
-        regressions_dir,
-    ) {
-        Ok((path, triage)) => {
-            println!("triage={} filed → {}", min_div.input_hex, path.display());
-            if triage.is_pending() {
-                println!("  → PENDING (genuine candidate; check QUEUE.md)");
+    let result = minimize_divergence(bytes, &spec, &mut oracle).map(|(_, divergence)| divergence);
+    let record = record_after_minimization(&original, result, None, "repro");
+    let failed = record.processing_error.is_some();
+    if let Some(error) = &record.processing_error {
+        eprintln!(
+            "{ORACLE_ERROR_MARKER} minimize failed: {error}; retaining original pending input"
+        );
+    }
+    match auto_file(&record, regressions_dir) {
+        Ok(path) => {
+            println!("  [PENDING] filed → {}", path.display());
+            if failed {
+                exit_harness_error()
             } else {
-                println!("  → KnownArtifact (benign; not queued)");
+                ExitCode::FAILURE
             }
-            ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("classify/file error: {e}");
-            ExitCode::FAILURE
+        Err(error) => {
+            eprintln!("{ORACLE_ERROR_MARKER} file error: {error}");
+            exit_harness_error()
         }
     }
 }
@@ -1164,6 +1167,28 @@ mod tests {
         assert_eq!(structured_oracle_surface("header"), Some("header"));
         assert_eq!(structured_oracle_surface("verify"), None);
         assert_eq!(structured_oracle_surface("verify_avl"), None);
+    }
+
+    #[test]
+    fn grouped_class_preserves_its_first_nonzero_generating_iteration() {
+        use ergo_difftest::oracle::{Divergence, DivergenceKind, Verdict};
+        let first = Divergence {
+            surface: "ergo_tree",
+            kind: DivergenceKind::Canonical,
+            input_hex: "deadbeef".into(),
+            rust: Verdict::Accept("00".into()),
+            jvm: Verdict::Accept("01".into()),
+        };
+        let mut later = first.clone();
+        later.input_hex = "aabb".into();
+        let mut classes = std::collections::HashMap::new();
+        observe_divergence(&mut classes, first.clone(), 42);
+        observe_divergence(&mut classes, later, 99);
+        let class = classes.values().next().unwrap();
+        assert_eq!(classes.len(), 1);
+        assert_eq!(class.count, 2);
+        assert_eq!(class.first_iter, 42);
+        assert_eq!(class.divergence, first);
     }
 
     // ----- round-trips -----
