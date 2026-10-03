@@ -27,13 +27,25 @@ struct Case {
 
 #[test]
 fn collection_types_scala_contracts_preserve_propositions_and_costs() {
-    let fixture: Fixture = serde_json::from_str(include_str!(
-        "../../../test-vectors/ergo-sigma/collection-types/cases.json"
-    ))
-    .unwrap();
+    check_fixture(
+        include_str!("../../../test-vectors/ergo-sigma/collection-types/cases.json"),
+        7,
+    );
+}
+
+#[test]
+fn flatmap_mixed_carriers_preserve_elements_and_scala_costs() {
+    check_fixture(
+        include_str!("../../../test-vectors/ergo-sigma/mixed-collection-types/cases.json"),
+        6,
+    );
+}
+
+fn check_fixture(json: &str, denominator: usize) {
+    let fixture: Fixture = serde_json::from_str(json).unwrap();
     assert_eq!(
         fixture.cases.len(),
-        7,
+        denominator,
         "complete independent oracle denominator"
     );
     let mut failures = Vec::new();
