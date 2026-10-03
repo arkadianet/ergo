@@ -8,6 +8,7 @@
 
 #![cfg(any(test, feature = "test-helpers"))]
 
+use redb::ReadableDatabase;
 use redb::ReadableTable;
 
 use super::{

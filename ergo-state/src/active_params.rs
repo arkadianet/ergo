@@ -260,6 +260,7 @@ mod tests {
     use super::*;
     use ergo_validation::scala_launch;
     use redb::Database;
+    use redb::ReadableDatabase;
     use tempfile::tempdir;
 
     fn open_db() -> (tempfile::TempDir, Database) {

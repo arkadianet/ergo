@@ -2,6 +2,7 @@
 //! writer-task implementations.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
 use ergo_api::wallet::sending::{BoxesCollectRequest, BoxesCollectResponse, PaymentRequestDto};
 

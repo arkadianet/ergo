@@ -20,6 +20,7 @@ pub use undo::{UndoEntry, ROLLBACK_WINDOW};
 
 use ergo_indexer_types::{IndexedErgoBox, IndexedErgoTransaction};
 use ergo_primitives::digest::Digest32;
+use redb::ReadableDatabase;
 
 use crate::address::IndexedAddress;
 use crate::segment::Segment;

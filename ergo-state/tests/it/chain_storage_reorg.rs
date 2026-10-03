@@ -19,6 +19,7 @@ use ergo_ser::transaction::{read_transaction, Transaction};
 use ergo_state::chain::{ChainStateMeta, HeaderMeta};
 use ergo_state::store::StateStore;
 use ergo_state::wallet::{RescanGuard, WalletApplyHook, WalletReader};
+use redb::ReadableDatabase;
 use redb::WriteTransaction;
 
 /// Re-install the `hci_version=1` sentinel on the underlying redb after a

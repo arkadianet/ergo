@@ -119,7 +119,7 @@ pub fn apply_block_with_scratch(
     scratch: &mut BlockApplyScratch,
 ) -> Result<IndexerMeta, IndexerError> {
     let mut write_txn = store.begin_write()?;
-    write_txn.set_durability(redb::Durability::Eventual);
+    write_txn.set_durability(redb::Durability::Immediate)?;
     let applied =
         apply_block_in_transaction(&write_txn, store.rollback_window(), meta, block, scratch)?;
     write_txn.commit()?;

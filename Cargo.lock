@@ -758,7 +758,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "rand 0.8.6",
- "redb",
+ "redb 4.3.0",
  "reqwest",
  "serde",
  "serde_json",
@@ -851,7 +851,7 @@ dependencies = [
  "ergo-ser",
  "ergo-state",
  "hex",
- "redb",
+ "redb 4.3.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -944,7 +944,8 @@ dependencies = [
  "parking_lot",
  "rand 0.8.6",
  "rayon",
- "redb",
+ "redb 2.6.3",
+ "redb 4.3.0",
  "reqwest",
  "serde",
  "serde_json",
@@ -967,7 +968,7 @@ dependencies = [
  "ergo-primitives",
  "ergo-ser",
  "hex",
- "redb",
+ "redb 4.3.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1064,7 +1065,8 @@ dependencies = [
  "num-bigint",
  "proptest",
  "rand 0.8.6",
- "redb",
+ "redb 2.6.3",
+ "redb 4.3.0",
  "scoped-tls-hkt",
  "serde",
  "serde_json",
@@ -1089,7 +1091,7 @@ dependencies = [
  "hex",
  "num-bigint",
  "rayon",
- "redb",
+ "redb 4.3.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -2302,6 +2304,15 @@ name = "redb"
 version = "2.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "redb"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb338a6c67830a61bed824b78c2bb034ab1ff401a20616bd7957524f4fdc2f22"
 dependencies = [
  "libc",
  "log",

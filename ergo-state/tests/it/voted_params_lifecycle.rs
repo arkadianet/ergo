@@ -15,6 +15,7 @@
 //! integration tests prove the txn-level atomicity for the rest of
 //! that table set; voted_params inherits it).
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use ergo_primitives::digest::{blake2b256, Digest32, ModifierId};

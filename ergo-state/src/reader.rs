@@ -11,6 +11,7 @@
 //! lookups against historical heights this is irrelevant; for tip-only
 //! reads, prefer the snapshot path.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use redb::Database;

@@ -15,6 +15,7 @@
 //! best-header pointers; this component only persists the rows and the
 //! derived indexes.
 
+use redb::ReadableDatabase;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -208,7 +209,7 @@ impl HeaderSectionTables {
         section_bytes: &[u8],
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
-        write_txn.set_durability(redb::Durability::None);
+        write_txn.set_durability(redb::Durability::None)?;
         {
             let mut table = write_txn.open_table(BLOCK_SECTIONS)?;
             table.insert(modifier_id.as_slice(), section_bytes)?;
@@ -243,7 +244,7 @@ impl HeaderSectionTables {
         section_type: u8,
     ) -> Result<(), StateError> {
         let mut write_txn = crate::begin_write_qr(&self.db)?;
-        write_txn.set_durability(redb::Durability::None);
+        write_txn.set_durability(redb::Durability::None)?;
         insert_block_section_in_txn(&write_txn, modifier_id, section_bytes, section_type)?;
         write_txn.commit()?;
         Ok(())

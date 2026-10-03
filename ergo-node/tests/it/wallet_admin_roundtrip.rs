@@ -1,6 +1,7 @@
 //! Integration test: NodeWalletAdmin init→status round-trip via the
 //! channel-backed writer task.
 
+use redb::ReadableDatabase;
 use std::sync::Arc;
 
 use async_trait::async_trait;

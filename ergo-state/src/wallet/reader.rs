@@ -488,6 +488,7 @@ mod tests {
     use crate::wallet::tables::tracked_pubkey_key;
     use crate::wallet::types::TrackedPubkeyMeta;
     use redb::Database;
+    use redb::ReadableDatabase;
 
     // ----- helpers -----
 

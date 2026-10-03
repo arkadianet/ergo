@@ -349,9 +349,11 @@ impl<C: IndexerChainSource> IndexerTask<C> {
             Ok(write) => write,
             Err(error) => return IndexerPoll::Halted(error),
         };
-        // Same quick-repair transaction and Eventual durability as single-block
+        // Same quick-repair transaction and Immediate durability as single-block
         // apply. A crash exposes the old checkpoint or the whole committed batch.
-        write.set_durability(redb::Durability::Eventual);
+        if let Err(error) = write.set_durability(redb::Durability::Immediate) {
+            return IndexerPoll::Halted(error.into());
+        }
         let start = Instant::now();
         let mut next = meta;
         let mut bytes = 0_u64;

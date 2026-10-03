@@ -9,6 +9,7 @@ use ergo_state::wallet::reader::WalletReader;
 use ergo_wallet::state::WalletState;
 use ergo_wallet::storage::SecretStorage;
 use redb::Database;
+use redb::ReadableDatabase;
 
 /// A test wallet that lives in a temporary directory. Owns:
 /// - a redb file at `<dir>/state.redb` for wallet tables

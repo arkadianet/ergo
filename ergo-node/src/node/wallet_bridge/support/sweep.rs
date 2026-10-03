@@ -2,6 +2,7 @@
 //! pre-validation, and the writer-task implementation.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
 use super::sign_submit::{map_submit_error, serialize_signed_tx, sign_unsigned_tx};
 use super::tx_build::{build_unsigned_tx, MIN_BOX_VALUE, MIN_FEE};

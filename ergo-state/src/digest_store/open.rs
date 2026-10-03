@@ -4,6 +4,7 @@
 //!
 //! Sibling of `mod.rs`; pure impl relocation.
 
+use redb::ReadableDatabase;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;

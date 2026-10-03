@@ -14,6 +14,7 @@
 //! opaquely as JSON ([`ScanRequestDto`] / [`ScanDto`]); the DTO <-> domain
 //! conversion (which also validates the `trackingRule` predicate) happens here.
 
+use redb::ReadableDatabase;
 use redb::ReadableTable;
 use tokio::sync::oneshot;
 

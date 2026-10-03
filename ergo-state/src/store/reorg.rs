@@ -10,6 +10,7 @@
 //! `self.rebuild_from_committed()` to restore in-memory state
 //! from disk.
 
+use redb::ReadableDatabase;
 use redb::ReadableTable;
 use tracing::{info, warn};
 

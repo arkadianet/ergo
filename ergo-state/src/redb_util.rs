@@ -23,18 +23,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use redb::{Database, DatabaseError, TransactionError, WriteTransaction};
+use redb::{Database, DatabaseError, WriteTransaction};
 use tracing::info;
 
 /// Open a redb write transaction with quick-repair enabled.
 ///
 /// See module docs for the non-monotonicity contract.
-#[allow(clippy::result_large_err)] // redb's TransactionError shape is fixed upstream
-pub fn begin_write_qr(db: &Database) -> Result<WriteTransaction, TransactionError> {
+#[allow(clippy::result_large_err)] // redb's error shape is fixed upstream
+pub fn begin_write_qr(db: &Database) -> Result<WriteTransaction, redb::Error> {
     let mut txn = db.begin_write()?;
     txn.set_quick_repair(true);
     #[cfg(any(test, feature = "test-utils"))]
-    txn.set_durability(test_durability(db, redb::Durability::Immediate));
+    txn.set_durability(test_durability(db, redb::Durability::Immediate))?;
     Ok(txn)
 }
 
@@ -156,10 +156,11 @@ pub fn open_with_repair_logging_and_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::ReadableDatabase;
     use redb::TableDefinition;
     use tempfile::tempdir;
 
-    // Observability note: redb 2.6.3 does not expose a getter for the
+    // Observability note: redb 4.3 does not expose a getter for the
     // quick-repair flag on `WriteTransaction`, and `Database::drop`
     // itself ensures allocator state on graceful close — so this test
     // can only verify that the helper returns a usable txn that
@@ -217,15 +218,15 @@ mod tests {
             redb::Durability::Immediate
         ));
         disable_test_durability(&db);
-        for requested in [redb::Durability::Immediate, redb::Durability::Eventual] {
+        for requested in [redb::Durability::Immediate, redb::Durability::None] {
             assert!(matches!(
                 test_durability(&db, requested),
                 redb::Durability::None
             ));
         }
         assert!(matches!(
-            test_durability(&control, redb::Durability::Eventual),
-            redb::Durability::Eventual
+            test_durability(&control, redb::Durability::Immediate),
+            redb::Durability::Immediate
         ));
 
         let table: TableDefinition<&str, &[u8]> = TableDefinition::new("t");
@@ -262,7 +263,7 @@ mod tests {
 
         // Graceful close above; reopen and verify. Repair callback
         // must not fire — graceful close always leaves a valid
-        // allocator state table in redb 2.6.3, helper or not.
+        // allocator state table in redb 4.3, helper or not.
         let callback_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cb = callback_fired.clone();
         let db = redb::Builder::new()

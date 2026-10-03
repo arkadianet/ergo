@@ -5,6 +5,7 @@
 //! - `MemoryArena`: HashMap-backed, used by tests and genesis init.
 //! - `CachedDiskArena`: Three-tier (dirty + LRU + redb), used in production.
 
+use redb::ReadableDatabase;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};

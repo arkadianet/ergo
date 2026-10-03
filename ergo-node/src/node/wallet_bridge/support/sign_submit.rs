@@ -2,6 +2,7 @@
 //! building blocks the send/sweep/generate paths all route through.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
 use super::generate_sign::transaction_sign_impl_with_snapshot;
 use super::tx_build::build_transaction_impl_with_snapshot;

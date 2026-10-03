@@ -194,6 +194,16 @@ and `cargo-machete`. See
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
 [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
 
+## Storage compatibility
+
+The redb 2.6 → 4 file-format change is a storage compatibility boundary, not a
+consensus or wire-format change. Use the [offline copy-only migration](operating.md#migrating-legacy-redb-databases)
+for v2 databases before startup. Table schemas and typed row contents are
+verified under both real dependency versions, including the indexer's fixed
+width tuple keys and embedded wallet tables; unknown schemas fail closed.
+Keep the old data directory and binary for rollback because a database later
+written by redb 4 may contain type metadata unreadable by redb 2.6.
+
 ## Known limitations
 
 Areas where parity is incomplete, partial, or deliberately out of scope.

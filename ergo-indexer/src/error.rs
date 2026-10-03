@@ -340,6 +340,12 @@ impl From<redb::CommitError> for IndexerError {
     }
 }
 
+impl From<redb::SetDurabilityError> for IndexerError {
+    fn from(e: redb::SetDurabilityError) -> Self {
+        Self::Db(Box::new(e.into()))
+    }
+}
+
 impl IndexerError {
     /// Map an in-loop fatal error to the halt-reason classification
     /// used by the API gate.

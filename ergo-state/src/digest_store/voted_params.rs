@@ -5,6 +5,7 @@
 //! Sibling of `mod.rs`; pure impl relocation.
 
 use ergo_validation::ActiveProtocolParameters;
+use redb::ReadableDatabase;
 use redb::{Database, ReadableTable};
 
 use crate::active_params;

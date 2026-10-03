@@ -2,6 +2,7 @@
 //! `generateCommitments`/`extractHints`, and their writer-task implementations.
 
 use parking_lot::RwLock;
+use redb::ReadableDatabase;
 
 use super::hints_codec::tx_hints_bag_to_dto;
 use super::sign_submit::decode_external_secret;

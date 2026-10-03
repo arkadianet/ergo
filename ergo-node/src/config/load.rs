@@ -23,6 +23,9 @@ impl NodeConfig {
     /// Load config from TOML file + CLI overrides.
     /// CLI args take priority over TOML values.
     pub fn load(cli: Cli) -> Result<Self, String> {
+        if cli.command.is_some() {
+            return Err("offline migration commands cannot load or start a node".into());
+        }
         // 1. Determine data dir (CLI > default)
         let data_dir = cli
             .data_dir

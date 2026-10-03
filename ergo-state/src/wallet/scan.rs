@@ -12,6 +12,7 @@
 
 #![allow(clippy::result_large_err)] // redb::Error shape is fixed upstream
 
+use redb::ReadableDatabase;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -819,7 +820,7 @@ mod tests {
         fn len(&self) -> std::io::Result<u64> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> std::io::Result<()> {
             use std::sync::atomic::Ordering;
             if let Some(reads) = self.reads.lock().unwrap().as_mut() {
                 reads.push(offset);
@@ -833,16 +834,61 @@ mod tests {
                     "injected transaction-row read failure",
                 ));
             }
-            self.inner.read(offset, len)
+            self.inner.read(offset, out)
         }
         fn set_len(&self, len: u64) -> std::io::Result<()> {
             self.inner.set_len(len)
         }
-        fn sync_data(&self, eventual: bool) -> std::io::Result<()> {
-            self.inner.sync_data(eventual)
+        fn sync_data(&self) -> std::io::Result<()> {
+            self.inner.sync_data()
         }
         fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
             self.inner.write(offset, data)
+        }
+        fn close(&self) -> std::io::Result<()> {
+            self.inner.close()
+        }
+        fn try_lock_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<bool, redb::BackendError> {
+            self.inner.try_lock_range(start, end)
+        }
+        fn try_lock_shared_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<bool, redb::BackendError> {
+            self.inner.try_lock_shared_range(start, end)
+        }
+        fn lock_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<(), redb::BackendError> {
+            self.inner.lock_range(start, end)
+        }
+        fn lock_shared_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<(), redb::BackendError> {
+            self.inner.lock_shared_range(start, end)
+        }
+        fn unlock_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<(), redb::BackendError> {
+            self.inner.unlock_range(start, end)
+        }
+        fn query_lock_range(
+            &self,
+            start: std::ops::Bound<u64>,
+            end: std::ops::Bound<u64>,
+        ) -> Result<bool, redb::BackendError> {
+            self.inner.query_lock_range(start, end)
         }
     }
 

@@ -49,6 +49,7 @@ fn default_toml() -> tempfile::NamedTempFile {
 
 fn minimal_cli<P: AsRef<std::path::Path>>(tmp_toml: Option<P>) -> Cli {
     Cli {
+        command: None,
         config: tmp_toml.map(|p| p.as_ref().to_path_buf()),
         network: Some("mainnet".into()),
         peers: vec!["127.0.0.1:9030".parse().unwrap()],
