@@ -96,12 +96,23 @@ pub enum DifficultyError {
     /// epoch boundary (`epoch_headers.len() >= 2`).
     #[error("missing epoch headers for difficulty recalculation")]
     MissingEpochHeaders,
+    /// Caller-supplied height arithmetic is outside the u32 domain.
+    #[error("difficulty height overflow: {height} + {increment}")]
+    HeightOverflow { height: u32, increment: u32 },
+    /// An arithmetic configuration prerequisite is invalid.
+    #[error("invalid difficulty configuration: {field} must be nonzero")]
+    InvalidConfiguration { field: &'static str },
+    /// Retarget headers are not in ascending height/time order.
+    #[error("invalid difficulty epoch window at pair {index}: {reason}")]
+    InvalidEpochWindow { index: usize, reason: &'static str },
 }
 
 /// Verify that a header's nBits matches the expected difficulty derived
 /// from ancestor epoch headers under the supplied [`DifficultyParams`]. Also
 /// checks `height == parent.height + 1` and that the supplied window is
-/// large enough for the active recalculation branch.
+/// large enough for the active recalculation branch, with ascending heights
+/// and timestamps. The caller still owns the ancestry/epoch-height relation;
+/// these arithmetic guards do not authenticate a chain.
 ///
 /// `epoch_headers`: the headers at epoch boundary heights needed for
 /// recalculation. The last element must be the parent header.
