@@ -322,11 +322,8 @@ impl NodeConfig {
         // (`state_type = digest` + `verify_transactions = true`) does
         // not retain a UTXO box store, so subsystems whose
         // contracts depend on UTXO box bytes are incompatible. Each
-        // gate fires here BEFORE the Mode 5 activation gate so the
-        // operator sees the precise conflict ("indexer + digest")
-        // rather than the generic "Mode 5 deferred" reject — and so
-        // the gates remain operative when the activation gate
-        // eventually lifts.
+        // gate fires before the canonical-mode check so the operator
+        // sees the precise subsystem conflict ("indexer + digest").
         //
         // Mining: Scala `failWithError(stateType == Digest &&
         // mining)`. Candidate generation needs UTXO access to pull
@@ -372,9 +369,8 @@ impl NodeConfig {
         // pass through the activation gates below. Mode 6 ships: the
         // sync coordinator skips block-section requests when
         // `verify_transactions = false`, the StateStore accepts the
-        // `"digest"` sentinel, and the mempool disables itself. Other
-        // Digest combos (Mode 5) and other pruning combos (Mode 3) stay
-        // gated until their own machinery ships.
+        // `"digest"` sentinel, and the mempool disables itself. The
+        // canonical Mode 5 and bounded Mode 3 checks are separate below.
         let is_canonical_mode_6 = super::is_canonical_mode_6_combo(
             state_type,
             verify_transactions,
