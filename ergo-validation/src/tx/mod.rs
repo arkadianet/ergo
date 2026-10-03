@@ -153,6 +153,8 @@ pub fn validate_transaction(
     // Stage 4: resolve inputs
     let resolved_inputs = resolve_inputs(&tx, utxo)?;
     let resolved_data_inputs = resolve_data_inputs(&tx, utxo)?;
+    verify_resolved_inputs_match(&tx, &resolved_inputs)?;
+    verify_resolved_data_inputs_match(&tx, &resolved_data_inputs)?;
 
     // Stage 4.5: per-output height constraints (Scala rules 112 + 124).
     // Runs after structural so we know we have outputs to walk, and
