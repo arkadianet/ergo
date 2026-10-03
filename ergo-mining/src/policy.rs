@@ -136,7 +136,7 @@ impl BlockPolicy {
         private_waiting: bool,
     ) -> u64 {
         let usable = total.saturating_sub(overhead);
-        let rent = total.saturating_mul(u64::from(maximum)) / 10_000;
+        let rent = (total.saturating_mul(u64::from(maximum)) / 10_000).saturating_sub(overhead);
         let private = if private_waiting {
             total.saturating_mul(u64::from(private_reserve)) / 10_000
         } else {
@@ -170,7 +170,7 @@ mod tests {
         );
         assert_eq!(
             BlockPolicy::rent_ceiling(10_000, 500, 9_375, 1_000, false),
-            9_375
+            8_875
         );
         assert_eq!(BlockPolicy::rent_ceiling(10, 100, 9_375, 1_000, true), 0);
     }
