@@ -492,7 +492,11 @@ pub(super) fn signal_mining_engine(
         expected_parent: now.best_full_id,
         expected_height: now.best_full_height,
         mempool: Arc::new(mempool),
-        private_transactions: Arc::new(handle.private_queue().selection_entries()),
+        private_transactions: Arc::new(
+            handle
+                .private_queue()
+                .selection_entries_at(crate::snapshot::unix_now_ms(), now.best_full_height),
+        ),
         operator_generation: handle.operator_generation(),
         miner_pk,
         reason,
@@ -556,7 +560,7 @@ pub(super) fn handle_mining_request(
         }
     };
 
-    if let Err(error) = super::private_mining::expire(handle) {
+    if let Err(error) = super::private_mining::expire(state, handle) {
         tracing::error!(%error, "private mining expiry failed; work remains withdrawn");
     }
     let req = match req {
@@ -771,15 +775,20 @@ pub(super) fn handle_mining_request(
                 }
                 ergo_mining::solution::SolutionOutcome::InvalidPow => {
                     crate::metrics_counters::incr_invalid_pow();
+                    handle.record_outcome(None, None, "invalid_pow", None, now_unix_ms());
                     let _ = reply.send(Err(ergo_api::MiningApiError::InvalidPow));
                     return false;
                 }
                 ergo_mining::solution::SolutionOutcome::StaleParent { .. } => {
                     crate::metrics_counters::incr_stale_parent();
+                    handle.record_outcome(None, None, "stale", None, now_unix_ms());
                     let _ = reply.send(Err(ergo_api::MiningApiError::StaleParent));
                     return false;
                 }
             };
+            let solved_msg = ergo_ser::header::serialize_header_without_pow(&block.header)
+                .ok()
+                .map(|bytes| *ergo_primitives::digest::blake2b256(&bytes).as_bytes());
             let parent_id = block.parent_id;
             // 2. Recheck parent_id under the action-loop lock (the
             //    consensus-bearing TOCTOU close) and serialize the header
@@ -1079,6 +1088,7 @@ pub(super) fn handle_mining_request(
                 state, header_id, parent_id, submitted, follow_ups,
             ) {
                 info!(id = %hex::encode(header_id), apply_ms, "mined block applied");
+                handle.record_outcome(solved_msg, Some(header_id), "accepted", None, now_unix_ms());
                 let _ = reply.send(Ok(()));
                 false
             } else {
@@ -1137,6 +1147,13 @@ pub(super) fn handle_mining_request(
                         "mining: withdrew the failed block's parent templates; rebuilding",
                     );
                 }
+                handle.record_outcome(
+                    solved_msg,
+                    Some(header_id),
+                    "rejected",
+                    Some(failure.clone()),
+                    now_unix_ms(),
+                );
                 let _ = reply.send(Err(ergo_api::MiningApiError::Internal(format!(
                     "block apply failed ({failure})"
                 ))));

@@ -21,7 +21,9 @@ pub(crate) async fn list(State(s): State<OperatorState>) -> Response {
             Json(json!({"items":items})),
         )
             .into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => {
+            super::mining::map_mining_error(e, crate::v1::error::Reason::CandidateUnavailable)
+        }
     }
 }
 
@@ -39,10 +41,12 @@ pub(crate) async fn submit(
     let bytes = match hex::decode(&req.signed_transaction_hex) {
         Ok(bytes) => bytes,
         Err(_) => {
-            return crate::mining::MiningApiError::BadRequest(
-                "signed_transaction_hex must be hexadecimal".into(),
+            return super::mining::map_mining_error(
+                crate::mining::MiningApiError::BadRequest(
+                    "signed_transaction_hex must be hexadecimal".into(),
+                ),
+                crate::v1::error::Reason::CandidateUnavailable,
             )
-            .into_response()
         }
     };
     match m.submit_private_transaction(bytes, req.options).await {
@@ -51,7 +55,9 @@ pub(crate) async fn submit(
             Json(entry),
         )
             .into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => {
+            super::mining::map_mining_error(e, crate::v1::error::Reason::CandidateUnavailable)
+        }
     }
 }
 
@@ -64,10 +70,12 @@ pub(crate) async fn cancel(State(s): State<OperatorState>, Path(tx_id): Path<Str
         Err(e) => return *e,
     };
     if !hex::decode(&tx_id).is_ok_and(|id| id.len() == 32) {
-        return crate::mining::MiningApiError::BadRequest(
-            "tx_id must be 32 bytes of hexadecimal".into(),
-        )
-        .into_response();
+        return super::mining::map_mining_error(
+            crate::mining::MiningApiError::BadRequest(
+                "tx_id must be 32 bytes of hexadecimal".into(),
+            ),
+            crate::v1::error::Reason::CandidateUnavailable,
+        );
     }
     match m.cancel_private_transaction(tx_id).await {
         Ok(entry) => (
@@ -75,6 +83,8 @@ pub(crate) async fn cancel(State(s): State<OperatorState>, Path(tx_id): Path<Str
             Json(entry),
         )
             .into_response(),
-        Err(e) => e.into_response(),
+        Err(e) => {
+            super::mining::map_mining_error(e, crate::v1::error::Reason::CandidateUnavailable)
+        }
     }
 }

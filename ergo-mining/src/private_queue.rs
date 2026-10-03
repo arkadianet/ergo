@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ergo_mempool::pool::Entry;
@@ -26,6 +27,7 @@ const MAX_PRIVATE_BYTES: usize = 16 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct PrivateTransactionOptions {
     pub expires_at_ms: Option<u64>,
+    pub expires_at_height: Option<u32>,
     pub priority: i32,
     pub label: Option<String>,
 }
@@ -56,6 +58,7 @@ pub struct PrivateTransactionEntry {
     pub reason: Option<String>,
     pub created_at_ms: u64,
     pub expires_at_ms: Option<u64>,
+    pub expires_at_height: Option<u32>,
     pub priority: i32,
     pub label: Option<String>,
     pub input_ids: Vec<String>,
@@ -158,11 +161,21 @@ impl PrivateTransactionQueue {
 
     /// Rebuilt on load, and always revalidated during candidate assembly.
     pub fn selection_entries(&self) -> Vec<Entry> {
+        self.selection_entries_at(0, 0)
+    }
+
+    /// Filter deadlines even if the durable expiry transition fails. This
+    /// keeps failed persistence from reintroducing withdrawn work in a build.
+    pub fn selection_entries_at(&self, now_ms: u64, parent_height: u32) -> Vec<Entry> {
         let store = self.lock();
         let mut records: Vec<_> = store
             .records
             .values()
-            .filter(|r| r.entry.state.is_active())
+            .filter(|r| {
+                r.entry.state.is_active()
+                    && r.entry.expires_at_ms.is_none_or(|d| d > now_ms)
+                    && r.entry.expires_at_height.is_none_or(|d| d > parent_height)
+            })
             .collect();
         records.sort_by(|a, b| {
             b.entry
@@ -190,6 +203,12 @@ impl PrivateTransactionQueue {
             .is_some_and(|deadline| deadline <= now_ms)
         {
             return Err("private transaction deadline has already elapsed".into());
+        }
+        if options
+            .expires_at_height
+            .is_some_and(|height| height <= tip_height)
+        {
+            return Err("private transaction height deadline has already elapsed".into());
         }
         if options.label.as_ref().is_some_and(|s| s.len() > 200) {
             return Err("private transaction label exceeds 200 bytes".into());
@@ -231,6 +250,7 @@ impl PrivateTransactionQueue {
             reason: None,
             created_at_ms: now_ms,
             expires_at_ms: options.expires_at_ms,
+            expires_at_height: options.expires_at_height,
             priority: options.priority,
             label: options.label,
             input_ids,
@@ -275,12 +295,21 @@ impl PrivateTransactionQueue {
     }
 
     /// Deadlines withdraw pending work; they never broadcast the transaction.
-    pub fn expire(&self, now_ms: u64) -> Result<bool, String> {
+    pub fn expire(&self, now_ms: u64, parent_height: u32) -> Result<bool, String> {
         let mut store = self.lock();
         let mut updated = store.clone();
         let mut changed = false;
         for r in updated.records.values_mut() {
-            if r.entry.state.is_active() && r.entry.expires_at_ms.is_some_and(|d| d <= now_ms) {
+            if matches!(
+                r.entry.state,
+                PrivateTransactionState::Queued
+                    | PrivateTransactionState::InCandidate
+                    | PrivateTransactionState::Conflicted
+            ) && (r.entry.expires_at_ms.is_some_and(|d| d <= now_ms)
+                || r.entry
+                    .expires_at_height
+                    .is_some_and(|d| d <= parent_height))
+            {
                 r.entry.state = PrivateTransactionState::Expired;
                 r.entry.reason = Some("local mining deadline elapsed".into());
                 changed = true;
@@ -400,17 +429,26 @@ impl PrivateTransactionQueue {
             .parent()
             .ok_or("private queue path needs a directory")?;
         std::fs::create_dir_all(parent).map_err(|e| format!("private queue directory: {e}"))?;
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
         let bytes = serde_json::to_vec(store).map_err(|_| "private queue serialization failed")?;
+        // Create exclusively so stale files or symlinks cannot redirect a
+        // write containing private transaction bytes.
+        let mut file = options
+            .open(&tmp)
+            .map_err(|e| format!("private queue temporary file: {e}"))?;
         let result = (|| {
-            let mut file = options.open(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&tmp, path)?;
@@ -444,6 +482,14 @@ fn materialize(record: &Record) -> Result<Entry, String> {
     let id = transaction_id(&tx).map_err(|_| "private queue transaction identifier failed")?;
     if hex::encode(id.as_bytes()) != record.entry.tx_id {
         return Err("private queue transaction identifier mismatch".into());
+    }
+    let input_ids: Vec<_> = tx
+        .inputs
+        .iter()
+        .map(|i| hex::encode(i.box_id.as_bytes()))
+        .collect();
+    if input_ids != record.entry.input_ids || bytes.len() != record.entry.size_bytes as usize {
+        return Err("private queue transaction metadata mismatch".into());
     }
     let output_boxes: Vec<_> = tx
         .output_candidates
@@ -480,3 +526,6 @@ fn materialize(record: &Record) -> Result<Entry, String> {
     )
     .with_output_boxes(output_boxes))
 }
+
+#[cfg(test)]
+mod tests;

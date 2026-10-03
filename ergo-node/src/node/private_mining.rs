@@ -33,6 +33,7 @@ pub(super) fn api_entry(
         reason: entry.reason,
         created_at_ms: entry.created_at_ms,
         expires_at_ms: entry.expires_at_ms,
+        expires_at_height: entry.expires_at_height,
         priority: entry.priority,
         label: entry.label,
         input_ids: entry.input_ids,
@@ -164,6 +165,7 @@ pub(super) fn admit(
             &entry,
             ergo_mining::private_queue::PrivateTransactionOptions {
                 expires_at_ms: options.expires_at_ms,
+                expires_at_height: options.expires_at_height,
                 priority: options.priority,
                 label: options.label,
             },
@@ -177,20 +179,30 @@ pub(super) fn admit(
 }
 
 /// Called before every solution request as well as on ordinary loop ticks.
-pub(super) fn expire(handle: &MiningHandle) -> Result<bool, String> {
+pub(super) fn expire(state: &NodeState, handle: &MiningHandle) -> Result<bool, String> {
     let now = crate::snapshot::unix_now_ms();
+    let height = state
+        .store
+        .reader_handle()
+        .committed_tip()
+        .map_err(|e| e.to_string())?
+        .map_or(0, |(height, _)| height);
     let queue = handle.private_queue();
-    if !queue
-        .list()
-        .iter()
-        .any(|entry| entry.state.is_active() && entry.expires_at_ms.is_some_and(|d| d <= now))
-    {
+    if !queue.list().iter().any(|entry| {
+        matches!(
+            entry.state,
+            PrivateTransactionState::Queued
+                | PrivateTransactionState::InCandidate
+                | PrivateTransactionState::Conflicted
+        ) && (entry.expires_at_ms.is_some_and(|d| d <= now)
+            || entry.expires_at_height.is_some_and(|d| d <= height))
+    }) {
         return Ok(false);
     }
     // Retire offered templates and in-flight build generations before inputs
     // can be released by a durable expiry commit.
     handle.invalidate_operator_generation();
-    queue.expire(now)
+    queue.expire(now, height)
 }
 
 /// Incrementally inspect applied history, including after an offline interval.

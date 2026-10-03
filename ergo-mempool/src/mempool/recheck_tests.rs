@@ -1446,3 +1446,30 @@ fn demote_all_then_tick_revalidation_restores_pool() {
     assert_eq!(invs, 2, "each re-admitted tx broadcasts an Inv");
     mp.pool().check_invariants();
 }
+
+#[test]
+fn private_ids_never_enter_public_admission_or_relay_on_reorg_replay() {
+    let mut mp = mempool_with(MempoolConfig::default());
+    mp.register_private_transaction(d(1));
+    let v = validator(vec![ok_plan(1, 100)]);
+    let utxo = FakeUtxo::empty();
+    let tip = TestTip::new();
+    for source in [TxSource::Wallet, TxSource::Api, TxSource::DemotedFromBlock] {
+        let (outcome, actions) =
+            mp.process(&tx_bytes(1), source, Instant::now(), &tip.view(&utxo), &v);
+        assert!(matches!(outcome, AdmissionOutcome::Rejected { .. }));
+        assert!(
+            actions.is_empty(),
+            "no inventory or observer action for private bytes"
+        );
+        assert!(!mp.contains(&d(1)));
+        assert!(
+            mp.get_bytes(&d(1)).is_none(),
+            "peer retrieval cannot obtain private bytes"
+        );
+        assert_eq!(mp.staging_len(), 0);
+    }
+    assert!(mp
+        .recheck_and_evict(Instant::now(), &tip.view(&utxo), &v)
+        .is_empty());
+}

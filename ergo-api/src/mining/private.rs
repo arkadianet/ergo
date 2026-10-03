@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 #[serde(deny_unknown_fields)]
 pub struct PrivateTransactionOptions {
     pub expires_at_ms: Option<u64>,
+    pub expires_at_height: Option<u32>,
     #[serde(default)]
     pub priority: i32,
     pub label: Option<String>,
@@ -21,6 +22,7 @@ pub struct PrivateTransactionEntry {
     pub reason: Option<String>,
     pub created_at_ms: u64,
     pub expires_at_ms: Option<u64>,
+    pub expires_at_height: Option<u32>,
     pub priority: i32,
     pub label: Option<String>,
     pub input_ids: Vec<String>,

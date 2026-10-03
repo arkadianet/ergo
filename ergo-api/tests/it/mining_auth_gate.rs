@@ -224,3 +224,21 @@ async fn mining_policy_mutation_requires_operator_key() {
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+#[tokio::test]
+async fn private_queue_routes_require_owner_key_before_parsing_signed_bytes() {
+    let requests = [
+        get("/api/v1/mining/private-transactions"),
+        post_json("/api/v1/mining/private-transactions", r#"{"signed_transaction_hex":"00","options":{}}"#),
+        post("/api/v1/mining/private-transactions/0000000000000000000000000000000000000000000000000000000000000000/cancel"),
+    ];
+    for req in requests {
+        let response = app().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = app()
+        .oneshot(with_key(get("/api/v1/mining/private-transactions")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
