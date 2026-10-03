@@ -75,40 +75,52 @@ as `ERR`, never as `ACCEPT`.
 
 ## 2. Replay driver I/O contract  (Slice 1b)
 
-New binary `ergo-difftest --replay` (or `src/bin/replay.rs`). Purpose: make the
-immutable chain the oracle instead of committed block bytes.
+The standalone `replay` binary compares early-mainnet application with a supplied
+archival node. Its fixed context supports contiguous heights **1..=200** from
+genesis. Later epochs need historical voted parameters, soft-fork state and
+parent extensions; the driver refuses a larger window before network or state I/O.
 
-**Input:**
-```text
---from <height> --to <height>
---node <url>            default http://127.0.0.1:9053
---pins <path>          height→hash pin file (default ergo-difftest/docs/replay-pins.json)
---offline <dir>        replay from a committed hermetic seed dir instead of the node
+```sh
+cargo run --locked -p ergo-difftest --bin replay -- \
+  --from 1 --to 200 --node http://127.0.0.1:9053 \
+  --pins ergo-difftest/replay-pins.json
 ```
 
-**Per-height loop (streamed, one block at a time — never materialize the range):**
-1. `GET /blocks/at/{h}` → header id; **assert** it equals the pinned hash for `h`
-   (reproducibility without committing bytes). Mismatch ⇒ hard error (a reorg or
-   wrong node), never silently continue.
-2. `GET /blocks/{id}` → full block JSON → decode via `ergo-rest-json`.
-3. Apply to Rust in-process: `validate_full_block_parallel` → `apply_block`.
-   Forced full-block validation = `script_validation_checkpoint: None` (no skip).
-4. Diff:
-   - **state root**: Rust `root_digest()` vs the block header's `stateRoot`
-     (which the Scala node already committed) → `RootMismatch`.
-   - **per-tx validity**: each tx's Rust verdict vs the Scala node's (a tx in a
-     committed block is valid-by-definition; a Rust `REJECT` is a reject-valid
-     divergence) → `TxValidityMismatch`.
-5. On any diff: emit a `Divergence` (§4 schema) and continue (collect, don't
-   abort — one bad block shouldn't blind the rest of the range).
+`--from` must be 1; `--to` is required. The node and pins shown are defaults.
+There is no `--offline` option. Committed fixture unit tests exercise genesis
+application separately from live archival replay.
 
-**Output:** a JSONL stream of `Divergence` records + a final summary
-`{from, to, blocks, tx_total, divergences, pins_verified}`. Exit non-zero iff any
-divergence OR any pin mismatch.
+For each height the driver fetches its served header id and full-block JSON,
+decodes wire sections, and binds the requested height, served id, decoded header
+id and any pin's header id/state root. An inconsistent source is a hard integrity
+error. Genesis uses `apply_genesis`; later blocks use
+`validate_full_block_parallel` with full script validation and then `apply_block`.
+A pin contributes to `pins_verified` only after successful application and a
+matching computed state root, including height 1. The already checked genesis
+header seeds the parent window without a second node fetch.
 
-**Pin file** `replay-pins.json`: `{ "network":"mainnet", "node_version":"6.0.2",
-"heights": { "<h>": "<headerIdHex>" } }`. Generated once from `:9053`, committed.
-This is how a retired range stays reproducible with zero committed block bytes.
+Validation or root differences emit block-specific JSONL records with
+`triage: PENDING`. A failed block stops replay because later blocks require the
+state at that height. The final summary contains
+`{from,to,blocks,tx_total,divergences,pins_verified}`; divergence or fatal integrity
+failure returns nonzero.
+
+Pin entries have the actual shape:
+```json
+{"network":"mainnet", "node_version":"6.0.2", "heights": {
+  "1": {"headerId":"<32-byte hex>", "stateRoot":"<33-byte hex>"}
+}}
+```
+The historical reference version records capture attribution, not a current
+runtime guarantee. Later-height entries remain historical metadata even though
+the fixed context cannot replay them. Pins do not guarantee an archive remains
+available or authenticate every served section.
+
+This is a diagnostic comparison: genesis is unchecked, PoW is trusted from the
+supplied node, parent-extension validation is omitted, and downloaded AD proofs
+are not passed to state application. A green early replay is not a complete
+consensus/bootstrap proof. CI explicitly reports an unset `REPLAY_NODE_URL` as
+**not tested**. Source/unit-test validation does not claim live node execution.
 
 ---
 
