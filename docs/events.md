@@ -180,9 +180,11 @@ REST state even if the page contains useful records.
 - `dropped_events`: observations lost by journal admission or failed writes this session.
 - `available`: whether journal persistence is currently operating.
 
-Records above the confirmed boundary can be live-only. When a notification
-store cannot be opened, the boot log explicitly reports session-only replay;
-webhooks are disabled if their durable registry cannot be restored. Back up
+Records above the confirmed boundary can be live-only. When notification
+cursors cannot be loaded or reserved safely, the boot log reports that API
+startup is disabled; the node and wallet continue running. There is no session
+fallback that could reuse durable cursors. Webhooks alone are disabled if their
+registry cannot be restored but the replay journal initializes successfully. Back up
 `webhooks.redb` with the other operator databases, preserving its private
 permissions because it also contains signing secrets.
 
@@ -203,7 +205,9 @@ a downgrade with any such marker disables the webhook subsystem when loading
 the registry. Re-enabling clears the marker durably. If reconciliation is not
 possible, keep the current binary and retain the paused subscriptions. Back up
 `webhooks.redb` before changing versions; do not replace it with a fresh file to
-bypass this compatibility check.
+bypass this compatibility check. A pre-replay binary does not preserve the new
+journal cursor contract; discard replay cursors and reconcile REST state across
+a downgrade.
 
 ## Transport limits
 

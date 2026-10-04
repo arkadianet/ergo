@@ -402,7 +402,7 @@ pub(super) async fn bind(
             Ok(store) => Arc::new(store),
             Err(error) => {
                 tracing::error!(%error, "notification store unavailable; webhooks and durable replay disabled");
-                return Arc::new(ergo_api::ApiServices::with_webhooks(None));
+                return Err(error);
             }
         };
         let webhook_engine = match ergo_api::v1::WebhookEngine::durable(Default::default(), store.clone()) {
@@ -412,19 +412,31 @@ pub(super) async fn bind(
                 None
             }
         };
-        match ergo_api::ApiServices::with_durable_realtime(webhook_engine.clone(), store) {
-            Ok(services) => Arc::new(services),
-            Err(error) => {
-                tracing::error!(%error, "durable replay unavailable; serving session-only realtime history");
-                Arc::new(ergo_api::ApiServices::with_webhooks(webhook_engine))
-            }
-        }
+        ergo_api::ApiServices::with_durable_realtime(webhook_engine, store).map(Arc::new)
     })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::error!(%error, "webhook storage initialization failed; webhooks disabled");
-        Arc::new(ergo_api::ApiServices::with_webhooks(None))
-    });
+    .await;
+    let api_services = match api_services
+        .map_err(|error| error.to_string())
+        .and_then(|result| result)
+    {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::error!(%error, "notification cursor initialization failed; node continuing without API");
+            // No safe fallback cursor exists when the durable reservation is
+            // unreadable or uncertain. Keep the wallet/node running, as for a
+            // listener bind failure, without activating realtime publishers.
+            return Ok(ApiBind {
+                api_addr: None,
+                api_handle: None,
+                api_shutdown_tx: None,
+                wallet_rescan,
+                wallet_cancel,
+                wallet_handle,
+                api_services: None,
+                live_wallet_hook: Some(hook),
+            });
+        }
+    };
     // Realtime WS bridge (A2): the same node-owned bus the
     // router feeds the `blocks` coarse-ring bridge into. Wiring
     // it as a `MempoolObserver` lets admit/evict publish
@@ -555,6 +567,51 @@ mod tests {
         fn begin_write(&self) -> Result<Box<dyn WalletWrite>, WalletStoreError> {
             Err(redb::Error::Io(std::io::Error::other("injected recovery write failure")).into())
         }
+    }
+
+    #[tokio::test]
+    async fn unreadable_replay_cursor_never_falls_back_to_reused_session_cursors() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("node.toml");
+        std::fs::write(&config_path, "[api]\nbind = \"127.0.0.1:0\"\n").unwrap();
+        let cli = crate::config::Cli::parse_from([
+            "ergo-node",
+            "--network",
+            "devnet",
+            "--data-dir",
+            directory.path().to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "--peers",
+            "127.0.0.1:1",
+        ]);
+        let config = NodeConfig::load(cli).unwrap();
+        let path = directory.path().join("webhooks.redb");
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            {
+                let mut table = write
+                    .open_table(redb::TableDefinition::<&str, &[u8]>::new(
+                        "realtime_metadata_v1",
+                    ))
+                    .unwrap();
+                table
+                    .insert(
+                        "state",
+                        br#"{"version":2,"next_seq":100000,"retained_bytes":0}"#.as_slice(),
+                    )
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+        let handle = crate::node::run_inner(config).await.unwrap();
+        let api_addr = handle.api_addr;
+        handle.shutdown().await.unwrap();
+        assert!(
+            api_addr.is_none(),
+            "uncertain persisted cursors must disable API publication"
+        );
     }
 
     // ----- happy path -----
