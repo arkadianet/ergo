@@ -793,16 +793,19 @@ impl NodeChainQuery for ScalaCompatBridge {
     }
 
     fn pool_expected_wait_time_ms(&self, fee: u64, tx_size_bytes: u32) -> u64 {
+        self.pool_wait_estimate_ms(fee, tx_size_bytes)
+            .unwrap_or(pool_fee_stats::UNKNOWN_WAIT_MS)
+    }
+
+    fn pool_wait_estimate_ms(&self, fee: u64, tx_size_bytes: u32) -> Option<u64> {
         if tx_size_bytes == 0 {
-            return pool_fee_stats::UNKNOWN_WAIT_MS;
+            return None;
         }
         let snap = self.handle.load();
-        let Some(model) = fee_model(&snap) else {
-            return pool_fee_stats::UNKNOWN_WAIT_MS;
-        };
+        let model = fee_model(&snap)?;
         let ranked =
             pool_fee_stats::rank_pool_by_fee_per_byte(&snap.pool_full_txs, &pool_costs(&snap));
-        model.wait_for_fee(&ranked, fee, tx_size_bytes, 0).0
+        Some(model.wait_for_fee(&ranked, fee, tx_size_bytes, 0).0)
     }
 
     fn pool_fee_estimate(

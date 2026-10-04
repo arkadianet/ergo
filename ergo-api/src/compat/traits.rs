@@ -430,15 +430,6 @@ pub trait NodeChainQuery: Send + Sync {
         Vec::new()
     }
 
-    /// `POST /transactions/unconfirmed/byBoxId` — pool txs that
-    /// spend the supplied 32-byte box id (input side). The handler
-    /// owns the hex+length validation; this method receives the
-    /// already-decoded id.
-    ///
-    /// Match scope: only `tx.inputs[i].box_id == box_id`. Pool tx
-    /// outputs are NOT matched against `box_id` because output box
-    /// ids are derived deterministically from `(tx_id, output_index)`
-    /// and a caller looking for "this box's existence" would query
     /// Operator fee estimate with observation coverage and explicit unknowns.
     /// Compatibility scalar endpoints may fall back to the relay floor when
     /// recent canonical block observations are insufficient.
@@ -451,6 +442,15 @@ pub trait NodeChainQuery: Send + Sync {
         None
     }
 
+    /// `POST /transactions/unconfirmed/byBoxId` — pool txs that
+    /// spend the supplied 32-byte box id (input side). The handler
+    /// owns the hex+length validation; this method receives the
+    /// already-decoded id.
+    ///
+    /// Match scope: only `tx.inputs[i].box_id == box_id`. Pool tx
+    /// outputs are NOT matched against `box_id` because output box
+    /// ids are derived deterministically from `(tx_id, output_index)`
+    /// and a caller looking for "this box's existence" would query
     /// `/utxo/byId/{boxId}` for confirmed state. Scala's mempool
     /// reader uses the same input-side scoping.
     fn pool_txs_by_box_id(&self, _box_id: &[u8; 32]) -> Vec<ScalaUnconfirmedTransaction> {
@@ -512,6 +512,12 @@ pub trait NodeChainQuery: Send + Sync {
     /// the pool is empty / smaller than the buckets account for).
     fn pool_recommended_fee(&self, _wait_time_minutes: u32, _tx_size_bytes: u32) -> u64 {
         0
+    }
+
+    /// Observed wait for native transaction status; absent when statistics
+    /// cannot support a forecast. Scalar compatibility fallbacks are separate.
+    fn pool_wait_estimate_ms(&self, _fee: u64, _tx_size_bytes: u32) -> Option<u64> {
+        None
     }
 
     /// `GET /transactions/waitTime?fee=<nanoErgs>&txSize=<bytes>` —
