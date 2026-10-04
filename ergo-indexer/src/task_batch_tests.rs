@@ -849,6 +849,55 @@ fn adaptive_replay_reopen_and_rollback_match_every_table() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn adaptive_maximum_batch_preserves_undo_pruning_and_spill_rollback() {
+    let first_tx = corpus()[0].transactions[0].clone();
+    let mut blocks = empty_blocks(600);
+    for block in &mut blocks {
+        let mut tx = first_tx.clone();
+        for candidate in &mut tx.output_candidates {
+            candidate.creation_height = block.height as u32;
+            candidate.value = 1_000_000;
+        }
+        block.transactions = vec![tx];
+    }
+    let (_a, reference, _ca, mut single) = setup(&blocks);
+    let (tmp, handle, chain, mut batched) = setup(&blocks);
+    assert!(matches!(batched.step_batch(), IndexerPoll::Applied(256)));
+    assert!(matches!(batched.step_batch(), IndexerPoll::Applied(512)));
+    while handle.indexed_height() < 600 {
+        assert!(matches!(batched.step_batch(), IndexerPoll::Applied(_)));
+    }
+    for _ in &blocks {
+        assert!(matches!(single.step(), IndexerPoll::Applied(_)));
+    }
+    super::task_mainnet_bench::assert_all_rows_equal(
+        &reference.store().unwrap().test_snapshot(),
+        &handle.store().unwrap().test_snapshot(),
+    );
+    assert!(handle.store().unwrap().read_undo(399).unwrap().is_none());
+    assert!(handle.store().unwrap().read_undo(400).unwrap().is_some());
+    // Rewind through the 512 checkpoint and the address/template spill boundary.
+    chain.tip.store(400, Ordering::Relaxed);
+    chain.headers.lock().unwrap().truncate(400);
+    for height in (401..=600).rev() {
+        assert!(matches!(batched.step_batch(), IndexerPoll::RolledBack(h) if h == height));
+    }
+    drop(batched);
+    drop(handle);
+    let (store, _) = IndexerStore::open(&tmp.path().join("indexer.redb")).unwrap();
+    let resumed = IndexerHandle::with_store(store, 400);
+    let mut task = IndexerTask::new(resumed.clone(), Arc::new(Chain::new(&blocks)));
+    while resumed.indexed_height() < 600 {
+        assert!(matches!(task.step_batch(), IndexerPoll::Applied(_)));
+    }
+    super::task_mainnet_bench::assert_all_rows_equal(
+        &reference.store().unwrap().test_snapshot(),
+        &resumed.store().unwrap().test_snapshot(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn adaptive_cancelled_prefix_reopens_and_resumes_identically() {
     let blocks = corpus();
     let (tmp, handle, chain, mut task) = setup(&blocks);
