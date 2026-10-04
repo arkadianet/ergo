@@ -203,6 +203,24 @@ pub(crate) async fn restore(
         let _ = reply.send(Err(WalletAdminError::WalletExists));
         return;
     }
+    if ctx.chain.is_pruned() {
+        // Publish invalidation before the seed: a crash must never expose a
+        // restored wallet as complete when historical replay is unavailable.
+        let invalidation = (|| -> Result<(), WalletAdminError> {
+            let txn = ergo_state::begin_write_qr(ctx.db)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            txn.open_table(ergo_state::wallet::tables::WALLET_SCAN_INVALIDATED)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?
+                .insert((), true)
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))?;
+            txn.commit()
+                .map_err(|e| WalletAdminError::Internal(e.to_string()))
+        })();
+        if let Err(error) = invalidation {
+            let _ = reply.send(Err(error));
+            return;
+        }
+    }
     let result = storage
         .restore(&mnemonic, &mnemonic_pass, &pass, use_pre_1627)
         .map_err(|e| match e {

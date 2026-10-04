@@ -127,3 +127,9 @@ export class TransactionSession {
     } finally { this.busy = false; }
   }
 }
+
+export function walletRecoveryMessage(error) {
+  if (error !== 'scan_invalidated' && !error?.startsWith('wallet scan invalidated')) return null;
+  return 'Wallet recovery required — balances and boxes are unavailable until discovery or a full rescan. ' +
+    'On a pruned or snapshot node, unlock and derive your addresses, stop the node, then run wallet-scan-utxo with your data directory. Archive nodes can use POST /wallet/rescan.';
+}

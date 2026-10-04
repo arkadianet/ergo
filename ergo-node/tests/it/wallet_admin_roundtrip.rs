@@ -427,6 +427,24 @@ async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
         .restore(phrase.into(), String::new(), "pw".into(), false)
         .await
         .unwrap();
+    let status = admin.native_status().await.unwrap();
+    assert!(status.scan_invalidated);
+    assert!(matches!(
+        status.rescan,
+        ergo_api::wallet::native::dto::RescanStateDto::Required { .. }
+    ));
+    assert_eq!(
+        admin.status().await.unwrap().error,
+        WalletAdminError::ScanInvalidated.to_string()
+    );
+    assert!(matches!(
+        admin.native_balance(false).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
+    assert!(matches!(
+        admin.native_boxes(0, 10).await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
     admin.unlock("pw".into()).await.unwrap();
     assert!(
         !ergo_state::wallet::reader::WalletReader::new(&db.begin_read().unwrap())
@@ -434,6 +452,11 @@ async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
             .unwrap()
             .is_empty()
     );
+    assert!(admin.native_status().await.unwrap().scan_invalidated);
+    assert!(matches!(
+        admin.balances().await,
+        Err(WalletAdminError::ScanInvalidated)
+    ));
     admin.lock().await.unwrap();
     let txn = db.begin_write().unwrap();
     let coverage = ergo_state::wallet::utxo_scan::DiscoveryCoverage {
@@ -465,6 +488,12 @@ async fn pruned_restore_and_discovery_coverage_remain_visible_while_locked() {
     txn.open_table(WALLET_DISCOVERED_BOXES)
         .unwrap()
         .insert(wb.box_id, 0)
+        .unwrap();
+    // Emulate the atomic discovery publication below; invalidation clears
+    // only together with the verified holdings and coverage.
+    txn.open_table(WALLET_SCAN_INVALIDATED)
+        .unwrap()
+        .insert((), false)
         .unwrap();
     txn.commit().unwrap();
     let status = admin.native_status().await.unwrap();
