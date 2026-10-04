@@ -151,8 +151,6 @@ fn migrate_controlled(
     // Only newly keyable boxes are retained in memory. Existing entries are
     // merged from the old snapshot one spill at a time, including when a wrapped
     // tree shares its v3 key with an already-indexed structured tree.
-    let mut additions: HashMap<Digest32, Vec<i64>> = HashMap::new();
-    let mut affected_boxes = 0_u64;
     {
         let numeric = read.open_table(NUMERIC_BOX)?;
         let boxes = read.open_table(INDEXED_BOX)?;
@@ -161,43 +159,14 @@ fn migrate_controlled(
         {
             return Err(invalid("box counts differ from checkpoint"));
         }
-        for gi in 0..checkpoint.global_box_index {
-            check()?;
-            let box_id = read_box_id(&numeric, gi)?
-                .ok_or_else(|| invalid(format!("missing global box index {gi}")))?;
-            let record = read_box(&boxes, &box_id, gi)?;
-            let index = i64::try_from(gi).map_err(|_| invalid("box index exceeds i64"))?;
-            if record.global_index != index {
-                return Err(invalid(format!("box global index differs at {gi}")));
-            }
-            let candidate = &record.box_data.candidate;
-            // The v2 received-bytes derivation omitted a whole-tree wrap.
-            // Use the box's already-parsed tree, avoiding a second parse of
-            // every ordinary tree during this tens-of-millions-row scan.
-            if matches!(candidate.ergo_tree().body, Expr::Unparsed(_)) {
-                let hash = template_hash_for_box_bytes(candidate.ergo_tree_bytes())?
-                    .ok_or_else(|| invalid("wrapped tree has no v3 template key"))?;
-                additions
-                    .entry(hash)
-                    .or_default()
-                    .push(if record.is_spent() { -index } else { index });
-                affected_boxes += 1;
-            }
-            if last_log.elapsed() >= Duration::from_secs(10) {
-                tracing::info!(
-                    event = "indexer_schema_migration_progress",
-                    phase = "boxes",
-                    scanned_boxes = gi + 1,
-                    total_boxes = checkpoint.global_box_index,
-                    affected_boxes,
-                    changed_tokens,
-                    elapsed_secs = start.elapsed().as_secs_f64(),
-                    "schema-2 migration progress"
-                );
-                last_log = Instant::now();
-            }
-        }
     }
+    // Leave CPU capacity for node/miner work instead of using every core.
+    let workers = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 6));
+    let additions = scan_boxes_parallel(db, checkpoint.global_box_index, workers, check, &|| {})?;
+    let affected_boxes: u64 = additions.values().map(|entries| entries.len() as u64).sum();
+    // Both template write order and each template's entry order are stable.
+    let mut additions: Vec<_> = additions.into_iter().collect();
+    additions.sort_unstable_by_key(|(hash, _)| *hash.as_bytes());
     let affected_templates = additions.len();
     {
         let mut templates = write.open_table(INDEXED_TEMPLATE)?;
@@ -305,6 +274,141 @@ fn migrate_controlled(
         "schema-2 index migration committed"
     );
     Ok(())
+}
+
+type TemplateAdditions = HashMap<Digest32, Vec<i64>>;
+
+// The caller holds the sole writer for the entire scan: all worker read
+// transactions therefore see the same committed snapshot, even while the
+// migration has staged token writes. Workers retain only wrapped-tree entries.
+fn scan_boxes_parallel(
+    db: &redb::Database,
+    total: u64,
+    workers: usize,
+    check: &(impl Fn() -> Result<(), IndexerError> + Sync),
+    on_worker: &(impl Fn() + Sync),
+) -> Result<TemplateAdditions, IndexerError> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+    let workers = workers
+        .max(1)
+        .min(usize::try_from(total.max(1)).unwrap_or(usize::MAX));
+    let failed = AtomicBool::new(false);
+    let first_error = Mutex::new(None);
+    std::thread::scope(|scope| {
+        let mut threads = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let boundary = |i: u64| total / workers as u64 * i + i.min(total % workers as u64);
+            let range = boundary(worker as u64)..boundary(worker as u64 + 1);
+            let read = db.begin_read().map_err(|error| {
+                failed.store(true, Ordering::Release);
+                IndexerError::from(error)
+            })?;
+            let failed = &failed;
+            let first_error = &first_error;
+            let thread = std::thread::Builder::new()
+                .name(format!("index-migrate-{worker}"))
+                .stack_size(ergo_ser::decode_stack::DECODE_THREAD_STACK_BYTES)
+                .spawn_scoped(scope, move || {
+                    on_worker();
+                    scan_box_range(&read, range, &|| {
+                        check()?;
+                        if failed.load(Ordering::Acquire) {
+                            Err(invalid("box scan aborted after worker failure"))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .map_err(|error| {
+                        let mut first = first_error.lock().unwrap_or_else(|p| p.into_inner());
+                        if first.is_none() {
+                            *first = Some(error);
+                        }
+                        failed.store(true, Ordering::Release);
+                    })
+                })
+                .map_err(|source| {
+                    failed.store(true, Ordering::Release);
+                    IndexerError::FsIo {
+                        context: "spawn migration box worker",
+                        source,
+                    }
+                })?;
+            threads.push(thread);
+        }
+        let mut additions = TemplateAdditions::new();
+        // Join in range order so entries remain sorted by absolute global index.
+        for thread in threads {
+            match thread.join() {
+                Ok(Ok(part)) => {
+                    for (hash, entries) in part {
+                        additions.entry(hash).or_default().extend(entries);
+                    }
+                }
+                Ok(Err(())) => {}
+                Err(_) => {
+                    failed.store(true, Ordering::Release);
+                    return Err(invalid("box scan worker panicked"));
+                }
+            }
+        }
+        if let Some(error) = first_error.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            return Err(error);
+        }
+        Ok(additions)
+    })
+}
+
+fn scan_box_range(
+    read: &redb::ReadTransaction,
+    range: std::ops::Range<u64>,
+    check: &impl Fn() -> Result<(), IndexerError>,
+) -> Result<TemplateAdditions, IndexerError> {
+    let start = Instant::now();
+    let mut last_log = start;
+    let range_start = range.start;
+    let range_end = range.end;
+    let numeric = read.open_table(NUMERIC_BOX)?;
+    let boxes = read.open_table(INDEXED_BOX)?;
+    let mut additions = TemplateAdditions::new();
+    let mut affected_boxes = 0_u64;
+    for gi in range {
+        check()?;
+        let box_id = read_box_id(&numeric, gi)?
+            .ok_or_else(|| invalid(format!("missing global box index {gi}")))?;
+        let record = read_box(&boxes, &box_id, gi)?;
+        let index = i64::try_from(gi).map_err(|_| invalid("box index exceeds i64"))?;
+        if record.global_index != index {
+            return Err(invalid(format!("box global index differs at {gi}")));
+        }
+        let candidate = &record.box_data.candidate;
+        // Use the already-parsed tree, avoiding a second parse of ordinary trees.
+        if matches!(candidate.ergo_tree().body, Expr::Unparsed(_)) {
+            let hash = template_hash_for_box_bytes(candidate.ergo_tree_bytes())?
+                .ok_or_else(|| invalid("wrapped tree has no v3 template key"))?;
+            additions
+                .entry(hash)
+                .or_default()
+                .push(if record.is_spent() { -index } else { index });
+            affected_boxes += 1;
+        }
+        if last_log.elapsed() >= Duration::from_secs(10) {
+            tracing::info!(
+                event = "indexer_schema_migration_progress",
+                phase = "boxes",
+                range_start,
+                range_end,
+                scanned_boxes = gi + 1 - range_start,
+                affected_boxes,
+                elapsed_secs = start.elapsed().as_secs_f64(),
+                "schema-2 migration worker progress"
+            );
+            last_log = Instant::now();
+        }
+    }
+    Ok(additions)
 }
 
 fn append_signed(

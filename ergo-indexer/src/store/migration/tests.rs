@@ -533,3 +533,34 @@ fn schema_two_shutdown_aborts_staged_writes_and_next_boot_migrates() {
     wait_ready(&handle);
     worker.join().unwrap();
 }
+
+#[test]
+fn schema_two_parallel_scan_matches_serial_additions_and_uses_workers() {
+    use std::sync::Mutex;
+    let tmp = tempfile::tempdir().unwrap();
+    let legacy = build(&tmp.path().join("legacy.redb"), &blocks(), true);
+    let total = legacy.read_meta().unwrap().global_box_index;
+    // Pin the snapshot exactly as the migration does, including uncommitted writes.
+    let write = legacy.begin_write().unwrap();
+    meta::write_schema_version(&write, 3).unwrap();
+    let read = legacy.db.begin_read().unwrap();
+    let serial = scan_box_range(&read, 0..total, &|| Ok(())).unwrap();
+    assert!(!serial.is_empty());
+    for workers in [1, 2, 4, 7] {
+        let threads = Mutex::new(HashSet::new());
+        let parallel = scan_boxes_parallel(&legacy.db, total, workers, &|| Ok(()), &|| {
+            threads.lock().unwrap().insert(std::thread::current().id());
+        })
+        .unwrap();
+        assert_eq!(
+            threads.into_inner().unwrap().len(),
+            workers,
+            "scan must use the requested workers"
+        );
+        assert_eq!(parallel, serial);
+        for entries in parallel.values() {
+            assert!(entries.windows(2).all(|pair| pair[0].abs() < pair[1].abs()));
+        }
+    }
+    assert_eq!(meta::read_schema_version(&read).unwrap(), Some(2));
+}
