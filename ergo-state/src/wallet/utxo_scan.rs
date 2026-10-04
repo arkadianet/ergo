@@ -115,7 +115,9 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     let snapshot = db.begin_read()?;
     let tip = inspect_tip(&snapshot)?;
     if tip.state_type.as_deref().is_some_and(|kind| kind != "utxo") || tip.state_root.is_none() {
-        return Err(corrupt("discovery requires an initialized UTXO backend"));
+        return Err(StateError::WalletDiscoveryUnavailable(
+            "discovery requires an initialized UTXO backend".into(),
+        ));
     }
     let pubkeys: BTreeSet<Vec<u8>> = super::reader::WalletReader::new(&snapshot)
         .tracked_pubkeys_with_paths()?
@@ -123,13 +125,13 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
         .map(|(_, pk, _)| pk.to_vec())
         .collect();
     if pubkeys.is_empty() {
-        return Err(corrupt("no persisted tracked keys; initialize/restore and unlock the wallet before stopping the node"));
+        return Err(StateError::WalletDiscoveryUnavailable("no persisted tracked keys; initialize/restore and unlock the wallet before stopping the node".into()));
     }
     match snapshot.open_table(WALLET_SCANS) {
         Ok(scans) => {
             use redb::ReadableTableMetadata;
             if !scans.is_empty()? {
-                return Err(corrupt("registered custom scans require historical rescan; current-UTXO discovery only rebuilds owned wallet holdings"));
+                return Err(StateError::WalletDiscoveryUnavailable("registered custom scans require historical rescan; current-UTXO discovery only rebuilds owned wallet holdings".into()));
             }
         }
         Err(redb::TableError::TableDoesNotExist(_)) => {}
@@ -146,8 +148,8 @@ pub fn discover(db: &Database, restart: bool) -> Result<DiscoveryCoverage, State
     };
     let mut job = if let Some(previous) = previous.filter(|_| !restart) {
         if previous.version != 1 || previous.tip != tip || previous.pubkeys != key_strings {
-            return Err(corrupt(
-                "checkpoint tip or tracked keys changed; rerun with --restart",
+            return Err(StateError::WalletDiscoveryRestartRequired(
+                "checkpoint tip or tracked keys changed; rerun with --restart".into(),
             ));
         }
         previous

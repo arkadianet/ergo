@@ -313,3 +313,38 @@ fn sparse_snapshot_discovery_anchor_mismatch_invalidates_on_migration() {
         .unwrap()
         .value());
 }
+
+#[test]
+fn discovery_preconditions_have_operator_errors() {
+    let (_dir, db, _) = fixture(4);
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(WALLET_TRACKED_PUBKEYS)
+        .unwrap()
+        .retain(|_, _| false)
+        .unwrap();
+    txn.commit().unwrap();
+    assert!(matches!(
+        discover(&db, false),
+        Err(StateError::WalletDiscoveryUnavailable(_))
+    ));
+
+    let (_dir, db, boxes) = fixture(4);
+    seed_checkpoint(&db, &boxes[..2]);
+    crate::maintenance::test_set_tip(&db, 1001);
+    assert!(matches!(
+        discover(&db, false),
+        Err(StateError::WalletDiscoveryRestartRequired(_))
+    ));
+
+    let (_dir, db, _) = fixture_at(4, 0);
+    let txn = crate::begin_write_qr(&db).unwrap();
+    txn.open_table(crate::store::STATE_META)
+        .unwrap()
+        .remove("root")
+        .unwrap();
+    txn.commit().unwrap();
+    assert!(matches!(
+        discover(&db, false),
+        Err(StateError::WalletDiscoveryUnavailable(_))
+    ));
+}
