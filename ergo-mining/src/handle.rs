@@ -597,10 +597,16 @@ impl MiningHandle {
         cache.newest_offered_on(&parent).map(|t| t.work.clone())
     }
 
-    /// The latest client-requested job, read atomically with the current tip.
-    /// The serial worker calls this immediately after publishing its request.
-    /// Ordinary GET candidate serving always uses the operator's own jobs.
-    pub fn cached_requested_template_if_synced(&self) -> Option<(WorkMessage, TemplateIdentity)> {
+    /// The client-requested job published as `template_seq`, read atomically
+    /// with the current tip. The serial worker calls this immediately after
+    /// publishing its request; matching the exact publish keeps an older
+    /// requested job on the same parent (e.g. after an A→B→A tip change) from
+    /// answering a different request. Ordinary GET candidate serving always
+    /// uses the operator's own jobs.
+    pub fn cached_requested_template_if_synced(
+        &self,
+        template_seq: u64,
+    ) -> Option<(WorkMessage, TemplateIdentity)> {
         let cache = self.cache.read().expect("cache poisoned");
         if !cache.best_tip.synced {
             return None;
@@ -608,7 +614,8 @@ impl MiningHandle {
         let found = cache
             .offered()
             .find(|t| {
-                t.identity.reason == BuildReason::Requested
+                t.identity.template_seq == template_seq
+                    && t.identity.reason == BuildReason::Requested
                     && t.candidate.parent_id == cache.best_tip.parent_id
             })
             .map(|t| (t.work.clone(), t.identity.clone()));
@@ -2226,7 +2233,7 @@ mod tests {
         handle.set_best_tip(synced_tip(parent));
         let requested_msg = [0xA1; 32];
         let (candidate, work) = candidate_pair_for_key(parent, requested_msg, requested_pk, 10);
-        handle
+        let requested_seq = handle
             .publish_if_current(
                 candidate,
                 work,
@@ -2234,7 +2241,8 @@ mod tests {
                 || BUILT_AT_MS,
                 BuildReason::Requested,
             )
-            .unwrap();
+            .unwrap()
+            .template_seq;
         assert!(
             handle.cached_work_if_synced().is_none(),
             "requested work does not become solo work"
@@ -2263,7 +2271,11 @@ mod tests {
         assert_eq!(solo.pk, operator_pk);
         assert_eq!(solo.msg, last_operator_msg);
         assert_eq!(
-            handle.cached_requested_template_if_synced().unwrap().0.msg,
+            handle
+                .cached_requested_template_if_synced(requested_seq)
+                .unwrap()
+                .0
+                .msg,
             requested_msg
         );
         assert_eq!(
@@ -2288,6 +2300,44 @@ mod tests {
     }
 
     #[test]
+    fn requested_lookup_returns_the_published_job_not_an_older_one_after_aba() {
+        let operator_pk = [0x02; 33];
+        let requested_pk = requested_test_key();
+        let handle = MiningHandle::mainnet(operator_pk);
+        let (a, b) = ([0xAA; 32], [0xBB; 32]);
+        let publish = |parent: [u8; 32], msg: [u8; 32], chain_seq: u64| {
+            handle.set_best_tip(synced_tip_seq(parent, chain_seq));
+            let (candidate, work) = candidate_pair_for_key(parent, msg, requested_pk, 10);
+            handle
+                .publish_if_current(
+                    candidate,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested,
+                )
+                .unwrap()
+                .template_seq
+        };
+        let on_a = publish(a, [0x01; 32], 1);
+        let on_b = publish(b, [0x02; 32], 2);
+        // The tip returns to A before the worker reads back its B publish.
+        handle.set_best_tip(synced_tip_seq(a, 3));
+        assert!(
+            handle.cached_requested_template_if_synced(on_b).is_none(),
+            "the B job is off-tip and the older A job must not stand in for it"
+        );
+        assert_eq!(
+            handle
+                .cached_requested_template_if_synced(on_a)
+                .unwrap()
+                .0
+                .msg,
+            [0x01; 32]
+        );
+    }
+
+    #[test]
     fn requested_jobs_with_same_transactions_are_selected_only_by_matching_key() {
         let operator_pk = [0x02; 33];
         let first_pk = requested_test_key();
@@ -2298,19 +2348,33 @@ mod tests {
         handle.set_best_tip(synced_tip(parent));
         // The same package and work digest must never make the newest key's
         // candidate stand in for another miner's independently retained job.
+        let mut seqs = Vec::new();
         for (pk, timestamp, reason) in [
             (first_pk, 10, BuildReason::Requested),
             (second_pk, 20, BuildReason::Requested),
             (operator_pk, 30, BuildReason::Tip),
         ] {
             let (candidate, work) = candidate_pair_for_key(parent, [0xA2; 32], pk, timestamp);
-            handle
+            let identity = handle
                 .publish_if_current(candidate, work, &parent, || BUILT_AT_MS, reason)
                 .unwrap();
+            seqs.push(identity.template_seq);
         }
-        assert_eq!(
-            handle.cached_requested_template_if_synced().unwrap().0.pk,
-            second_pk
+        for (seq, pk) in [(seqs[0], first_pk), (seqs[1], second_pk)] {
+            assert_eq!(
+                handle
+                    .cached_requested_template_if_synced(seq)
+                    .unwrap()
+                    .0
+                    .pk,
+                pk
+            );
+        }
+        assert!(
+            handle
+                .cached_requested_template_if_synced(seqs[2])
+                .is_none(),
+            "an operator template is never returned as a requested job"
         );
         assert_eq!(handle.cached_work_if_synced().unwrap().pk, operator_pk);
         let dir = tempfile::tempdir().unwrap();

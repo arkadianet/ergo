@@ -173,6 +173,9 @@ pub enum BuildOutcome {
     /// timings so the driver logs one histogram-friendly line per build.
     Published {
         timings: crate::candidate::PhaseTimings,
+        /// `template_seq` of the template this build published, so a caller
+        /// can read back exactly that template rather than any on the tip.
+        template_seq: u64,
     },
     /// Built, but the live tip moved off the built parent before publish —
     /// discarded (wasted, not wrong).
@@ -533,7 +536,7 @@ fn build_and_publish_inner(
         now_ms,
         intent.reason,
     ) {
-        Some(_) => {
+        Some(identity) => {
             // Record the suspect ids alongside the published candidate so the
             // node loop can re-validate them against the live tip and evict the
             // still-invalid ones. Only on publish: a DroppedStale build's
@@ -550,7 +553,10 @@ fn build_and_publish_inner(
                 handle.record_suspects(suspects);
             }
             timings.publish = publish_start.elapsed();
-            Ok(BuildOutcome::Published { timings })
+            Ok(BuildOutcome::Published {
+                timings,
+                template_seq: identity.template_seq,
+            })
         }
         None => Ok(BuildOutcome::DroppedStale),
     }

@@ -27,7 +27,11 @@ object WalletOracle extends App {
     P2PKAddress(key.publicImage)(ErgoAddressEncoder.Mainnet).toString
   }
   if (args.headOption.contains("verify")) {
-    val storage = new JsonSecretStorage(new java.io.File(args(1)), settings)
+    // JsonSecretStorage ignores the file's cipherParams and decrypts with the
+    // node's configured settings, so verify against the stock node default
+    // (application.conf: HmacSHA256, 128000, 256) that Rust now writes.
+    val nodeDefault = EncryptionSettings("HmacSHA256", 128000, 256)
+    val storage = new JsonSecretStorage(new java.io.File(args(1)), nodeDefault)
     storage.unlock(SecretString.create(args(2))).get
     assert(java.util.Arrays.equals(storage.secret.get.keyBytes, ExtendedSecretKey.deriveMasterKey(seed(phrase), false).keyBytes))
     println("scala-unlock-ok")

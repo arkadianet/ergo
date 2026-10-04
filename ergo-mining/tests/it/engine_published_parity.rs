@@ -784,7 +784,7 @@ fn publish_and_serve_under(regime: &Regime) {
     )
     .expect("build_and_publish ok");
     let timings = match outcome {
-        BuildOutcome::Published { timings } => timings,
+        BuildOutcome::Published { timings, .. } => timings,
         other => {
             panic!("engine must publish a candidate for the committed synced tip, got {other:?}",)
         }
@@ -2114,7 +2114,7 @@ fn benchmark_same_parent_full_refresh_proof_reuse() {
             }
             .unwrap();
             let elapsed = started.elapsed();
-            let BuildOutcome::Published { timings } = outcome else {
+            let BuildOutcome::Published { timings, .. } = outcome else {
                 panic!("benchmark build did not publish: {outcome:?}");
             };
             assert_eq!(timings.proof_reused, path == 1 && pass != 0);

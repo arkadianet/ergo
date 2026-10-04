@@ -508,8 +508,8 @@ pub(super) fn run_build_worker(
             BuildReply::Requested { reply, _permit } => {
                 use ergo_api::MiningApiError;
                 let result = match result {
-                    Ok(BuildOutcome::Published { .. }) => handle
-                        .cached_requested_template_if_synced()
+                    Ok(BuildOutcome::Published { template_seq, .. }) => handle
+                        .cached_requested_template_if_synced(template_seq)
                         .map(|(work, identity)| {
                             crate::mining_bridge::work_message_to_json(
                                 work,
@@ -671,7 +671,7 @@ pub(super) async fn run_mining_engine(
                         _ = tokio::time::sleep(VIS_BACKOFF) => {}
                     }
                 }
-                Ok(BuildOutcome::Published { timings: t }) => {
+                Ok(BuildOutcome::Published { timings: t, .. }) => {
                     let accounted = t.setup
                         + t.rent_resolve
                         + t.assembly
@@ -1154,6 +1154,7 @@ mod tests {
                 .send((
                     Ok(BuildOutcome::Published {
                         timings: Default::default(),
+                        template_seq: 0,
                     }),
                     "advanced",
                 ))
