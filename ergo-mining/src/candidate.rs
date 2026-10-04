@@ -418,10 +418,13 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
     //    params/settings the validator recomputes.
     let extension_fields = if genesis {
         crate::extension_builder::validate_custom_extension_fields(custom_extension_fields)?;
-        custom_extension_fields
+        let fields = custom_extension_fields
             .iter()
             .map(|(k, v)| (k.to_vec(), v.clone()))
-            .collect()
+            .collect();
+        // The builder below applies this section cap itself; genesis bypasses it.
+        crate::extension_builder::validate_candidate_extension_size(&fields)?;
+        fields
     } else {
         let parent_extension_bytes = read_parent_extension_bytes(view, &parent_header)?;
         let parent_interlinks = unpack_interlinks_from_extension(&parent_extension_bytes)?;
@@ -449,7 +452,6 @@ pub fn generate_candidate_cancellable<V: CandidateStateView>(
             custom_extension_fields,
         )?
     };
-    crate::extension_builder::validate_candidate_extension_size(&extension_fields)?;
 
     timings.setup = setup_start.elapsed();
     check_build_cancelled(should_cancel)?;
@@ -1352,6 +1354,95 @@ mod tests {
             .unwrap();
             assert!(candidate.is_none());
         }
+    }
+
+    fn generate_with_custom_fields(
+        view: &ExhaustedView,
+        network: ergo_chain_spec::Network,
+        custom: &[([u8; 2], Vec<u8>)],
+    ) -> Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError> {
+        generate_candidate(
+            view,
+            network,
+            BuildMode::Minimal,
+            &MempoolReadSnapshot::empty(),
+            &[0x02; 33],
+            &MonetarySettings::mainnet(),
+            None,
+            None,
+            &DifficultyParams::mainnet(),
+            &[],
+            &BTreeMap::new(),
+            &VotingSettings::mainnet(),
+            custom,
+            &mut vec![],
+        )
+    }
+
+    /// Individually legal custom fields whose complete section, header ID and
+    /// count prefix included, is one byte over the 32,768-byte cap.
+    fn one_byte_over_section_cap() -> Vec<([u8; 2], Vec<u8>)> {
+        let mut fields: Vec<_> = (0..488u16)
+            .map(|id| ([3 + (id >> 8) as u8, id as u8], vec![0; 64]))
+            .collect();
+        fields.push(([5, 0], vec![0; 36]));
+        fields
+    }
+
+    fn rule_error(
+        result: Result<Option<(Candidate, WorkMessage, PhaseTimings)>, MiningError>,
+        rule: &str,
+    ) {
+        match result {
+            Err(MiningError::InvalidConfig(message)) if message.contains(rule) => {}
+            other => panic!("expected {rule} refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    // ----- error paths -----
+
+    /// Devnet genesis copies custom fields verbatim instead of running the
+    /// extension builder, so it needs its own field rules and section cap.
+    #[test]
+    fn genesis_candidate_enforces_custom_field_rules_and_section_cap() {
+        let view = ExhaustedView {
+            header: crate::genesis::parent_header(),
+        };
+        let devnet = ergo_chain_spec::Network::Devnet;
+        rule_error(
+            generate_with_custom_fields(&view, devnet, &[([0xAE, 0x00], vec![0; 65])]),
+            "rule 404",
+        );
+        rule_error(
+            generate_with_custom_fields(&view, devnet, &one_byte_over_section_cap()),
+            "32769 bytes > 32768 (rule 400)",
+        );
+        // The same fields fit without the extra byte; the build then reaches
+        // the shared genesis emission box, which this stub view lacks.
+        let mut at_cap = one_byte_over_section_cap();
+        at_cap.last_mut().unwrap().1.pop();
+        assert!(matches!(
+            generate_with_custom_fields(&view, devnet, &at_cap),
+            Err(MiningError::EmissionInvariant { .. })
+        ));
+    }
+
+    /// Ordinary candidates take the cap from the extension builder, which
+    /// also counts the interlinks.
+    #[test]
+    fn ordinary_candidate_enforces_section_cap_through_the_builder() {
+        let mut header = crate::genesis::parent_header();
+        header.height = 14;
+        header.n_bits = 16_842_752;
+        let view = ExhaustedView { header };
+        rule_error(
+            generate_with_custom_fields(
+                &view,
+                ergo_chain_spec::Network::Mainnet,
+                &one_byte_over_section_cap(),
+            ),
+            "(rule 400)",
+        );
     }
 
     /// Ancestry from a real store after a UTXO-snapshot install; every other
