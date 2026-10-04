@@ -8,7 +8,8 @@ use ergo_primitives::writer::VlqWriter;
 
 use crate::error::WriteError;
 
-use super::{read::read_ergo_tree_tracking_template, read_ergo_tree, ErgoTree};
+use super::read::{read_ergo_tree_tracking_template, wrapped_tree_template};
+use super::{read_ergo_tree, ErgoTree};
 
 /// Failure modes for [`tree_hash_from_bytes`]. The byte helper validates
 /// parsing and consumption without re-serializing the received tree.
@@ -16,7 +17,8 @@ use super::{read::read_ergo_tree_tracking_template, read_ergo_tree, ErgoTree};
 pub enum TreeHashError {
     /// Input bytes could not be parsed into an `ErgoTree`.
     Parse(ReadError),
-    /// Retained for source compatibility; the byte helper no longer serializes.
+    /// Never constructed: the byte helper no longer serializes. Retained for
+    /// source compatibility with exhaustive matches.
     Write(WriteError),
 }
 
@@ -52,20 +54,17 @@ pub fn tree_hash_from_bytes(tree_bytes: &[u8]) -> Result<[u8; 32], TreeHashError
 }
 
 /// Failure modes for the template-hash derivations. Distinct from
-/// [`TreeHashError`] because templating has the extra `Unparseable`
-/// case: a tree that `read_ergo_tree` accepted as a soft-fork
-/// placeholder cannot produce a meaningful template hash (Scala's
-/// `tree.template` throws on its `Left(UnparsedErgoTree)` branch).
+/// [`TreeHashError`] because the structured [`template_hash`] has the extra
+/// `Unparseable` case. [`template_hash_from_bytes`] returns only `Parse`.
 #[derive(Debug)]
 pub enum TemplateHashError {
     /// Input bytes could not be parsed into an `ErgoTree`.
     Parse(ReadError),
-    /// Tree parsed cleanly but its template body failed to re-serialize.
+    /// [`template_hash`] only: the structured body failed to serialize.
     Write(WriteError),
-    /// Tree was rebuilt by `unparsed_soft_fork_tree` and does not have
-    /// a meaningful template — the indexer must skip template recording
-    /// for this output rather than emit a hash that collides across all
-    /// unparsed trees.
+    /// [`template_hash`] only: a soft-fork-wrapped tree has no structured
+    /// body to serialize. Its received bytes still have Scala's cached
+    /// template; hash them with [`template_hash_from_bytes`].
     Unparseable,
 }
 
@@ -98,7 +97,7 @@ pub fn template_bytes(tree: &ErgoTree) -> Result<Vec<u8>, WriteError> {
 /// Soft-fork-wrapped trees have no structured template.
 pub fn template_hash(tree: &ErgoTree) -> Result<[u8; 32], TemplateHashError> {
     // A soft-fork-wrapped tree has an `Expr::Unparsed` whole-tree body with no
-    // meaningful template. Honor the documented contract by returning
+    // structured template. Honor the documented contract by returning
     // `Unparseable` rather than passing `Expr::Unparsed` to `template_bytes`
     // (which surfaces a generic `Write` error).
     if matches!(tree.body, crate::opcode::Expr::Unparsed(_)) {
@@ -110,9 +109,12 @@ pub fn template_hash(tree: &ErgoTree) -> Result<[u8; 32], TemplateHashError> {
 
 /// Hash the original expression slice of one completely parsed tree,
 /// excluding its received header, size field and segregated constants.
-/// This mirrors Scala's cached `ErgoTree.template`; expression normalization
-/// cannot change the index key. Soft-fork-wrapped trees keep the existing
-/// `Unparseable` result.
+/// This mirrors Scala's `IndexedContractTemplateSerializer.hashTreeTemplate`
+/// over the cached `ErgoTree.template`; expression normalization cannot change
+/// the index key. A soft-fork-wrapped tree keeps its received bytes, and Scala
+/// still derives a template from them by re-reading the header, size and
+/// constants; when that re-read throws, `hashTreeTemplate` hashes the whole
+/// tree bytes. Only a parse failure of the input itself is an error.
 pub fn template_hash_from_bytes(tree_bytes: &[u8]) -> Result<[u8; 32], TemplateHashError> {
     let mut reader = VlqReader::new(tree_bytes);
     let (_tree, was_wrapped, template) =
@@ -122,11 +124,13 @@ pub fn template_hash_from_bytes(tree_bytes: &[u8]) -> Result<[u8; 32], TemplateH
             "trailing bytes after ergoTree".into(),
         )));
     }
-    if was_wrapped {
-        return Err(TemplateHashError::Unparseable);
-    }
-    let template = template.ok_or(TemplateHashError::Unparseable)?;
-    Ok(*blake2b256(&tree_bytes[template]).as_bytes())
+    let template = if was_wrapped {
+        wrapped_tree_template(tree_bytes)
+    } else {
+        template
+    };
+    let hashed = template.map_or(tree_bytes, |range| &tree_bytes[range]);
+    Ok(*blake2b256(hashed).as_bytes())
 }
 
 #[cfg(test)]
@@ -179,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn received_identity_helpers_keep_complete_input_and_wrap_policy() {
+    fn received_identity_helpers_keep_complete_input_policy() {
         let mut trailing = hex::decode("1000d17f").unwrap();
         trailing.push(0);
         assert!(matches!(
@@ -190,9 +194,55 @@ mod tests {
             template_hash_from_bytes(&trailing),
             Err(TemplateHashError::Parse(_))
         ));
-        assert!(matches!(
-            template_hash_from_bytes(&hex::decode("0b01fd").unwrap()),
-            Err(TemplateHashError::Unparseable)
-        ));
+    }
+
+    /// Expected templates come from sigma-state 6.0.6 (Maven Central jar,
+    /// sha1 e7dcc53775ed64daaa2f159eb781340b35dc3f4a) driven from Java: each
+    /// tree was read with `deserializeErgoTree(reader, 4096)` under
+    /// `VersionContext.withVersions(a, 0)` for activated versions a = 1, 2, 3,
+    /// then `withVersions(3, 3) { tree.template }` as in ergo-scala's
+    /// `hashTreeTemplate`. Every tree parsed with `root.isRight == false` and
+    /// the same template at each accepted version (`0b01fd` is rejected at
+    /// activation 2). `None` marks a template that threw, where
+    /// `hashTreeTemplate` hashes the whole `tree.bytes` (here, the input).
+    #[test]
+    fn wrapped_trees_hash_the_scala_cached_template() {
+        // Mainnet block 1,702,686 output: v1, sized, non-SigmaProp root.
+        let block_1702686 = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
+        let cases = [
+            (block_1702686, Some(&block_1702686[4..])),
+            ("0b01fd", Some("fd")),
+            ("08020101", Some("0101")),
+            // Segregated constants are stripped as for a parsed tree.
+            ("18050101017300", Some("7300")),
+            // A v3-only constant type wraps this v0 tree, but `template`
+            // re-reads the constants with the (3, 3) type table.
+            ("180601090105d17f", Some("d17f")),
+            // Constants after the wrapping one still fail the re-read.
+            ("180502090105ff", None),
+            ("180402090105", None),
+            ("18050209010500", None),
+        ];
+        for (tree_hex, template_hex) in cases {
+            let bytes = hex::decode(tree_hex).unwrap();
+            let mut reader = VlqReader::new(&bytes);
+            let (tree, wrapped, _) = read_ergo_tree_tracking_template(&mut reader).unwrap();
+            assert!(wrapped && reader.is_empty(), "{tree_hex}");
+            assert!(matches!(
+                template_hash(&tree),
+                Err(TemplateHashError::Unparseable)
+            ));
+            let hashed = template_hex.map_or(bytes.clone(), |t| hex::decode(t).unwrap());
+            assert_eq!(
+                template_hash_from_bytes(&bytes).unwrap(),
+                *blake2b256(&hashed).as_bytes(),
+                "{tree_hex}"
+            );
+        }
+        // The key Scala serves under /blockchain/box/byTemplateHash.
+        assert_eq!(
+            hex::encode(template_hash_from_bytes(&hex::decode(block_1702686).unwrap()).unwrap()),
+            "c7f899c5518eddc86a5052a932551fd54706cd8d12641150b160c25cdbd4befd"
+        );
     }
 }

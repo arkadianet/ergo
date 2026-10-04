@@ -76,9 +76,8 @@ fn take_unparsed_size_region(
     Ok(r.data_slice(tree_start, end).to_vec())
 }
 
-/// Also reports local soft-fork wrapping. Template helpers currently refuse
-/// these opaque trees because no parsed expression boundary was established;
-/// that is an explicit helper policy, not a claim about Scala cached templates.
+/// Also reports local soft-fork wrapping. Wrapped trees establish no parsed
+/// expression boundary; see [`wrapped_tree_template`] for their template.
 pub(crate) fn read_ergo_tree_tracking_wrap(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool), ReadError> {
@@ -88,7 +87,7 @@ pub(crate) fn read_ergo_tree_tracking_wrap(
 /// Record the original expression slice while parsing. Scala's cached
 /// `ErgoTree.template` strips the received header and constants, rather than
 /// serializing the normalized expression again. Wrapped trees have no parsed
-/// template; callers retain the existing unparseable policy for them.
+/// template range; [`wrapped_tree_template`] re-reads their retained bytes.
 pub(super) fn read_ergo_tree_tracking_template(
     r: &mut VlqReader,
 ) -> Result<(ErgoTree, bool, Option<std::ops::Range<usize>>), ReadError> {
@@ -368,6 +367,35 @@ pub(super) fn read_ergo_tree_tracking_template(
         r.set_ergo_tree_version(saved_v);
         parsed.map(|(tree, template_start)| (tree, false, Some(template_start..r.position())))
     }
+}
+
+/// Scala's `ErgoTree.template` of a soft-fork-wrapped tree, as a range of its
+/// retained bytes. `deserializeHeaderWithTreeBytes` re-reads the header, size
+/// and segregated constants, then keeps everything after them; it never looks
+/// at the root, so a wrapped root does not throw. `hashTreeTemplate` runs it
+/// under `VersionContext.withVersions(3, 3)`, so constants decode with the v3
+/// type table whatever the header version. `None` where that re-read throws
+/// (e.g. a declared size that cuts the constants short), where Scala hashes
+/// the whole tree bytes instead. Constant group elements are not curve-checked
+/// here (this crate is crypto-free), unlike Scala's re-read.
+pub(super) fn wrapped_tree_template(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+    let mut r = VlqReader::new(bytes);
+    r.set_activated_script_version(Some(MAX_SUPPORTED_TREE_VERSION));
+    r.set_ergo_tree_version(Some(MAX_SUPPORTED_TREE_VERSION));
+    let header = r.get_u8().ok()?;
+    // A wrapped tree always carries the size bit, so `CheckHeaderSizeBit` holds.
+    if header & SIZE_FLAG != 0 {
+        r.get_uint_to_i32().ok()?;
+    }
+    if header & CONSTANT_SEGREGATION_FLAG != 0 {
+        // Same `getUInt().toInt` count and `safeNewArray` bound as `parse_body`.
+        let count = r.get_uint_to_i32().ok()?.max(0) as usize;
+        crate::opcode::check_array_length(count, "segregated constants").ok()?;
+        for _ in 0..count {
+            read_constant(&mut r).ok()?;
+        }
+    }
+    Some(r.position()..bytes.len())
 }
 
 /// A size-delimited tree degraded: Scala's `deserializeErgoTree` catches the

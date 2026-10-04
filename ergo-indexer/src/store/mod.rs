@@ -396,9 +396,8 @@ impl IndexerStore {
     }
 
     /// Fetch the `IndexedTemplate` parent record keyed by `template_hash`.
-    /// `None` means no output ever indexed under that template (e.g.
-    /// every output's tree was soft-fork-wrapped, or the template
-    /// hasn't been touched on this chain).
+    /// `None` means no output was ever indexed under that template on
+    /// this chain.
     pub fn read_template(
         &self,
         template_hash: &Digest32,

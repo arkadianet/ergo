@@ -76,6 +76,49 @@ fn open_wipes_when_schema_version_mismatches() {
     assert_eq!(store.read_meta().unwrap(), IndexerMeta::empty());
 }
 
+/// A populated schema-2 index (0.11.0 and earlier) holds token metadata and
+/// template keys derived by the replaced projections, so opening it must
+/// resync from genesis rather than resume.
+#[test]
+fn schema_two_index_is_rebuilt_on_open() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("indexer.redb");
+    {
+        let (store, _) = IndexerStore::open(&path).unwrap();
+        let meta = IndexerMeta {
+            indexed_height: 1,
+            indexed_header_id: Some(header_id(0x11)),
+            global_tx_index: 1,
+            global_box_index: 1,
+        };
+        let undo = UndoEntry {
+            prev_indexed_header_id: None,
+            prev_global_tx_index: 0,
+            prev_global_box_index: 0,
+        };
+        store.commit_apply_meta_only(&meta, 1, &undo).unwrap();
+    }
+    {
+        let db = Database::open(&path).unwrap();
+        let txn = ergo_state::begin_write_qr(&db).unwrap();
+        {
+            let mut t = txn.open_table(INDEXER_META).unwrap();
+            t.insert("schema_version", 2u32.to_be_bytes().as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let (store, outcome) = IndexerStore::open(&path).unwrap();
+    assert_eq!(
+        outcome,
+        OpenOutcome::WipedAndRecreated {
+            previous_version: 2
+        }
+    );
+    assert_eq!(store.read_meta().unwrap(), IndexerMeta::empty());
+    assert!(store.read_undo(1).unwrap().is_none());
+}
+
 #[test]
 fn open_halts_when_schema_version_key_missing() {
     let dir = tempdir().unwrap();
@@ -288,10 +331,12 @@ fn rollback_meta_helper_removes_undo_entry() {
 }
 
 #[test]
-fn schema_version_constant_is_two() {
+fn schema_version_constant_is_three() {
     // Bumped from 1 to 2 alongside the storage-rent eligibility index
-    // (spec `2026-05-01-storage-rent-eligibility.md` slice 1). Bump
-    // again whenever the on-disk format changes so this canary forces
-    // a deliberate test update rather than a silent migration.
-    assert_eq!(INDEXER_SCHEMA_VERSION, 2);
+    // (spec `2026-05-01-storage-rent-eligibility.md` slice 1), and to 3
+    // when token text/decimals and wrapped-tree template keys changed.
+    // Bump again whenever the on-disk format or a persisted derivation
+    // changes so this canary forces a deliberate test update rather
+    // than a silent migration.
+    assert_eq!(INDEXER_SCHEMA_VERSION, 3);
 }

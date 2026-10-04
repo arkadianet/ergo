@@ -44,6 +44,13 @@ infrastructure.
   fail node startup. Live-file locks and I/O failures preserve the database
   and keep the existing best-effort peer fallback; automatic quarantine is
   limited to an explicit corruption error.
+- Indexer schema 3: on first start an existing indexer database is deleted
+  and rebuilt from genesis, and `/blockchain/*` answers `503 indexer-syncing`
+  until it catches up. The rebuild applies two Scala-parity corrections to
+  already-indexed history: EIP-4 token names, descriptions and decimals use
+  the JVM text and digit projections, and outputs with soft-fork-wrapped
+  scripts are listed under the template hash Scala records for them (for
+  example the mainnet block 1,702,686 output).
 
 ### Removed
 

@@ -1215,33 +1215,40 @@ fn template_hash_self_consistent_for_emission_contract() {
     assert_eq!(from_parsed, from_bytes);
 }
 
-/// Block 1,702,686 size-flagged non-SigmaProp tree must surface as
-/// `Unparseable` from the bytes path so the indexer can skip
-/// recording an entry rather than emitting a hash that would
-/// collide across every soft-fork-wrapped tree on the chain.
+/// Block 1,702,686 size-flagged non-SigmaProp tree is wrapped, yet Scala's
+/// cached `template` is defined: the bytes after its header (0x09) and size
+/// (0x2f), as it has no segregated constants. The bytes path hashes that
+/// slice, the key a Scala indexer records (see the sigma-state 6.0.6 table in
+/// `hash.rs`). The structured path has no template for the wrapped body.
 #[test]
-fn template_hash_from_bytes_unparseable_for_block_1702686() {
+fn template_hash_from_bytes_uses_scala_template_for_block_1702686() {
     let hex = "092f0204a00b08cd021dde34603426402615658f1d970cfa7c7bd92ac81a8b16ee20427901040404040004020504040402";
     let bytes = hex::decode(hex).unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&bytes[2..]).as_bytes()
+    );
+    let tree = read_ergo_tree(&mut VlqReader::new(&bytes)).unwrap();
+    assert!(matches!(
+        template_hash(&tree),
+        Err(TemplateHashError::Unparseable)
+    ));
 }
 
-/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped
-/// by the version-soft-fork branch and must also surface as
-/// `Unparseable`.
+/// A v4 tree (version > MAX_SUPPORTED_TREE_VERSION = 3) is wrapped by the
+/// version-soft-fork branch. Scala rejects such a tree at deserialization at
+/// every activated version, so it never indexes one; the bytes path applies
+/// the same header/size strip as to any other wrapped tree.
 #[test]
-fn template_hash_from_bytes_unparseable_for_v4_softfork() {
+fn template_hash_from_bytes_strips_v4_softfork_header_and_size() {
     // Header: 0x0C = v=4, has_size=true, no cseg. Size VLQ(1)=0x01.
     // Body: one arbitrary byte (0x00) — never parsed because version
     // exceeds MAX_SUPPORTED_TREE_VERSION, so the wrap branch fires.
     let bytes = hex::decode("0C0100").unwrap();
-    match template_hash_from_bytes(&bytes) {
-        Err(TemplateHashError::Unparseable) => {}
-        other => panic!("expected Unparseable for v4 tree, got {other:?}"),
-    }
+    assert_eq!(
+        template_hash_from_bytes(&bytes).unwrap(),
+        *blake2b256(&[0x00]).as_bytes()
+    );
 }
 
 /// Every mainnet vector that the existing roundtrip test exercises

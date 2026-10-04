@@ -14,15 +14,21 @@ use crate::error::IndexerError;
 use crate::store::tables::INDEXER_META;
 use crate::HeaderId;
 
-/// Bumped any time the on-disk format changes incompatibly. A bump
-/// triggers the wipe/resume table's `schema_version mismatch` row:
+/// Bumped any time the on-disk format changes incompatibly, or a value
+/// derived once at apply time changes. A bump triggers the wipe/resume
+/// table's `schema_version mismatch` row:
 /// the file is deleted and recreated, forcing a full resync. New
 /// tables introduced at the current version are lazy-created on first
 /// apply (`WriteTransaction::open_table` is create-or-open in redb
 /// 4.x), so the wipe-and-resync path is the only mechanism that
 /// backfills them — older DBs are deleted on first boot, never
 /// migrated in place.
-pub const INDEXER_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 re-derives JVM token name/description/decimals projections
+/// and template entries for soft-fork-wrapped trees. Mint-time token
+/// metadata is never recomputed, and rolling back a pre-change wrapped
+/// output would pop a template entry that was never recorded.
+pub const INDEXER_SCHEMA_VERSION: u32 = 3;
 
 pub(crate) const KEY_SCHEMA_VERSION: &str = "schema_version";
 pub(crate) const KEY_INDEXED_HEIGHT: &str = "indexed_height";
