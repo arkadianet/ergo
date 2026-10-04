@@ -11,6 +11,8 @@ use crate::node::wallet_bridge::{ChainStateAccessor, TxSubmitter, WriterConfig};
 
 #[derive(Default)]
 struct Probe {
+    /// Behaves like a node without `[mining]`: every private call fails.
+    mining_disabled: AtomicBool,
     snapshots: AtomicUsize,
     snapshot_hangs: AtomicBool,
     snapshot_fails: AtomicBool,
@@ -27,6 +29,10 @@ impl TxSubmitter for Probe {
         panic!("maintenance must never broadcast");
     }
 
+    fn private_mining_configured(&self) -> bool {
+        !self.mining_disabled.load(Ordering::SeqCst)
+    }
+
     async fn private_transactions(
         &self,
     ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {
@@ -34,7 +40,8 @@ impl TxSubmitter for Probe {
         if self.snapshot_hangs.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
-        if self.snapshot_fails.load(Ordering::SeqCst) {
+        if self.snapshot_fails.load(Ordering::SeqCst) || self.mining_disabled.load(Ordering::SeqCst)
+        {
             return Err(ergo_api::types::SubmitError {
                 reason: "private_mining_unavailable".into(),
                 detail: None,
@@ -48,6 +55,12 @@ impl TxSubmitter for Probe {
         bytes: Vec<u8>,
         _: ergo_api::mining::PrivateTransactionOptions,
     ) -> Result<String, ergo_api::types::SubmitError> {
+        if self.mining_disabled.load(Ordering::SeqCst) {
+            return Err(ergo_api::types::SubmitError {
+                reason: "private_mining_unavailable".into(),
+                detail: None,
+            });
+        }
         self.submissions.lock().push(bytes);
         if self.submit_hangs.load(Ordering::SeqCst) {
             return std::future::pending().await;
@@ -60,6 +73,12 @@ impl TxSubmitter for Probe {
         _: String,
     ) -> Result<(), ergo_api::types::SubmitError> {
         self.cancellations.fetch_add(1, Ordering::SeqCst);
+        if self.mining_disabled.load(Ordering::SeqCst) {
+            return Err(ergo_api::types::SubmitError {
+                reason: "private_mining_unavailable".into(),
+                detail: None,
+            });
+        }
         if self.cancel_hangs.load(Ordering::SeqCst) {
             return std::future::pending().await;
         }
@@ -154,6 +173,10 @@ impl Harness {
     }
 
     fn seed(&self, state: WalletJobState, signed: bool) -> u64 {
+        self.seed_until(state, signed, 100)
+    }
+
+    fn seed_until(&self, state: WalletJobState, signed: bool, expires_at_height: u32) -> u64 {
         let job = create(
             &self.db,
             WalletJobRequest {
@@ -161,8 +184,8 @@ impl Harness {
                 task: WalletJobTask::Renew {
                     box_ids: vec!["11".repeat(32)],
                 },
-                not_before_height: 10,
-                expires_at_height: 100,
+                not_before_height: 1,
+                expires_at_height,
                 max_attempts: 3,
             },
         )
@@ -233,6 +256,79 @@ async fn unsigned_locked_job_needs_no_queue_rpc_or_retry_attempt() {
     assert_eq!(job.attempts, 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn disabled_private_mining_waits_then_retires_jobs_locally() {
+    let harness = Harness::new();
+    harness.probe.mining_disabled.store(true, Ordering::SeqCst);
+    let queued = harness.seed(WalletJobState::Queued, true);
+    let prepared = harness.seed(WalletJobState::Prepared, true);
+    let unsigned = harness.seed(WalletJobState::Waiting, false);
+    tick(&harness.context()).await.unwrap();
+    assert_eq!(harness.probe.snapshots.load(Ordering::SeqCst), 0);
+    for (_, record) in records(&harness.db).unwrap() {
+        assert_eq!(record.job.attempts, 0);
+        assert_eq!(
+            record.job.detail.as_deref(),
+            Some("private mining is not enabled on this node")
+        );
+    }
+    // Nothing can be queued on such a node, so cancellation needs no RPC.
+    let cancelled = cancel(&harness.context(), &queued.to_string())
+        .await
+        .unwrap();
+    assert_eq!(cancelled.state, WalletJobState::Cancelled);
+    assert_eq!(harness.probe.cancellations.load(Ordering::SeqCst), 0);
+    harness.height.0.store(100, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    let states: BTreeMap<_, _> = records(&harness.db)
+        .unwrap()
+        .into_iter()
+        .map(|(key, record)| (key, record.job.state))
+        .collect();
+    assert_eq!(states[&queued], WalletJobState::Cancelled);
+    assert_eq!(states[&prepared], WalletJobState::Expired);
+    assert_eq!(states[&unsigned], WalletJobState::Expired);
+    assert!(reserved_inputs(&harness.db).unwrap().is_empty());
+    assert!(harness.probe.submissions.lock().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_without_queue_knowledge_reports_a_wallet_confirmed_transaction() {
+    let harness = Harness::new();
+    let confirmed = harness.seed_until(WalletJobState::Queued, true, 10);
+    let unconfirmed = harness.seed_until(WalletJobState::Queued, true, 10);
+    let tx_id: [u8; 32] = hex::decode(format!("{confirmed:064x}"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let write = harness.db.begin_write().unwrap();
+    write
+        .open_table(ergo_state::wallet::tables::WALLET_TXS)
+        .unwrap()
+        .insert(
+            ergo_state::wallet::tables::wallet_tx_key(10, &tx_id),
+            bincode::serialize(&ergo_state::wallet::types::WalletTransaction {
+                tx_id,
+                block_height: 10,
+                block_id: [0x33; 32],
+                wallet_outputs: Vec::new(),
+                wallet_inputs: vec![[0x11; 32]],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    harness.probe.snapshot_fails.store(true, Ordering::SeqCst);
+    tick(&harness.context()).await.unwrap();
+    let jobs: BTreeMap<_, _> = records(&harness.db).unwrap().into_iter().collect();
+    assert_eq!(jobs[&confirmed].job.state, WalletJobState::Mined);
+    assert_eq!(
+        jobs[&confirmed].job.detail.as_deref(),
+        Some(MINED_IN_WALLET)
+    );
+    assert_eq!(jobs[&unconfirmed].job.state, WalletJobState::Expired);
+}
+
 // ----- error paths -----
 #[tokio::test(start_paused = true)]
 async fn unavailable_snapshot_is_bounded_and_preserves_uncertain_admissions() {
@@ -240,16 +336,25 @@ async fn unavailable_snapshot_is_bounded_and_preserves_uncertain_admissions() {
     for _ in 0..8 {
         harness.seed(WalletJobState::Queued, true);
     }
+    // Neither unsigned work nor a passed deadline depends on the queue.
+    let unsigned = harness.seed(WalletJobState::Waiting, false);
+    let late = harness.seed_until(WalletJobState::Queued, true, 10);
     harness.probe.snapshot_hangs.store(true, Ordering::SeqCst);
     let start = tokio::time::Instant::now();
     tick(&harness.context()).await.unwrap();
     assert_eq!(start.elapsed(), BACKGROUND_RPC_TIMEOUT);
     assert_eq!(harness.probe.snapshots.load(Ordering::SeqCst), 1);
     assert!(harness.probe.submissions.lock().is_empty());
-    for (_, record) in records(&harness.db).unwrap() {
-        assert_eq!(record.job.state, WalletJobState::Queued);
+    for (key, record) in records(&harness.db).unwrap() {
+        if key == unsigned {
+            assert_eq!(record.job.state, WalletJobState::WaitingForWallet);
+        } else if key == late {
+            assert_eq!(record.job.state, WalletJobState::Expired);
+        } else {
+            assert_eq!(record.job.state, WalletJobState::Queued);
+            assert_eq!(record.signed_hex.as_deref(), Some("abcd"));
+        }
         assert_eq!(record.job.attempts, 0);
-        assert_eq!(record.signed_hex.as_deref(), Some("abcd"));
     }
     assert!(!harness.rescan.stopping());
 }

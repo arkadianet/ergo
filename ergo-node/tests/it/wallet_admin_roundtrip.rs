@@ -1847,9 +1847,10 @@ async fn native_signed_private_delivery_preserves_bytes_without_wallet_unlock_or
 }
 
 /// The real writer refuses to journal an approval while the wallet is locked:
-/// an approved job later signs with the wallet key, like an intent send.
+/// an approved job later signs with the wallet key, like an intent send. A node
+/// without private mining refuses it too, since the job could never run.
 #[tokio::test]
-async fn mining_job_approval_requires_an_unlocked_wallet() {
+async fn mining_job_approval_requires_an_unlocked_wallet_and_private_mining() {
     use ergo_api::wallet::native::dto::{WalletJobRequest, WalletJobTask};
     use ergo_state::wallet::tables::WALLET_BOXES;
     use ergo_state::wallet::types::{BoxProvenance, BoxStatus, WalletBox};
@@ -1883,8 +1884,13 @@ async fn mining_job_approval_requires_an_unlocked_wallet() {
     };
     assert!(admin.native_status().await.unwrap().locked);
     assert!(matches!(
-        admin.create_mining_job(request).await,
+        admin.create_mining_job(request.clone()).await,
         Err(WalletAdminError::Locked)
+    ));
+    admin.unlock("pw".into()).await.unwrap();
+    assert!(matches!(
+        admin.create_mining_job(request).await,
+        Err(WalletAdminError::BadRequest(detail)) if detail.contains("private mining")
     ));
     assert!(admin.mining_jobs().await.unwrap().items.is_empty());
 }

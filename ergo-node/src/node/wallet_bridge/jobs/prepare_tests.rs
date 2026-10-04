@@ -40,6 +40,10 @@ impl TxSubmitter for PrivateQueue {
         panic!("maintenance must never broadcast");
     }
 
+    fn private_mining_configured(&self) -> bool {
+        true
+    }
+
     async fn private_transactions(
         &self,
     ) -> Result<Vec<ergo_api::mining::PrivateTransactionEntry>, ergo_api::types::SubmitError> {

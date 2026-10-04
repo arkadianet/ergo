@@ -38,9 +38,17 @@ There is at most one preparation/submission attempt per applied height and one
 operation per scheduler wake. Mined jobs follow private-queue reorg state.
 The scheduler reads one queue metadata snapshot per wake and waits at most one
 second for each background metadata, admission, or cancellation request. An
-unavailable snapshot preserves pending jobs and their reservations. An uncertain
-admission keeps its prepared bytes; only a successful later snapshot showing
-absence permits resubmission of those same bytes.
+unavailable snapshot holds back only jobs whose transaction may already be
+admitted, and only until their deadline: the queue applies the same height
+deadline, so expiry never waits for it. An uncertain admission keeps its
+prepared bytes; only a successful later snapshot showing absence permits
+resubmission of those same bytes. When the queue cannot report a deadline's
+outcome, the wallet's own chain history tells a mined job from an expired one.
+
+Jobs need private mining, so a node without `[mining] enabled = true` refuses
+approvals. If mining is disabled after approval, pending jobs wait without
+signing or spending attempts; their deadline and cancellation then take effect
+locally, since nothing is queued on such a node.
 
 The journal holds at most 256 jobs, pruning the oldest terminal record when
 necessary. Each record is bounded to 512 KiB. Signed bytes remain in the node's

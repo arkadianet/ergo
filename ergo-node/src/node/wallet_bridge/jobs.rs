@@ -238,6 +238,13 @@ pub(super) fn create_owned(
     if ctx.storage.read().unlocked().is_none() {
         return Err(WalletAdminError::Locked);
     }
+    // Jobs deliver only to this node's private mining queue; without one an
+    // approval could never run, yet would reserve its inputs until expiry.
+    if !ctx.submit_handle.private_mining_configured() {
+        return Err(WalletAdminError::BadRequest(
+            "maintenance jobs need private mining; enable [mining] on this node".into(),
+        ));
+    }
     super::scan_guard::require_valid_scan(ctx.store.as_ref())?;
     let height = ctx.chain.tip_height().map_err(internal)?;
     if request.expires_at_height <= height {
@@ -381,7 +388,21 @@ pub(super) async fn cancel(
         return Ok(record.job);
     }
     if let Some(tx_id) = &record.job.tx_id {
-        if bounded_rpc(ctx.submit_handle.private_transaction_status(tx_id.clone()))
+        if !ctx.submit_handle.private_mining_configured() {
+            // Nothing is queued on a node without private mining, so absence is
+            // definitive; only an already mined transaction cannot be cancelled.
+            if mined_in_wallet(ctx, tx_id)? == Some(true) {
+                transition(
+                    &mut record,
+                    WalletJobState::Mined,
+                    Some(MINED_IN_WALLET.into()),
+                );
+                save(ctx.db, job_id, &record)?;
+                return Err(WalletAdminError::BadRequest(
+                    "the job transaction is already confirmed and cannot be cancelled".into(),
+                ));
+            }
+        } else if bounded_rpc(ctx.submit_handle.private_transaction_status(tx_id.clone()))
             .await
             .map_err(sign_submit::map_submit_error)?
             .is_some()
@@ -394,6 +415,27 @@ pub(super) async fn cancel(
     transition(&mut record, WalletJobState::Cancelled, None);
     save(ctx.db, job_id, &record)?;
     Ok(record.job)
+}
+
+const MINED_IN_WALLET: &str = "confirmed in the wallet's chain history";
+
+/// Without private queue knowledge, the wallet's own history tells a mined job
+/// from one that never confirmed. `None` while that history is incomplete.
+fn mined_in_wallet(ctx: &WriterContext<'_>, tx_id: &str) -> Result<Option<bool>, WalletAdminError> {
+    if ctx.rescan.in_progress()
+        || super::scan_guard::require_valid_scan(ctx.store.as_ref()).is_err()
+    {
+        return Ok(None);
+    }
+    let tx_id: [u8; 32] = hex::decode(tx_id)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| internal("bad journal transaction id"))?;
+    let read = ctx.db.begin_read().map_err(internal)?;
+    let found = WalletReader::new(&read)
+        .transaction_by_id(&tx_id)
+        .map_err(internal)?;
+    Ok(Some(found.is_some()))
 }
 
 fn task_box_ids(task: &WalletJobTask) -> &[String] {
@@ -655,6 +697,16 @@ async fn prepare(ctx: &WriterContext<'_>, record: &Record) -> Result<Vec<u8>, Wa
     Ok(signed)
 }
 
+/// Private queue knowledge for one scheduler wake.
+enum Queue {
+    /// This node has no private mining queue: nothing can be admitted, and no
+    /// admitted transaction is waiting here.
+    Disabled,
+    /// The snapshot failed. Admissions stay uncertain until a later read.
+    Unavailable(Option<String>),
+    Entries(BTreeMap<String, ergo_api::mining::PrivateTransactionEntry>),
+}
+
 /// Perform at most one due preparation/submission per wake. This runs inside
 /// the existing wallet writer so lock, cancel and shutdown retain its ordering.
 pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError> {
@@ -667,92 +719,114 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
     }
     let height = ctx.chain.tip_height().map_err(internal)?;
     // One queue RPC per wake, regardless of retained job count. An unavailable
-    // snapshot is never evidence that an uncertain admission disappeared.
-    let queue = if jobs
+    // snapshot is never evidence that an uncertain admission disappeared, so it
+    // holds back only jobs with an admitted transaction, and only until their
+    // deadline, which the queue enforces at the same height.
+    let queue = if !ctx.submit_handle.private_mining_configured() {
+        Queue::Disabled
+    } else if jobs
         .iter()
         .any(|(_, record)| follows_queue(record) && record.job.tx_id.is_some())
     {
         match bounded_rpc(ctx.submit_handle.private_transactions()).await {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|entry| (entry.tx_id.clone(), entry))
-                .collect::<BTreeMap<_, _>>(),
-            Err(error) => {
-                let detail = error.detail.or(Some(error.reason));
-                for (job_id, mut record) in jobs {
-                    if follows_queue(&record)
-                        && record.job.tx_id.is_some()
-                        && record.job.detail != detail
-                    {
-                        record.job.detail = detail.clone();
-                        save(ctx.db, job_id, &record)?;
-                    }
-                }
-                return Ok(());
-            }
+            Ok(entries) => Queue::Entries(
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.tx_id.clone(), entry))
+                    .collect(),
+            ),
+            Err(error) => Queue::Unavailable(error.detail.or(Some(error.reason))),
         }
     } else {
-        BTreeMap::new()
+        Queue::Entries(BTreeMap::new())
     };
     for (job_id, mut record) in jobs {
         if !follows_queue(&record) {
             continue;
         }
         let mut queue_known = false;
-        if let Some(tx_id) = record.job.tx_id.as_ref() {
-            match queue.get(tx_id) {
-                Some(entry) => {
-                    queue_known = true;
-                    let state = match entry.state.as_str() {
-                        "mined" => WalletJobState::Mined,
-                        "in_candidate" => WalletJobState::InCandidate,
-                        "conflicted" => WalletJobState::Conflicted,
-                        "cancelled" => WalletJobState::Cancelled,
-                        "expired" => WalletJobState::Expired,
-                        "queued" => WalletJobState::Queued,
-                        _ => {
+        if let Some(tx_id) = record.job.tx_id.clone() {
+            match &queue {
+                Queue::Entries(entries) => match entries.get(&tx_id) {
+                    Some(entry) => {
+                        queue_known = true;
+                        let state = match entry.state.as_str() {
+                            "mined" => WalletJobState::Mined,
+                            "in_candidate" => WalletJobState::InCandidate,
+                            "conflicted" => WalletJobState::Conflicted,
+                            "cancelled" => WalletJobState::Cancelled,
+                            "expired" => WalletJobState::Expired,
+                            "queued" => WalletJobState::Queued,
+                            _ => {
+                                continue;
+                            }
+                        };
+                        if record.job.state != state {
+                            transition(&mut record, state, entry.reason.clone());
+                            save(ctx.db, job_id, &record)?;
+                        }
+                        if state.terminal() {
                             continue;
                         }
-                    };
-                    if record.job.state != state {
-                        transition(&mut record, state, entry.reason.clone());
-                        save(ctx.db, job_id, &record)?;
                     }
-                    if state.terminal() {
+                    None if record.job.state == WalletJobState::Mined => {
                         continue;
                     }
-                }
-                None if record.job.state == WalletJobState::Mined => {
+                    None if matches!(
+                        record.job.state,
+                        WalletJobState::Queued | WalletJobState::InCandidate
+                    ) =>
+                    {
+                        transition(
+                            &mut record,
+                            WalletJobState::Prepared,
+                            Some("recovering private admission from durable signed bytes".into()),
+                        );
+                        save(ctx.db, job_id, &record)?;
+                    }
+                    None => {}
+                },
+                // Without queue knowledge a mined or conflicted job keeps its state.
+                _ if record.job.state.terminal() => continue,
+                Queue::Unavailable(detail) if height < record.job.request.expires_at_height => {
+                    if record.job.detail != *detail {
+                        record.job.detail = detail.clone();
+                        save(ctx.db, job_id, &record)?;
+                    }
                     continue;
                 }
-                None if matches!(
-                    record.job.state,
-                    WalletJobState::Queued | WalletJobState::InCandidate
-                ) =>
-                {
-                    transition(
-                        &mut record,
-                        WalletJobState::Prepared,
-                        Some("recovering private admission from durable signed bytes".into()),
-                    );
-                    save(ctx.db, job_id, &record)?;
-                }
-                None => {}
+                _ => {}
             }
         }
         if height >= record.job.request.expires_at_height {
             if let Some(tx_id) = record.job.tx_id.as_ref() {
-                match if queue_known {
-                    bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone())).await
-                } else {
-                    Ok(())
-                } {
-                    Ok(()) => {}
-                    Err(error) if error.reason == "not_found" => {}
-                    Err(error) => {
-                        record.job.detail = error.detail.or(Some(error.reason));
-                        save(ctx.db, job_id, &record)?;
-                        return Ok(());
+                if queue_known {
+                    match bounded_rpc(ctx.submit_handle.cancel_private_transaction(tx_id.clone()))
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(error) if error.reason == "not_found" => {}
+                        Err(error) => {
+                            record.job.detail = error.detail.or(Some(error.reason));
+                            save(ctx.db, job_id, &record)?;
+                            return Ok(());
+                        }
+                    }
+                } else if !matches!(queue, Queue::Entries(_)) {
+                    // The transaction may have confirmed at the deadline height
+                    // while the queue could not report it.
+                    match mined_in_wallet(ctx, tx_id)? {
+                        None => continue,
+                        Some(true) => {
+                            transition(
+                                &mut record,
+                                WalletJobState::Mined,
+                                Some(MINED_IN_WALLET.into()),
+                            );
+                            save(ctx.db, job_id, &record)?;
+                            continue;
+                        }
+                        Some(false) => {}
                     }
                 }
             }
@@ -764,6 +838,16 @@ pub(super) async fn tick(ctx: &WriterContext<'_>) -> Result<(), WalletAdminError
             save(ctx.db, job_id, &record)?;
             if queue_known {
                 return Ok(());
+            }
+            continue;
+        }
+        if matches!(queue, Queue::Disabled) {
+            // Nothing can be delivered: wait for the deadline or a cancellation
+            // without signing or spending the retry allowance.
+            let detail = Some("private mining is not enabled on this node".to_owned());
+            if record.job.detail != detail {
+                record.job.detail = detail;
+                save(ctx.db, job_id, &record)?;
             }
             continue;
         }

@@ -48,6 +48,12 @@ pub trait TxSubmitter: Send + Sync {
         &self,
         tx_bytes: Vec<u8>,
     ) -> Result<String, ergo_api::types::SubmitError>;
+    /// Whether this node runs a private mining queue. `false` is definitive for
+    /// the process lifetime, unlike a queue that is temporarily unavailable.
+    fn private_mining_configured(&self) -> bool {
+        false
+    }
+
     /// Submit to the authenticated private mining queue, never public relay.
     async fn submit_private_transaction(
         &self,
@@ -121,6 +127,9 @@ impl TxSubmitter for NodeSubmitAdapter {
         self.inner
             .submit_transaction(tx_bytes, SubmitMode::Broadcast)
             .await
+    }
+    fn private_mining_configured(&self) -> bool {
+        self.mining.is_some()
     }
     async fn submit_private_transaction(
         &self,
