@@ -87,13 +87,15 @@ pub fn read_indexed_template(r: &mut VlqReader) -> Result<IndexedTemplate, ReadE
 ///   keyed by the template re-read from its retained bytes, or by the hash of
 ///   those bytes where that re-read fails. The indexer must record this
 ///   output / input under the returned `template_hash`.
+/// - `Ok(Some(hash))` of the tree bytes themselves when they do not re-read
+///   as one tree. A box can retain such bytes: a size-delimited tree whose
+///   body fails soft-forkably is wrapped at its declared size, which may end
+///   inside its constants. Scala's `hashTreeTemplate` catches any failure of
+///   `tree.template` and falls back to `Algos.hash(tree.bytes)`, so any
+///   consensus-valid output indexes rather than halting the indexer.
 /// - `Ok(None)` / `Err(IndexerError::HashDerivation)`: the shared
 ///   `TemplateHashError` arms that only the structured `template_hash`
 ///   produces; the received-bytes helper never returns them.
-/// - `Err(IndexerError::DbDecode)` when the bytes fail to re-parse
-///   under the wrap-tracking reader. Carries the underlying
-///   `ergo_primitives::reader::ReadError` — same divergence class as
-///   any other row-decode mismatch.
 pub(crate) fn template_hash_for_box_bytes(
     tree_bytes: &[u8],
 ) -> Result<Option<Digest32>, IndexerError> {
@@ -104,10 +106,9 @@ pub(crate) fn template_hash_for_box_bytes(
             context: "template_hash",
             source,
         }),
-        Err(TemplateHashError::Parse(source)) => Err(IndexerError::DbDecode {
-            context: "template_hash_tree_bytes",
-            source,
-        }),
+        Err(TemplateHashError::Parse(_)) => {
+            Ok(Some(crate::segment_id::tree_hash_from_bytes(tree_bytes)))
+        }
     }
 }
 
@@ -197,6 +198,31 @@ mod tests {
         );
         assert_eq!(&parsed, t);
         bytes
+    }
+
+    // ----- Scala hashTreeTemplate fallback -----
+
+    /// A box may carry a size-delimited tree whose declared size ends inside
+    /// its segregated constants: the box reader keeps it as a soft-fork wrap,
+    /// but those bytes do not re-read as one tree. Scala's `hashTreeTemplate`
+    /// catches the failed `template` and keys the box by the hash of its tree
+    /// bytes, so such an output must index rather than halt the indexer.
+    #[test]
+    fn unreadable_wrapped_tree_bytes_key_by_their_own_hash() {
+        // value 1; tree `18 01 01` declares a one-byte body, but its constant
+        // runs on into `09`, a type code version-0 trees may not use, so the
+        // reader wraps the declared bytes and rewinds: `09` is then the
+        // creation height, followed by no tokens and no registers.
+        let box_bytes = hex::decode("01180101090000").unwrap();
+        let candidate =
+            ergo_ser::ergo_box::read_ergo_box_candidate(&mut VlqReader::new(&box_bytes)).unwrap();
+        let tree_bytes = candidate.ergo_tree_bytes();
+        assert_eq!(tree_bytes, [0x18, 0x01, 0x01]);
+        assert!(template_hash_from_bytes(tree_bytes).is_err());
+        assert_eq!(
+            template_hash_for_box_bytes(tree_bytes).unwrap(),
+            Some(crate::segment_id::tree_hash_from_bytes(tree_bytes))
+        );
     }
 
     // ----- happy path -----
