@@ -46,3 +46,4 @@ pub use reward_script::{reward_output_script, reward_output_script_from_hex, REW
 
 mod genesis;
 mod policy_store;
+mod retained_size;

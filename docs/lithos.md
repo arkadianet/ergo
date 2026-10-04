@@ -92,8 +92,13 @@ Identical ordered packages on the live parent reuse their offered work for
 60 seconds, including the message and template sequence. Cache hits do not
 consume build permits. Requested jobs retain up to 16 templates per miner key
 and share a 64 MiB accounted-byte budget (four times encoded transactions,
-resolved system inputs, AVL proofs, extensions and membership proofs, at least
-64 KiB per job). Budget pressure evicts stale or withdrawn jobs first. Ordinary
+resolved system inputs, AVL proofs, extensions and membership proofs, plus
+parsed structures and exclusion observations, at least 64 KiB per job). Both
+retention limits evict stale or withdrawn jobs first, then the least recently
+served eligible job. Live jobs served within 60 seconds plus a 30-second solution
+grace period remain protected; a new publish that cannot fit answers 503.
+Requested history covers the current parent and three recent tip transitions
+for reorgs. Ordinary
 jobs retain their own 16-slot history. Refreshing
 ordinary mempool contents cannot evict a retained Lithos job; solo candidate
 reads use the operator's key even after a lender request. Submit `pk` from the

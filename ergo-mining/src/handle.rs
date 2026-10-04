@@ -116,6 +116,8 @@ pub const MAX_REQUESTED_TEMPLATES: usize = MAX_REQUESTED_TEMPLATE_BYTES / (64 * 
 pub const REQUESTED_GENERATION_INTERVAL_MS: u64 = 60_000;
 /// Time for a miner to submit a solution after its last reusable reply.
 pub const REQUESTED_SOLUTION_GRACE_MS: u64 = 30_000;
+/// Current parent plus three recent tip transitions for reorg coverage.
+pub const MAX_REQUESTED_PARENTS: usize = 4;
 /// Bounded lifecycle event retention; events reset on node restart.
 pub const MAX_MINING_OUTCOMES: usize = 128;
 
@@ -151,6 +153,7 @@ struct MiningCache {
     /// Monotonic publish counter, stamped onto each template's
     /// `TemplateIdentity::template_seq`. Never reset.
     template_seq: u64,
+    requested_parents: std::collections::VecDeque<[u8; 32]>,
     operator_generation: u64,
     /// Authoritative current tip + synced bit, kept INSIDE the cache lock so
     /// the off-loop engine's CAS-publish and the cache-only serve both decide
@@ -872,6 +875,16 @@ impl MiningHandle {
             if cache.best_tip == tip {
                 false
             } else {
+                if cache.requested_parents.back() != Some(&tip.parent_id) {
+                    cache.requested_parents.push_back(tip.parent_id);
+                    while cache.requested_parents.len() > MAX_REQUESTED_PARENTS {
+                        cache.requested_parents.pop_front();
+                    }
+                    let parents = cache.requested_parents.clone();
+                    cache.templates.retain(|t| {
+                        t.requested_weight == 0 || parents.contains(&t.template.candidate.parent_id)
+                    });
+                }
                 cache.best_tip = tip;
                 true
             }
@@ -1001,7 +1014,25 @@ impl MiningHandle {
                         .sum::<usize>(),
                 )
                 .saturating_add(proofs_size);
-            encoded_size.saturating_mul(4).max(64 * 1024)
+            let parsed_size = crate::retained_size::candidate_parsed_size(&candidate);
+            let excluded_size = candidate
+                .observation
+                .excluded
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::inspection::ExcludedTransaction>())
+                .saturating_add(
+                    candidate
+                        .observation
+                        .excluded
+                        .iter()
+                        .map(|tx| tx.reason.capacity())
+                        .sum::<usize>(),
+                );
+            encoded_size
+                .saturating_mul(4)
+                .saturating_add(parsed_size)
+                .saturating_add(excluded_size)
+                .max(64 * 1024)
         } else {
             0
         };
@@ -3619,7 +3650,7 @@ mod tests {
         ] {
             handle.set_best_tip(synced_tip(parent));
             let (candidate, mut work) = candidate_pair_for_key(parent, msg, pk, 10);
-            work.metrics.transactions_size_bytes = 8 * 1024 * 1024;
+            work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
             seqs.push(
                 handle
                     .publish_if_current(
@@ -3634,7 +3665,8 @@ mod tests {
             );
         }
         handle.set_best_tip(synced_tip(a));
-        let (candidate, work) = candidate_pair_for_key(a, [0xB5; 32], [3; 33], 10);
+        let (candidate, mut work) = candidate_pair_for_key(a, [0xB5; 32], [3; 33], 10);
+        work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
         handle
             .publish_if_current(candidate, work, &a, || BUILT_AT_MS, BuildReason::Requested)
             .unwrap();
@@ -3665,7 +3697,7 @@ mod tests {
                 let (mut candidate, mut work) =
                     candidate_pair_for_key(parent, [i; 32], key, 10 + i as u64);
                 candidate.observation.requested_ids = if i == 0 { ids.clone() } else { vec![] };
-                work.metrics.transactions_size_bytes = 8 * 1024 * 1024;
+                work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
                 seqs.push(
                     handle
                         .publish_if_current(
@@ -3689,7 +3721,7 @@ mod tests {
                     .is_some());
             }
             let (candidate, mut work) = candidate_pair_for_key(parent, [3; 32], [2; 33], 30);
-            work.metrics.transactions_size_bytes = 8 * 1024 * 1024;
+            work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
             handle
                 .publish_if_current(
                     candidate,
@@ -3734,7 +3766,7 @@ mod tests {
                 let (candidate, mut work) =
                     candidate_pair_for_key(parent, [i as u8; 32], requested_test_key(), 10);
                 if byte_budget {
-                    work.metrics.transactions_size_bytes = 8 * 1024 * 1024;
+                    work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
                 }
                 handle
                     .publish_if_current(
@@ -3748,8 +3780,11 @@ mod tests {
             }
             let history = handle.inspect_history();
             let sequence = handle.cache.read().unwrap().template_seq;
-            let (candidate, work) =
+            let (candidate, mut work) =
                 candidate_pair_for_key(parent, [99; 32], requested_test_key(), 10);
+            if byte_budget {
+                work.metrics.transactions_size_bytes = 7 * 1024 * 1024;
+            }
             assert!(handle
                 .publish_if_current(
                     candidate,
@@ -3770,6 +3805,117 @@ mod tests {
                     BuildReason::Tip
                 )
                 .is_some());
+        }
+    }
+
+    #[test]
+    fn requested_history_retires_old_parents_and_preserves_recent_reorgs() {
+        let handle = MiningHandle::mainnet([2; 33]);
+        let a = [0; 32];
+        handle.set_best_tip(synced_tip_seq(a, 1));
+        let (candidate, work) = candidate_pair(a);
+        let ordinary = handle
+            .publish_if_current(candidate, work, &a, || BUILT_AT_MS, BuildReason::Tip)
+            .unwrap()
+            .template_seq;
+        let (candidate, work) = candidate_pair_for_key(a, [99; 32], requested_test_key(), 10);
+        let requested = handle
+            .publish_if_current(candidate, work, &a, || BUILT_AT_MS, BuildReason::Requested)
+            .unwrap()
+            .template_seq;
+        for (parent, seq) in [([1; 32], 2), ([2; 32], 3), (a, 4)] {
+            handle.set_best_tip(synced_tip_seq(parent, seq));
+        }
+        assert!(handle
+            .cached_requested_template_if_synced(requested, BUILT_AT_MS)
+            .is_some());
+        for i in 1..=MAX_REQUESTED_PARENTS {
+            let parent = [i as u8; 32];
+            handle.set_best_tip(synced_tip_seq(parent, 4 + i as u64));
+            let (candidate, work) =
+                candidate_pair_for_key(parent, [i as u8; 32], requested_test_key(), 10);
+            handle
+                .publish_if_current(
+                    candidate,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested,
+                )
+                .unwrap();
+            if i < MAX_REQUESTED_PARENTS {
+                assert!(handle.inspect_template(None, Some(requested)).is_some());
+            }
+        }
+        assert!(handle.inspect_template(None, Some(requested)).is_none());
+        assert!(handle.inspect_template(None, Some(ordinary)).is_some());
+        assert_eq!(
+            handle.cache.read().unwrap().requested_parents.len(),
+            MAX_REQUESTED_PARENTS
+        );
+    }
+
+    #[test]
+    fn requested_weight_counts_parsed_outputs_and_excluded_reasons() {
+        for parsed in [false, true] {
+            let handle = MiningHandle::mainnet([2; 33]);
+            let parent = [0; 32];
+            handle.set_best_tip(synced_tip(parent));
+            let (mut candidate, work) =
+                candidate_pair_for_key(parent, [99; 32], requested_test_key(), 10);
+            let minimum = if parsed {
+                let bytes =
+                    ergo_ser::address::build_p2pk_tree_bytes(&requested_test_key()).unwrap();
+                let tree = ergo_ser::ergo_tree::read_ergo_tree(
+                    &mut ergo_primitives::reader::VlqReader::new(&bytes),
+                )
+                .unwrap();
+                let output = ergo_ser::ergo_box::ErgoBoxCandidate::new(
+                    1_000_000_000,
+                    tree,
+                    0,
+                    vec![],
+                    ergo_ser::register::AdditionalRegisters::empty(),
+                )
+                .unwrap();
+                candidate
+                    .transactions
+                    .push(ergo_ser::transaction::Transaction {
+                        inputs: vec![],
+                        data_inputs: vec![],
+                        output_candidates: vec![output; 2000],
+                    });
+                2000 * std::mem::size_of::<ergo_ser::ergo_box::ErgoBoxCandidate>()
+            } else {
+                candidate
+                    .observation
+                    .excluded
+                    .push(crate::inspection::ExcludedTransaction {
+                        tx_id: Digest32::from_bytes([1; 32]),
+                        reason: "x".repeat(1024 * 1024),
+                    });
+                1024 * 1024
+            };
+            handle
+                .publish_if_current(
+                    candidate,
+                    work,
+                    &parent,
+                    || BUILT_AT_MS,
+                    BuildReason::Requested,
+                )
+                .unwrap();
+            assert!(
+                handle
+                    .cache
+                    .read()
+                    .unwrap()
+                    .templates
+                    .back()
+                    .unwrap()
+                    .requested_weight
+                    > minimum
+            );
         }
     }
 
