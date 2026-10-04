@@ -27,12 +27,9 @@ It rejects tokenless dust change that would otherwise silently become a fee;
 choose exact inputs or enough change for a valid box. Public admission retains
 its configured minimum relay fee.
 
-Zero miner fees do not remove contract requirements, minimum output values,
-re-emission obligations, DEX pool fees, or payments to a swap service. A signed
-swap that spends a particular pool UTXO cannot be edited if that UTXO is spent.
-It must be rebuilt and signed again. A node wallet can sign a new bounded swap
-intent while unlocked; an external wallet must provide a new signature. Changing
-slippage or recipient terms requires renewed approval of those terms.
+Zero miner fees do not remove contract requirements, minimum output values, or
+re-emission obligations. A signed transaction cannot be edited: if a box it
+spends or reads is spent first, it must be rebuilt and signed again.
 
 ## Deadlines, input reservations, and rollback
 
@@ -84,7 +81,7 @@ Content-Type: application/json
     "expires_at_ms": 2000000000000,
     "expires_at_height": 2000000,
     "priority": 5,
-    "label": "phone-signed swap"
+    "label": "phone-signed payment"
   }
 }
 ```
