@@ -959,7 +959,8 @@ impl MiningHandle {
         let policy = self.policy.read().expect("policy poisoned");
         let mut cache = self.cache.write().expect("cache poisoned");
         if candidate.observation.policy_revision != policy.0
-            || candidate.observation.operator_generation != cache.operator_generation
+            || (candidate.observation.operator_owned
+                && candidate.observation.operator_generation != cache.operator_generation)
         {
             return None;
         }
@@ -2893,6 +2894,7 @@ mod tests {
             .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
             .unwrap();
         let (mut candidate, work) = candidate_pair(parent);
+        candidate.observation.operator_owned = true;
         assert_eq!(handle.invalidate_operator_generation(), 1);
         assert!(handle.inspect_template(None, None).is_none());
         assert!(handle
@@ -2928,6 +2930,7 @@ mod tests {
         assert!(entries.is_empty());
         // So a build carrying that snapshot cannot publish.
         let (mut candidate, work) = candidate_pair(parent);
+        candidate.observation.operator_owned = true;
         candidate.observation.operator_generation = generation;
         assert!(handle
             .publish_if_current(candidate, work, &parent, || 100, BuildReason::Tip)
@@ -3302,8 +3305,9 @@ mod tests {
             let handle = MiningHandle::mainnet([2; 33]);
             let parent = [0; 32];
             handle.set_best_tip(synced_tip(parent));
-            let (candidate, work) =
+            let (mut candidate, work) =
                 candidate_pair_for_key(parent, [0xA6; 32], requested_test_key(), 10);
+            candidate.observation.operator_owned = true;
             let seq = handle
                 .publish_if_current(
                     candidate.clone(),

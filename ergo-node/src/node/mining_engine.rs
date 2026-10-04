@@ -333,6 +333,7 @@ enum BuildReply {
             Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
         >,
         _permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
     },
 }
 
@@ -345,6 +346,7 @@ impl BuildRequest {
             Result<ergo_rest_json::mining::WorkMessageJson, ergo_api::MiningApiError>,
         >,
         permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: Instant,
     ) -> Self {
         Self {
             intent,
@@ -354,6 +356,7 @@ impl BuildRequest {
             reply: BuildReply::Requested {
                 reply,
                 _permit: permit,
+                deadline,
             },
         }
     }
@@ -434,7 +437,6 @@ pub(super) fn run_build_worker(
         // the disposition stays `None` and we fall back to a sensible wire
         // label.
         let mut raw_disposition: Option<BaseDisposition> = None;
-        let mut attempts = 0;
         let result = loop {
             let caller_cancelled = || {
                 #[cfg(test)]
@@ -446,7 +448,7 @@ pub(super) fn run_build_worker(
                     });
                 }
                 matches!(&reply,
-                BuildReply::Requested { reply, .. } if reply.is_closed())
+                BuildReply::Requested { reply, deadline, .. } if reply.is_closed() || Instant::now() >= *deadline)
             };
             let rent_resolver = |snapshot: &CommittedSnapshot, h: u32| {
                 resolve_eligible_rent_boxes(
@@ -489,11 +491,15 @@ pub(super) fn run_build_worker(
             };
             if is_requested
                 && matches!(result, Ok(BuildOutcome::TipNotVisible))
-                && attempts < MAX_VIS_RETRIES
-                && !matches!(&reply, BuildReply::Requested { reply, .. } if reply.is_closed())
+                && !caller_cancelled()
             {
-                attempts += 1;
-                std::thread::sleep(VIS_BACKOFF);
+                let remaining = match &reply {
+                    BuildReply::Requested { deadline, .. } => {
+                        deadline.saturating_duration_since(Instant::now())
+                    }
+                    BuildReply::Background(_) => VIS_BACKOFF,
+                };
+                std::thread::sleep(VIS_BACKOFF.min(remaining));
                 continue;
             }
             break result;
@@ -529,7 +535,7 @@ pub(super) fn run_build_worker(
             BuildReply::Background(reply) => {
                 let _ = reply.send((result, base_cache));
             }
-            BuildReply::Requested { reply, _permit } => {
+            BuildReply::Requested { reply, _permit, .. } => {
                 use ergo_api::MiningApiError;
                 let result = match result {
                     Ok(BuildOutcome::Published { template_seq, .. }) => handle

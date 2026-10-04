@@ -318,6 +318,7 @@ async fn check_requested_worker_disconnect(before_start: bool) {
             vec![],
             reply,
             slots.clone().try_acquire_owned().unwrap(),
+            std::time::Instant::now() + Duration::from_secs(9),
         ))
         .unwrap();
     let mut response = Some(response);
@@ -362,6 +363,7 @@ async fn check_requested_worker_disconnect(before_start: bool) {
             vec![],
             reply,
             slots.clone().try_acquire_owned().unwrap(),
+            std::time::Instant::now() + Duration::from_secs(9),
         ))
         .unwrap();
     drop(request_tx);
@@ -385,4 +387,38 @@ async fn requested_worker_disconnect_before_build_releases_permit_without_build(
 #[tokio::test]
 async fn requested_worker_disconnect_during_build_cancels_and_releases_permit() {
     check_requested_worker_disconnect(false).await;
+}
+
+#[tokio::test]
+async fn requested_visibility_wait_uses_the_request_deadline() {
+    use crate::node::mining_engine::{run_build_worker, BuildRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let (state, handle) = devnet_node(dir.path());
+    let (_, height) = sync_handle_to_tip(&state, &handle);
+    let parent = [0x42; 32];
+    handle.set_best_tip(ergo_mining::engine::BestTip { parent_id: parent, chain_seq: 2, synced: true });
+    let intent = ergo_mining::engine::BuildIntent {
+        expected_parent: parent, expected_height: height + 1,
+        mempool: std::sync::Arc::new(ergo_mempool::MempoolReadSnapshot::empty()),
+        private_transactions: std::sync::Arc::new(vec![]),
+        operator_generation: handle.operator_generation(), operator_owned: false,
+        miner_pk: MINER_PK, reason: BuildReason::Requested,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_millis(1_400);
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    tx.send(BuildRequest::requested(intent, vec![], vec![], reply,
+        slots.clone().try_acquire_owned().unwrap(), deadline)).unwrap();
+    drop(tx);
+    let reader = state.store.as_utxo().unwrap().reader_handle();
+    let worker_handle = handle.clone();
+    let worker = std::thread::spawn(move || run_build_worker(reader, worker_handle, None, false, rx));
+    let result = tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap();
+    worker.join().unwrap();
+    assert!(matches!(result, Err(ergo_api::MiningApiError::Unavailable(_))), "{result:?}");
+    assert!(std::time::Instant::now() >= deadline, "must retry beyond the old one-second cap");
+    assert!(handle.inspect_history().is_empty());
+    assert_eq!(slots.available_permits(), 1);
 }

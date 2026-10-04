@@ -2569,3 +2569,78 @@ fn requested_lender_jobs_skip_the_operator_storage_rent_sweep() {
             .all(|tx| tx.category != "rent"));
     }
 }
+
+#[test]
+fn requested_foreign_build_ignores_operator_generation_changes() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    for operator_owned in [false, true] {
+        let handle = handle(&regime);
+        handle.set_best_tip(BestTip {
+            parent_id: tip,
+            chain_seq: 1,
+            synced: true,
+        });
+        let mut intent = build_intent(tip, regime.parent_height);
+        intent.reason = BuildReason::Requested;
+        intent.operator_owned = operator_owned;
+        handle.withdraw_private_transactions(&std::collections::HashSet::new(), true);
+        let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+            &store.reader_handle(),
+            &handle,
+            &intent,
+            &[],
+            &[],
+            &|| false,
+            None,
+            &mut ergo_mining::state_view::CandidateProofCache::default(),
+            || BUILT_AT_MS,
+            |_, _| vec![],
+            &mut None,
+        )
+        .unwrap();
+        if operator_owned {
+            assert_eq!(outcome, BuildOutcome::DroppedStale);
+        } else {
+            assert!(
+                matches!(outcome, BuildOutcome::Published { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn requested_parse_cancellation_is_a_stale_build() {
+    let regime = Regime::pre_eip27();
+    let (_dir, store, tip) = synced_store(&regime);
+    let handle = handle(&regime);
+    handle.set_best_tip(BestTip {
+        parent_id: tip,
+        chain_seq: 1,
+        synced: true,
+    });
+    let mut intent = build_intent(tip, regime.parent_height);
+    intent.reason = BuildReason::Requested;
+    let checks = std::cell::Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() >= 2
+    };
+    let outcome = ergo_mining::engine::build_requested_and_publish_cached(
+        &store.reader_handle(),
+        &handle,
+        &intent,
+        &[vec![]],
+        &[],
+        &cancelled,
+        None,
+        &mut ergo_mining::state_view::CandidateProofCache::default(),
+        || BUILT_AT_MS,
+        |_, _| vec![],
+        &mut None,
+    )
+    .unwrap();
+    assert_eq!(outcome, BuildOutcome::DroppedStale);
+    assert!(handle.inspect_history().is_empty());
+}

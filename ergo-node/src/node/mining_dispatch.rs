@@ -656,6 +656,7 @@ pub(super) fn handle_mining_request(
             miner_pk,
             reply,
             permit,
+            deadline,
         } => {
             if let Some((work, identity)) = handle.cached_requested_package(
                 miner_pk,
@@ -738,6 +739,7 @@ pub(super) fn handle_mining_request(
                 forbidden_private_ids,
                 reply,
                 permit,
+                deadline,
             );
             if worker_tx.send(request).is_err() {
                 // Dropping the failed request closes its reply and releases its

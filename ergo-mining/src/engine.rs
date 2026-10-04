@@ -443,7 +443,7 @@ fn build_and_publish_inner(
             || tip.parent_id != intent.expected_parent
             || caller_cancelled.is_some_and(|cancelled| cancelled())
             || handle.policy_revision() != policy_revision
-            || handle.operator_generation() != intent.operator_generation
+            || (intent.operator_owned && handle.operator_generation() != intent.operator_generation)
     };
     if should_cancel() {
         return Ok(BuildOutcome::DroppedStale);
@@ -455,8 +455,15 @@ fn build_and_publish_inner(
             reason: format!("{e:?}"),
         })?;
     let activated = ergo_validation::derive_activated_script_version(active.block_version);
-    let requested =
-        parse_requested_transactions(requested, activated, forbidden_private_ids, &should_cancel)?;
+    let requested = match parse_requested_transactions(
+        requested,
+        activated,
+        forbidden_private_ids,
+        &should_cancel,
+    ) {
+        Err(MiningError::BuildCancelled) => return Ok(BuildOutcome::DroppedStale),
+        result => result?,
+    };
     let requested = requested.as_slice();
     if intent.reason == BuildReason::Requested {
         let ids = requested

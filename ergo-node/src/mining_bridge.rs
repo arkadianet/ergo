@@ -72,7 +72,7 @@ pub const MINING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 
 /// Lithos bounds its HTTP call at ten seconds. Leave time for HTTP transport
 /// while bounding on-demand build admission and the worker queue.
-const CANDIDATE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9);
+pub(crate) const CANDIDATE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9);
 
 /// Upper bound on a `GET /mining/candidate?longpoll=` block. When the client
 /// is already on the current template the handler parks until the next publish
@@ -95,6 +95,7 @@ pub enum MiningRequest {
         miner_pk: Option<[u8; 33]>,
         reply: oneshot::Sender<Result<WorkMessageJson, MiningApiError>>,
         permit: tokio::sync::OwnedSemaphorePermit,
+        deadline: std::time::Instant,
     },
     ListPrivateTransactions {
         reply:
@@ -407,6 +408,7 @@ impl NodeMining for MiningBridge {
                     "candidate request queue full; retry with backoff".into(),
                 )
             })?;
+        let deadline = std::time::Instant::now() + CANDIDATE_REQUEST_TIMEOUT;
         let (reply, response) = oneshot::channel();
         self.tx
             .try_send(MiningRequest::GetCandidateWithTxs {
@@ -415,9 +417,10 @@ impl NodeMining for MiningBridge {
                 miner_pk,
                 reply,
                 permit,
+                deadline,
             })
             .map_err(|e| MiningApiError::Unavailable(format!("candidate request channel: {e}")))?;
-        match tokio::time::timeout(CANDIDATE_REQUEST_TIMEOUT, response).await {
+        match tokio::time::timeout_at(deadline.into(), response).await {
             Ok(Ok(result)) => result.map(Some),
             Ok(Err(_)) => Err(MiningApiError::Unavailable("mining worker stopped".into())),
             Err(_) => Err(MiningApiError::Timeout(
