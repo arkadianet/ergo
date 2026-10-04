@@ -44,9 +44,11 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 mod credentials;
+mod scopes;
 pub use credentials::{
     validate_credentials, CredentialInfo, CredentialScope, ScopedCredentialConfig,
 };
+pub use scopes::required_scope;
 
 /// HTTP header name carrying the operator's plaintext API key. Matches
 /// Scala `ApiRoute.apiKeyHeaderName = "api_key"`.
@@ -122,14 +124,17 @@ impl ApiSecurity {
         Ok(self)
     }
 
-    pub fn authorize(&self, presented_key: &[u8], path: &str, admin: bool) -> bool {
+    pub fn authorize(&self, presented_key: &[u8], method: &str, path: &str, admin: bool) -> bool {
         if self.verify(presented_key) {
             return true;
         }
+        let Some(scope) = required_scope(method, path) else {
+            return false;
+        };
         self.credentials.as_ref().is_some_and(|keys| {
             keys.authorize(
                 &Self::hash_key(presented_key),
-                credentials::required_scope(path, admin),
+                if admin { CredentialScope::Admin } else { scope },
             )
         })
     }
@@ -212,7 +217,14 @@ pub async fn require_api_key(
     };
     // Single api-key scheme: delegate the Blake2b-256 + constant-time hex
     // compare to `ApiSecurity::verify` (shared with the v1 tier gate).
-    if sec.authorize(header_val.as_bytes(), req.uri().path(), false) {
+    if sec.authorize(
+        header_val.as_bytes(),
+        req.method().as_str(),
+        req.extensions()
+            .get::<axum::extract::MatchedPath>()
+            .map_or(req.uri().path(), |path| path.as_str()),
+        false,
+    ) {
         next.run(req).await
     } else {
         reject_invalid()

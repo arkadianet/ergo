@@ -107,7 +107,9 @@ revoked = false # set true to revoke durably in configuration
 Scopes are `mining`, `wallet`, `operator` and `admin`. Admin permits all gated
 groups, including configuration mutation, shutdown, credential administration
 and private-key export. Wallet permits wallet/scan/account operations; mining
-permits mining and voting; operator permits other operator controls. Public
+permits work submission and mining reads. Protocol vote writes, policy updates
+and private mining queue access require operator. Wallet mining jobs require
+wallet. Unknown authenticated operations deny all scoped keys. Public
 routes remain public. Both compatible and native authentication gates enforce
 the same scopes. Named keys require a master hash; identifiers are unique
 1..64-character ASCII letters/digits/underscore/hyphen strings. At most 128 keys

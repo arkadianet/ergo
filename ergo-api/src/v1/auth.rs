@@ -209,7 +209,18 @@ fn check_key(config: &V1AuthConfig, req: &axum::http::Request<Body>, admin: bool
     };
     let presented = req.headers().get(API_KEY_HEADER);
     match presented {
-        Some(val) if sec.authorize(val.as_bytes(), req.uri().path(), admin) => KeyOutcome::Ok,
+        Some(val)
+            if sec.authorize(
+                val.as_bytes(),
+                req.method().as_str(),
+                req.extensions()
+                    .get::<axum::extract::MatchedPath>()
+                    .map_or(req.uri().path(), |path| path.as_str()),
+                admin,
+            ) =>
+        {
+            KeyOutcome::Ok
+        }
         _ => KeyOutcome::Rejected(v1_error(
             Reason::Unauthorized,
             "missing or invalid api_key",

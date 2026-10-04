@@ -123,7 +123,7 @@ impl CredentialRegistry {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!(path = %path.display(), "scoped credential revocation ledger is absent; lost or restored data can re-enable runtime-revoked keys; set revoked = true in config for durable denial");
                 BTreeSet::new()
-            },
+            }
             Err(e) => return Err(e.to_string()),
         };
         Ok(Self {
@@ -236,38 +236,6 @@ fn persist(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
-/// All private routes default to operator scope unless they belong to a
-/// more privileged subsystem. Admin-scoped credentials may use every group.
-pub(super) fn required_scope(path: &str, admin: bool) -> CredentialScope {
-    if admin
-        || path == "/wallet/getPrivateKey"
-        || path == "/api/v1/accounts/private-key"
-        || path == "/node/shutdown"
-        || path == "/api/v1/node/shutdown"
-        || path.starts_with("/api/v1/node/credentials")
-    {
-        return CredentialScope::Admin;
-    }
-    if path == "/api/v1/mining/policy"
-        || path.starts_with("/api/v1/mining/private-transactions")
-    {
-        return CredentialScope::Operator;
-    }
-    let path = path.strip_prefix("/api/v1").unwrap_or(path);
-    if path.starts_with("/wallet")
-        || path.starts_with("/scan")
-        || path.starts_with("/accounts")
-        || path.starts_with("/psbt")
-        || path.starts_with("/transactions-psbt")
-    {
-        CredentialScope::Wallet
-    } else if path.starts_with("/mining") || path.starts_with("/voting") || path == "/votes" {
-        CredentialScope::Mining
-    } else {
-        CredentialScope::Operator
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,21 +255,26 @@ mod tests {
             .unwrap()
             .with_credentials(keys.clone(), path.clone())
             .unwrap();
-        assert!(security.authorize(b"pool-key", "/mining/candidate", false));
-        assert!(security.authorize(b"pool-key", "/api/v1/mining/candidate", false));
-        assert!(security.authorize(b"pool-key", "/api/v1/mining/template", false));
-        assert!(security.authorize(b"pool-key", "/api/v1/mining/candidate-with-txs", false));
-        assert!(!security.authorize(b"pool-key", "/api/v1/webhooks", false));
-        assert!(!security.authorize(b"pool-key", "/wallet/unlock", false));
-        assert!(!security.authorize(b"pool-key", "/api/v1/node/config", true));
+        assert!(security.authorize(b"pool-key", "GET", "/mining/candidate", false));
+        assert!(security.authorize(b"pool-key", "GET", "/api/v1/mining/candidate", false));
+        assert!(!security.authorize(b"pool-key", "GET", "/api/v1/mining/template", false));
+        assert!(security.authorize(
+            b"pool-key",
+            "POST",
+            "/api/v1/mining/candidate-with-txs",
+            false
+        ));
+        assert!(!security.authorize(b"pool-key", "GET", "/api/v1/webhooks", false));
+        assert!(!security.authorize(b"pool-key", "GET", "/wallet/unlock", false));
+        assert!(!security.authorize(b"pool-key", "GET", "/api/v1/node/config", true));
         security.revoke_credential("pool").unwrap();
-        assert!(!security.authorize(b"pool-key", "/mining/candidate", false));
+        assert!(!security.authorize(b"pool-key", "GET", "/mining/candidate", false));
         let restarted = ApiSecurity::new(master)
             .unwrap()
             .with_credentials(keys, path)
             .unwrap();
-        assert!(!restarted.authorize(b"pool-key", "/mining/candidate", false));
-        assert!(restarted.authorize(b"master", "/wallet/unlock", true));
+        assert!(!restarted.authorize(b"pool-key", "GET", "/mining/candidate", false));
+        assert!(restarted.authorize(b"master", "GET", "/wallet/unlock", true));
         assert!(restarted.credentials()[0].revoked);
     }
 
@@ -310,11 +283,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("revoked.json");
         std::fs::write(&path, b"corrupt").unwrap();
-        let security = ApiSecurity::new(ApiSecurity::hash_key(b"master")).unwrap()
-            .with_credentials(vec![], path.clone()).unwrap();
-        assert!(security.authorize(b"master", "/node/shutdown", true));
-        let key = ScopedCredentialConfig { id: "pool".into(), hash: ApiSecurity::hash_key(b"pool-key"), scopes: vec![CredentialScope::Mining], revoked: false };
-        assert!(ApiSecurity::new(ApiSecurity::hash_key(b"master")).unwrap().with_credentials(vec![key], path).is_err());
+        let security = ApiSecurity::new(ApiSecurity::hash_key(b"master"))
+            .unwrap()
+            .with_credentials(vec![], path.clone())
+            .unwrap();
+        assert!(security.authorize(b"master", "GET", "/node/shutdown", true));
+        let key = ScopedCredentialConfig {
+            id: "pool".into(),
+            hash: ApiSecurity::hash_key(b"pool-key"),
+            scopes: vec![CredentialScope::Mining],
+            revoked: false,
+        };
+        assert!(ApiSecurity::new(ApiSecurity::hash_key(b"master"))
+            .unwrap()
+            .with_credentials(vec![key], path)
+            .is_err());
     }
 
     #[test]
@@ -340,15 +323,52 @@ mod tests {
     #[test]
     fn revocation_writer_does_not_block_authorization() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = CredentialRegistry::load(vec![ScopedCredentialConfig {
-            id: "pool".into(), hash: ApiSecurity::hash_key(b"pool-key"),
-            scopes: vec![CredentialScope::Mining], revoked: false,
-        }], dir.path().join("revoked.json")).unwrap();
-        registry.revoke_with("pool", |path, bytes| {
-            assert!(registry.revoked.try_read().is_ok(), "persistence must not hold the authorization lock");
-            assert!(!registry.authorize(&ApiSecurity::hash_key(b"pool-key"), CredentialScope::Mining));
-            persist(path, bytes)
-        }).unwrap();
+        let registry = CredentialRegistry::load(
+            vec![ScopedCredentialConfig {
+                id: "pool".into(),
+                hash: ApiSecurity::hash_key(b"pool-key"),
+                scopes: vec![CredentialScope::Mining],
+                revoked: false,
+            }],
+            dir.path().join("revoked.json"),
+        )
+        .unwrap();
+        registry
+            .revoke_with("pool", |path, bytes| {
+                assert!(
+                    registry.revoked.try_read().is_ok(),
+                    "persistence must not hold the authorization lock"
+                );
+                assert!(!registry
+                    .authorize(&ApiSecurity::hash_key(b"pool-key"), CredentialScope::Mining));
+                persist(path, bytes)
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn unclassified_routes_deny_all_scoped_keys_even_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let security = ApiSecurity::new(ApiSecurity::hash_key(b"master"))
+            .unwrap()
+            .with_credentials(
+                vec![ScopedCredentialConfig {
+                    id: "admin".into(),
+                    hash: ApiSecurity::hash_key(b"admin"),
+                    scopes: vec![CredentialScope::Admin],
+                    revoked: false,
+                }],
+                dir.path().join("revoked.json"),
+            )
+            .unwrap();
+        for route in [
+            "/api/v1/new-sensitive-route",
+            "/api/v1/mining/new-control",
+            "/api/v1/accounts/new-secret",
+        ] {
+            assert!(!security.authorize(b"admin", "POST", route, false));
+            assert!(security.authorize(b"master", "POST", route, false));
+        }
     }
 
     #[test]
@@ -383,7 +403,7 @@ mod tests {
         std::fs::remove_dir(&parent).unwrap();
         std::fs::write(&parent, b"not a directory").unwrap();
         assert!(security.revoke_credential("pool").is_err());
-        assert!(!security.authorize(b"pool-key", "/mining/candidate", false));
+        assert!(!security.authorize(b"pool-key", "GET", "/mining/candidate", false));
         std::fs::remove_file(&parent).unwrap();
         std::fs::create_dir(&parent).unwrap();
         security.revoke_credential("pool").unwrap();
