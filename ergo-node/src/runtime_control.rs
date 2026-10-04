@@ -319,7 +319,7 @@ impl RuntimeControl {
                 ));
             }
         }
-        if *tip > unix_ms.saturating_add(120_000) {
+        if *tip > unix_ms.saturating_add(ergo_validation::header::FUTURE_TIMESTAMP_DRIFT_MS) {
             readiness.reasons.push("chain_tip_clock_skew".into());
         }
         match tip_age_ms {
@@ -554,6 +554,42 @@ mod tests {
         assert!(
             !control
                 .probes_at(&snapshot, Instant::now(), 8_200_001)
+                .readiness
+                .ready
+        );
+    }
+
+    #[test]
+    fn readiness_accepts_consensus_future_timestamp_drift() {
+        let control = RuntimeControl::new(&config()).unwrap();
+        control.beat();
+        let mut snapshot = probe_snapshot();
+        snapshot.health.status = HealthStatus::Ok;
+        snapshot.sync.headers_chain_synced = true;
+        snapshot.sync.recovery_done = true;
+        let now_ms = 1_000_000;
+        let drift = ergo_validation::header::FUTURE_TIMESTAMP_DRIFT_MS;
+        for offset in [19 * 60 * 1000, drift] {
+            snapshot.tip.best_full_block.timestamp_unix_ms = now_ms + offset;
+            assert!(
+                control
+                    .probes_at(&snapshot, Instant::now(), now_ms)
+                    .readiness
+                    .ready
+            );
+        }
+        snapshot.tip.best_full_block.timestamp_unix_ms = now_ms + drift + 1;
+        let probes = control.probes_at(&snapshot, Instant::now(), now_ms);
+        assert!(probes.liveness.ready);
+        assert!(probes
+            .readiness
+            .reasons
+            .contains(&"chain_tip_clock_skew".into()));
+        // Saturating addition must also hold near the timestamp's upper bound.
+        snapshot.tip.best_full_block.timestamp_unix_ms = u64::MAX;
+        assert!(
+            control
+                .probes_at(&snapshot, Instant::now(), u64::MAX - 1)
                 .readiness
                 .ready
         );

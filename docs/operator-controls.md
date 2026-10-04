@@ -43,7 +43,8 @@ Thresholds accept 1,000 through 86,400,000 milliseconds. The optional dependency
 checks should be enabled for services that require indexed queries or wallet
 balances. An absent/disabled indexer or uninitialized wallet fails its required
 check. Core readiness alone does not guarantee those optional services are ready.
-A tip timestamp more than two minutes ahead of local wall time also fails readiness.
+A tip timestamp beyond the consensus future drift (20 minutes) ahead of local wall
+time also fails readiness.
 Probe failure reasons describe local observations, not proof that the wider
 network's best chain has been discovered.
 
