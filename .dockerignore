@@ -1,0 +1,12 @@
+.git
+**/target
+ergo-data
+**/*.redb
+**/*.redb.*
+**/*.log
+**/.env
+**/secret.json
+**/credentials-revoked.json
+**/node_modules
+**/__pycache__
+.codex

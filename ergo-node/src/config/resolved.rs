@@ -200,6 +200,9 @@ pub struct NodeConfig {
     /// `ergo_api::auth::ApiSecurity` to gate `/wallet/*` and
     /// `/node/shutdown`.
     pub api_key_hash: Option<String>,
+    pub api_scoped_keys: Vec<ergo_api::auth::ScopedCredentialConfig>,
+    pub api_limits: ergo_api::operator_control::ApiLimits,
+    pub api_readiness: ergo_api::operator_control::ProbePolicy,
     /// `[api] allowed_hosts` — extra `Host` header values the DNS-
     /// rebinding guard accepts, beyond `localhost` / `127.0.0.1` /
     /// `::1` / the literal bind address (which are always allowed on a

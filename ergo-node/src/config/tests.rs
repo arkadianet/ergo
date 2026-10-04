@@ -2432,3 +2432,38 @@ fn api_script_policy_resolves_and_rejects_misspellings_and_invalid_costs() {
         );
     }
 }
+
+#[test]
+fn api_operational_settings_and_scoped_credentials_are_validated() {
+    let source = format!(
+        r#"
+[api.limits]
+refill_per_sec = 30.0
+burst = 80.0
+[api.readiness]
+require_indexer = true
+[api.security]
+api_key_hash = "{TEST_DEFAULT_API_KEY_HASH}"
+[[api.security.keys]]
+id = "pool"
+hash = "{}"
+scopes = ["mining"]
+"#,
+        ergo_api::auth::ApiSecurity::hash_key(b"pool-key")
+    );
+    let path = temp_toml(&source);
+    let resolved = NodeConfig::load(minimal_cli(Some(&path))).unwrap();
+    assert_eq!(resolved.api_limits.burst, 80.0);
+    assert!(resolved.api_readiness.require_indexer);
+    assert_eq!(resolved.api_scoped_keys.len(), 1);
+    for source in [
+        "[api.limits]\nrefill_per_sec = 0.0\n",
+        "[api.limits]\nburst = 1.0\n",
+        "[api.limits]\nexempt_loopback = false\n",
+        "[api.readiness]\ntip_max_age_ms = 0\n",
+        "[api.security]\n[[api.security.keys]]\nid = \"pool\"\nhash = \"bad\"\nscopes = [\"mining\"]\n",
+    ] {
+        let path = temp_toml(source);
+        assert!(NodeConfig::load(minimal_cli(Some(&path))).is_err(), "{source}");
+    }
+}

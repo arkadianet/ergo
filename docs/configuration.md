@@ -626,3 +626,5 @@ operator template at
 Configuration is unstable until 1.0; keys and shapes may change between
 minor versions — see [`./compatibility.md`](./compatibility.md) for the
 versioning policy.
+
+See [operator controls](operator-controls.md) for configurable API request budgets, readiness policy, named credentials, runtime changes and durable peer administration.

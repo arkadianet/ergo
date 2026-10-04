@@ -1,9 +1,8 @@
 //! `network/*` handlers. Reads (T0) project the same
 //! peer/sync state the compat `/peers/*` routes read, reshaped into the
 //! standard collection envelope + snake_case. `connect` (T1) reuses
-//! [`NodeAdmin::connect_to_peer`](crate::traits::NodeAdmin). Manual blacklist
-//! writes have no node-side seam yet (the peer manager exposes no
-//! externally-triggered ban), so they answer the honest `route_unavailable`.
+//! [`NodeAdmin::connect_to_peer`](crate::traits::NodeAdmin). Manual ban/unban,
+//! disconnect and saved-peer removal are acknowledged by the node action loop.
 
 use std::net::SocketAddr;
 use utoipa::ToSchema;
@@ -288,37 +287,132 @@ pub(crate) async fn connect(State(s): State<OperatorState>, body: axum::body::By
     (StatusCode::OK, Json(json!("OK"))).into_response()
 }
 
-/// `POST /api/v1/network/blacklist` — T1, seam-deferred. No manual-ban write
-/// path exists on the peer manager yet, so this answers the honest
-/// `route_unavailable` rather than pretending to ban.
-#[utoipa::path(
-    post, path = "/api/v1/network/blacklist", tag = "network",
-    responses((status = 503, description = "Manual peer blacklisting not wired on this node", body = V1Error)),
-    security(("ApiKeyAuth" = [])),
-)]
-pub(crate) async fn blacklist_add(State(_s): State<OperatorState>) -> Response {
-    v1_error(
-        Reason::RouteUnavailable,
-        "manual peer blacklisting is not wired on this node",
-        "the peer manager exposes no externally-triggered ban seam yet (Phase-2)",
-    )
+#[derive(Debug, serde::Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BanRequest {
+    addr: String,
+    #[serde(default = "default_ban_duration")]
+    duration_secs: u64,
 }
 
-/// `DELETE /api/v1/network/blacklist/{addr}` — T1, seam-deferred (same gap as
-/// [`blacklist_add`]).
-#[utoipa::path(
-    delete, path = "/api/v1/network/blacklist/{addr}", tag = "network",
-    params(("addr" = String, Path, description = "Peer address to un-blacklist")),
-    responses((status = 503, description = "Manual peer un-blacklisting not wired on this node", body = V1Error)),
-    security(("ApiKeyAuth" = [])),
-)]
-pub(crate) async fn blacklist_remove(
-    State(_s): State<OperatorState>,
-    Path(_addr): Path<String>,
+fn default_ban_duration() -> u64 {
+    1800
+}
+
+fn parse_ip(raw: &str) -> Option<std::net::IpAddr> {
+    raw.parse()
+        .ok()
+        .or_else(|| raw.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+}
+
+#[utoipa::path(post, path = "/api/v1/network/blacklist", tag = "network",
+    request_body = BanRequest,
+    responses((status = 204, description = "IP-wide timed ban persisted and sessions disconnected"),
+        (status = 400, description = "Invalid address or duration", body = V1Error),
+        (status = 503, description = "Persistence or runtime unavailable", body = V1Error)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn blacklist_add(
+    State(s): State<OperatorState>,
+    body: axum::body::Bytes,
 ) -> Response {
-    v1_error(
-        Reason::RouteUnavailable,
-        "manual peer un-blacklisting is not wired on this node",
-        "the peer manager exposes no externally-triggered ban seam yet (Phase-2)",
+    let request: BanRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return v1_error(Reason::BadRequest, "invalid ban request", error.to_string())
+        }
+    };
+    let Some(ip) = parse_ip(&request.addr) else {
+        return v1_error(
+            Reason::InvalidAddress,
+            "ban address must be an IP or socket address",
+            "hostnames are not accepted for IP-wide bans",
+        );
+    };
+    if !(1..=31_536_000).contains(&request.duration_secs) {
+        return v1_error(
+            Reason::OutOfRange,
+            "invalid ban duration",
+            "duration_secs must be between 1 and 31536000",
+        );
+    }
+    control(
+        s,
+        crate::operator_control::PeerControl::Ban {
+            ip,
+            duration_secs: request.duration_secs,
+        },
     )
+    .await
+}
+
+#[utoipa::path(delete, path = "/api/v1/network/blacklist/{addr}", tag = "network",
+    params(("addr" = String, Path, description = "IP or socket address to unban, including IPv6")),
+    responses((status = 204, description = "Unban persisted"),
+        (status = 400, description = "Invalid address", body = V1Error)),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn blacklist_remove(
+    State(s): State<OperatorState>,
+    Path(addr): Path<String>,
+) -> Response {
+    let Some(ip) = parse_ip(&addr) else {
+        return v1_error(
+            Reason::InvalidAddress,
+            "unban address must be an IP or socket address",
+            "supply the canonical IP shown in blacklisted peers",
+        );
+    };
+    control(s, crate::operator_control::PeerControl::Unban { ip }).await
+}
+
+#[utoipa::path(post, path = "/api/v1/network/disconnect", tag = "network",
+    request_body = String,
+    responses((status = 204, description = "Session disconnected; future dialing remains enabled")),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn disconnect(
+    State(s): State<OperatorState>,
+    body: axum::body::Bytes,
+) -> Response {
+    let addr = match serde_json::from_slice::<String>(&body)
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+    {
+        Some(addr) => addr,
+        None => {
+            return v1_error(
+                Reason::InvalidAddress,
+                "body must be a JSON socket-address string",
+                "send the exact ip:port from the peer list",
+            )
+        }
+    };
+    control(s, crate::operator_control::PeerControl::Disconnect { addr }).await
+}
+
+#[utoipa::path(delete, path = "/api/v1/network/peers/{addr}", tag = "network",
+    params(("addr" = String, Path, description = "Socket address to remove from saved peers")),
+    responses((status = 204, description = "Saved dial metadata removed and session disconnected")),
+    security(("ApiKeyAuth" = [])))]
+pub(crate) async fn remove(State(s): State<OperatorState>, Path(addr): Path<String>) -> Response {
+    let addr = match addr.parse() {
+        Ok(addr) => addr,
+        Err(_) => {
+            return v1_error(
+                Reason::InvalidAddress,
+                "peer address must be ip:port",
+                "configured seeds may reappear after restart; use a ban to prevent all dialing",
+            )
+        }
+    };
+    control(s, crate::operator_control::PeerControl::Remove { addr }).await
+}
+
+async fn control(s: OperatorState, command: crate::operator_control::PeerControl) -> Response {
+    let admin = match s.admin() {
+        Ok(admin) => admin,
+        Err(error) => return *error,
+    };
+    match admin.peer_control(command).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => super::control_error(error),
+    }
 }

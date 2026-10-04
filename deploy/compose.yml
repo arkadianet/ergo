@@ -1,0 +1,29 @@
+services:
+  node:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ergo-node:local
+    restart: unless-stopped
+    stop_grace_period: 5m
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    ports:
+      - "9030:9030"
+      - "127.0.0.1:9099:9099"
+    volumes:
+      - ergo-data:/var/lib/ergo
+      - ./ergo-node.container.toml:/etc/ergo/node.toml:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+volumes:
+  ergo-data:

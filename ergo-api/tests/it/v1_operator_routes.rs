@@ -943,7 +943,7 @@ async fn config_patch_t2_hard_deny_allows_loopback_then_seam_deferred() {
             "/api/v1/node/config",
             Some("operator-secret"),
             Some(LOCAL),
-            None,
+            Some(Body::from("{}")),
         ),
     )
     .await;

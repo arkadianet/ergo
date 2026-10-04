@@ -232,6 +232,9 @@ pub fn operator_router(
         .route("/api/v1/node/tip", get(node::tip))
         .route("/api/v1/node/identity", get(node::identity))
         .route("/api/v1/node/health", get(node::health))
+        .route("/api/v1/node/startup", get(node::startup))
+        .route("/api/v1/node/liveness", get(node::liveness))
+        .route("/api/v1/node/readiness", get(node::readiness))
         .route("/api/v1/node/version", get(node::version))
         .route("/api/v1/node/host", get(node::host))
         // network/*
@@ -258,6 +261,11 @@ pub fn operator_router(
         .route("/api/v1/node/config", get(node::config_get))
         // network controls
         .route("/api/v1/network/connect", post(network::connect))
+        .route("/api/v1/network/disconnect", post(network::disconnect))
+        .route(
+            "/api/v1/network/peers/:addr",
+            axum::routing::delete(network::remove),
+        )
         .route("/api/v1/network/blacklist", post(network::blacklist_add))
         .route(
             "/api/v1/network/blacklist/:addr",
@@ -293,6 +301,11 @@ pub fn operator_router(
     // is a separately-reviewable behavior change, deferred out of this additive
     // group. `config` PATCH (mutation) is the T2 control this group carries.
     let t2: Router<OperatorState> = Router::new()
+        .route("/api/v1/node/credentials", get(node::credentials))
+        .route(
+            "/api/v1/node/credentials/:id",
+            axum::routing::delete(node::revoke_credential),
+        )
         // config mutation is the more dangerous half of node/config → T2
         .route(
             "/api/v1/node/config",
@@ -304,6 +317,23 @@ pub fn operator_router(
         ));
 
     t0.merge(t1).merge(t2).with_state(state)
+}
+
+fn control_error(error: crate::operator_control::OperatorControlError) -> Response {
+    use crate::operator_control::OperatorControlError;
+    let reason = match &error {
+        OperatorControlError::Invalid(_) => Reason::BadRequest,
+        OperatorControlError::Conflict(_) => Reason::ConfigConflict,
+        OperatorControlError::Unavailable(_) | OperatorControlError::Storage(_) => {
+            Reason::RouteUnavailable
+        }
+        OperatorControlError::NotFound(_) => Reason::CredentialNotFound,
+    };
+    v1_error(
+        reason,
+        error.to_string(),
+        "inspect node configuration or state and retry",
+    )
 }
 
 #[cfg(test)]

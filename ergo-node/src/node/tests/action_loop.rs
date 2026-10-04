@@ -134,6 +134,11 @@ async fn action_loop_services_queued_api_before_ready_peer_flood() {
         .unwrap_or_else(|_| panic!("submit queue capacity"));
     let (_mining_tx, mining_rx) = mpsc::channel(1);
     let (_connect_tx, connect_rx) = mpsc::channel(1);
+    let (_peer_control_tx, peer_control_rx) = mpsc::channel(1);
+    let runtime_config = crate::config::NodeConfig::load(
+        <crate::config::Cli as clap::Parser>::parse_from(["ergo-node", "--network", "devnet", "--peers", "127.0.0.1:1"]),
+    ).unwrap();
+    let runtime_control = crate::runtime_control::RuntimeControl::new(&runtime_config).unwrap();
     let (_votes_tx, votes_rx) = mpsc::channel(1);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(super::action_loop::action_loop(
@@ -142,6 +147,8 @@ async fn action_loop_services_queued_api_before_ready_peer_flood() {
         submit_rx,
         mining_rx,
         connect_rx,
+        peer_control_rx,
+        runtime_control,
         votes_rx,
         None,
         shutdown_rx,

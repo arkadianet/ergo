@@ -27,6 +27,7 @@ use crate::peer::{
 
 mod known_peer;
 pub mod limits;
+mod operator;
 mod persistence;
 pub mod routability;
 

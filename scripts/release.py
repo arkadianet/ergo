@@ -25,11 +25,13 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGETS = (
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
 )
 TAG_PATTERN = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?")
-DOCS = ("operating.md", "configuration.md", "compatibility.md", "logging.md")
+DOCS = ("operating.md", "configuration.md", "compatibility.md", "logging.md", "operator-controls.md", "deployment.md")
 
 
 def validate_tag(tag, version):
@@ -243,6 +245,7 @@ def package(target, binaries, output, *, root=ROOT):
             (stage / "config").mkdir()
             for config in ("ergo-node.toml", "ergo-node.toml.example"):
                 shutil.copy2(root / "ergo-node" / config, stage / "config" / config)
+            shutil.copytree(root / "deploy", stage / "deploy")
             for document in stage.rglob("*.md"):
                 document.write_text(packaged_document(
                     document.read_text(encoding="utf-8"), document.relative_to(stage).as_posix(),

@@ -790,6 +790,8 @@ async fn run_inner_with_backend(
     // Operator /peers/connect -> action-loop dial requests. Small bound:
     // these are manual, rare, and fire-and-forget.
     let (peer_connect_tx, peer_connect_rx) = mpsc::channel::<std::net::SocketAddr>(16);
+    let (peer_control_tx, peer_control_rx) =
+        mpsc::channel::<crate::runtime_control::PeerControlRequest>(16);
     // Operator POST /api/v1/votes -> action-loop "rebuild the mining candidate
     // now" signal. Rare, fire-and-forget, coalescing (each rebuild reads the
     // latest targets), so a tiny bound is plenty.
@@ -882,6 +884,8 @@ async fn run_inner_with_backend(
         scaffold.voting_targets_slot.clone(),
         &shutdown_notify,
         &peer_connect_tx,
+        &peer_control_tx,
+        scaffold.runtime_control.clone(),
         &votes_changed_tx,
     )
     .await?;
@@ -1103,6 +1107,8 @@ async fn run_inner_with_backend(
         submit_rx,
         mining_submit_rx,
         peer_connect_rx,
+        peer_control_rx,
+        scaffold.runtime_control.clone(),
         votes_changed_rx,
         mining_engine.wiring,
         shutdown_rx,

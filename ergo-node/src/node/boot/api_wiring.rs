@@ -29,6 +29,7 @@ use super::super::NodeError;
 /// subsystem (which needs [`voting_targets_slot`](Self::voting_targets_slot)).
 pub(super) struct Scaffold {
     pub api_info: ergo_api::types::ApiInfo,
+    pub runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     pub identity_slot: crate::api_bridge::IdentitySlot,
     pub snapshot_publisher: SnapshotPublisher,
     pub voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
@@ -53,6 +54,7 @@ pub(super) fn build_scaffold(
     // started; the publisher itself stays cheap (one ArcSwap) and is
     // updated unconditionally so disabling/enabling the API never
     // changes the main loop's hot path.
+    let runtime_control = crate::runtime_control::RuntimeControl::new(config)?;
     let api_info = ergo_api::types::ApiInfo {
         agent_name: config.agent_name.clone(),
         node_name: config.node_name.clone(),
@@ -115,6 +117,7 @@ pub(super) fn build_scaffold(
         live_telemetry,
     )
     .with_peer_details(peer_details)
+    .with_runtime_control(runtime_control.clone())
     .into_dyn();
     let submit_bridge: Arc<dyn ergo_api::NodeSubmit> =
         SubmitBridge::new(submit_tx.clone(), event_tx.clone())
@@ -123,6 +126,7 @@ pub(super) fn build_scaffold(
 
     Ok(Scaffold {
         api_info,
+        runtime_control,
         identity_slot,
         snapshot_publisher,
         voting_targets_slot,
@@ -196,8 +200,16 @@ pub(super) async fn bind(
     voting_targets_slot: Arc<std::sync::RwLock<std::collections::BTreeMap<u8, i64>>>,
     shutdown_notify: &Arc<tokio::sync::Notify>,
     peer_connect_tx: &mpsc::Sender<std::net::SocketAddr>,
+    peer_control_tx: &mpsc::Sender<crate::runtime_control::PeerControlRequest>,
+    runtime_control: Arc<crate::runtime_control::RuntimeControl>,
     votes_changed_tx: &mpsc::Sender<()>,
 ) -> Result<ApiBind, NodeError> {
+    // Validate/load the revocation ledger before spawning storage-owning tasks.
+    let security = if config.api_bind.is_some() {
+        api_security(config)?
+    } else {
+        None
+    };
     let network_prefix = config.chain_spec.network_params.address_prefix;
     // P5 mempool overlay: hand the snapshot-backed view to
     // the API so `/blockchain/balance` (and future unspent
@@ -213,6 +225,35 @@ pub(super) async fn bind(
     // state behind RwLocks; the writer task is a dedicated tokio
     // task receiving commands via a channel.
     let db_arc = store.db_arc();
+    let indexer_probe = indexer_handle.clone();
+    let wallet_probe_db = db_arc.clone();
+    runtime_control.set_dependencies(Arc::new(move || {
+        use ergo_indexer::IndexerQuery;
+        let indexer_height = indexer_probe.as_ref().map(|handle| handle.indexed_height());
+        let indexer_healthy = indexer_probe
+            .as_ref()
+            .is_some_and(|handle| handle.is_caught_up());
+        let (wallet_height, wallet_healthy) = wallet_probe_db
+            .begin_read()
+            .ok()
+            .and_then(|txn| {
+                let cursor = ergo_state::wallet::reader::WalletReader::new(&txn)
+                    .scan_cursor()
+                    .ok()??;
+                let tip = ergo_state::reader::committed_tip_in(&txn).ok()??;
+                Some((
+                    Some(cursor.height),
+                    cursor.height == tip.0 && cursor.header_id == Some(tip.1),
+                ))
+            })
+            .unwrap_or((None, false));
+        crate::runtime_control::Dependencies {
+            indexer_height,
+            indexer_healthy,
+            wallet_height,
+            wallet_healthy,
+        }
+    }));
     let wallet_store: Arc<dyn ergo_state::wallet::WalletStore> =
         Arc::new(ergo_state::wallet::RedbWalletStore::new(db_arc.clone()));
     recover_wallet_for_boot(wallet_store.as_ref())?;
@@ -387,7 +428,6 @@ pub(super) async fn bind(
     let indexer_for_api: Option<Arc<dyn ergo_indexer::IndexerQuery>> = indexer_handle
         .clone()
         .map(|h| Arc::new(h) as Arc<dyn ergo_indexer::IndexerQuery>);
-    let security = api_security(config)?;
     // Restore admitted delivery obligations before node-owned realtime observers
     // and the API listener start. An unavailable store disables webhooks rather
     // than acknowledging registrations that would disappear at restart.
@@ -434,7 +474,8 @@ pub(super) async fn bind(
     )
     // Held regardless of mining state to keep the channel open; only
     // fired on a successful vote update (which requires mining).
-    .with_votes_changed_signal(votes_changed_tx.clone());
+    .with_votes_changed_signal(votes_changed_tx.clone())
+    .with_operator_control(runtime_control, peer_control_tx.clone(), security.clone());
     // Expose the runtime voting write only when mining is enabled —
     // votes have no effect without a candidate builder, so
     // `POST /api/v1/votes` otherwise returns `MiningDisabled`.
@@ -499,13 +540,17 @@ pub(super) async fn bind(
 fn api_security(
     config: &NodeConfig,
 ) -> Result<Option<Arc<ergo_api::auth::ApiSecurity>>, NodeError> {
-    config
-        .api_key_hash
-        .clone()
-        .map(ergo_api::auth::ApiSecurity::new)
-        .transpose()
-        .map(|security| security.map(Arc::new))
-        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })
+    let Some(hash) = config.api_key_hash.clone() else {
+        ergo_api::auth::validate_credentials(&config.api_scoped_keys, None)?;
+        return Ok(None);
+    };
+    let security = ergo_api::auth::ApiSecurity::new(hash)
+        .map_err(|e| -> NodeError { format!("invalid api_key_hash in NodeConfig: {e}").into() })?
+        .with_credentials(
+            config.api_scoped_keys.clone(),
+            config.data_dir.join("credentials-revoked.json"),
+        )?;
+    Ok(Some(Arc::new(security)))
 }
 
 #[cfg(test)]

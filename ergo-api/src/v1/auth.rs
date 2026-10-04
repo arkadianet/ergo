@@ -147,13 +147,13 @@ pub async fn require_tier(
 ) -> Response {
     match state.tier {
         Tier::Public => next.run(req).await,
-        Tier::Operator => match check_key(&state.config, &req) {
+        Tier::Operator => match check_key(&state.config, &req, state.tier == Tier::Admin) {
             KeyOutcome::Ok => next.run(req).await,
             KeyOutcome::NoKeyConfigured => no_key_configured(),
             KeyOutcome::Rejected(resp) => resp,
         },
         Tier::Admin => {
-            match check_key(&state.config, &req) {
+            match check_key(&state.config, &req, state.tier == Tier::Admin) {
                 KeyOutcome::Rejected(resp) => return resp,
                 KeyOutcome::NoKeyConfigured => return no_key_configured(),
                 KeyOutcome::Ok => {}
@@ -203,13 +203,13 @@ fn no_key_configured() -> Response {
     )
 }
 
-fn check_key(config: &V1AuthConfig, req: &axum::http::Request<Body>) -> KeyOutcome {
+fn check_key(config: &V1AuthConfig, req: &axum::http::Request<Body>, admin: bool) -> KeyOutcome {
     let Some(sec) = config.security.as_ref() else {
         return KeyOutcome::NoKeyConfigured;
     };
     let presented = req.headers().get(API_KEY_HEADER);
     match presented {
-        Some(val) if sec.verify(val.as_bytes()) => KeyOutcome::Ok,
+        Some(val) if sec.authorize(val.as_bytes(), req.uri().path(), admin) => KeyOutcome::Ok,
         _ => KeyOutcome::Rejected(v1_error(
             Reason::Unauthorized,
             "missing or invalid api_key",
