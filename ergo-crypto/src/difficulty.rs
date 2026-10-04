@@ -81,8 +81,7 @@ pub fn previous_heights_for_recalculation(height: u32, epoch_length: u32) -> Vec
             .collect();
         heights.sort();
         heights
-    } else if parent_height.is_multiple_of(epoch_length)
-        && parent_height > epoch_length * USE_LAST_EPOCHS
+    } else if parent_height.is_multiple_of(epoch_length) && height > epoch_length * USE_LAST_EPOCHS
     {
         // Scala-parity branch for epoch_length <= 1 (degenerate; never on mainnet).
         let mut heights: Vec<u32> = (0..=USE_LAST_EPOCHS)
@@ -608,6 +607,16 @@ mod tests {
     fn interpolate_single_data_point_returns_input_value() {
         let data = vec![(1024u32, BigUint::from(100u32))];
         assert_eq!(interpolate(&data, 1024), BigUint::from(100u32));
+    }
+
+    #[test]
+    fn previous_heights_epoch_length_one_matches_scala_height_bound() {
+        // Scala: `(height - 1) % 1 == 0 && height > 1 * useLastEpochs`.
+        assert_eq!(
+            previous_heights_for_recalculation(9, 1),
+            (0..=8).collect::<Vec<u32>>()
+        );
+        assert_eq!(previous_heights_for_recalculation(8, 1), vec![7]);
     }
 
     #[test]
